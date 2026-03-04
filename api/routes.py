@@ -1,0 +1,800 @@
+"""
+API 라우터 모듈 (API Router Module)
+
+목적: FastAPI 라우터로 REST API 엔드포인트를 정의한다.
+주요 기능:
+    - /api/status: 시스템 상태 및 작업 큐 현황 조회
+    - /api/meetings: 전체 회의 목록 조회
+    - /api/meetings/{meeting_id}: 특정 회의 상세 조회
+    - /api/search: 하이브리드 검색 (벡터 + FTS5)
+    - /api/chat: RAG 기반 AI Chat
+    - pydantic 요청/응답 스키마 정의
+의존성: fastapi, pydantic, search/hybrid_search, search/chat, core/job_queue
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# === API 라우터 ===
+
+router = APIRouter(prefix="/api", tags=["api"])
+
+
+# === 요청/응답 Pydantic 스키마 ===
+
+
+class StatusResponse(BaseModel):
+    """시스템 상태 응답 스키마.
+
+    Attributes:
+        status: 서버 동작 상태 ("ok")
+        queue_summary: 상태별 작업 수 집계
+        active_jobs: 현재 진행 중인 작업 수
+        total_jobs: 전체 작업 수
+    """
+
+    status: str = "ok"
+    queue_summary: dict[str, int] = Field(default_factory=dict)
+    active_jobs: int = 0
+    total_jobs: int = 0
+
+
+class MeetingItem(BaseModel):
+    """회의 목록 아이템 스키마.
+
+    Attributes:
+        id: 작업 ID
+        meeting_id: 회의 고유 식별자
+        audio_path: 오디오 파일 경로
+        status: 현재 상태
+        retry_count: 재시도 횟수
+        error_message: 에러 메시지
+        created_at: 생성 시각
+        updated_at: 수정 시각
+    """
+
+    id: int
+    meeting_id: str
+    audio_path: str
+    status: str
+    retry_count: int = 0
+    error_message: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class MeetingsResponse(BaseModel):
+    """회의 목록 응답 스키마.
+
+    Attributes:
+        meetings: 회의 목록
+        total: 전체 회의 수
+    """
+
+    meetings: list[MeetingItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class SearchRequest(BaseModel):
+    """검색 요청 스키마.
+
+    Attributes:
+        query: 검색 쿼리 문자열
+        date_filter: 날짜 필터 (선택, 예: "2026-03-04")
+        speaker_filter: 화자 필터 (선택, 예: "SPEAKER_00")
+        meeting_id_filter: 회의 ID 필터 (선택)
+        top_k: 반환할 최대 결과 수 (선택)
+    """
+
+    query: str = Field(..., min_length=1, description="검색 쿼리")
+    date_filter: Optional[str] = None
+    speaker_filter: Optional[str] = None
+    meeting_id_filter: Optional[str] = None
+    top_k: Optional[int] = Field(None, ge=1, le=20)
+
+
+class SearchResultItem(BaseModel):
+    """검색 결과 아이템 스키마.
+
+    Attributes:
+        chunk_id: 청크 고유 식별자
+        text: 청크 텍스트
+        score: RRF 결합 점수
+        meeting_id: 회의 식별자
+        date: 회의 날짜
+        speakers: 화자 목록
+        start_time: 시작 시간 (초)
+        end_time: 종료 시간 (초)
+        chunk_index: 청크 순서 인덱스
+        source: 검색 소스 ("vector", "fts", "both")
+    """
+
+    chunk_id: str
+    text: str
+    score: float
+    meeting_id: str
+    date: str
+    speakers: list[str] = Field(default_factory=list)
+    start_time: float = 0.0
+    end_time: float = 0.0
+    chunk_index: int = 0
+    source: str = "both"
+
+
+class SearchResponse(BaseModel):
+    """검색 응답 스키마.
+
+    Attributes:
+        results: 검색 결과 목록
+        query: 원본 검색 쿼리
+        total_found: 검색된 결과 수
+        vector_count: 벡터 검색 결과 수
+        fts_count: FTS 검색 결과 수
+        filters_applied: 적용된 필터 정보
+    """
+
+    results: list[SearchResultItem] = Field(default_factory=list)
+    query: str
+    total_found: int = 0
+    vector_count: int = 0
+    fts_count: int = 0
+    filters_applied: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatRequest(BaseModel):
+    """Chat 요청 스키마.
+
+    Attributes:
+        query: 사용자 질문
+        session_id: 대화 세션 ID (선택)
+        meeting_id_filter: 특정 회의로 검색 범위 제한 (선택)
+        date_filter: 특정 날짜로 검색 범위 제한 (선택)
+        speaker_filter: 특정 화자로 검색 범위 제한 (선택)
+    """
+
+    query: str = Field(..., min_length=1, description="사용자 질문")
+    session_id: Optional[str] = None
+    meeting_id_filter: Optional[str] = None
+    date_filter: Optional[str] = None
+    speaker_filter: Optional[str] = None
+
+
+class TranscriptUtteranceItem(BaseModel):
+    """전사문 개별 발화 스키마.
+
+    Attributes:
+        text: 보정된 발화 텍스트
+        original_text: 원본 STT 텍스트
+        speaker: 화자 라벨 (예: "SPEAKER_00")
+        start: 발화 시작 시간 (초)
+        end: 발화 종료 시간 (초)
+        was_corrected: LLM 보정 적용 여부
+    """
+
+    text: str
+    original_text: str = ""
+    speaker: str = "UNKNOWN"
+    start: float = 0.0
+    end: float = 0.0
+    was_corrected: bool = False
+
+
+class TranscriptResponse(BaseModel):
+    """전사문 응답 스키마.
+
+    Attributes:
+        utterances: 보정된 발화 목록
+        meeting_id: 회의 고유 식별자
+        num_speakers: 감지된 화자 수
+        speakers: 화자 라벨 목록
+        total_utterances: 전체 발화 수
+    """
+
+    utterances: list[TranscriptUtteranceItem] = Field(default_factory=list)
+    meeting_id: str
+    num_speakers: int = 0
+    speakers: list[str] = Field(default_factory=list)
+    total_utterances: int = 0
+
+
+class SummaryResponse(BaseModel):
+    """회의록 요약 응답 스키마.
+
+    Attributes:
+        markdown: 마크다운 형식의 회의록
+        meeting_id: 회의 고유 식별자
+        num_speakers: 화자 수
+        speakers: 화자 라벨 목록
+        num_utterances: 발화 수
+        created_at: 회의록 생성 시각
+    """
+
+    markdown: str
+    meeting_id: str
+    num_speakers: int = 0
+    speakers: list[str] = Field(default_factory=list)
+    num_utterances: int = 0
+    created_at: str = ""
+
+
+class ChatReferenceItem(BaseModel):
+    """Chat 참조 출처 스키마.
+
+    Attributes:
+        chunk_id: 청크 고유 식별자
+        meeting_id: 회의 식별자
+        date: 회의 날짜
+        speakers: 화자 목록
+        start_time: 시작 시간 (초)
+        end_time: 종료 시간 (초)
+        text_preview: 청크 텍스트 미리보기
+        score: 검색 관련도 점수
+    """
+
+    chunk_id: str
+    meeting_id: str
+    date: str
+    speakers: list[str] = Field(default_factory=list)
+    start_time: float = 0.0
+    end_time: float = 0.0
+    text_preview: str = ""
+    score: float = 0.0
+
+
+class ChatResponse(BaseModel):
+    """Chat 응답 스키마.
+
+    Attributes:
+        answer: LLM이 생성한 답변
+        references: 참조 출처 목록
+        query: 원본 질문
+        has_context: 검색 컨텍스트 존재 여부
+        llm_used: LLM 응답 성공 여부
+        error_message: 에러 메시지 (선택)
+    """
+
+    answer: str
+    references: list[ChatReferenceItem] = Field(default_factory=list)
+    query: str
+    has_context: bool = True
+    llm_used: bool = True
+    error_message: Optional[str] = None
+
+
+# === 헬퍼 함수 ===
+
+
+def _get_job_queue(request: Request) -> Any:
+    """app.state에서 AsyncJobQueue를 가져온다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        AsyncJobQueue 인스턴스
+
+    Raises:
+        HTTPException: job_queue가 초기화되지 않았을 때 (503)
+    """
+    queue = getattr(request.app.state, "job_queue", None)
+    if queue is None:
+        raise HTTPException(
+            status_code=503,
+            detail="작업 큐가 초기화되지 않았습니다.",
+        )
+    return queue
+
+
+def _get_search_engine(request: Request) -> Any:
+    """app.state에서 HybridSearchEngine을 가져온다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        HybridSearchEngine 인스턴스
+
+    Raises:
+        HTTPException: search_engine이 초기화되지 않았을 때 (503)
+    """
+    engine = getattr(request.app.state, "search_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="검색 엔진이 초기화되지 않았습니다.",
+        )
+    return engine
+
+
+# meeting_id 유효성 검증 정규식 (path traversal 방지)
+_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
+
+
+def _validate_meeting_id(meeting_id: str) -> None:
+    """meeting_id 형식을 검증한다 (path traversal 방지).
+
+    Args:
+        meeting_id: 검증할 회의 ID
+
+    Raises:
+        HTTPException: 유효하지 않은 형식일 때 (400)
+    """
+    if not _MEETING_ID_PATTERN.match(meeting_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
+        )
+
+
+def _get_outputs_dir(request: Request) -> Path:
+    """app.state.config에서 outputs 디렉토리 경로를 반환한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        outputs 디렉토리 절대 경로
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 설정이 초기화되지 않았습니다.",
+        )
+    return config.paths.resolved_outputs_dir
+
+
+def _get_chat_engine(request: Request) -> Any:
+    """app.state에서 ChatEngine을 가져온다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        ChatEngine 인스턴스
+
+    Raises:
+        HTTPException: chat_engine이 초기화되지 않았을 때 (503)
+    """
+    engine = getattr(request.app.state, "chat_engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Chat 엔진이 초기화되지 않았습니다.",
+        )
+    return engine
+
+
+# === 엔드포인트 ===
+
+
+@router.get("/status", response_model=StatusResponse)
+async def get_status(request: Request) -> StatusResponse:
+    """시스템 상태를 반환한다.
+
+    작업 큐의 상태별 집계와 활성 작업 수를 포함한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        StatusResponse: 시스템 상태 정보
+    """
+    queue = _get_job_queue(request)
+
+    try:
+        summary = await queue.count_by_status()
+        all_jobs = await queue.get_all_jobs()
+
+        # 진행 중인 상태 목록 (queued, completed, failed 제외)
+        active_statuses = {
+            "recording", "transcribing", "diarizing",
+            "merging", "embedding",
+        }
+        active_count = sum(
+            count for status, count in summary.items()
+            if status in active_statuses
+        )
+
+        return StatusResponse(
+            status="ok",
+            queue_summary=summary,
+            active_jobs=active_count,
+            total_jobs=len(all_jobs),
+        )
+    except Exception as e:
+        logger.exception(f"상태 조회 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"상태 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.get("/meetings", response_model=MeetingsResponse)
+async def get_meetings(request: Request) -> MeetingsResponse:
+    """전체 회의 목록을 반환한다.
+
+    최신순으로 정렬된 모든 회의(작업) 목록을 반환한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        MeetingsResponse: 회의 목록
+    """
+    queue = _get_job_queue(request)
+
+    try:
+        all_jobs = await queue.get_all_jobs()
+
+        meetings = [
+            MeetingItem(
+                id=job.id,
+                meeting_id=job.meeting_id,
+                audio_path=job.audio_path,
+                status=job.status,
+                retry_count=job.retry_count,
+                error_message=job.error_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            )
+            for job in all_jobs
+        ]
+
+        return MeetingsResponse(
+            meetings=meetings,
+            total=len(meetings),
+        )
+    except Exception as e:
+        logger.exception(f"회의 목록 조회 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의 목록 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.get("/meetings/{meeting_id}", response_model=MeetingItem)
+async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
+    """특정 회의의 상세 정보를 반환한다.
+
+    meeting_id로 작업을 조회하여 상세 정보를 반환한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        MeetingItem: 회의 상세 정보
+
+    Raises:
+        HTTPException: 회의를 찾을 수 없을 때 (404)
+    """
+    queue = _get_job_queue(request)
+
+    try:
+        # meeting_id로 작업 조회 (동기 함수를 비동기로 래핑)
+        import asyncio
+        job = await asyncio.to_thread(
+            queue.queue.get_job_by_meeting_id, meeting_id,
+        )
+
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        return MeetingItem(
+            id=job.id,
+            meeting_id=job.meeting_id,
+            audio_path=job.audio_path,
+            status=job.status,
+            retry_count=job.retry_count,
+            error_message=job.error_message,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"회의 상세 조회 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의 상세 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.get(
+    "/meetings/{meeting_id}/transcript",
+    response_model=TranscriptResponse,
+)
+async def get_transcript(
+    request: Request, meeting_id: str,
+) -> TranscriptResponse:
+    """특정 회의의 전사문(보정된 발화 목록)을 반환한다.
+
+    outputs/{meeting_id}/corrected.json 파일에서 발화 데이터를 읽어 반환한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        TranscriptResponse: 전사문 데이터
+
+    Raises:
+        HTTPException: 유효하지 않은 ID(400), 파일 미존재(404), 서버 에러(500)
+    """
+    _validate_meeting_id(meeting_id)
+    outputs_dir = _get_outputs_dir(request)
+    corrected_path = outputs_dir / meeting_id / "corrected.json"
+
+    if not corrected_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"전사문을 찾을 수 없습니다: {meeting_id}",
+        )
+
+    try:
+        import asyncio
+
+        def _read_corrected() -> dict:
+            with open(corrected_path, encoding="utf-8") as f:
+                return json.load(f)
+
+        data = await asyncio.to_thread(_read_corrected)
+
+        utterances = [
+            TranscriptUtteranceItem(
+                text=u.get("text", ""),
+                original_text=u.get("original_text", ""),
+                speaker=u.get("speaker", "UNKNOWN"),
+                start=u.get("start", 0.0),
+                end=u.get("end", 0.0),
+                was_corrected=u.get("was_corrected", False),
+            )
+            for u in data.get("utterances", [])
+        ]
+
+        # 화자 목록 추출 (UNKNOWN 제외, 순서 보존)
+        seen: set[str] = set()
+        speakers: list[str] = []
+        for u in utterances:
+            if u.speaker != "UNKNOWN" and u.speaker not in seen:
+                seen.add(u.speaker)
+                speakers.append(u.speaker)
+
+        return TranscriptResponse(
+            utterances=utterances,
+            meeting_id=meeting_id,
+            num_speakers=data.get("num_speakers", len(speakers)),
+            speakers=speakers,
+            total_utterances=len(utterances),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"전사문 조회 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"전사문 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.get(
+    "/meetings/{meeting_id}/summary",
+    response_model=SummaryResponse,
+)
+async def get_summary(
+    request: Request, meeting_id: str,
+) -> SummaryResponse:
+    """특정 회의의 AI 요약(회의록)을 반환한다.
+
+    outputs/{meeting_id}/summary.json 메타데이터와
+    summary.md 마크다운 파일에서 회의록을 읽어 반환한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        SummaryResponse: 회의록 데이터
+
+    Raises:
+        HTTPException: 유효하지 않은 ID(400), 파일 미존재(404), 서버 에러(500)
+    """
+    _validate_meeting_id(meeting_id)
+    outputs_dir = _get_outputs_dir(request)
+    meeting_dir = outputs_dir / meeting_id
+
+    summary_md_path = meeting_dir / "summary.md"
+    summary_json_path = meeting_dir / "summary.json"
+
+    if not summary_md_path.is_file() and not summary_json_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"회의록을 찾을 수 없습니다: {meeting_id}",
+        )
+
+    try:
+        import asyncio
+
+        markdown = ""
+        meta: dict = {}
+
+        # 마크다운 파일 읽기
+        if summary_md_path.is_file():
+            def _read_md() -> str:
+                return summary_md_path.read_text(encoding="utf-8")
+            markdown = await asyncio.to_thread(_read_md)
+
+        # 메타데이터 JSON 읽기
+        if summary_json_path.is_file():
+            def _read_json() -> dict:
+                with open(summary_json_path, encoding="utf-8") as f:
+                    return json.load(f)
+            meta = await asyncio.to_thread(_read_json)
+
+            # JSON에 마크다운이 포함되어 있고 파일이 없는 경우 대체
+            if not markdown and meta.get("markdown"):
+                markdown = meta["markdown"]
+
+        return SummaryResponse(
+            markdown=markdown,
+            meeting_id=meeting_id,
+            num_speakers=meta.get("num_speakers", 0),
+            speakers=meta.get("speakers", []),
+            num_utterances=meta.get("num_utterances", 0),
+            created_at=meta.get("created_at", ""),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"회의록 조회 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의록 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.post("/search", response_model=SearchResponse)
+async def search(request: Request, body: SearchRequest) -> SearchResponse:
+    """하이브리드 검색을 수행한다.
+
+    벡터 검색(ChromaDB)과 키워드 검색(FTS5)을 RRF로 결합하여
+    관련 회의 내용을 검색한다.
+
+    Args:
+        request: FastAPI Request 객체
+        body: SearchRequest 검색 요청
+
+    Returns:
+        SearchResponse: 검색 결과
+
+    Raises:
+        HTTPException: 빈 쿼리(400), 엔진 미초기화(503), 서버 에러(500)
+    """
+    search_engine = _get_search_engine(request)
+
+    try:
+        from search.hybrid_search import EmptyQueryError, ModelLoadError
+
+        result = await search_engine.search(
+            query=body.query,
+            date_filter=body.date_filter,
+            speaker_filter=body.speaker_filter,
+            meeting_id_filter=body.meeting_id_filter,
+            top_k=body.top_k,
+        )
+
+        # SearchResult → SearchResultItem 변환
+        items = [
+            SearchResultItem(
+                chunk_id=r.chunk_id,
+                text=r.text,
+                score=r.score,
+                meeting_id=r.meeting_id,
+                date=r.date,
+                speakers=r.speakers,
+                start_time=r.start_time,
+                end_time=r.end_time,
+                chunk_index=r.chunk_index,
+                source=r.source,
+            )
+            for r in result.results
+        ]
+
+        return SearchResponse(
+            results=items,
+            query=result.query,
+            total_found=result.total_found,
+            vector_count=result.vector_count,
+            fts_count=result.fts_count,
+            filters_applied=result.filters_applied,
+        )
+
+    except EmptyQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ModelLoadError as e:
+        logger.error(f"검색 모델 로드 실패: {e}")
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"검색 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"검색 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: Request, body: ChatRequest) -> ChatResponse:
+    """RAG 기반 AI Chat을 수행한다.
+
+    하이브리드 검색으로 관련 회의 내용을 찾은 후,
+    EXAONE LLM으로 답변을 생성한다.
+
+    Args:
+        request: FastAPI Request 객체
+        body: ChatRequest 채팅 요청
+
+    Returns:
+        ChatResponse: AI 답변 + 참조 출처
+
+    Raises:
+        HTTPException: 빈 질문(400), 엔진 미초기화(503), 서버 에러(500)
+    """
+    chat_engine = _get_chat_engine(request)
+
+    try:
+        from search.chat import EmptyQueryError as ChatEmptyQueryError
+
+        result = await chat_engine.chat(
+            query=body.query,
+            session_id=body.session_id,
+            meeting_id_filter=body.meeting_id_filter,
+            date_filter=body.date_filter,
+            speaker_filter=body.speaker_filter,
+        )
+
+        # ChatReference → ChatReferenceItem 변환
+        refs = [
+            ChatReferenceItem(
+                chunk_id=r.chunk_id,
+                meeting_id=r.meeting_id,
+                date=r.date,
+                speakers=r.speakers,
+                start_time=r.start_time,
+                end_time=r.end_time,
+                text_preview=r.text_preview,
+                score=r.score,
+            )
+            for r in result.references
+        ]
+
+        return ChatResponse(
+            answer=result.answer,
+            references=refs,
+            query=result.query,
+            has_context=result.has_context,
+            llm_used=result.llm_used,
+            error_message=result.error_message,
+        )
+
+    except ChatEmptyQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"Chat 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat 중 오류가 발생했습니다: {e}",
+        ) from e

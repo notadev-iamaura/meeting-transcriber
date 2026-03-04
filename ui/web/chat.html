@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chat — 회의 전사 시스템</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- 채팅 페이지 max-width 오버라이드 -->
+    <style>:root { --max-width: 900px; }</style>
+</head>
+<body class="chat-page">
+    <!-- === 헤더 === -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="header-title">
+                <span class="header-title-icon">&#x1F399;</span>
+                <span>회의 전사 시스템</span>
+            </div>
+            <nav class="header-nav">
+                <a href="/static/index.html" class="nav-link">회의 목록</a>
+                <a href="/static/chat.html" class="nav-link active">AI Chat</a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- === 에러 배너 === -->
+    <div class="error-banner" id="errorBanner">
+        <span>&#x26A0;</span>
+        <span id="errorMessage"></span>
+        <button class="error-banner-close" id="errorClose">&#x2715;</button>
+    </div>
+
+    <!-- === 채팅 레이아웃 === -->
+    <div class="chat-layout">
+        <!-- 제어 바 -->
+        <div class="controls-bar">
+            <span class="controls-label">검색 범위:</span>
+            <select class="controls-select" id="meetingFilter">
+                <option value="">전체 회의</option>
+            </select>
+            <div class="controls-right">
+                <button class="btn-small" id="btnClearChat">대화 초기화</button>
+            </div>
+        </div>
+
+        <!-- 메시지 영역 -->
+        <div class="messages-area" id="messagesArea">
+            <!-- 환영 메시지 -->
+            <div class="welcome-message" id="welcomeMessage">
+                <div class="welcome-icon">&#x1F4AC;</div>
+                <div class="welcome-title">AI 회의 어시스턴트</div>
+                <div class="welcome-desc">
+                    회의 내용에 대해 자유롭게 질문하세요.<br>
+                    관련 회의 내용을 검색하여 AI가 답변합니다.
+                </div>
+                <div class="welcome-tips">
+                    <div class="welcome-tip">&#x1F4A1; "지난 회의에서 결정된 일정이 뭐야?"</div>
+                    <div class="welcome-tip">&#x1F4A1; "프로젝트 진행 상황을 요약해줘"</div>
+                    <div class="welcome-tip">&#x1F4A1; "다음 마일스톤까지 해야 할 일은?"</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 타이핑 인디케이터 -->
+        <div class="typing-indicator" id="typingIndicator">
+            <div class="typing-dots">
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+            </div>
+            <span class="typing-text">AI가 답변을 생성하고 있습니다...</span>
+        </div>
+
+        <!-- 입력 영역 -->
+        <div class="input-area">
+            <div class="input-row">
+                <div class="input-wrapper">
+                    <textarea
+                        class="chat-input"
+                        id="chatInput"
+                        placeholder="회의 내용에 대해 질문하세요..."
+                        rows="1"
+                    ></textarea>
+                </div>
+                <button class="send-btn" id="sendBtn" disabled>전송</button>
+            </div>
+            <div class="input-hint">Enter로 전송, Shift+Enter로 줄바꿈</div>
+        </div>
+    </div>
+
+    <!-- 공통 모듈 -->
+    <script src="/static/app.js"></script>
+
+    <script>
+    /* === AI Chat 스크립트 ===
+     *
+     * 목적: RAG 기반 AI Chat 인터페이스를 제공한다.
+     *       회의 내용에 대한 질문에 참조 출처를 포함한 AI 답변을 표시한다.
+     * 의존성: MeetingApp (app.js), POST /api/chat, GET /api/meetings API 엔드포인트
+     */
+    (function () {
+        "use strict";
+
+        // === MeetingApp 참조 ===
+        var App = window.MeetingApp;
+
+        // === 세션 ID 생성 (대화 컨텍스트 유지) ===
+        var sessionId = (function () {
+            if (typeof crypto !== "undefined" && crypto.randomUUID) {
+                return crypto.randomUUID();
+            }
+            // 폴백: 간단한 UUID v4 생성
+            return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+                var r = (Math.random() * 16) | 0;
+                var v = c === "x" ? r : (r & 0x3) | 0x8;
+                return v.toString(16);
+            });
+        })();
+
+        // === DOM 참조 ===
+        var els = {
+            meetingFilter: document.getElementById("meetingFilter"),
+            btnClearChat: document.getElementById("btnClearChat"),
+            messagesArea: document.getElementById("messagesArea"),
+            welcomeMessage: document.getElementById("welcomeMessage"),
+            typingIndicator: document.getElementById("typingIndicator"),
+            chatInput: document.getElementById("chatInput"),
+            sendBtn: document.getElementById("sendBtn"),
+        };
+
+        // === 에러 배너 초기화 ===
+        var errorBanner = App.initErrorBanner("errorBanner", "errorMessage", "errorClose");
+
+        // === 상태 ===
+        var isSending = false; // 전송 중 여부
+        var messageCount = 0;  // 메시지 수 (환영 메시지 제어용)
+
+        // === 메시지 렌더링 ===
+
+        /** 환영 메시지를 숨긴다 */
+        function hideWelcome() {
+            if (els.welcomeMessage) {
+                els.welcomeMessage.style.display = "none";
+            }
+        }
+
+        /** 사용자 메시지를 추가한다 */
+        function addUserMessage(text) {
+            hideWelcome();
+            messageCount++;
+
+            var msg = document.createElement("div");
+            msg.className = "message user";
+
+            // 아바타
+            var avatar = document.createElement("div");
+            avatar.className = "message-avatar";
+            avatar.textContent = "\uD83D\uDC64"; // 사람 아이콘
+
+            // 버블
+            var body = document.createElement("div");
+            body.className = "message-body";
+
+            var bubble = document.createElement("div");
+            bubble.className = "message-bubble";
+            bubble.textContent = text;
+
+            body.appendChild(bubble);
+            msg.appendChild(avatar);
+            msg.appendChild(body);
+            els.messagesArea.appendChild(msg);
+
+            scrollToBottom();
+        }
+
+        /** AI 답변 메시지를 추가한다 */
+        function addAssistantMessage(data) {
+            messageCount++;
+
+            var msg = document.createElement("div");
+            msg.className = "message assistant";
+
+            // 아바타
+            var avatar = document.createElement("div");
+            avatar.className = "message-avatar";
+            avatar.textContent = "\uD83E\uDD16"; // 로봇 아이콘
+
+            // 메시지 본체
+            var body = document.createElement("div");
+            body.className = "message-body";
+
+            // 답변 버블
+            var bubble = document.createElement("div");
+            bubble.className = "message-bubble";
+            bubble.innerHTML = App.renderMarkdown(data.answer);
+
+            body.appendChild(bubble);
+
+            // LLM 미사용 경고
+            if (!data.llm_used && data.error_message) {
+                var notice = document.createElement("div");
+                notice.className = "llm-fallback-notice";
+                notice.textContent = "\u26A0 AI 모델 응답 불가: " + data.error_message;
+                body.appendChild(notice);
+            }
+
+            // 참조 출처
+            if (data.references && data.references.length > 0) {
+                var refsSection = document.createElement("div");
+                refsSection.className = "references";
+
+                var refsTitle = document.createElement("div");
+                refsTitle.className = "references-title";
+                refsTitle.textContent = "\uD83D\uDCCE 참조 출처 (" + data.references.length + "건)";
+                refsSection.appendChild(refsTitle);
+
+                data.references.forEach(function (ref, index) {
+                    var card = document.createElement("a");
+                    card.className = "ref-card";
+                    // viewer.html로 링크 (해당 회의의 전사문 뷰어)
+                    card.href = "/static/viewer.html?meeting_id=" +
+                        encodeURIComponent(ref.meeting_id);
+                    card.target = "_blank";
+                    card.rel = "noopener";
+
+                    // 인덱스
+                    var indexEl = document.createElement("span");
+                    indexEl.className = "ref-card-index";
+                    indexEl.textContent = "[" + (index + 1) + "]";
+
+                    // 본체
+                    var bodyEl = document.createElement("div");
+                    bodyEl.className = "ref-card-body";
+
+                    // 메타 정보
+                    var meta = document.createElement("div");
+                    meta.className = "ref-card-meta";
+
+                    var meetingSpan = document.createElement("span");
+                    meetingSpan.textContent = ref.meeting_id;
+
+                    var dateSpan = document.createElement("span");
+                    dateSpan.textContent = ref.date || "";
+
+                    var speakersSpan = document.createElement("span");
+                    speakersSpan.textContent = (ref.speakers || []).join(", ");
+
+                    var timeSpan = document.createElement("span");
+                    timeSpan.textContent = App.formatTime(ref.start_time) + "~" + App.formatTime(ref.end_time);
+
+                    meta.appendChild(meetingSpan);
+                    if (ref.date) meta.appendChild(dateSpan);
+                    if (ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
+                    meta.appendChild(timeSpan);
+
+                    // 미리보기
+                    var preview = document.createElement("div");
+                    preview.className = "ref-card-preview";
+                    preview.textContent = ref.text_preview || "";
+
+                    bodyEl.appendChild(meta);
+                    bodyEl.appendChild(preview);
+
+                    // 점수
+                    var scoreEl = document.createElement("span");
+                    scoreEl.className = "ref-card-score";
+                    scoreEl.textContent = (ref.score * 100).toFixed(0) + "%";
+
+                    card.appendChild(indexEl);
+                    card.appendChild(bodyEl);
+                    card.appendChild(scoreEl);
+                    refsSection.appendChild(card);
+                });
+
+                body.appendChild(refsSection);
+            }
+
+            msg.appendChild(avatar);
+            msg.appendChild(body);
+            els.messagesArea.appendChild(msg);
+
+            scrollToBottom();
+        }
+
+        /** 메시지 영역을 맨 아래로 스크롤한다 */
+        function scrollToBottom() {
+            requestAnimationFrame(function () {
+                els.messagesArea.scrollTop = els.messagesArea.scrollHeight;
+            });
+        }
+
+        // === 전송 제어 ===
+
+        /** 전송 상태를 설정한다 */
+        function setSending(sending) {
+            isSending = sending;
+            els.sendBtn.disabled = sending || !els.chatInput.value.trim();
+            els.chatInput.disabled = sending;
+            els.typingIndicator.classList.toggle("visible", sending);
+
+            if (sending) {
+                scrollToBottom();
+            }
+        }
+
+        /** 입력 필드 값 변경 시 전송 버튼 활성화 제어 */
+        els.chatInput.addEventListener("input", function () {
+            els.sendBtn.disabled = isSending || !els.chatInput.value.trim();
+            // 자동 높이 조정 (textarea)
+            this.style.height = "auto";
+            this.style.height = Math.min(this.scrollHeight, 120) + "px";
+        });
+
+        /** 키보드 이벤트: Enter 전송, Shift+Enter 줄바꿈 */
+        els.chatInput.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (!isSending && els.chatInput.value.trim()) {
+                    sendMessage();
+                }
+            }
+        });
+
+        /** 전송 버튼 클릭 */
+        els.sendBtn.addEventListener("click", function () {
+            if (!isSending && els.chatInput.value.trim()) {
+                sendMessage();
+            }
+        });
+
+        // === 메시지 전송 ===
+
+        /** 채팅 메시지를 전송한다 */
+        async function sendMessage() {
+            var query = els.chatInput.value.trim();
+            if (!query) return;
+
+            // 입력 초기화
+            els.chatInput.value = "";
+            els.chatInput.style.height = "auto";
+            errorBanner.hide();
+
+            // 사용자 메시지 표시
+            addUserMessage(query);
+
+            // 전송 상태
+            setSending(true);
+
+            try {
+                // 검색 범위 필터
+                var meetingIdFilter = els.meetingFilter.value || null;
+
+                // API 호출
+                var result = await App.apiPost("/chat", {
+                    query: query,
+                    session_id: sessionId,
+                    meeting_id_filter: meetingIdFilter,
+                    date_filter: null,
+                    speaker_filter: null,
+                });
+
+                // AI 답변 표시
+                addAssistantMessage(result);
+
+            } catch (e) {
+                if (e.status === 503) {
+                    errorBanner.show("Chat 엔진이 초기화되지 않았습니다. 서버 상태를 확인하세요.");
+                } else if (e.status === 400) {
+                    errorBanner.show("잘못된 요청입니다: " + e.message);
+                } else {
+                    errorBanner.show("답변 생성 실패: " + e.message);
+                }
+            } finally {
+                setSending(false);
+                els.chatInput.focus();
+            }
+        }
+
+        // === 대화 초기화 ===
+
+        els.btnClearChat.addEventListener("click", function () {
+            // 새 세션 ID 생성
+            if (typeof crypto !== "undefined" && crypto.randomUUID) {
+                sessionId = crypto.randomUUID();
+            } else {
+                sessionId = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+                    var r = (Math.random() * 16) | 0;
+                    var v = c === "x" ? r : (r & 0x3) | 0x8;
+                    return v.toString(16);
+                });
+            }
+
+            // 메시지 영역 초기화
+            els.messagesArea.innerHTML = "";
+            messageCount = 0;
+
+            // 환영 메시지 복원
+            var welcome = document.createElement("div");
+            welcome.className = "welcome-message";
+            welcome.id = "welcomeMessage";
+            welcome.innerHTML =
+                '<div class="welcome-icon">&#x1F4AC;</div>' +
+                '<div class="welcome-title">AI 회의 어시스턴트</div>' +
+                '<div class="welcome-desc">' +
+                    '회의 내용에 대해 자유롭게 질문하세요.<br>' +
+                    '관련 회의 내용을 검색하여 AI가 답변합니다.' +
+                '</div>' +
+                '<div class="welcome-tips">' +
+                    '<div class="welcome-tip">&#x1F4A1; "지난 회의에서 결정된 일정이 뭐야?"</div>' +
+                    '<div class="welcome-tip">&#x1F4A1; "프로젝트 진행 상황을 요약해줘"</div>' +
+                    '<div class="welcome-tip">&#x1F4A1; "다음 마일스톤까지 해야 할 일은?"</div>' +
+                '</div>';
+            els.messagesArea.appendChild(welcome);
+            els.welcomeMessage = welcome;
+
+            errorBanner.hide();
+            els.chatInput.focus();
+        });
+
+        // === 회의 목록 로드 (검색 범위 드롭다운) ===
+
+        async function loadMeetingList() {
+            try {
+                var data = await App.apiRequest("/meetings");
+                var meetings = data.meetings || [];
+
+                meetings.forEach(function (meeting) {
+                    var option = document.createElement("option");
+                    option.value = meeting.meeting_id;
+
+                    // 표시 텍스트: meeting_id + 상태
+                    var statusLabel = {
+                        completed: "\u2705",
+                        recording: "\uD83D\uDD34",
+                        transcribing: "\u2699\uFE0F",
+                        diarizing: "\u2699\uFE0F",
+                        merging: "\u2699\uFE0F",
+                        embedding: "\u2699\uFE0F",
+                        queued: "\u23F3",
+                        failed: "\u274C",
+                    };
+                    var icon = statusLabel[meeting.status] || "";
+                    option.textContent = icon + " " + meeting.meeting_id;
+                    els.meetingFilter.appendChild(option);
+                });
+            } catch (e) {
+                // 회의 목록 로드 실패는 조용히 처리 (전체 검색은 가능)
+                console.warn("회의 목록 로드 실패:", e.message);
+            }
+        }
+
+        // === URL 파라미터 처리 ===
+
+        var params = new URLSearchParams(window.location.search);
+        var presetMeetingId = params.get("meeting_id");
+
+        // === WebSocket 이벤트 리스닝 ===
+
+        // 새 회의 추가/완료 시 드롭다운 자동 갱신
+        document.addEventListener("ws:job_completed", function () {
+            // 기존 옵션 초기화 후 다시 로드
+            els.meetingFilter.innerHTML = '<option value="">전체 회의</option>';
+            loadMeetingList().then(function () {
+                if (presetMeetingId) {
+                    els.meetingFilter.value = presetMeetingId;
+                }
+            });
+        });
+
+        document.addEventListener("ws:job_added", function () {
+            els.meetingFilter.innerHTML = '<option value="">전체 회의</option>';
+            loadMeetingList().then(function () {
+                if (presetMeetingId) {
+                    els.meetingFilter.value = presetMeetingId;
+                }
+            });
+        });
+
+        // === 초기화 ===
+
+        // WebSocket 연결
+        App.connectWebSocket();
+
+        // 회의 목록 로드
+        loadMeetingList().then(function () {
+            // URL에서 meeting_id가 전달된 경우 드롭다운 선택
+            if (presetMeetingId) {
+                els.meetingFilter.value = presetMeetingId;
+            }
+        });
+
+        // 입력에 포커스
+        els.chatInput.focus();
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,950 @@
+"""
+RAG 기반 AI Chat 엔진 모듈 (RAG-based AI Chat Engine Module)
+
+목적: 하이브리드 검색 결과를 컨텍스트로 활용하여 EXAONE LLM에
+      회의 내용 기반 질의응답을 수행한다.
+주요 기능:
+    - 하이브리드 검색(벡터 + FTS5) → 상위 5청크 컨텍스트 구성
+    - EXAONE 3.5 LLM을 통한 RAG 응답 생성 (Ollama API)
+    - 대화 이력 슬라이딩 윈도우 (최근 3쌍 유지)
+    - 참조 출처(회의 ID, 화자, 시간) 표시
+    - 스트리밍 응답 지원 (stream=True)
+    - Ollama 실패 시 검색 결과만 반환 (graceful degradation)
+    - 비동기(async) 인터페이스 지원
+의존성: config 모듈, search/hybrid_search 모듈, core/model_manager 모듈
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import unicodedata
+import urllib.error
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from typing import Any, AsyncGenerator, Optional
+
+from config import AppConfig, ChatConfig, get_config
+from core.model_manager import ModelLoadManager, get_model_manager
+from search.hybrid_search import (
+    HybridSearchEngine,
+    SearchResponse,
+    SearchResult,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# === 에러 계층 ===
+
+
+class ChatError(Exception):
+    """Chat 처리 중 발생하는 에러의 기본 클래스."""
+
+
+class OllamaConnectionError(ChatError):
+    """Ollama 서버에 연결할 수 없을 때 발생한다."""
+
+
+class OllamaTimeoutError(ChatError):
+    """Ollama 요청이 타임아웃되었을 때 발생한다."""
+
+
+class EmptyQueryError(ChatError):
+    """질문이 비어있을 때 발생한다."""
+
+
+# === 데이터 클래스 ===
+
+
+@dataclass
+class ChatMessage:
+    """단일 대화 메시지를 나타내는 데이터 클래스.
+
+    Attributes:
+        role: 메시지 역할 ("user" 또는 "assistant")
+        content: 메시지 내용
+    """
+
+    role: str
+    content: str
+
+    def to_dict(self) -> dict[str, str]:
+        """딕셔너리로 변환한다 (JSON 직렬화용).
+
+        Returns:
+            메시지 딕셔너리
+        """
+        return {"role": self.role, "content": self.content}
+
+
+@dataclass
+class ChatReference:
+    """응답의 참조 출처를 나타내는 데이터 클래스.
+
+    Attributes:
+        chunk_id: 청크 고유 식별자
+        meeting_id: 회의 식별자
+        date: 회의 날짜
+        speakers: 화자 목록
+        start_time: 시작 시간 (초)
+        end_time: 종료 시간 (초)
+        text_preview: 청크 텍스트 미리보기 (첫 100자)
+        score: 검색 관련도 점수
+    """
+
+    chunk_id: str
+    meeting_id: str
+    date: str
+    speakers: list[str]
+    start_time: float
+    end_time: float
+    text_preview: str
+    score: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """딕셔너리로 변환한다 (JSON 직렬화용).
+
+        Returns:
+            참조 출처 딕셔너리
+        """
+        return asdict(self)
+
+
+@dataclass
+class ChatResponse:
+    """AI Chat 응답을 담는 데이터 클래스.
+
+    Attributes:
+        answer: LLM이 생성한 답변 텍스트
+        references: 참조 출처 목록 (검색에 사용된 청크들)
+        query: 원본 질문
+        has_context: 검색 컨텍스트가 있었는지 여부
+        llm_used: LLM 응답이 성공했는지 여부
+        error_message: 에러 발생 시 메시지 (없으면 None)
+    """
+
+    answer: str
+    references: list[ChatReference]
+    query: str
+    has_context: bool = True
+    llm_used: bool = True
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """딕셔너리로 변환한다 (JSON 직렬화용).
+
+        Returns:
+            Chat 응답 딕셔너리
+        """
+        return {
+            "answer": self.answer,
+            "references": [r.to_dict() for r in self.references],
+            "query": self.query,
+            "has_context": self.has_context,
+            "llm_used": self.llm_used,
+            "error_message": self.error_message,
+        }
+
+
+# === 대화 세션 관리 ===
+
+
+class ChatSession:
+    """대화 이력을 관리하는 세션 클래스.
+
+    슬라이딩 윈도우 방식으로 최근 N쌍의 대화만 유지한다.
+    user 질문과 assistant 답변이 하나의 쌍을 구성한다.
+
+    Args:
+        max_pairs: 유지할 최대 대화 쌍 수 (기본 3)
+    """
+
+    def __init__(self, max_pairs: int = 3) -> None:
+        """ChatSession을 초기화한다.
+
+        Args:
+            max_pairs: 유지할 최대 대화 쌍 수
+        """
+        self._max_pairs = max_pairs
+        self._history: list[ChatMessage] = []
+
+    @property
+    def history(self) -> list[ChatMessage]:
+        """현재 대화 이력을 반환한다."""
+        return list(self._history)
+
+    @property
+    def pair_count(self) -> int:
+        """현재 유지 중인 대화 쌍 수."""
+        return len(self._history) // 2
+
+    def add_exchange(self, user_query: str, assistant_answer: str) -> None:
+        """사용자 질문과 AI 답변 쌍을 이력에 추가한다.
+
+        최대 쌍 수를 초과하면 가장 오래된 쌍부터 제거한다.
+
+        Args:
+            user_query: 사용자 질문
+            assistant_answer: AI 답변
+        """
+        self._history.append(ChatMessage(role="user", content=user_query))
+        self._history.append(
+            ChatMessage(role="assistant", content=assistant_answer)
+        )
+
+        # 슬라이딩 윈도우: 최대 쌍 수 초과 시 가장 오래된 쌍 제거
+        max_messages = self._max_pairs * 2
+        if len(self._history) > max_messages:
+            self._history = self._history[-max_messages:]
+
+    def clear(self) -> None:
+        """대화 이력을 초기화한다."""
+        self._history.clear()
+
+    def to_ollama_messages(self) -> list[dict[str, str]]:
+        """대화 이력을 Ollama API 형식으로 변환한다.
+
+        Returns:
+            Ollama messages 형식의 딕셔너리 목록
+        """
+        return [msg.to_dict() for msg in self._history]
+
+
+# === 컨텍스트 구성 ===
+
+
+def _build_context_text(results: list[SearchResult]) -> str:
+    """검색 결과를 LLM 컨텍스트 텍스트로 구성한다.
+
+    각 검색 결과에 화자, 시간, 날짜 정보를 포함하여
+    LLM이 출처를 파악할 수 있도록 한다.
+
+    Args:
+        results: 검색 결과 목록
+
+    Returns:
+        컨텍스트 텍스트 문자열
+    """
+    if not results:
+        return ""
+
+    context_parts: list[str] = []
+    for i, result in enumerate(results, start=1):
+        # 화자 정보 구성
+        speakers_str = ", ".join(result.speakers) if result.speakers else "미확인"
+
+        # 시간 정보 구성 (분:초 형식)
+        start_min = int(result.start_time // 60)
+        start_sec = int(result.start_time % 60)
+        end_min = int(result.end_time // 60)
+        end_sec = int(result.end_time % 60)
+        time_str = f"{start_min:02d}:{start_sec:02d}~{end_min:02d}:{end_sec:02d}"
+
+        context_parts.append(
+            f"[참조 {i}] 회의: {result.meeting_id} | "
+            f"날짜: {result.date} | "
+            f"화자: {speakers_str} | "
+            f"시간: {time_str}\n"
+            f"{result.text}"
+        )
+
+    return "\n\n".join(context_parts)
+
+
+def _build_user_prompt(query: str, context_text: str) -> str:
+    """사용자 질문과 검색 컨텍스트를 결합한 프롬프트를 구성한다.
+
+    Args:
+        query: 사용자 질문
+        context_text: 검색 결과 컨텍스트 텍스트
+
+    Returns:
+        LLM에 전달할 사용자 프롬프트
+    """
+    if context_text:
+        return (
+            f"다음은 관련 회의 내용입니다:\n\n"
+            f"{context_text}\n\n"
+            f"위 회의 내용을 참고하여 다음 질문에 답변해주세요:\n"
+            f"{query}"
+        )
+    return (
+        f"관련 회의 내용을 찾을 수 없습니다. "
+        f"다음 질문에 대해 알고 있는 범위에서 답변해주세요:\n"
+        f"{query}"
+    )
+
+
+def _build_references(results: list[SearchResult]) -> list[ChatReference]:
+    """검색 결과를 ChatReference 목록으로 변환한다.
+
+    Args:
+        results: 검색 결과 목록
+
+    Returns:
+        참조 출처 목록
+    """
+    references: list[ChatReference] = []
+    for result in results:
+        # 텍스트 미리보기 (최대 100자)
+        preview = result.text[:100] + "..." if len(result.text) > 100 else result.text
+
+        references.append(
+            ChatReference(
+                chunk_id=result.chunk_id,
+                meeting_id=result.meeting_id,
+                date=result.date,
+                speakers=result.speakers,
+                start_time=result.start_time,
+                end_time=result.end_time,
+                text_preview=preview,
+                score=result.score,
+            )
+        )
+    return references
+
+
+def _estimate_korean_tokens(text: str) -> int:
+    """한국어 텍스트의 토큰 수를 근사 추정한다.
+
+    한국어 1토큰 ≈ 1.5글자 기준으로 추정한다.
+    정확한 토크나이저 없이 stdlib만으로 구현한다.
+
+    Args:
+        text: 토큰 수를 추정할 텍스트
+
+    Returns:
+        추정 토큰 수
+    """
+    if not text:
+        return 0
+    return max(1, int(len(text) / 1.5))
+
+
+# === 메인 클래스 ===
+
+
+class ChatEngine:
+    """RAG 기반 AI Chat 엔진.
+
+    하이브리드 검색(ChromaDB 벡터 + SQLite FTS5)으로 관련 회의 내용을
+    검색한 후, EXAONE 3.5 LLM으로 질문에 대한 답변을 생성한다.
+
+    대화 이력을 슬라이딩 윈도우로 유지하여 맥락 있는 대화를 지원하고,
+    각 답변에 참조 출처(회의 ID, 화자, 시간)를 포함한다.
+
+    Args:
+        config: 애플리케이션 설정 (None이면 싱글턴 사용)
+        model_manager: 모델 로드 매니저 (None이면 싱글턴 사용)
+        search_engine: 하이브리드 검색 엔진 (None이면 자동 생성)
+
+    사용 예시:
+        engine = ChatEngine()
+        response = await engine.chat("프로젝트 일정이 어떻게 되나요?")
+        print(response.answer)
+        for ref in response.references:
+            print(f"  출처: {ref.meeting_id} ({ref.date})")
+    """
+
+    def __init__(
+        self,
+        config: Optional[AppConfig] = None,
+        model_manager: Optional[ModelLoadManager] = None,
+        search_engine: Optional[HybridSearchEngine] = None,
+    ) -> None:
+        """ChatEngine을 초기화한다.
+
+        Args:
+            config: 애플리케이션 설정 (None이면 get_config() 사용)
+            model_manager: 모델 로드 매니저 (None이면 get_model_manager() 사용)
+            search_engine: 하이브리드 검색 엔진 (None이면 자동 생성)
+        """
+        self._config = config or get_config()
+        self._model_manager = model_manager or get_model_manager()
+        self._search_engine = search_engine or HybridSearchEngine(
+            config=self._config,
+            model_manager=self._model_manager,
+        )
+
+        # Chat 설정 캐시
+        self._chat_config: ChatConfig = self._config.chat
+        self._max_history_pairs = self._chat_config.max_history_pairs
+        self._system_prompt = self._chat_config.system_prompt
+
+        # LLM 설정 캐시
+        self._llm_host = self._config.llm.host
+        self._llm_model = self._config.llm.model_name
+        self._temperature = self._config.llm.temperature
+        self._max_context_tokens = self._config.llm.max_context_tokens
+        self._request_timeout = self._config.llm.request_timeout_seconds
+
+        # 검색 설정
+        self._top_k = self._config.search.top_k
+
+        # 세션 관리 (세션 ID → ChatSession)
+        self._sessions: dict[str, ChatSession] = {}
+        self._default_session = ChatSession(
+            max_pairs=self._max_history_pairs,
+        )
+
+        logger.info(
+            f"ChatEngine 초기화: model={self._llm_model}, "
+            f"max_history_pairs={self._max_history_pairs}, "
+            f"top_k={self._top_k}"
+        )
+
+    def get_session(self, session_id: Optional[str] = None) -> ChatSession:
+        """대화 세션을 반환한다.
+
+        session_id가 None이면 기본 세션을 반환한다.
+        존재하지 않는 session_id면 새 세션을 생성한다.
+
+        Args:
+            session_id: 세션 식별자 (None이면 기본 세션)
+
+        Returns:
+            ChatSession 인스턴스
+        """
+        if session_id is None:
+            return self._default_session
+
+        if session_id not in self._sessions:
+            self._sessions[session_id] = ChatSession(
+                max_pairs=self._max_history_pairs,
+            )
+        return self._sessions[session_id]
+
+    def clear_session(self, session_id: Optional[str] = None) -> None:
+        """대화 세션의 이력을 초기화한다.
+
+        Args:
+            session_id: 세션 식별자 (None이면 기본 세션)
+        """
+        session = self.get_session(session_id)
+        session.clear()
+        logger.info(f"대화 세션 초기화: session_id={session_id or 'default'}")
+
+    def _create_ollama_client(self) -> dict[str, Any]:
+        """Ollama 클라이언트 설정을 반환한다.
+
+        Ollama 서버 연결 가능 여부를 확인한 후 설정을 반환한다.
+
+        Returns:
+            Ollama 연결 설정 딕셔너리
+
+        Raises:
+            OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
+        """
+        try:
+            url = f"{self._llm_host}/api/tags"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    raise OllamaConnectionError(
+                        f"Ollama 서버 응답 오류: status={resp.status}"
+                    )
+        except urllib.error.URLError as e:
+            raise OllamaConnectionError(
+                f"Ollama 서버에 연결할 수 없습니다: {self._llm_host} — {e}"
+            ) from e
+        except OllamaConnectionError:
+            raise
+        except Exception as e:
+            raise OllamaConnectionError(
+                f"Ollama 서버 연결 확인 실패: {e}"
+            ) from e
+
+        logger.info(f"Ollama 서버 연결 확인 완료: {self._llm_host}")
+
+        return {
+            "host": self._llm_host,
+            "model": self._llm_model,
+            "temperature": self._temperature,
+            "num_ctx": self._max_context_tokens,
+            "timeout": self._request_timeout,
+        }
+
+    def _call_ollama_chat(
+        self,
+        client_config: dict[str, Any],
+        messages: list[dict[str, str]],
+    ) -> str:
+        """Ollama /api/chat 엔드포인트를 호출하여 응답을 반환한다.
+
+        stream=false로 전체 응답을 한 번에 수신한다.
+
+        Args:
+            client_config: Ollama 연결 설정
+            messages: Ollama messages 형식의 대화 목록
+
+        Returns:
+            LLM 응답 텍스트
+
+        Raises:
+            OllamaConnectionError: 연결 실패 시
+            OllamaTimeoutError: 타임아웃 시
+            ChatError: 기타 API 오류 시
+        """
+        url = f"{client_config['host']}/api/chat"
+        payload = {
+            "model": client_config["model"],
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": client_config["temperature"],
+                "num_ctx": client_config["num_ctx"],
+            },
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                req, timeout=client_config["timeout"]
+            ) as resp:
+                response_data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as e:
+            cause = str(e).lower()
+            if "timed out" in cause or "timeout" in cause:
+                raise OllamaTimeoutError(
+                    f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
+                ) from e
+            raise OllamaConnectionError(
+                f"Ollama API 호출 실패: {e}"
+            ) from e
+        except TimeoutError as e:
+            raise OllamaTimeoutError(
+                f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
+            ) from e
+        except json.JSONDecodeError as e:
+            raise ChatError(
+                f"Ollama 응답 JSON 파싱 실패: {e}"
+            ) from e
+
+        content = response_data.get("message", {}).get("content", "")
+        if not content:
+            raise ChatError("Ollama 응답에 content가 없습니다")
+
+        return content
+
+    def _call_ollama_chat_stream(
+        self,
+        client_config: dict[str, Any],
+        messages: list[dict[str, str]],
+    ) -> list[str]:
+        """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
+
+        stream=true로 응답을 토큰 단위로 수신한다.
+        동기 함수이므로 asyncio.to_thread로 래핑하여 사용한다.
+
+        Args:
+            client_config: Ollama 연결 설정
+            messages: Ollama messages 형식의 대화 목록
+
+        Returns:
+            토큰 청크 목록
+
+        Raises:
+            OllamaConnectionError: 연결 실패 시
+            OllamaTimeoutError: 타임아웃 시
+            ChatError: 기타 API 오류 시
+        """
+        url = f"{client_config['host']}/api/chat"
+        payload = {
+            "model": client_config["model"],
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": client_config["temperature"],
+                "num_ctx": client_config["num_ctx"],
+            },
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        chunks: list[str] = []
+        try:
+            with urllib.request.urlopen(
+                req, timeout=client_config["timeout"]
+            ) as resp:
+                for line in resp:
+                    line_str = line.decode("utf-8").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        chunk_data = json.loads(line_str)
+                    except json.JSONDecodeError:
+                        continue
+                    token = chunk_data.get("message", {}).get("content", "")
+                    if token:
+                        chunks.append(token)
+                    # done 플래그 확인
+                    if chunk_data.get("done", False):
+                        break
+        except urllib.error.URLError as e:
+            cause = str(e).lower()
+            if "timed out" in cause or "timeout" in cause:
+                raise OllamaTimeoutError(
+                    f"Ollama 스트리밍 타임아웃 ({client_config['timeout']}초)"
+                ) from e
+            raise OllamaConnectionError(
+                f"Ollama 스트리밍 호출 실패: {e}"
+            ) from e
+        except TimeoutError as e:
+            raise OllamaTimeoutError(
+                f"Ollama 스트리밍 타임아웃 ({client_config['timeout']}초)"
+            ) from e
+
+        return chunks
+
+    def _truncate_context(
+        self,
+        system_prompt: str,
+        history_messages: list[dict[str, str]],
+        user_prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """컨텍스트 윈도우를 초과하지 않도록 사용자 프롬프트를 절단한다.
+
+        시스템 프롬프트 + 대화 이력 + 사용자 프롬프트의 총 토큰 수가
+        max_tokens를 초과하면 사용자 프롬프트를 줄인다.
+
+        Args:
+            system_prompt: 시스템 프롬프트
+            history_messages: 대화 이력 메시지 목록
+            user_prompt: 사용자 프롬프트 (검색 컨텍스트 포함)
+            max_tokens: 최대 토큰 수
+
+        Returns:
+            필요 시 절단된 사용자 프롬프트
+        """
+        # 응답을 위한 여유 토큰 확보 (약 1024 토큰)
+        response_reserve = 1024
+        available = max_tokens - response_reserve
+
+        # 시스템 프롬프트 + 이력 토큰 추정
+        system_tokens = _estimate_korean_tokens(system_prompt)
+        history_tokens = sum(
+            _estimate_korean_tokens(m.get("content", ""))
+            for m in history_messages
+        )
+
+        # 사용자 프롬프트에 할당 가능한 토큰 수
+        prompt_budget = available - system_tokens - history_tokens
+
+        if prompt_budget <= 0:
+            # 이력이 너무 길면 프롬프트 최소 할당
+            prompt_budget = 512
+            logger.warning(
+                f"대화 이력이 너무 길어 컨텍스트 여유가 부족합니다. "
+                f"프롬프트를 {prompt_budget} 토큰으로 제한합니다."
+            )
+
+        current_tokens = _estimate_korean_tokens(user_prompt)
+        if current_tokens <= prompt_budget:
+            return user_prompt
+
+        # 글자 수 기준으로 절단 (토큰 ≈ 글자/1.5)
+        max_chars = int(prompt_budget * 1.5)
+        truncated = user_prompt[:max_chars]
+
+        logger.info(
+            f"프롬프트 절단: {current_tokens} → ~{prompt_budget} 토큰 "
+            f"({len(user_prompt)} → {max_chars} 글자)"
+        )
+
+        return truncated
+
+    async def chat(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        meeting_id_filter: Optional[str] = None,
+        date_filter: Optional[str] = None,
+        speaker_filter: Optional[str] = None,
+    ) -> ChatResponse:
+        """RAG 기반 AI Chat을 수행한다.
+
+        1. 하이브리드 검색으로 관련 회의 내용 검색
+        2. 검색 결과를 LLM 컨텍스트로 구성
+        3. 대화 이력 + 컨텍스트 + 질문으로 EXAONE LLM 호출
+        4. 답변과 참조 출처 반환
+
+        Args:
+            query: 사용자 질문
+            session_id: 대화 세션 ID (None이면 기본 세션)
+            meeting_id_filter: 특정 회의로 검색 범위 제한
+            date_filter: 특정 날짜로 검색 범위 제한
+            speaker_filter: 특정 화자로 검색 범위 제한
+
+        Returns:
+            ChatResponse (답변 + 참조 출처)
+
+        Raises:
+            EmptyQueryError: 질문이 비어있을 때
+        """
+        # 질문 전처리
+        query = query.strip()
+        if not query:
+            raise EmptyQueryError("질문이 비어있습니다.")
+
+        query = unicodedata.normalize("NFC", query)
+
+        logger.info(f"Chat 시작: query='{query}', session={session_id or 'default'}")
+
+        # 1. 하이브리드 검색
+        search_results: list[SearchResult] = []
+        try:
+            search_response: SearchResponse = await self._search_engine.search(
+                query=query,
+                meeting_id_filter=meeting_id_filter,
+                date_filter=date_filter,
+                speaker_filter=speaker_filter,
+                top_k=self._top_k,
+            )
+            search_results = search_response.results
+            logger.info(f"검색 완료: {len(search_results)}개 결과")
+        except Exception as e:
+            logger.warning(f"검색 실패, 컨텍스트 없이 진행: {e}")
+
+        # 참조 출처 구성
+        references = _build_references(search_results)
+
+        # 2. LLM 프롬프트 구성
+        context_text = _build_context_text(search_results)
+        user_prompt = _build_user_prompt(query, context_text)
+
+        # 대화 세션 가져오기
+        session = self.get_session(session_id)
+        history_messages = session.to_ollama_messages()
+
+        # 컨텍스트 윈도우 절단
+        user_prompt = self._truncate_context(
+            system_prompt=self._system_prompt,
+            history_messages=history_messages,
+            user_prompt=user_prompt,
+            max_tokens=self._max_context_tokens,
+        )
+
+        # Ollama messages 구성
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._system_prompt},
+        ]
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": user_prompt})
+
+        # 3. LLM 호출
+        try:
+            async with self._model_manager.acquire(
+                "exaone", self._create_ollama_client
+            ) as client_config:
+                answer = await asyncio.to_thread(
+                    self._call_ollama_chat, client_config, messages
+                )
+
+            # NFC 정규화 적용
+            answer = unicodedata.normalize("NFC", answer.strip())
+
+            # 대화 이력에 추가
+            session.add_exchange(query, answer)
+
+            logger.info(
+                f"Chat 완료: query='{query}', "
+                f"answer_length={len(answer)}, "
+                f"references={len(references)}"
+            )
+
+            return ChatResponse(
+                answer=answer,
+                references=references,
+                query=query,
+                has_context=bool(search_results),
+                llm_used=True,
+            )
+
+        except (OllamaConnectionError, OllamaTimeoutError) as e:
+            # LLM 실패 시 검색 결과만 반환 (graceful degradation)
+            logger.warning(f"LLM 호출 실패, 검색 결과만 반환: {e}")
+
+            fallback_answer = self._build_fallback_answer(
+                search_results, str(e)
+            )
+
+            return ChatResponse(
+                answer=fallback_answer,
+                references=references,
+                query=query,
+                has_context=bool(search_results),
+                llm_used=False,
+                error_message=str(e),
+            )
+        except ChatError as e:
+            logger.warning(f"Chat 처리 실패: {e}")
+            return ChatResponse(
+                answer=f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}",
+                references=references,
+                query=query,
+                has_context=bool(search_results),
+                llm_used=False,
+                error_message=str(e),
+            )
+
+    async def stream_chat(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        meeting_id_filter: Optional[str] = None,
+        date_filter: Optional[str] = None,
+        speaker_filter: Optional[str] = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """스트리밍 방식으로 RAG Chat 응답을 생성한다.
+
+        검색 결과와 참조 출처를 먼저 전송한 후,
+        LLM 응답을 토큰 단위로 스트리밍한다.
+
+        Args:
+            query: 사용자 질문
+            session_id: 대화 세션 ID (None이면 기본 세션)
+            meeting_id_filter: 특정 회의로 검색 범위 제한
+            date_filter: 특정 날짜로 검색 범위 제한
+            speaker_filter: 특정 화자로 검색 범위 제한
+
+        Yields:
+            스트리밍 이벤트 딕셔너리:
+            - {"type": "references", "data": [...]}
+            - {"type": "token", "data": "토큰 문자열"}
+            - {"type": "done", "data": {"answer": "전체 답변"}}
+            - {"type": "error", "data": {"message": "에러 메시지"}}
+
+        Raises:
+            EmptyQueryError: 질문이 비어있을 때
+        """
+        # 질문 전처리
+        query = query.strip()
+        if not query:
+            raise EmptyQueryError("질문이 비어있습니다.")
+
+        query = unicodedata.normalize("NFC", query)
+
+        logger.info(f"스트리밍 Chat 시작: query='{query}'")
+
+        # 1. 하이브리드 검색
+        search_results: list[SearchResult] = []
+        try:
+            search_response = await self._search_engine.search(
+                query=query,
+                meeting_id_filter=meeting_id_filter,
+                date_filter=date_filter,
+                speaker_filter=speaker_filter,
+                top_k=self._top_k,
+            )
+            search_results = search_response.results
+        except Exception as e:
+            logger.warning(f"검색 실패: {e}")
+
+        # 참조 출처 먼저 전송
+        references = _build_references(search_results)
+        yield {
+            "type": "references",
+            "data": [r.to_dict() for r in references],
+        }
+
+        # 2. LLM 프롬프트 구성
+        context_text = _build_context_text(search_results)
+        user_prompt = _build_user_prompt(query, context_text)
+
+        session = self.get_session(session_id)
+        history_messages = session.to_ollama_messages()
+
+        user_prompt = self._truncate_context(
+            system_prompt=self._system_prompt,
+            history_messages=history_messages,
+            user_prompt=user_prompt,
+            max_tokens=self._max_context_tokens,
+        )
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._system_prompt},
+        ]
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": user_prompt})
+
+        # 3. LLM 스트리밍 호출
+        try:
+            async with self._model_manager.acquire(
+                "exaone", self._create_ollama_client
+            ) as client_config:
+                chunks = await asyncio.to_thread(
+                    self._call_ollama_chat_stream, client_config, messages
+                )
+
+            # 각 토큰을 이벤트로 전송
+            full_answer_parts: list[str] = []
+            for token in chunks:
+                full_answer_parts.append(token)
+                yield {"type": "token", "data": token}
+
+            full_answer = "".join(full_answer_parts)
+            full_answer = unicodedata.normalize("NFC", full_answer.strip())
+
+            # 대화 이력에 추가
+            session.add_exchange(query, full_answer)
+
+            yield {
+                "type": "done",
+                "data": {"answer": full_answer},
+            }
+
+        except (OllamaConnectionError, OllamaTimeoutError, ChatError) as e:
+            logger.warning(f"스트리밍 LLM 호출 실패: {e}")
+            yield {
+                "type": "error",
+                "data": {"message": str(e)},
+            }
+
+    def _build_fallback_answer(
+        self,
+        search_results: list[SearchResult],
+        error_message: str,
+    ) -> str:
+        """LLM 실패 시 검색 결과로 대체 답변을 구성한다.
+
+        Args:
+            search_results: 검색 결과 목록
+            error_message: 에러 메시지
+
+        Returns:
+            대체 답변 텍스트
+        """
+        if not search_results:
+            return (
+                f"AI 답변을 생성할 수 없습니다 ({error_message}). "
+                f"관련 회의 내용도 찾지 못했습니다."
+            )
+
+        parts = [
+            f"AI 답변을 생성할 수 없습니다 ({error_message}). "
+            f"관련 회의 내용을 검색 결과로 대신 제공합니다:\n"
+        ]
+        for i, result in enumerate(search_results, start=1):
+            speakers_str = ", ".join(result.speakers) if result.speakers else "미확인"
+            parts.append(
+                f"\n[{i}] {result.date} | {speakers_str}\n"
+                f"{result.text[:200]}{'...' if len(result.text) > 200 else ''}"
+            )
+
+        return "\n".join(parts)

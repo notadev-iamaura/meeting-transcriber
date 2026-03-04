@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>회의 전사 시스템</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- === 헤더 === -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="header-title">
+                <span class="header-title-icon">&#x1F399;</span>
+                <span>회의 전사 시스템</span>
+            </div>
+            <nav class="header-nav">
+                <a href="/static/index.html" class="nav-link active">회의 목록</a>
+                <a href="/static/chat.html" class="nav-link">AI Chat</a>
+            </nav>
+            <div class="status-badge" id="statusBadge">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">연결 확인 중...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- === 메인 컨텐츠 === -->
+    <main class="container">
+        <!-- 에러 배너 -->
+        <div class="error-banner" id="errorBanner">
+            <span>&#x26A0;</span>
+            <span id="errorMessage"></span>
+            <button class="error-banner-close" id="errorClose">&#x2715;</button>
+        </div>
+
+        <!-- 검색 섹션 -->
+        <section class="search-section">
+            <h2 class="search-title">회의 내용 검색</h2>
+            <form class="search-form" id="searchForm">
+                <div class="search-input-row">
+                    <div class="search-input-wrapper">
+                        <span class="search-icon">&#x1F50D;</span>
+                        <input
+                            type="text"
+                            class="search-input"
+                            id="searchQuery"
+                            placeholder="검색어를 입력하세요 (예: 프로젝트 일정, 결정사항...)"
+                            autocomplete="off"
+                        />
+                    </div>
+                    <button type="submit" class="search-btn" id="searchBtn">검색</button>
+                </div>
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <span class="filter-label">날짜</span>
+                        <input
+                            type="date"
+                            class="filter-input"
+                            id="filterDate"
+                        />
+                    </div>
+                    <div class="filter-group">
+                        <span class="filter-label">화자</span>
+                        <input
+                            type="text"
+                            class="filter-input"
+                            id="filterSpeaker"
+                            placeholder="예: SPEAKER_00"
+                        />
+                    </div>
+                    <button type="button" class="filter-clear-btn" id="filterClearBtn">
+                        필터 초기화
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- 검색 결과 (검색 수행 시에만 표시) -->
+        <section class="search-results" id="searchResults">
+            <div class="search-results-header">
+                <div>
+                    <h2 class="section-title">검색 결과</h2>
+                    <span class="search-stats" id="searchStats"></span>
+                </div>
+                <button class="search-close-btn" id="searchCloseBtn">결과 닫기</button>
+            </div>
+            <div id="searchResultsList"></div>
+            <div class="loading-overlay" id="searchLoading">
+                <span class="loading-spinner"></span>
+                <span>검색 중...</span>
+            </div>
+            <div class="empty-state" id="searchEmpty" style="display:none;">
+                <div class="empty-state-icon">&#x1F50D;</div>
+                <div class="empty-state-text">검색 결과가 없습니다</div>
+                <div class="empty-state-sub">다른 검색어나 필터를 시도해보세요</div>
+            </div>
+        </section>
+
+        <!-- 회의 목록 -->
+        <section>
+            <div class="section-header">
+                <h2 class="section-title">회의 목록</h2>
+                <span class="section-count" id="meetingsCount"></span>
+            </div>
+            <div class="meetings-grid" id="meetingsGrid"></div>
+            <div class="loading-overlay" id="meetingsLoading">
+                <span class="loading-spinner"></span>
+                <span>회의 목록 불러오는 중...</span>
+            </div>
+            <div class="empty-state" id="meetingsEmpty" style="display:none;">
+                <div class="empty-state-icon">&#x1F4CB;</div>
+                <div class="empty-state-text">아직 등록된 회의가 없습니다</div>
+                <div class="empty-state-sub">오디오 파일을 감시 폴더에 추가하면 자동으로 처리됩니다</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 공통 모듈 -->
+    <script src="/static/app.js"></script>
+
+    <script>
+    /* === 회의 전사 시스템 — 메인 페이지 스크립트 ===
+     *
+     * 목적: 회의 목록 조회, 하이브리드 검색 UI, 시스템 상태 표시
+     * 의존성: MeetingApp (app.js), /api/status, /api/meetings, /api/search
+     */
+    (function () {
+        "use strict";
+
+        // === MeetingApp 참조 ===
+        var App = window.MeetingApp;
+
+        // === 상수 ===
+        var STATUS_POLL_INTERVAL = 5000;   // 상태 폴링 간격 (ms)
+        var MEETINGS_POLL_INTERVAL = 15000; // 회의 목록 갱신 간격 (ms)
+
+        // === DOM 참조 ===
+        var elements = {
+            statusDot: document.getElementById("statusDot"),
+            statusText: document.getElementById("statusText"),
+            searchForm: document.getElementById("searchForm"),
+            searchQuery: document.getElementById("searchQuery"),
+            searchBtn: document.getElementById("searchBtn"),
+            filterDate: document.getElementById("filterDate"),
+            filterSpeaker: document.getElementById("filterSpeaker"),
+            filterClearBtn: document.getElementById("filterClearBtn"),
+            searchResults: document.getElementById("searchResults"),
+            searchResultsList: document.getElementById("searchResultsList"),
+            searchStats: document.getElementById("searchStats"),
+            searchLoading: document.getElementById("searchLoading"),
+            searchEmpty: document.getElementById("searchEmpty"),
+            searchCloseBtn: document.getElementById("searchCloseBtn"),
+            meetingsGrid: document.getElementById("meetingsGrid"),
+            meetingsCount: document.getElementById("meetingsCount"),
+            meetingsLoading: document.getElementById("meetingsLoading"),
+            meetingsEmpty: document.getElementById("meetingsEmpty"),
+        };
+
+        // === 에러 배너 초기화 ===
+        var errorBanner = App.initErrorBanner("errorBanner", "errorMessage", "errorClose");
+
+        // === 시스템 상태 ===
+
+        /** 시스템 상태를 폴링한다. */
+        async function fetchStatus() {
+            try {
+                var data = await App.apiRequest("/status");
+                elements.statusDot.className = "status-dot connected";
+                var activeCount = data.active_jobs || 0;
+                if (activeCount > 0) {
+                    App.safeText(elements.statusText, "처리 중 " + activeCount + "건");
+                } else {
+                    App.safeText(elements.statusText, "대기 중");
+                }
+            } catch (e) {
+                elements.statusDot.className = "status-dot error";
+                App.safeText(elements.statusText, "서버 미연결");
+            }
+        }
+
+        // === 회의 목록 ===
+
+        /** 회의 목록을 API에서 가져와 렌더링한다. */
+        async function fetchMeetings() {
+            elements.meetingsLoading.classList.add("visible");
+            elements.meetingsEmpty.style.display = "none";
+
+            try {
+                var data = await App.apiRequest("/meetings");
+                renderMeetings(data.meetings || []);
+                App.safeText(elements.meetingsCount, "총 " + (data.total || 0) + "건");
+            } catch (e) {
+                errorBanner.show("회의 목록을 불러올 수 없습니다: " + e.message);
+            } finally {
+                elements.meetingsLoading.classList.remove("visible");
+            }
+        }
+
+        /**
+         * 회의 목록을 카드 형태로 렌더링한다.
+         * @param {Array} meetings - 회의 아이템 배열
+         */
+        function renderMeetings(meetings) {
+            elements.meetingsGrid.innerHTML = "";
+
+            if (meetings.length === 0) {
+                elements.meetingsEmpty.style.display = "block";
+                return;
+            }
+
+            elements.meetingsEmpty.style.display = "none";
+
+            meetings.forEach(function (meeting) {
+                var card = document.createElement("div");
+                card.className = "meeting-card";
+                card.setAttribute("role", "button");
+                card.setAttribute("tabindex", "0");
+
+                // 카드 헤더: ID + 상태 배지
+                var header = document.createElement("div");
+                header.className = "meeting-card-header";
+
+                var idEl = document.createElement("span");
+                idEl.className = "meeting-id";
+                idEl.textContent = meeting.meeting_id;
+
+                var statusEl = document.createElement("span");
+                statusEl.className = "meeting-status " + meeting.status;
+                statusEl.textContent = App.getStatusLabel(meeting.status);
+
+                header.appendChild(idEl);
+                header.appendChild(statusEl);
+
+                // 메타 정보
+                var meta = document.createElement("div");
+                meta.className = "meeting-meta";
+
+                // 파일명
+                var fileItem = document.createElement("div");
+                fileItem.className = "meeting-meta-item";
+                var fileIcon = document.createElement("span");
+                fileIcon.className = "meeting-meta-icon";
+                fileIcon.textContent = "\uD83C\uDFA4";
+                var fileText = document.createElement("span");
+                fileText.textContent = App.getFileName(meeting.audio_path);
+                fileItem.appendChild(fileIcon);
+                fileItem.appendChild(fileText);
+                meta.appendChild(fileItem);
+
+                // 생성일
+                if (meeting.created_at) {
+                    var dateItem = document.createElement("div");
+                    dateItem.className = "meeting-meta-item";
+                    var dateIcon = document.createElement("span");
+                    dateIcon.className = "meeting-meta-icon";
+                    dateIcon.textContent = "\uD83D\uDCC5";
+                    var dateText = document.createElement("span");
+                    dateText.textContent = App.formatDate(meeting.created_at);
+                    dateItem.appendChild(dateIcon);
+                    dateItem.appendChild(dateText);
+                    meta.appendChild(dateItem);
+                }
+
+                // 재시도 횟수
+                if (meeting.retry_count > 0) {
+                    var retryItem = document.createElement("div");
+                    retryItem.className = "meeting-meta-item";
+                    var retryIcon = document.createElement("span");
+                    retryIcon.className = "meeting-meta-icon";
+                    retryIcon.textContent = "\u21BB";
+                    var retryText = document.createElement("span");
+                    retryText.textContent = "재시도 " + meeting.retry_count + "회";
+                    retryItem.appendChild(retryIcon);
+                    retryItem.appendChild(retryText);
+                    meta.appendChild(retryItem);
+                }
+
+                card.appendChild(header);
+                card.appendChild(meta);
+
+                // 에러 메시지
+                if (meeting.error_message) {
+                    var errorEl = document.createElement("div");
+                    errorEl.className = "meeting-error";
+                    errorEl.textContent = meeting.error_message;
+                    card.appendChild(errorEl);
+                }
+
+                // 클릭 → 뷰어 페이지로 이동
+                card.addEventListener("click", function () {
+                    window.location.href = "/static/viewer.html?meeting_id=" +
+                        encodeURIComponent(meeting.meeting_id);
+                });
+
+                // 키보드 접근성 (Enter/Space)
+                card.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        card.click();
+                    }
+                });
+
+                elements.meetingsGrid.appendChild(card);
+            });
+        }
+
+        // === 검색 ===
+
+        /** 검색을 수행한다. */
+        async function performSearch() {
+            var query = elements.searchQuery.value.trim();
+            if (!query) return;
+
+            elements.searchResults.classList.add("visible");
+            elements.searchLoading.classList.add("visible");
+            elements.searchResultsList.innerHTML = "";
+            elements.searchEmpty.style.display = "none";
+            elements.searchBtn.disabled = true;
+
+            try {
+                var body = { query: query };
+
+                var dateVal = elements.filterDate.value;
+                if (dateVal) body.date_filter = dateVal;
+
+                var speakerVal = elements.filterSpeaker.value.trim();
+                if (speakerVal) body.speaker_filter = speakerVal;
+
+                var data = await App.apiPost("/search", body);
+                renderSearchResults(data);
+            } catch (e) {
+                if (e.status === 503) {
+                    errorBanner.show("검색 엔진이 아직 초기화되지 않았습니다.");
+                } else {
+                    errorBanner.show("검색 실패: " + e.message);
+                }
+                elements.searchResults.classList.remove("visible");
+            } finally {
+                elements.searchLoading.classList.remove("visible");
+                elements.searchBtn.disabled = false;
+            }
+        }
+
+        /**
+         * 검색 결과를 렌더링한다.
+         * @param {Object} data - SearchResponse
+         */
+        function renderSearchResults(data) {
+            var results = data.results || [];
+            elements.searchResultsList.innerHTML = "";
+
+            // 통계
+            App.safeText(
+                elements.searchStats,
+                results.length + "건 검색됨 (벡터: " +
+                    (data.vector_count || 0) + ", FTS: " +
+                    (data.fts_count || 0) + ")"
+            );
+
+            if (results.length === 0) {
+                elements.searchEmpty.style.display = "block";
+                return;
+            }
+
+            elements.searchEmpty.style.display = "none";
+
+            results.forEach(function (item) {
+                var el = document.createElement("div");
+                el.className = "result-item";
+                el.setAttribute("role", "button");
+                el.setAttribute("tabindex", "0");
+
+                // 헤더: 회의 ID + 점수
+                var header = document.createElement("div");
+                header.className = "result-header";
+
+                var meetingId = document.createElement("span");
+                meetingId.className = "result-meeting-id";
+                meetingId.textContent = item.meeting_id;
+
+                var score = document.createElement("span");
+                score.className = "result-score";
+                score.textContent = "점수 " + item.score.toFixed(4);
+
+                header.appendChild(meetingId);
+                header.appendChild(score);
+
+                // 본문 텍스트
+                var text = document.createElement("div");
+                text.className = "result-text";
+                text.textContent = item.text;
+
+                // 메타 정보
+                var meta = document.createElement("div");
+                meta.className = "result-meta";
+
+                var dateItem = document.createElement("span");
+                dateItem.className = "result-meta-item";
+                dateItem.textContent = "\uD83D\uDCC5 " + (item.date || "-");
+                meta.appendChild(dateItem);
+
+                if (item.speakers && item.speakers.length > 0) {
+                    var speakerItem = document.createElement("span");
+                    speakerItem.className = "result-meta-item";
+                    speakerItem.textContent = "\uD83D\uDC64 " + item.speakers.join(", ");
+                    meta.appendChild(speakerItem);
+                }
+
+                var timeItem = document.createElement("span");
+                timeItem.className = "result-meta-item";
+                timeItem.textContent = "\u23F1 " + App.formatTime(item.start_time) +
+                    " ~ " + App.formatTime(item.end_time);
+                meta.appendChild(timeItem);
+
+                // 검색 소스 태그
+                var sourceTag = document.createElement("span");
+                sourceTag.className = "result-source-tag " + (item.source || "both");
+                var sourceLabels = {
+                    vector: "벡터",
+                    fts: "키워드",
+                    both: "복합",
+                };
+                sourceTag.textContent = sourceLabels[item.source] || item.source;
+                meta.appendChild(sourceTag);
+
+                el.appendChild(header);
+                el.appendChild(text);
+                el.appendChild(meta);
+
+                // 클릭 → 뷰어로 이동
+                el.addEventListener("click", function () {
+                    window.location.href = "/static/viewer.html?meeting_id=" +
+                        encodeURIComponent(item.meeting_id);
+                });
+
+                el.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        el.click();
+                    }
+                });
+
+                elements.searchResultsList.appendChild(el);
+            });
+        }
+
+        // === 이벤트 바인딩 ===
+
+        elements.searchForm.addEventListener("submit", function (e) {
+            e.preventDefault();
+            performSearch();
+        });
+
+        elements.filterClearBtn.addEventListener("click", function () {
+            elements.filterDate.value = "";
+            elements.filterSpeaker.value = "";
+        });
+
+        elements.searchCloseBtn.addEventListener("click", function () {
+            elements.searchResults.classList.remove("visible");
+            elements.searchResultsList.innerHTML = "";
+        });
+
+        // === WebSocket 이벤트 리스닝 ===
+
+        // WebSocket 연결 상태에 따라 상태 배지 업데이트
+        document.addEventListener("ws:connection", function (e) {
+            if (e.detail.connected) {
+                elements.statusDot.className = "status-dot connected";
+            }
+        });
+
+        // 파이프라인 이벤트 수신 시 회의 목록 자동 갱신
+        document.addEventListener("ws:job_completed", function () {
+            fetchMeetings();
+        });
+
+        document.addEventListener("ws:job_added", function () {
+            fetchMeetings();
+        });
+
+        document.addEventListener("ws:pipeline_status", function () {
+            fetchStatus();
+        });
+
+        // === 초기화 ===
+
+        // WebSocket 연결
+        App.connectWebSocket();
+
+        // 데이터 로드
+        fetchStatus();
+        fetchMeetings();
+
+        // 주기적 폴링 (WebSocket 폴백)
+        setInterval(fetchStatus, STATUS_POLL_INTERVAL);
+        setInterval(fetchMeetings, MEETINGS_POLL_INTERVAL);
+    })();
+    </script>
+</body>
+</html>

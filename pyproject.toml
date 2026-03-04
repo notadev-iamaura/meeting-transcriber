@@ -1,0 +1,83 @@
+# 한국어 로컬 AI 회의 전사 시스템 — 프로젝트 설정 (PEP 621)
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meeting-transcriber"
+version = "0.1.0"
+description = "한국어 로컬 AI 회의 전사 시스템 — 100% 오프라인, Apple Silicon 최적화"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "notadev-iamaura" },
+]
+keywords = ["meeting", "transcription", "korean", "local-ai", "apple-silicon", "whisper", "diarization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # 웹 프레임워크
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    # macOS UI
+    "rumps>=0.4.0",
+    # 파일 감시
+    "watchdog>=3.0.0",
+    # 설정 관리
+    "pyyaml>=6.0",
+    # 시스템 모니터링
+    "psutil>=5.9.0",
+    # 벡터 DB
+    "chromadb>=0.4.0",
+    # AI/ML — STT (Apple Silicon MLX)
+    "mlx-whisper>=0.1.0",
+    # AI/ML — 화자분리
+    "pyannote.audio>=3.1.0",
+    # AI/ML — 임베딩
+    "sentence-transformers>=2.2.0",
+    # AI/ML — Ollama 클라이언트
+    "ollama>=0.1.0",
+    # 오디오 처리
+    "soundfile>=0.12.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/notadev-iamaura/meeting-transcriber"
+Repository = "https://github.com/notadev-iamaura/meeting-transcriber"
+Issues = "https://github.com/notadev-iamaura/meeting-transcriber/issues"
+
+[project.scripts]
+meeting-transcriber = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "config"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "steps*", "search*", "api*", "ui*", "security*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

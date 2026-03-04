@@ -1,0 +1,124 @@
+# 한국어 로컬 AI 회의 전사 시스템 설정
+# 모든 경로는 base_dir 기준 상대 경로로 관리
+
+# === 기본 경로 설정 ===
+paths:
+  base_dir: "~/.meeting-transcriber"        # 기본 데이터 디렉토리
+  audio_input_dir: "audio_input"             # 입력 오디오 폴더 (base_dir 하위)
+  outputs_dir: "outputs"                     # 처리 결과 출력 폴더
+  checkpoints_dir: "checkpoints"             # 파이프라인 체크포인트
+  chroma_db_dir: "chroma_db"                 # ChromaDB 벡터 저장소
+  pipeline_db: "pipeline.db"                 # 파이프라인 상태 DB
+  meetings_db: "meetings.db"                 # 회의 데이터 DB
+
+# === STT 모델 설정 ===
+stt:
+  model_name: "whisper-medium-ko-zeroth"     # mlx-whisper 한국어 모델
+  language: "ko"                             # 전사 언어
+  beam_size: 5                               # 빔 서치 크기
+  batch_size: 16                             # 배치 크기
+
+# === 화자분리 설정 ===
+diarization:
+  model_name: "pyannote/speaker-diarization-3.1"
+  device: "cpu"                              # MPS 버그로 CPU 강제
+  min_speakers: 2                            # 최소 화자 수
+  max_speakers: 10                           # 최대 화자 수
+  # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정
+
+# === LLM 설정 (EXAONE via Ollama) ===
+llm:
+  model_name: "exaone3.5:7.8b-instruct-q4_K_M"
+  host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
+  max_context_tokens: 8192                   # 컨텍스트 윈도우
+  temperature: 0.3                           # 생성 온도
+  correction_batch_size: 10                  # 보정 시 배치 크기 (발화 수)
+  request_timeout_seconds: 120               # 요청 타임아웃
+
+# === 임베딩 모델 설정 ===
+embedding:
+  model_name: "intfloat/multilingual-e5-small"
+  dimension: 384                             # 벡터 차원
+  device: "mps"                              # Apple Silicon MPS 가속
+  query_prefix: "query: "                    # 쿼리 접두사 (필수)
+  passage_prefix: "passage: "                # 문서 접두사 (필수)
+  batch_size: 32                             # 배치 임베딩 크기
+
+# === 청크 설정 ===
+chunking:
+  max_tokens: 300                            # 청크 최대 토큰 수
+  min_tokens: 50                             # 청크 최소 토큰 수
+  time_gap_threshold_seconds: 30             # 토픽 분리 시간 간격 (초)
+  overlap_tokens: 30                         # 청크 간 오버랩
+
+# === 검색 설정 ===
+search:
+  vector_weight: 0.6                         # 벡터 검색 가중치
+  fts_weight: 0.4                            # FTS5 키워드 검색 가중치
+  rrf_k: 60                                  # RRF 결합 파라미터
+  top_k: 5                                   # 반환할 최상위 결과 수
+  fts_tokenizer: "unicode61"                 # FTS5 토크나이저
+
+# === AI Chat 설정 ===
+chat:
+  max_history_pairs: 3                       # 대화 이력 유지 쌍 수 (슬라이딩 윈도우)
+  system_prompt: |
+    당신은 회의 내용을 기반으로 질문에 답변하는 AI 어시스턴트입니다.
+    제공된 회의 전사문을 참고하여 정확하게 답변하세요.
+    회의 내용에 없는 정보는 추측하지 마세요.
+
+# === 오디오 변환 설정 ===
+audio:
+  sample_rate: 16000                         # 출력 샘플레이트 (Hz)
+  channels: 1                                # 모노
+  format: "wav"                              # 출력 포맷
+  supported_input_formats:                   # 지원하는 입력 포맷
+    - "wav"
+    - "mp3"
+    - "m4a"
+    - "flac"
+    - "ogg"
+    - "webm"
+
+# === 파이프라인 설정 ===
+pipeline:
+  peak_ram_limit_gb: 9.5                     # 최대 RAM 사용량 (GB)
+  checkpoint_enabled: true                   # 체크포인트 활성화
+  retry_max_count: 3                         # 최대 재시도 횟수
+  min_disk_free_gb: 2.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
+  min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
+
+# === 서멀 관리 설정 ===
+thermal:
+  batch_size: 2                              # 연속 처리 건수
+  cooldown_seconds: 180                      # 쿨다운 시간 (초, 3분)
+  cpu_temp_throttle_celsius: 85              # 속도 조절 온도 (C)
+  cpu_temp_halt_celsius: 95                  # 강제 중단 온도 (C)
+
+# === 서버 설정 ===
+server:
+  host: "127.0.0.1"                          # 로컬 전용
+  port: 8765                                 # 웹 서버 포트
+  log_level: "info"                          # 로그 레벨
+
+# === Zoom 감지 설정 ===
+zoom:
+  process_name: "CptHost"                    # Zoom 미팅 프로세스명
+  poll_interval_seconds: 5                   # 감지 폴링 간격 (초)
+
+# === 폴더 감시 설정 ===
+watcher:
+  debounce_seconds: 2                        # 파일 안정화 대기 시간 (초)
+  check_interval_seconds: 0.5                # 파일 크기 안정화 확인 간격 (초)
+
+# === 보안 설정 ===
+security:
+  data_dir_permissions: 448                   # 데이터 디렉토리 권한 (8진수 0o700 = 10진수 448)
+  exclude_from_spotlight: true               # Spotlight 인덱싱 제외
+  exclude_from_timemachine: true             # Time Machine 백업 제외
+
+# === 데이터 라이프사이클 설정 ===
+lifecycle:
+  hot_days: 30                               # Hot 보존 기간 (일, WAV 원본 유지)
+  warm_days: 90                              # Warm 보존 기간 (일, FLAC 압축)
+  cold_action: "delete_audio"                # Cold 정책: delete_audio | archive

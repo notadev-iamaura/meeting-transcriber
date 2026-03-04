@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# 가상환경
+.venv/
+venv/
+
+# 데이터 (민감)
+data/
+*.wav
+*.flac
+*.m4a
+*.mp3
+
+# ChromaDB
+chroma_db/
+
+# OS
+.DS_Store
+.metadata_never_index
+
+# IDE
+.vscode/
+.idea/
+
+# Ralph 루프 (개발용)
+.ralph-logs/
+progress.md
