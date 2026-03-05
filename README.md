@@ -31,6 +31,31 @@
 
 ## 빠른 시작
 
+### AI 에이전트로 셋업 (Claude Code / Cursor)
+
+> **가장 쉬운 방법**: AI 코딩 에이전트가 자동으로 환경을 구성합니다.
+
+```bash
+git clone https://github.com/notadev-iamaura/meeting-transcriber.git
+cd meeting-transcriber
+```
+
+**Claude Code** 사용 시:
+```bash
+claude
+# 프롬프트에 "이 프로젝트 셋업해줘" 입력
+```
+
+**Cursor** 사용 시:
+- 프로젝트 폴더 열기 → Composer에 "이 프로젝트 셋업해줘" 입력
+
+AI 에이전트가 `CLAUDE.md`를 읽고 가상환경 생성, 의존성 설치, Ollama 모델 다운로드까지 자동 처리합니다.
+HuggingFace 토큰 설정 등 수동 단계는 에이전트가 안내해줍니다.
+
+---
+
+### 수동 셋업
+
 ### 1. 저장소 클론
 
 ```bash
