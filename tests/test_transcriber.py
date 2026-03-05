@@ -488,7 +488,8 @@ class TestTranscribe:
         assert call_kwargs[0][0] == str(audio_file)
         assert call_kwargs[1]["path_or_hf_repo"] == "whisper-medium-ko-zeroth"
         assert call_kwargs[1]["language"] == "ko"
-        assert call_kwargs[1]["beam_size"] == 5
+        # mlx-whisper 0.4.x에서 beam_size는 직접 파라미터로 전달하지 않음
+        assert "beam_size" not in call_kwargs[1]
         assert call_kwargs[1]["word_timestamps"] is False
 
     async def test_파일_없음_에러(self, transcriber: Transcriber) -> None:

@@ -13,7 +13,7 @@ paths:
 
 # === STT 모델 설정 ===
 stt:
-  model_name: "whisper-medium-ko-zeroth"     # mlx-whisper 한국어 모델
+  model_name: "mlx-community/whisper-medium-mlx"  # mlx-whisper 모델 (한국어 지원)
   language: "ko"                             # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 16                             # 배치 크기

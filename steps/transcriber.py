@@ -303,12 +303,13 @@ class Transcriber:
                 "whisper", self._load_whisper_module
             ) as whisper_module:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
+                # mlx-whisper 0.4.x에서 beam_size는 직접 파라미터가 아닌
+                # decode_options로 전달해야 한다 (미구현 시 무시됨)
                 raw_result = await asyncio.to_thread(
                     whisper_module.transcribe,
                     str(audio_path),
                     path_or_hf_repo=self._model_name,
                     language=self._language,
-                    beam_size=self._beam_size,
                     word_timestamps=False,
                 )
         except ModelNotAvailableError:

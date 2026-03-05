@@ -120,8 +120,10 @@ def _run_with_mock_launchctl(
     mock_plutil.chmod(0o755)
 
     # PATH 앞에 mock_bin을 추가하여 가짜 바이너리 우선 사용
+    # VIRTUAL_ENV를 제거하여 실제 활성화된 venv가 테스트에 영향을 주지 않도록 함
+    filtered_env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
     env = {
-        **os.environ,
+        **filtered_env,
         "HOME": mock_env["home"],
         "PATH": f"{mock_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
     }

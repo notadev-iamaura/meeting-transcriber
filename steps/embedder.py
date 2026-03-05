@@ -341,7 +341,8 @@ def _store_chunks_chroma(
         metadatas = [
             {
                 "meeting_id": c.meeting_id,
-                "date": c.date,
+                # ChromaDB 메타데이터는 str/int/float/bool만 허용
+                "date": str(c.date) if not isinstance(c.date, str) else c.date,
                 "speakers": ",".join(c.speakers),
                 "start_time": c.start_time,
                 "end_time": c.end_time,
