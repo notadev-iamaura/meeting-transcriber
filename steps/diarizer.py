@@ -250,9 +250,10 @@ class Diarizer:
         )
 
         try:
+            # pyannote 4.x: use_auth_token → token으로 변경됨
             pipeline = Pipeline.from_pretrained(
                 self._model_name,
-                use_auth_token=token,
+                token=token,
             )
         except Exception as e:
             raise ModelNotAvailableError(
