@@ -67,12 +67,28 @@ bash scripts/install.sh
 
 ### 5. HuggingFace 토큰 설정 (화자 분리에 필요)
 
+화자 분리에 사용하는 [pyannote](https://github.com/pyannote/pyannote-audio) 모델은 HuggingFace에서 **게이트 모델(gated model)**로 배포됩니다.
+모델은 로컬에서 실행되지만, 최초 다운로드 시 인증이 필요합니다. (한 번만 하면 됩니다)
+
+**설정 절차:**
+
+1. [HuggingFace](https://huggingface.co/join)에 무료 가입
+2. 아래 두 모델 페이지를 방문하여 각각 **"Agree and access repository"** 클릭:
+   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+3. [토큰 발급 페이지](https://huggingface.co/settings/tokens)에서 **Access Token** 생성 (Read 권한)
+4. 환경변수로 설정:
+
 ```bash
+# 터미널에서 일회성 설정
 export HUGGINGFACE_TOKEN=hf_xxxxx
+
+# 영구 설정 (~/.zshrc 또는 ~/.bashrc에 추가)
+echo 'export HUGGINGFACE_TOKEN=hf_xxxxx' >> ~/.zshrc
 ```
 
-[HuggingFace 토큰 발급](https://huggingface.co/settings/tokens)에서 토큰을 생성하세요.
-[pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) 모델의 사용 동의가 필요합니다.
+> **참고**: 토큰 설정 후 최초 실행 시 모델이 자동 다운로드되며 (`~/.cache/huggingface/`에 캐시),
+> 이후에는 인터넷 없이 오프라인으로 동작합니다.
 
 ### 6. 실행
 
