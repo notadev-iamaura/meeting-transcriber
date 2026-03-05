@@ -16,6 +16,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -303,6 +304,88 @@ class TestPipelineState:
         loaded = PipelineState.from_file(state_path)
         assert loaded.meeting_id == "회의_테스트"
         assert loaded.error_message == "한국어 에러 메시지"
+
+    def test_atomic_save_no_tmp_file_remains(self, tmp_path: Path) -> None:
+        """원자적 저장 후 임시 파일(.tmp)이 남아있지 않은지 확인한다."""
+        state = PipelineState(
+            meeting_id="atomic_test",
+            audio_path="/tmp/test.m4a",
+        )
+        state_path = tmp_path / "state.json"
+        state.save(state_path)
+
+        # 저장 완료 후 .tmp 파일이 남아있으면 안 됨
+        tmp_file = state_path.with_suffix(".tmp")
+        assert not tmp_file.exists(), ".tmp 파일이 정리되지 않았습니다"
+        assert state_path.exists()
+
+    def test_atomic_save_preserves_original_on_write_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        """쓰기 실패 시 기존 파일이 보존되는지 확인한다.
+
+        json.dump가 실패하면 원본 파일은 손상되지 않아야 한다.
+        """
+        state = PipelineState(
+            meeting_id="original",
+            audio_path="/tmp/test.m4a",
+            status="running",
+        )
+        state_path = tmp_path / "state.json"
+
+        # 먼저 정상적으로 저장
+        state.save(state_path)
+        original_content = state_path.read_text(encoding="utf-8")
+
+        # json.dump가 실패하도록 모킹
+        with patch("core.pipeline.json.dump", side_effect=IOError("쓰기 실패")):
+            with pytest.raises(IOError, match="쓰기 실패"):
+                state.save(state_path)
+
+        # 원본 파일이 그대로 보존되어야 함
+        assert state_path.exists(), "원본 파일이 삭제되었습니다"
+        preserved_content = state_path.read_text(encoding="utf-8")
+        assert preserved_content == original_content, (
+            "원본 파일 내용이 변경되었습니다"
+        )
+
+        # 임시 파일이 남아있지 않아야 함
+        tmp_file = state_path.with_suffix(".tmp")
+        assert not tmp_file.exists(), "실패 후 .tmp 파일이 정리되지 않았습니다"
+
+    def test_atomic_save_uses_fsync(self, tmp_path: Path) -> None:
+        """저장 시 fsync가 호출되는지 확인한다 (디스크 플러시 보장)."""
+        state = PipelineState(
+            meeting_id="fsync_test",
+            audio_path="/tmp/test.m4a",
+        )
+        state_path = tmp_path / "state.json"
+
+        with patch("core.pipeline.os.fsync") as mock_fsync:
+            state.save(state_path)
+            # fsync가 최소 1회 호출되어야 함
+            assert mock_fsync.called, "os.fsync가 호출되지 않았습니다"
+
+    def test_atomic_save_uses_os_replace(self, tmp_path: Path) -> None:
+        """저장 시 os.replace로 원자적 교체가 수행되는지 확인한다."""
+        state = PipelineState(
+            meeting_id="replace_test",
+            audio_path="/tmp/test.m4a",
+        )
+        state_path = tmp_path / "state.json"
+
+        with patch("core.pipeline.os.replace", wraps=os.replace) as mock_replace:
+            state.save(state_path)
+            # os.replace가 호출되어야 함
+            assert mock_replace.called, "os.replace가 호출되지 않았습니다"
+            # 인자 확인: (임시 파일 경로, 최종 파일 경로)
+            call_args = mock_replace.call_args[0]
+            assert call_args[0].endswith(".tmp"), (
+                "os.replace의 소스가 .tmp 파일이 아닙니다"
+            )
+            assert call_args[1] == str(state_path), (
+                "os.replace의 대상이 올바르지 않습니다"
+            )
 
 
 # === PipelineManager 입력 검증 테스트 ===

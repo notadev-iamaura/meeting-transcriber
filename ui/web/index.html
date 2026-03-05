@@ -25,6 +25,13 @@
         </div>
     </header>
 
+    <!-- === 녹음 상태 표시 바 === -->
+    <div id="recordingStatus" class="recording-status">
+        <span class="recording-dot"></span>
+        <span class="recording-text">녹음 중</span>
+        <span class="recording-duration" id="recordingDuration">00:00</span>
+    </div>
+
     <!-- === 메인 컨텐츠 === -->
     <main class="container">
         <!-- 에러 배너 -->
@@ -155,7 +162,20 @@
             meetingsCount: document.getElementById("meetingsCount"),
             meetingsLoading: document.getElementById("meetingsLoading"),
             meetingsEmpty: document.getElementById("meetingsEmpty"),
+            recordingStatus: document.getElementById("recordingStatus"),
+            recordingDuration: document.getElementById("recordingDuration"),
         };
+
+        // === 파이프라인 단계 정의 ===
+        // 파이프라인 6단계 순서와 한국어 레이블
+        var PIPELINE_STEPS = [
+            { key: "convert",    label: "변환" },
+            { key: "transcribe", label: "전사" },
+            { key: "diarize",    label: "화자" },
+            { key: "merge",      label: "병합" },
+            { key: "correct",    label: "보정" },
+            { key: "summarize",  label: "요약" },
+        ];
 
         // === 에러 배너 초기화 ===
         var errorBanner = App.initErrorBanner("errorBanner", "errorMessage", "errorClose");
@@ -286,6 +306,46 @@
                     errorEl.textContent = meeting.error_message;
                     card.appendChild(errorEl);
                 }
+
+                // 파이프라인 진행 표시 (처리 중인 회의에만 노출)
+                var isProcessing = (
+                    meeting.status !== "completed" &&
+                    meeting.status !== "failed" &&
+                    meeting.status !== "queued"
+                );
+
+                var progressEl = document.createElement("div");
+                progressEl.className = "pipeline-progress";
+                progressEl.setAttribute("data-meeting-id", meeting.meeting_id);
+
+                // 진행 단계 표시 영역
+                var stepsEl = document.createElement("div");
+                stepsEl.className = "progress-steps";
+
+                PIPELINE_STEPS.forEach(function (stepDef) {
+                    var dot = document.createElement("span");
+                    dot.className = "step-dot";
+                    dot.setAttribute("data-step", stepDef.key);
+                    dot.textContent = stepDef.label;
+                    stepsEl.appendChild(dot);
+                });
+
+                // 프로그레스 바 영역
+                var barEl = document.createElement("div");
+                barEl.className = "progress-bar";
+                var fillEl = document.createElement("div");
+                fillEl.className = "progress-fill";
+                barEl.appendChild(fillEl);
+
+                progressEl.appendChild(stepsEl);
+                progressEl.appendChild(barEl);
+
+                // 처리 중이 아닌 회의는 숨김
+                if (!isProcessing) {
+                    progressEl.style.display = "none";
+                }
+
+                card.appendChild(progressEl);
 
                 // 클릭 → 뷰어 페이지로 이동
                 card.addEventListener("click", function () {
@@ -480,8 +540,159 @@
             fetchMeetings();
         });
 
-        document.addEventListener("ws:pipeline_status", function () {
+        // === UIUX-001: 파이프라인 진행 상태 표시 ===
+
+        /**
+         * 파이프라인 진행 표시를 업데이트한다.
+         * 지정된 회의 카드의 단계 표시와 프로그레스 바를 갱신한다.
+         *
+         * @param {string} meetingId - 회의 ID
+         * @param {string} currentStep - 현재 실행 중인 단계 (convert, transcribe 등)
+         */
+        function updatePipelineProgress(meetingId, currentStep) {
+            // 해당 회의의 진행 표시 엘리먼트를 찾는다
+            var progressEl = document.querySelector(
+                '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
+            );
+            if (!progressEl) return;
+
+            // 진행 표시 영역을 보이게 한다
+            progressEl.style.display = "block";
+
+            // 현재 단계의 인덱스를 찾는다
+            var currentIdx = -1;
+            PIPELINE_STEPS.forEach(function (stepDef, idx) {
+                if (stepDef.key === currentStep) {
+                    currentIdx = idx;
+                }
+            });
+
+            // 각 단계 점에 적절한 클래스를 부여한다
+            var dots = progressEl.querySelectorAll(".step-dot");
+            dots.forEach(function (dot, idx) {
+                dot.classList.remove("active", "completed");
+
+                if (idx < currentIdx) {
+                    // 현재 단계 이전은 완료 상태
+                    dot.classList.add("completed");
+                } else if (idx === currentIdx) {
+                    // 현재 실행 중인 단계
+                    dot.classList.add("active");
+                }
+                // 이후 단계는 기본 상태 유지
+            });
+
+            // 프로그레스 바 업데이트
+            var fillEl = progressEl.querySelector(".progress-fill");
+            if (fillEl && currentIdx >= 0) {
+                // 현재 단계까지의 진행률 (1/6 ~ 6/6)
+                var pct = Math.round(((currentIdx + 1) / PIPELINE_STEPS.length) * 100);
+                fillEl.style.width = pct + "%";
+            }
+        }
+
+        document.addEventListener("ws:pipeline_status", function (e) {
             fetchStatus();
+
+            // 파이프라인 진행 표시 업데이트
+            var detail = e.detail || {};
+            var meetingId = detail.meeting_id;
+            // step 또는 current_step 또는 status 필드에서 단계명을 추출
+            var step = detail.step || detail.current_step || detail.status || "";
+
+            if (meetingId && step) {
+                updatePipelineProgress(meetingId, step);
+            }
+        });
+
+        // === UIUX-002: 녹음 이벤트 처리 ===
+
+        /**
+         * 초 단위 시간을 MM:SS 형식으로 변환한다.
+         * @param {number} totalSeconds - 초
+         * @returns {string} 포맷된 시간 문자열
+         */
+        function formatRecordingTime(totalSeconds) {
+            var sec = Math.floor(totalSeconds || 0);
+            var m = Math.floor(sec / 60);
+            var s = sec % 60;
+            var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+            return pad(m) + ":" + pad(s);
+        }
+
+        // 녹음 시작 이벤트
+        document.addEventListener("ws:recording_started", function (e) {
+            elements.recordingStatus.classList.add("visible");
+            App.safeText(elements.recordingDuration, "00:00");
+            // 회의 목록 갱신 (녹음 중 상태 반영)
+            fetchMeetings();
+        });
+
+        // 녹음 중지 이벤트
+        document.addEventListener("ws:recording_stopped", function (e) {
+            elements.recordingStatus.classList.remove("visible");
+            // 회의 목록 갱신 (녹음 완료 후 파이프라인 시작 반영)
+            fetchMeetings();
+        });
+
+        // 녹음 시간 업데이트 이벤트
+        document.addEventListener("ws:recording_duration", function (e) {
+            var detail = e.detail || {};
+            var seconds = detail.duration_seconds || 0;
+            App.safeText(elements.recordingDuration, formatRecordingTime(seconds));
+        });
+
+        // 녹음 에러 이벤트
+        document.addEventListener("ws:recording_error", function (e) {
+            var detail = e.detail || {};
+            elements.recordingStatus.classList.remove("visible");
+            var msg = detail.error || detail.message || "녹음 중 오류가 발생했습니다";
+            errorBanner.show(msg);
+        });
+
+        // 작업 완료/실패 시 해당 회의의 진행 표시 숨기기
+        document.addEventListener("ws:job_completed", function (e) {
+            var detail = e.detail || {};
+            var meetingId = detail.meeting_id;
+            if (meetingId) {
+                var progressEl = document.querySelector(
+                    '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
+                );
+                if (progressEl) {
+                    // 모든 단계를 완료로 표시
+                    var dots = progressEl.querySelectorAll(".step-dot");
+                    dots.forEach(function (dot) {
+                        dot.classList.remove("active");
+                        dot.classList.add("completed");
+                    });
+                    var fillEl = progressEl.querySelector(".progress-fill");
+                    if (fillEl) fillEl.style.width = "100%";
+
+                    // 잠시 후 진행 표시 숨김
+                    setTimeout(function () {
+                        progressEl.style.display = "none";
+                    }, 2000);
+                }
+            }
+        });
+
+        document.addEventListener("ws:job_failed", function (e) {
+            var detail = e.detail || {};
+            var meetingId = detail.meeting_id;
+            if (meetingId) {
+                var progressEl = document.querySelector(
+                    '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
+                );
+                if (progressEl) {
+                    // 현재 활성 단계를 에러 색상으로 표시
+                    var activeDot = progressEl.querySelector(".step-dot.active");
+                    if (activeDot) {
+                        activeDot.style.backgroundColor = "var(--error)";
+                    }
+                }
+            }
+            // 회의 목록 갱신
+            fetchMeetings();
         });
 
         // === 초기화 ===

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
@@ -292,16 +293,31 @@ class PipelineState:
         return asdict(self)
 
     def save(self, output_path: Path) -> None:
-        """파이프라인 상태를 JSON 파일로 저장한다.
+        """파이프라인 상태를 JSON 파일로 원자적으로 저장한다.
+
+        임시 파일에 먼저 기록한 뒤 os.replace()로 원자적 교체를 수행한다.
+        프로세스 크래시 시에도 기존 체크포인트가 손상되지 않는다.
 
         Args:
             output_path: 저장할 JSON 파일 경로
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         self.updated_at = datetime.now().isoformat()
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
-        logger.debug(f"파이프라인 상태 저장: {output_path}")
+
+        # 임시 파일에 먼저 쓴 후 원자적으로 교체 (크래시 시 데이터 손상 방지)
+        tmp_path = output_path.with_suffix(".tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            # POSIX에서 os.replace()는 원자적 연산
+            os.replace(str(tmp_path), str(output_path))
+        except Exception:
+            # 실패 시 임시 파일 정리
+            tmp_path.unlink(missing_ok=True)
+            raise
+        logger.debug(f"파이프라인 상태 저장 (원자적 쓰기): {output_path}")
 
     @classmethod
     def from_file(cls, state_path: Path) -> PipelineState:

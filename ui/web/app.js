@@ -24,6 +24,16 @@
         failed: "실패",
     };
 
+    // 파이프라인 6단계 정의 (순서 보장, 한국어 레이블 포함)
+    var PIPELINE_STEPS = [
+        { key: "convert",    label: "변환",  labelFull: "오디오 변환" },
+        { key: "transcribe", label: "전사",  labelFull: "음성 인식" },
+        { key: "diarize",    label: "화자",  labelFull: "화자 분리" },
+        { key: "merge",      label: "병합",  labelFull: "결과 병합" },
+        { key: "correct",    label: "보정",  labelFull: "텍스트 보정" },
+        { key: "summarize",  label: "요약",  labelFull: "회의록 생성" },
+    ];
+
     // 화자별 CSS 변수 색상 매핑 (최대 10명)
     var SPEAKER_COLORS = [
         "var(--speaker-0)", "var(--speaker-1)", "var(--speaker-2)",
@@ -496,6 +506,7 @@
         API_BASE: API_BASE,
         STATUS_LABELS: STATUS_LABELS,
         SPEAKER_COLORS: SPEAKER_COLORS,
+        PIPELINE_STEPS: PIPELINE_STEPS,
 
         // 유틸리티
         formatTime: formatTime,

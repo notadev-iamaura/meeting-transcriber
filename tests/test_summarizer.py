@@ -18,17 +18,14 @@
 """
 
 import json
+import urllib.error
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from steps.corrector import (
-    CorrectedResult,
-    CorrectedUtterance,
-    OllamaConnectionError,
-    OllamaTimeoutError,
-)
+from core.ollama_client import OllamaConnectionError, OllamaTimeoutError
+from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.summarizer import (
     EmptySummaryInputError,
     Summarizer,
@@ -569,7 +566,7 @@ class TestSummarizer:
         summarizer = _create_summarizer()
 
         mock_resp = _make_mock_urlopen(b'{"models": []}')
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             config = summarizer._create_ollama_client()
 
         assert config["host"] == "http://127.0.0.1:11434"
@@ -581,7 +578,7 @@ class TestSummarizer:
         summarizer = _create_summarizer()
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(OllamaConnectionError):
@@ -601,7 +598,7 @@ class TestSummarizer:
         response_bytes = _make_ollama_response("## 회의 개요\n- 테스트")
         mock_resp = _make_mock_urlopen(response_bytes)
 
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             result = summarizer._call_ollama(
                 client_config, "시스템 프롬프트", "사용자 프롬프트"
             )
@@ -620,7 +617,7 @@ class TestSummarizer:
         }
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("timed out"),
         ):
             with pytest.raises(OllamaTimeoutError):
@@ -640,7 +637,7 @@ class TestSummarizer:
         }
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(OllamaConnectionError):
@@ -666,7 +663,7 @@ class TestSummarizer:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             with pytest.raises(SummaryError, match="JSON 파싱"):
                 summarizer._call_ollama(
                     client_config, "시스템", "사용자"
@@ -690,7 +687,7 @@ class TestSummarizer:
         }).encode("utf-8")
         mock_resp = _make_mock_urlopen(empty_response)
 
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             with pytest.raises(SummaryError, match="content가 없습니다"):
                 summarizer._call_ollama(
                     client_config, "시스템", "사용자"
@@ -713,7 +710,7 @@ class TestSummarizer:
         response_bytes = _make_ollama_response(nfd_text)
         mock_resp = _make_mock_urlopen(response_bytes)
 
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             result = summarizer._call_ollama(
                 client_config, "시스템", "사용자"
             )
@@ -733,7 +730,7 @@ class TestSummarizer:
         }
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=TimeoutError("timed out"),
         ):
             with pytest.raises(OllamaTimeoutError):
@@ -771,7 +768,7 @@ class TestSummarizeSingle:
         mock_resp = _make_mock_urlopen(response_bytes)
 
         # 연결 확인 + 요약 호출을 위해 side_effect 사용
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             result = await summarizer.summarize(corrected)
 
         assert isinstance(result, SummaryResult)
@@ -813,9 +810,9 @@ class TestSummarizeSingle:
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # SummaryError 발생
-        with patch(
-            "steps.summarizer.urllib.request.urlopen",
+        # SummaryError 발생 (_call_ollama 메서드를 직접 모킹)
+        with patch.object(
+            summarizer, "_call_ollama",
             side_effect=SummaryError("테스트 실패"),
         ):
             result = await summarizer.summarize(corrected)
@@ -873,9 +870,9 @@ class TestSummarizeSingle:
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # RuntimeError 발생 (예상치 못한 오류)
-        with patch(
-            "steps.summarizer.urllib.request.urlopen",
+        # RuntimeError 발생 (예상치 못한 오류 — _call_ollama 메서드를 직접 모킹)
+        with patch.object(
+            summarizer, "_call_ollama",
             side_effect=RuntimeError("unexpected"),
         ):
             result = await summarizer.summarize(corrected)
@@ -902,7 +899,7 @@ class TestSummarizeSingle:
         response_bytes = _make_ollama_response(_SAMPLE_MARKDOWN)
         mock_resp = _make_mock_urlopen(response_bytes)
 
-        with patch("steps.summarizer.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             await summarizer.summarize(corrected)
 
         # acquire가 "exaone"으로 호출되었는지 확인
@@ -953,7 +950,7 @@ class TestSummarizeChunked:
                 )
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=mock_urlopen_side_effect,
         ):
             result = await summarizer.summarize(corrected)
@@ -980,23 +977,18 @@ class TestSummarizeChunked:
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
+        # _call_ollama를 직접 모킹하여 첫 호출만 실패하도록 설정
         call_count = 0
+        original_call_ollama = summarizer._call_ollama
 
-        def mock_urlopen_side_effect(req, timeout=None):
+        def mock_call_ollama(client_config, system_prompt, user_prompt):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                # 첫 청크 실패
                 raise SummaryError("첫 청크 실패")
-            else:
-                return _make_mock_urlopen(
-                    _make_ollama_response("요약 내용")
-                )
+            return "요약 내용"
 
-        with patch(
-            "steps.summarizer.urllib.request.urlopen",
-            side_effect=mock_urlopen_side_effect,
-        ):
+        with patch.object(summarizer, "_call_ollama", side_effect=mock_call_ollama):
             result = await summarizer.summarize(corrected)
 
         # 폴백 없이 결과가 생성되어야 함 (부분 실패는 원본으로 대체)
@@ -1022,7 +1014,7 @@ class TestSummarizeChunked:
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             with pytest.raises(OllamaConnectionError):
@@ -1048,13 +1040,11 @@ class TestSummarizerSingleMethod:
 
         captured_data = {}
 
-        original_urlopen = urllib.request.urlopen
-
         def capture_urlopen(req, timeout=None):
             captured_data["body"] = json.loads(req.data.decode("utf-8"))
             return mock_resp
 
-        with patch("steps.summarizer.urllib.request.urlopen", side_effect=capture_urlopen):
+        with patch("core.ollama_client.urllib.request.urlopen", side_effect=capture_urlopen):
             summarizer._summarize_single(
                 client_config,
                 "[SPEAKER_00] 안녕하세요",
@@ -1103,7 +1093,7 @@ class TestSummarizerChunkedMethod:
             )
 
         with patch(
-            "steps.summarizer.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=mock_urlopen_side_effect,
         ):
             result = summarizer._summarize_chunked(
@@ -1113,6 +1103,3 @@ class TestSummarizerChunkedMethod:
         # 2개 청크 부분 요약 + 1개 통합 = 3회 호출
         assert call_count == 3
         assert result  # 결과가 비어있지 않아야 함
-
-
-import urllib.error

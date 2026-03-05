@@ -590,6 +590,8 @@ class TestHybridSearchEngine:
 
     def _create_engine(self) -> HybridSearchEngine:
         """테스트용 엔진 인스턴스를 생성한다 (__new__ 패턴)."""
+        import threading
+
         engine = HybridSearchEngine.__new__(HybridSearchEngine)
         config = _make_config()
         engine._config = config
@@ -603,6 +605,19 @@ class TestHybridSearchEngine:
         engine._query_prefix = config.embedding.query_prefix
         engine._chroma_dir = config.paths.resolved_chroma_db_dir
         engine._meetings_db = config.paths.resolved_meetings_db
+
+        # PERF-005: 임베딩 모델 캐시 (테스트용 mock 모델 미리 설정)
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [
+            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
+        ]
+        engine._embed_model = mock_model
+        engine._embed_model_lock = threading.Lock()
+
+        # PERF-011: ChromaDB 캐시 (검색 함수가 패치되므로 None으로 설정)
+        engine._chroma_client = None
+        engine._chroma_collection = None
+        engine._chroma_lock = threading.Lock()
         return engine
 
     async def test_빈_쿼리_에러(self) -> None:
@@ -841,45 +856,35 @@ class TestHybridSearchEngine:
 class TestSearchVector:
     """벡터 검색 기능 테스트 (ChromaDB mock)."""
 
-    async def test_빈_디렉토리(self) -> None:
-        """ChromaDB 디렉토리가 없으면 빈 결과를 반환한다."""
+    async def test_컬렉션_None(self) -> None:
+        """컬렉션이 None이면 빈 결과를 반환한다. (PERF-011 변경 반영)"""
         from search.hybrid_search import _search_vector
 
         results = _search_vector(
             [0.1] * 384,
-            Path("/tmp/nonexistent_chroma_dir_xyz"),
+            None,  # 컬렉션이 없는 경우
             top_k=5,
         )
         assert results == []
 
-    async def test_컬렉션_미존재(self, tmp_path: Path) -> None:
-        """ChromaDB 컬렉션이 없으면 빈 결과를 반환한다."""
+    async def test_빈_컬렉션(self) -> None:
+        """비어있는 컬렉션이면 빈 결과를 반환한다."""
         from search.hybrid_search import _search_vector
 
-        chroma_dir = tmp_path / "chroma"
-        chroma_dir.mkdir()
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
 
-        mock_chromadb = MagicMock()
-        mock_client = MagicMock()
-        mock_client.get_collection.side_effect = Exception("컬렉션 없음")
-        mock_chromadb.PersistentClient.return_value = mock_client
-
-        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-            results = _search_vector(
-                [0.1] * 384, chroma_dir, top_k=5
-            )
+        results = _search_vector(
+            [0.1] * 384, mock_collection, top_k=5
+        )
 
         assert results == []
 
-    async def test_검색_결과_변환(self, tmp_path: Path) -> None:
-        """ChromaDB 검색 결과를 올바르게 변환한다."""
+    async def test_검색_결과_변환(self) -> None:
+        """ChromaDB 검색 결과를 올바르게 변환한다. (PERF-011 변경 반영)"""
         from search.hybrid_search import _search_vector
 
-        chroma_dir = tmp_path / "chroma"
-        chroma_dir.mkdir()
-
-        # ChromaDB mock 설정
-        mock_chromadb = MagicMock()
+        # ChromaDB mock 컬렉션 설정
         mock_collection = MagicMock()
         mock_collection.count.return_value = 10
         mock_collection.query.return_value = {
@@ -905,14 +910,10 @@ class TestSearchVector:
             ]],
             "distances": [[0.1, 0.2]],
         }
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_collection
-        mock_chromadb.PersistentClient.return_value = mock_client
 
-        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-            results = _search_vector(
-                [0.1] * 384, chroma_dir, top_k=5
-            )
+        results = _search_vector(
+            [0.1] * 384, mock_collection, top_k=5
+        )
 
         assert len(results) == 2
         assert results[0]["chunk_id"] == "c1"
@@ -938,3 +939,163 @@ class TestErrorHierarchy:
 
         error = ModelLoadError("모델 로드 실패")
         assert str(error) == "모델 로드 실패"
+
+
+# === 성능 최적화 테스트 (PERF-005, PERF-010, PERF-011) ===
+
+
+class TestPerformanceOptimizations:
+    """성능 최적화 관련 테스트 (캐싱, 병렬 검색)."""
+
+    def _create_engine_with_caching(self) -> HybridSearchEngine:
+        """캐싱 테스트를 위한 엔진을 생성한다."""
+        import threading
+
+        engine = HybridSearchEngine.__new__(HybridSearchEngine)
+        config = _make_config()
+        engine._config = config
+        engine._model_manager = _make_model_manager()
+        engine._vector_weight = config.search.vector_weight
+        engine._fts_weight = config.search.fts_weight
+        engine._rrf_k = config.search.rrf_k
+        engine._top_k = config.search.top_k
+        engine._model_name = config.embedding.model_name
+        engine._device = config.embedding.device
+        engine._query_prefix = config.embedding.query_prefix
+        engine._chroma_dir = config.paths.resolved_chroma_db_dir
+        engine._meetings_db = config.paths.resolved_meetings_db
+
+        # 캐시 필드 초기화 (비어있는 상태)
+        engine._embed_model = None
+        engine._embed_model_lock = threading.Lock()
+        engine._chroma_client = None
+        engine._chroma_collection = None
+        engine._chroma_lock = threading.Lock()
+        return engine
+
+    def test_PERF005_임베딩_모델_캐시_재사용(self) -> None:
+        """PERF-005: 임베딩 모델이 한 번만 로드되고 캐시되는지 확인한다."""
+        engine = self._create_engine_with_caching()
+
+        # mock 모델 로더 설정
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [
+            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
+        ]
+
+        with patch.object(engine, "_load_model", return_value=mock_model) as mock_loader:
+            # 첫 번째 호출: 모델 로드 실행
+            model1 = engine._get_embed_model()
+            # 두 번째 호출: 캐시에서 반환 (로드 안 함)
+            model2 = engine._get_embed_model()
+            # 세 번째 호출: 캐시에서 반환 (로드 안 함)
+            model3 = engine._get_embed_model()
+
+        # _load_model은 정확히 1번만 호출되어야 함
+        assert mock_loader.call_count == 1
+        # 모든 반환값이 동일한 인스턴스여야 함
+        assert model1 is model2
+        assert model2 is model3
+
+    def test_PERF011_chroma_클라이언트_캐시_재사용(self, tmp_path: Path) -> None:
+        """PERF-011: ChromaDB 클라이언트가 한 번만 생성되고 캐시되는지 확인한다."""
+        engine = self._create_engine_with_caching()
+
+        # 실제 ChromaDB 디렉토리 경로 설정
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        engine._chroma_dir = chroma_dir
+
+        # mock chromadb 설정
+        mock_collection = MagicMock()
+        mock_client = MagicMock()
+        mock_client.get_collection.return_value = mock_collection
+
+        mock_chromadb = MagicMock()
+        mock_chromadb.PersistentClient.return_value = mock_client
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            # 첫 번째 호출: 클라이언트 생성
+            col1 = engine._get_chroma_collection()
+            # 두 번째 호출: 캐시에서 반환
+            col2 = engine._get_chroma_collection()
+            # 세 번째 호출: 캐시에서 반환
+            col3 = engine._get_chroma_collection()
+
+        # PersistentClient는 정확히 1번만 호출되어야 함
+        assert mock_chromadb.PersistentClient.call_count == 1
+        # 모든 반환값이 동일한 인스턴스여야 함
+        assert col1 is col2
+        assert col2 is col3
+        # 캐시된 클라이언트가 엔진에 저장되어 있어야 함
+        assert engine._chroma_client is mock_client
+        assert engine._chroma_collection is mock_collection
+
+    def test_PERF011_chroma_디렉토리_없으면_None_반환(self) -> None:
+        """PERF-011: ChromaDB 디렉토리가 없으면 None을 반환한다."""
+        engine = self._create_engine_with_caching()
+        engine._chroma_dir = Path("/tmp/nonexistent_chroma_xyz_test")
+
+        result = engine._get_chroma_collection()
+
+        assert result is None
+
+    def test_PERF011_chroma_컬렉션_없으면_None_반환(self, tmp_path: Path) -> None:
+        """PERF-011: ChromaDB 컬렉션이 없으면 None을 반환한다."""
+        engine = self._create_engine_with_caching()
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        engine._chroma_dir = chroma_dir
+
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = Exception("컬렉션 없음")
+        mock_chromadb = MagicMock()
+        mock_chromadb.PersistentClient.return_value = mock_client
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            result = engine._get_chroma_collection()
+
+        assert result is None
+
+    async def test_PERF010_병렬_검색_실행(self) -> None:
+        """PERF-010: 벡터 검색과 FTS5 검색이 병렬로 실행되는지 확인한다."""
+        import asyncio
+        import time
+
+        engine = self._create_engine_with_caching()
+
+        # mock 임베딩 모델 설정
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [
+            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
+        ]
+        engine._embed_model = mock_model
+
+        # 각 검색에 0.1초 지연을 추가하여 병렬 실행 확인
+        def slow_vector_search(*args: Any, **kwargs: Any) -> list:
+            time.sleep(0.1)
+            return _make_vector_results(2)
+
+        def slow_fts_search(*args: Any, **kwargs: Any) -> list:
+            time.sleep(0.1)
+            return _make_fts_results(2)
+
+        with patch(
+            "search.hybrid_search._search_vector",
+            side_effect=slow_vector_search,
+        ), patch(
+            "search.hybrid_search._search_fts",
+            side_effect=slow_fts_search,
+        ):
+            start = time.monotonic()
+            response = await engine.search("테스트 쿼리")
+            elapsed = time.monotonic() - start
+
+        # 순차 실행이면 약 0.2초 이상, 병렬이면 약 0.1초
+        # 여유를 두고 0.18초 이내면 병렬로 판정
+        assert elapsed < 0.18, (
+            f"검색이 병렬로 실행되지 않음: {elapsed:.3f}초 "
+            f"(순차 실행 예상: ~0.2초, 병렬 예상: ~0.1초)"
+        )
+        assert response.vector_count == 2
+        assert response.fts_count == 2

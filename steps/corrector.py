@@ -19,14 +19,19 @@ import json
 import logging
 import re
 import unicodedata
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.ollama_client import (
+    OllamaConnectionError,
+    OllamaResponseError,
+    OllamaTimeoutError,
+    check_connection as _check_ollama_connection,
+    chat as _ollama_chat,
+)
 from steps.merger import MergedResult, MergedUtterance
 
 logger = logging.getLogger(__name__)
@@ -181,14 +186,6 @@ class CorrectionError(Exception):
     """보정 처리 중 발생하는 에러의 기본 클래스."""
 
 
-class OllamaConnectionError(CorrectionError):
-    """Ollama 서버에 연결할 수 없을 때 발생한다."""
-
-
-class OllamaTimeoutError(CorrectionError):
-    """Ollama 요청이 타임아웃되었을 때 발생한다."""
-
-
 class EmptyInputError(CorrectionError):
     """보정할 발화가 비어있을 때 발생한다."""
 
@@ -298,8 +295,7 @@ class Corrector:
         """Ollama 클라이언트 설정을 반환한다.
 
         ModelLoadManager의 loader 함수로 사용된다.
-        실제 모델 로드는 Ollama 서버가 관리하므로,
-        여기서는 연결 가능 여부만 확인하고 설정을 반환한다.
+        통합 ollama_client 모듈을 통해 연결을 확인하고 설정을 반환한다.
 
         Returns:
             Ollama 연결 설정 딕셔너리
@@ -307,26 +303,7 @@ class Corrector:
         Raises:
             OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
         """
-        try:
-            url = f"{self._host}/api/tags"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status != 200:
-                    raise OllamaConnectionError(
-                        f"Ollama 서버 응답 오류: status={resp.status}"
-                    )
-        except urllib.error.URLError as e:
-            raise OllamaConnectionError(
-                f"Ollama 서버에 연결할 수 없습니다: {self._host} — {e}"
-            ) from e
-        except OllamaConnectionError:
-            raise
-        except Exception as e:
-            raise OllamaConnectionError(
-                f"Ollama 서버 연결 확인 실패: {e}"
-            ) from e
-
-        logger.info(f"Ollama 서버 연결 확인 완료: {self._host}")
+        _check_ollama_connection(self._host)
 
         return {
             "host": self._host,
@@ -335,81 +312,6 @@ class Corrector:
             "num_ctx": self._max_context,
             "timeout": self._timeout,
         }
-
-    def _call_ollama(
-        self,
-        client_config: dict[str, Any],
-        prompt: str,
-    ) -> str:
-        """Ollama API를 호출하여 보정 결과를 반환한다.
-
-        /api/chat 엔드포인트를 사용하여 instruct 형식으로 보정을 요청한다.
-        stream=false로 전체 응답을 한 번에 수신한다.
-
-        Args:
-            client_config: Ollama 연결 설정
-            prompt: 보정할 발화 텍스트 ([번호] 형식)
-
-        Returns:
-            LLM 응답 텍스트
-
-        Raises:
-            OllamaConnectionError: 연결 실패 시
-            OllamaTimeoutError: 타임아웃 시
-            CorrectionError: 기타 API 오류 시
-        """
-        url = f"{client_config['host']}/api/chat"
-        payload = {
-            "model": client_config["model"],
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": client_config["temperature"],
-                "num_ctx": client_config["num_ctx"],
-            },
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(
-                req, timeout=client_config["timeout"]
-            ) as resp:
-                response_data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as e:
-            # 타임아웃 여부 확인
-            cause = str(e).lower()
-            if "timed out" in cause or "timeout" in cause:
-                raise OllamaTimeoutError(
-                    f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
-                ) from e
-            raise OllamaConnectionError(
-                f"Ollama API 호출 실패: {e}"
-            ) from e
-        except TimeoutError as e:
-            raise OllamaTimeoutError(
-                f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
-            ) from e
-        except json.JSONDecodeError as e:
-            raise CorrectionError(
-                f"Ollama 응답 JSON 파싱 실패: {e}"
-            ) from e
-
-        # 응답에서 텍스트 추출
-        content = response_data.get("message", {}).get("content", "")
-        if not content:
-            raise CorrectionError("Ollama 응답에 content가 없습니다")
-
-        return content
 
     def _correct_batch(
         self,
@@ -431,11 +333,21 @@ class Corrector:
         prompt = _build_correction_prompt(batch)
 
         try:
-            response_text = self._call_ollama(client_config, prompt)
+            response_text = _ollama_chat(
+                host=client_config["host"],
+                model=client_config["model"],
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=client_config["temperature"],
+                num_ctx=client_config["num_ctx"],
+                timeout=client_config["timeout"],
+            )
             corrections = _parse_correction_response(
                 response_text, len(batch)
             )
-        except CorrectionError as e:
+        except (CorrectionError, OllamaConnectionError, OllamaTimeoutError, OllamaResponseError) as e:
             logger.warning(f"배치 보정 실패, 원본 유지: {e}")
             corrections = {}
 

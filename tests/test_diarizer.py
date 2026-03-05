@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -58,6 +59,7 @@ def mock_config():
     config.diarization.min_speakers = 2
     config.diarization.max_speakers = 10
     config.diarization.huggingface_token = "hf_test_token_12345"
+    config.diarization.timeout_seconds = 1800
     config.pipeline.peak_ram_limit_gb = 9.5
     return config
 
@@ -624,6 +626,24 @@ class TestDiarize:
         call_args = mock_pipeline.call_args
         assert call_args[1]["min_speakers"] == 2
         assert call_args[1]["max_speakers"] == 10
+
+    async def test_화자분리_타임아웃(
+        self, mock_config, mock_manager, sample_audio
+    ):
+        """타임아웃 시 DiarizationError가 발생하는지 확인한다."""
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        # 매우 짧은 타임아웃 설정
+        diarizer._timeout_seconds = 0.01
+
+        with patch.object(
+            diarizer,
+            "_run_pipeline",
+            side_effect=lambda *a: time.sleep(5),
+        ):
+            with pytest.raises(DiarizationError, match="타임아웃"):
+                await diarizer.diarize(sample_audio)
 
 
 # === 파이프라인 로더 테스트 ===

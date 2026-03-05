@@ -673,6 +673,99 @@ body {
 }
 
 
+/* === 11. 파이프라인 진행 표시 (회의 카드 내부) === */
+
+.pipeline-progress {
+    margin-top: 8px;
+    padding: 8px 0;
+}
+
+.progress-steps {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.step-dot {
+    padding: 2px 6px;
+    border-radius: 10px;
+    transition: all 0.3s ease;
+}
+
+/* 현재 실행 중인 단계 */
+.step-dot.active {
+    background-color: var(--accent);
+    color: #ffffff;
+    font-weight: bold;
+}
+
+/* 이미 완료된 단계 */
+.step-dot.completed {
+    color: var(--success);
+    font-weight: 600;
+}
+
+.progress-bar {
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.5s ease;
+    border-radius: 2px;
+    width: 0%;
+}
+
+
+/* === 12. 녹음 상태 표시 바 === */
+
+.recording-status {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background-color: rgba(231, 76, 60, 0.08);
+    border-bottom: 1px solid rgba(231, 76, 60, 0.2);
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.recording-status.visible {
+    display: flex;
+}
+
+.recording-dot {
+    width: 10px;
+    height: 10px;
+    background-color: var(--recording);
+    border-radius: 50%;
+    animation: recPulse 1.5s infinite;
+    flex-shrink: 0;
+}
+
+@keyframes recPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.recording-text {
+    font-weight: 600;
+    color: var(--recording);
+}
+
+.recording-duration {
+    color: var(--text-secondary);
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 12px;
+}
+
+
 /* ================================================================= */
 /* === 페이지별 스타일: viewer.html (전사문 뷰어)                  === */
 /* ================================================================= */

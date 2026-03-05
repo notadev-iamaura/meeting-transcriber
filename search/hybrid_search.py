@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -308,7 +309,7 @@ def _combine_rrf(
 
 def _search_vector(
     query_embedding: list[float],
-    chroma_dir: Path,
+    collection: Any,
     top_k: int,
     date_filter: Optional[str] = None,
     speaker_filter: Optional[str] = None,
@@ -316,9 +317,12 @@ def _search_vector(
 ) -> list[dict[str, Any]]:
     """ChromaDB에서 벡터 유사도 검색을 수행한다.
 
+    캐시된 ChromaDB 컬렉션 객체를 직접 받아 사용하므로
+    매 쿼리마다 PersistentClient를 재생성하지 않는다. (PERF-011)
+
     Args:
         query_embedding: 쿼리 임베딩 벡터 (384차원)
-        chroma_dir: ChromaDB 저장 디렉토리 경로
+        collection: 캐시된 ChromaDB 컬렉션 객체 (None이면 빈 결과 반환)
         top_k: 반환할 최대 결과 수
         date_filter: 날짜 필터 (정확 매칭, 예: "2026-03-04")
         speaker_filter: 화자 필터 (포함 매칭, 예: "SPEAKER_00")
@@ -328,23 +332,9 @@ def _search_vector(
         검색 결과 딕셔너리 목록 (chunk_id, text, metadata 포함)
     """
     try:
-        if not chroma_dir.exists():
-            logger.warning(f"ChromaDB 디렉토리 없음: {chroma_dir}")
-            return []
-
-        import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
-
-        client = chromadb.PersistentClient(path=str(chroma_dir))
-
-        # 컬렉션 존재 확인
-        try:
-            collection = client.get_collection(
-                name=_CHROMA_COLLECTION_NAME,
-            )
-        except Exception:
-            logger.warning(
-                f"ChromaDB 컬렉션 미존재: {_CHROMA_COLLECTION_NAME}"
-            )
+        # 컬렉션이 없으면 빈 결과 반환 (graceful degradation)
+        if collection is None:
+            logger.debug("ChromaDB 컬렉션 미초기화 — 빈 결과 반환")
             return []
 
         # 컬렉션이 비어있는 경우
@@ -608,12 +598,92 @@ class HybridSearchEngine:
         self._chroma_dir = self._config.paths.resolved_chroma_db_dir
         self._meetings_db = self._config.paths.resolved_meetings_db
 
+        # PERF-005: 임베딩 모델 캐시 (지연 초기화, 스레드 안전)
+        self._embed_model: Any = None
+        self._embed_model_lock = threading.Lock()
+
+        # PERF-011: ChromaDB 클라이언트 및 컬렉션 캐시 (지연 초기화, 스레드 안전)
+        self._chroma_client: Any = None
+        self._chroma_collection: Any = None
+        self._chroma_lock = threading.Lock()
+
         logger.info(
             f"HybridSearchEngine 초기화: "
             f"vector_weight={self._vector_weight}, "
             f"fts_weight={self._fts_weight}, "
             f"rrf_k={self._rrf_k}, top_k={self._top_k}"
         )
+
+    def _get_chroma_collection(self) -> Any:
+        """캐시된 ChromaDB 컬렉션을 반환한다 (지연 초기화). (PERF-011)
+
+        첫 호출 시 PersistentClient와 컬렉션을 생성하고 캐시한다.
+        이후 호출에서는 캐시된 인스턴스를 재사용하여 50-200ms 오버헤드를 제거한다.
+        컬렉션이 존재하지 않으면 None을 반환한다 (빈 결과로 처리).
+
+        Returns:
+            ChromaDB 컬렉션 객체 또는 None (컬렉션 미존재 시)
+        """
+        # 빠른 경로: 이미 초기화된 경우 락 없이 반환
+        if self._chroma_collection is not None:
+            return self._chroma_collection
+
+        with self._chroma_lock:
+            # 더블 체크 락킹 (Double-Checked Locking)
+            if self._chroma_collection is not None:
+                return self._chroma_collection
+
+            if not self._chroma_dir.exists():
+                logger.warning(f"ChromaDB 디렉토리 없음: {self._chroma_dir}")
+                return None
+
+            try:
+                import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
+
+                self._chroma_client = chromadb.PersistentClient(
+                    path=str(self._chroma_dir)
+                )
+
+                # 컬렉션 존재 확인
+                self._chroma_collection = self._chroma_client.get_collection(
+                    name=_CHROMA_COLLECTION_NAME,
+                )
+                logger.info(
+                    f"ChromaDB 컬렉션 캐시 완료: {_CHROMA_COLLECTION_NAME}"
+                )
+                return self._chroma_collection
+
+            except Exception:
+                logger.warning(
+                    f"ChromaDB 컬렉션 미존재 또는 접근 실패: "
+                    f"{_CHROMA_COLLECTION_NAME}"
+                )
+                return None
+
+    def _get_embed_model(self) -> Any:
+        """캐시된 임베딩 모델을 반환한다 (지연 초기화). (PERF-005)
+
+        첫 호출 시 SentenceTransformer 모델을 로드하고 캐시한다.
+        이후 호출에서는 캐시된 인스턴스를 재사용하여 1-2초 오버헤드를 제거한다.
+        threading.Lock으로 동시 초기화를 방지한다.
+
+        Returns:
+            SentenceTransformer 모델 인스턴스
+
+        Raises:
+            ModelLoadError: 모델 로드 실패 시
+        """
+        # 빠른 경로: 이미 로드된 경우 락 없이 반환
+        if self._embed_model is not None:
+            return self._embed_model
+
+        with self._embed_model_lock:
+            # 더블 체크 락킹 (Double-Checked Locking)
+            if self._embed_model is not None:
+                return self._embed_model
+
+            self._embed_model = self._load_model()
+            return self._embed_model
 
     def _load_model(self) -> Any:
         """sentence_transformers 모델을 로드한다.
@@ -726,27 +796,27 @@ class HybridSearchEngine:
         if meeting_id_filter:
             filters_applied["meeting_id"] = meeting_id_filter
 
-        # 1. 쿼리 임베딩 생성
-        async with self._model_manager.acquire(
-            "e5", self._load_model
-        ) as model:
-            query_embedding = await asyncio.to_thread(
-                self._embed_query, model, query
-            )
+        # 1. 쿼리 임베딩 생성 (PERF-005: 캐시된 모델 사용)
+        model = self._get_embed_model()
+        query_embedding = await asyncio.to_thread(
+            self._embed_query, model, query
+        )
 
-        # 2. 벡터 검색 (별도 스레드)
-        vector_results = await asyncio.to_thread(
+        # 2-3. 벡터 검색과 FTS5 검색을 병렬 실행 (PERF-010)
+        # 두 검색은 독립적인 I/O 작업이므로 동시에 수행할 수 있다.
+        # PERF-011: 캐시된 ChromaDB 컬렉션 사용
+        collection = self._get_chroma_collection()
+
+        vector_task = asyncio.to_thread(
             _search_vector,
             query_embedding,
-            self._chroma_dir,
+            collection,
             fetch_k,
             date_filter,
             speaker_filter,
             meeting_id_filter,
         )
-
-        # 3. FTS5 검색 (별도 스레드)
-        fts_results = await asyncio.to_thread(
+        fts_task = asyncio.to_thread(
             _search_fts,
             query,
             self._meetings_db,
@@ -754,6 +824,9 @@ class HybridSearchEngine:
             date_filter,
             speaker_filter,
             meeting_id_filter,
+        )
+        vector_results, fts_results = await asyncio.gather(
+            vector_task, fts_task
         )
 
         # 4. RRF 결합

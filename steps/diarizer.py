@@ -187,11 +187,13 @@ class Diarizer:
         self._min_speakers = self._config.diarization.min_speakers
         self._max_speakers = self._config.diarization.max_speakers
         self._hf_token = self._config.diarization.huggingface_token
+        self._timeout_seconds = self._config.diarization.timeout_seconds
 
         logger.info(
             f"Diarizer 초기화: model={self._model_name}, "
             f"device={self._device}, "
-            f"speakers={self._min_speakers}~{self._max_speakers}"
+            f"speakers={self._min_speakers}~{self._max_speakers}, "
+            f"timeout={self._timeout_seconds}초"
         )
 
     def _validate_token(self) -> str:
@@ -375,7 +377,7 @@ class Diarizer:
             EmptyAudioError: 오디오가 비어있거나 화자분리 결과가 없을 때
             ModelNotAvailableError: pyannote-audio를 사용할 수 없을 때
             TokenNotConfiguredError: HuggingFace 토큰이 없을 때
-            DiarizationError: 화자분리 처리 중 오류 발생 시
+            DiarizationError: 화자분리 처리 중 오류 또는 타임아웃 발생 시
         """
         self._validate_audio(audio_path)
 
@@ -386,10 +388,22 @@ class Diarizer:
                 "pyannote", self._load_pipeline
             ) as pipeline:
                 # 화자분리를 별도 스레드에서 실행 (CPU 집약 작업)
-                annotation = await asyncio.to_thread(
-                    self._run_pipeline, pipeline, audio_path
-                )
+                # 타임아웃으로 무한 대기 방지 (STAB-029)
+                try:
+                    annotation = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._run_pipeline, pipeline, audio_path
+                        ),
+                        timeout=self._timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    raise DiarizationError(
+                        f"화자분리 타임아웃: {self._timeout_seconds}초 초과. "
+                        f"오디오 파일이 너무 크거나 모델이 응답하지 않습니다."
+                    )
         except (ModelNotAvailableError, TokenNotConfiguredError):
+            raise
+        except DiarizationError:
             raise
         except Exception as e:
             raise DiarizationError(

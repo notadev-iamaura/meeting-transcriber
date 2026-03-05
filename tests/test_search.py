@@ -634,17 +634,16 @@ class TestSearchGracefulDegradation:
         config.paths.resolved_meetings_db = fts_db_with_data
 
         manager = MagicMock()
-        ctx = MagicMock()
+
+        engine = HybridSearchEngine(config, manager)
+
+        # PERF-005: 캐시된 임베딩 모델 mock 직접 설정
         mock_model = MagicMock()
-        # encode 반환값에 tolist() 메서드가 있어야 함 (numpy 배열 모방)
         mock_embedding = MagicMock()
         mock_embedding.tolist.return_value = [0.1] * 384
         mock_model.encode.return_value = [mock_embedding]
-        ctx.__aenter__ = AsyncMock(return_value=mock_model)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        manager.acquire.return_value = ctx
+        engine._embed_model = mock_model
 
-        engine = HybridSearchEngine(config, manager)
         response = await engine.search("프로젝트")
 
         # FTS 결과만으로 응답이 생성되어야 함

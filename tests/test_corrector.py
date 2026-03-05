@@ -21,14 +21,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.ollama_client import (
+    OllamaConnectionError,
+    OllamaResponseError,
+    OllamaTimeoutError,
+)
 from steps.corrector import (
     CorrectedResult,
     CorrectedUtterance,
     CorrectionError,
     Corrector,
     EmptyInputError,
-    OllamaConnectionError,
-    OllamaTimeoutError,
     _build_correction_prompt,
     _parse_correction_response,
 )
@@ -401,7 +404,7 @@ class TestCorrector정상보정:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -444,7 +447,7 @@ class TestCorrector정상보정:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -475,7 +478,7 @@ class TestCorrector정상보정:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -508,7 +511,7 @@ class TestCorrector배치처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -538,7 +541,7 @@ class TestCorrector배치처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = [
                 _make_mock_urlopen(batch1_response),
                 _make_mock_urlopen(batch2_response),
@@ -566,7 +569,7 @@ class TestCorrector배치처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -634,7 +637,7 @@ class TestCorrector에러처리:
         manager = _make_mock_manager()
 
         import urllib.error
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError("connection refused")
 
             corrector = Corrector.__new__(Corrector)
@@ -660,7 +663,7 @@ class TestCorrector에러처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = TimeoutError("timed out")
 
             corrector = Corrector.__new__(Corrector)
@@ -687,7 +690,7 @@ class TestCorrector에러처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(bad_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -716,7 +719,7 @@ class TestCorrector에러처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(empty_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -756,7 +759,7 @@ class TestCorrector한국어처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -783,7 +786,7 @@ class TestCorrector한국어처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -808,7 +811,7 @@ class TestCorrector한국어처리:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -840,7 +843,7 @@ class TestOllamaClient:
         corrector._max_context = 8192
         corrector._timeout = 120
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = mock_resp
 
             client_config = corrector._create_ollama_client()
@@ -860,7 +863,7 @@ class TestOllamaClient:
         corrector._max_context = 8192
         corrector._timeout = 120
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError(
                 "Connection refused"
             )
@@ -869,95 +872,91 @@ class TestOllamaClient:
                 corrector._create_ollama_client()
 
 
-# === _call_ollama 테스트 ===
+# === ollama_client.chat 통합 테스트 (corrector 관점) ===
 
 
 class TestCallOllama:
-    """Ollama API 호출 테스트."""
+    """통합 ollama_client를 통한 Ollama API 호출 테스트."""
 
     def test_정상_호출(self) -> None:
         """정상적인 API 호출 및 응답 파싱."""
+        from core.ollama_client import chat as ollama_chat
+
         response = _make_ollama_response("[1] 보정된 텍스트")
         mock_resp = _make_mock_urlopen(response)
 
-        corrector = Corrector.__new__(Corrector)
-
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = mock_resp
 
-            client_config = {
-                "host": "http://127.0.0.1:11434",
-                "model": "test",
-                "temperature": 0.3,
-                "num_ctx": 8192,
-                "timeout": 120,
-            }
-            result = corrector._call_ollama(client_config, "[1] 원본")
+            result = ollama_chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "[1] 원본"}],
+                temperature=0.3,
+                num_ctx=8192,
+                timeout=120,
+            )
 
         assert "[1] 보정된 텍스트" in result
 
     def test_JSON_파싱_실패(self) -> None:
-        """JSON 파싱 실패 시 CorrectionError 발생."""
+        """JSON 파싱 실패 시 OllamaResponseError 발생."""
+        from core.ollama_client import chat as ollama_chat
+
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not json"
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        corrector = Corrector.__new__(Corrector)
-
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = mock_resp
 
-            client_config = {
-                "host": "http://127.0.0.1:11434",
-                "model": "test",
-                "temperature": 0.3,
-                "num_ctx": 8192,
-                "timeout": 120,
-            }
-
-            with pytest.raises(CorrectionError, match="JSON 파싱 실패"):
-                corrector._call_ollama(client_config, "[1] 텍스트")
+            with pytest.raises(OllamaResponseError, match="JSON 파싱 실패"):
+                ollama_chat(
+                    host="http://127.0.0.1:11434",
+                    model="test",
+                    messages=[{"role": "user", "content": "[1] 텍스트"}],
+                    temperature=0.3,
+                    num_ctx=8192,
+                    timeout=120,
+                )
 
     def test_타임아웃(self) -> None:
         """타임아웃 시 OllamaTimeoutError 발생."""
+        from core.ollama_client import chat as ollama_chat
         import urllib.error
 
-        corrector = Corrector.__new__(Corrector)
-
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError(
                 "urlopen error timed out"
             )
 
-            client_config = {
-                "host": "http://127.0.0.1:11434",
-                "model": "test",
-                "temperature": 0.3,
-                "num_ctx": 8192,
-                "timeout": 120,
-            }
-
             with pytest.raises(OllamaTimeoutError):
-                corrector._call_ollama(client_config, "[1] 텍스트")
+                ollama_chat(
+                    host="http://127.0.0.1:11434",
+                    model="test",
+                    messages=[{"role": "user", "content": "[1] 텍스트"}],
+                    temperature=0.3,
+                    num_ctx=8192,
+                    timeout=120,
+                )
 
     def test_TimeoutError_직접(self) -> None:
         """socket.timeout (TimeoutError) 발생 시 OllamaTimeoutError로 변환."""
-        corrector = Corrector.__new__(Corrector)
+        from core.ollama_client import chat as ollama_chat
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = TimeoutError("timed out")
 
-            client_config = {
-                "host": "http://127.0.0.1:11434",
-                "model": "test",
-                "temperature": 0.3,
-                "num_ctx": 8192,
-                "timeout": 120,
-            }
-
             with pytest.raises(OllamaTimeoutError):
-                corrector._call_ollama(client_config, "[1] 텍스트")
+                ollama_chat(
+                    host="http://127.0.0.1:11434",
+                    model="test",
+                    messages=[{"role": "user", "content": "[1] 텍스트"}],
+                    temperature=0.3,
+                    num_ctx=8192,
+                    timeout=120,
+                )
 
 
 # === 에러 계층 테스트 ===
@@ -966,13 +965,15 @@ class TestCallOllama:
 class TestErrorHierarchy:
     """에러 클래스 계층 구조 테스트."""
 
-    def test_OllamaConnectionError_is_CorrectionError(self) -> None:
-        """OllamaConnectionError는 CorrectionError의 하위 클래스."""
-        assert issubclass(OllamaConnectionError, CorrectionError)
+    def test_OllamaConnectionError_is_OllamaError(self) -> None:
+        """OllamaConnectionError는 OllamaError의 하위 클래스."""
+        from core.ollama_client import OllamaError
+        assert issubclass(OllamaConnectionError, OllamaError)
 
-    def test_OllamaTimeoutError_is_CorrectionError(self) -> None:
-        """OllamaTimeoutError는 CorrectionError의 하위 클래스."""
-        assert issubclass(OllamaTimeoutError, CorrectionError)
+    def test_OllamaTimeoutError_is_OllamaError(self) -> None:
+        """OllamaTimeoutError는 OllamaError의 하위 클래스."""
+        from core.ollama_client import OllamaError
+        assert issubclass(OllamaTimeoutError, OllamaError)
 
     def test_EmptyInputError_is_CorrectionError(self) -> None:
         """EmptyInputError는 CorrectionError의 하위 클래스."""
@@ -994,7 +995,7 @@ class TestModelManagerIntegration:
         corrected_response = _make_ollama_response("[1] 테스트")
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -1022,7 +1023,7 @@ class TestModelManagerIntegration:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)
@@ -1046,7 +1047,7 @@ class TestModelManagerIntegration:
 
         manager = _make_mock_manager()
 
-        with patch("steps.corrector.urllib.request.urlopen") as mock_urlopen:
+        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
 
             corrector = Corrector.__new__(Corrector)

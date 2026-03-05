@@ -12,9 +12,11 @@
 - **AI 교정**: EXAONE 3.5 7.8B (Ollama) 로컬 LLM으로 전사 오류 교정
 - **시맨틱 검색**: ChromaDB + SQLite FTS5 하이브리드 검색
 - **AI 채팅**: 회의 내용 기반 질의응답
-- **macOS 메뉴바 앱**: rumps 기반 시스템 트레이 상주
+- **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
+- **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
+- **macOS 메뉴바 앱**: rumps 기반 시스템 트레이 상주, 녹음 상태 실시간 표시
 - **웹 UI**: FastAPI + WebSocket 실시간 진행 상황 확인
-- **Zoom 감지**: Zoom 회의 종료 시 자동 전사 시작
+- **Zoom 감지**: Zoom 회의 시작/종료 자동 감지 (CptHost 프로세스 모니터링)
 - **폴더 감시**: 지정 폴더에 파일 추가 시 자동 처리
 - **서멀 관리**: 팬리스 MacBook Air 대응, 2-job + 쿨다운 패턴
 
@@ -181,10 +183,47 @@ python main.py --no-menubar
 
 서버만 실행합니다. SSH 접속이나 서비스 등록 시 유용합니다.
 
-### 자동 전사
+### Zoom 자동 녹음 + 전사
 
-1. **폴더 감시**: `~/.meeting-transcriber/audio_input/`에 오디오 파일을 넣으면 자동 전사
-2. **Zoom 감지**: Zoom 회의 종료 시 자동으로 녹음 파일 전사
+Zoom 회의를 감지하면 자동으로 녹음을 시작하고, 회의 종료 시 전사 파이프라인까지 자동 실행합니다.
+
+```
+Zoom 회의 시작 감지 → ffmpeg 녹음 시작 (recordings_temp/)
+                   → 메뉴바 🔴 녹음 표시
+                   → WebSocket "recording_started" 이벤트
+
+Zoom 회의 종료 감지 → ffmpeg 녹음 정지 (stdin 'q' → graceful 종료)
+                   → 녹음 파일을 audio_input/으로 이동
+                   → FolderWatcher 감지 → 전사 파이프라인 자동 시작
+```
+
+**오디오 캡처 방식:**
+- **BlackHole 설치됨**: 시스템 오디오 캡처 (회의 상대방 음성 포함)
+- **BlackHole 미설치**: 기본 마이크 녹음 (내 쪽 음성 위주)
+
+BlackHole 설치 (선택사항):
+```bash
+brew install blackhole-2ch
+```
+
+**수동 녹음 제어 (API):**
+```bash
+# 녹음 시작
+curl -X POST http://127.0.0.1:8765/api/recording/start
+
+# 녹음 상태 확인
+curl http://127.0.0.1:8765/api/recording/status
+
+# 녹음 정지
+curl -X POST http://127.0.0.1:8765/api/recording/stop
+
+# 오디오 장치 목록
+curl http://127.0.0.1:8765/api/recording/devices
+```
+
+### 자동 전사 (폴더 감시)
+
+`~/.meeting-transcriber/audio_input/`에 오디오 파일을 넣으면 자동 전사됩니다.
 
 ### 검색 및 채팅
 
@@ -209,6 +248,11 @@ bash scripts/setup_launchagent.sh
 | `server.port` | 웹 서버 포트 | `8765` |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |
+| `recording.enabled` | 녹음 기능 활성화 | `true` |
+| `recording.auto_record_on_zoom` | Zoom 자동 녹음 | `true` |
+| `recording.prefer_system_audio` | BlackHole 우선 사용 | `true` |
+| `recording.sample_rate` | 샘플레이트 | `16000` |
+| `recording.max_duration_seconds` | 최대 녹음 시간 | `14400` (4시간) |
 
 환경변수로 오버라이드 가능:
 
@@ -241,7 +285,8 @@ meeting-transcriber/
 │   ├── chunker.py           # 텍스트 청크 분할
 │   ├── embedder.py          # 벡터 임베딩
 │   ├── summarizer.py        # AI 요약
-│   └── zoom_detector.py     # Zoom 회의 감지
+│   ├── zoom_detector.py     # Zoom 회의 감지 (CptHost 프로세스)
+│   └── recorder.py          # 오디오 녹음 (ffmpeg AVFoundation)
 ├── search/                  # 검색 엔진
 │   ├── hybrid_search.py     # 하이브리드 검색 (Vector + FTS5)
 │   └── chat.py              # AI 채팅 (RAG)
@@ -264,7 +309,7 @@ meeting-transcriber/
 ├── scripts/                 # 스크립트
 │   ├── install.sh           # 설치 스크립트
 │   └── setup_launchagent.sh # 자동 시작 설정
-└── tests/                   # 테스트 (1165개)
+└── tests/                   # 테스트 (1215개)
 ```
 
 ## 기술 스택
@@ -283,10 +328,12 @@ meeting-transcriber/
 ## 아키텍처 특징
 
 - **100% 오프라인**: 모든 AI 모델이 로컬에서 실행, 외부 API 호출 없음
+- **Zoom 자동 녹음**: 회의 감지 → 녹음 → 전사까지 완전 자동화
 - **순차 모델 로드**: RAM 16GB 제한 내에서 피크 9.5GB 유지
 - **서멀 관리**: 팬리스 MacBook Air에서도 안정적 실행 (2-job 배치 + 3분 쿨다운)
 - **체크포인트 복구**: 파이프라인 중단 시 마지막 단계부터 재개
 - **데이터 보안**: chmod 700, Spotlight 제외, localhost only
+- **파일 스테이징**: 녹음 중 파일은 `recordings_temp/`에 격리, 완료 후 `audio_input/`으로 이동
 
 ## 기여하기
 

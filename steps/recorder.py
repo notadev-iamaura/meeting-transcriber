@@ -436,11 +436,16 @@ class AudioRecorder:
 
         logger.info(f"녹음 시작 완료: PID={self._process.pid}")
 
-    async def stop_recording(self) -> Optional[RecordingResult]:
+    async def stop_recording(
+        self, *, _from_guard: bool = False,
+    ) -> Optional[RecordingResult]:
         """녹음을 정지하고 파일을 audio_input으로 이동한다.
 
         ffmpeg에 'q' 명령을 보내 정상 종료한다.
         타임아웃 시 SIGTERM으로 강제 종료한다.
+
+        Args:
+            _from_guard: _max_duration_guard에서 호출 시 True (내부 전용)
 
         Returns:
             녹음 결과 (RecordingResult) 또는 최소 시간 미달 시 None
@@ -454,14 +459,14 @@ class AudioRecorder:
 
         self._state = RecordingState.STOPPING
 
-        # 가드 태스크 취소
-        if self._max_duration_task is not None:
+        # 가드 태스크 취소 (_from_guard=True이면 자기 자신이므로 건너뜀)
+        if not _from_guard and self._max_duration_task is not None:
             self._max_duration_task.cancel()
             try:
                 await self._max_duration_task
             except asyncio.CancelledError:
                 pass
-            self._max_duration_task = None
+        self._max_duration_task = None
 
         # 브로드캐스트 태스크 취소
         if self._duration_broadcast_task is not None:
@@ -600,7 +605,7 @@ class AudioRecorder:
             logger.warning(
                 f"최대 녹음 시간 초과 ({self._max_duration}초). 자동 정지"
             )
-            await self.stop_recording()
+            await self.stop_recording(_from_guard=True)
         except asyncio.CancelledError:
             pass
 

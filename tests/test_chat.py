@@ -36,6 +36,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config import AppConfig, ChatConfig, EmbeddingConfig, LLMConfig, SearchConfig
+from core.ollama_client import OllamaConnectionError, OllamaTimeoutError
 from search.chat import (
     ChatEngine,
     ChatError,
@@ -44,8 +45,6 @@ from search.chat import (
     ChatResponse,
     ChatSession,
     EmptyQueryError,
-    OllamaConnectionError,
-    OllamaTimeoutError,
     _build_context_text,
     _build_references,
     _build_user_prompt,
@@ -366,7 +365,7 @@ class TestChatEngine:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             response = await engine.chat("프로젝트 일정이 어떻게 되나요?")
 
         assert response.answer == "프로젝트 일정은 다음 주 월요일까지입니다."
@@ -393,7 +392,7 @@ class TestChatEngine:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             response = await engine.chat("질문입니다")
 
         assert response.llm_used is True
@@ -435,7 +434,7 @@ class TestChatEngine:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             await engine.chat("질문1")
 
         session = engine.get_session()
@@ -458,7 +457,7 @@ class TestChatEngine:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             await engine.chat("질문A", session_id="session_a")
             await engine.chat("질문B", session_id="session_b")
 
@@ -498,7 +497,7 @@ class TestChatEngine:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             await engine.chat(
                 "질문",
                 meeting_id_filter="m001",
@@ -648,7 +647,7 @@ class TestChatEngineStreaming:
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.__iter__ = MagicMock(return_value=iter(stream_lines))
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             events = []
             async for event in engine.stream_chat("프로젝트 일정"):
                 events.append(event)
@@ -726,7 +725,7 @@ class TestChatEngineOllamaClient:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             client_config = engine._create_ollama_client()
 
         assert client_config["host"] == "http://127.0.0.1:11434"
@@ -739,7 +738,7 @@ class TestChatEngineOllamaClient:
 
         import urllib.error
         with patch(
-            "search.chat.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("연결 거부"),
         ):
             with pytest.raises(OllamaConnectionError):
@@ -758,7 +757,7 @@ class TestChatEngineOllamaClient:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             with pytest.raises(ChatError, match="content가 없습니다"):
                 engine._call_ollama_chat(
                     {"host": "http://localhost:11434", "model": "test",
@@ -772,7 +771,7 @@ class TestChatEngineOllamaClient:
 
         import urllib.error
         with patch(
-            "search.chat.urllib.request.urlopen",
+            "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("timed out"),
         ):
             with pytest.raises(OllamaTimeoutError):
@@ -791,7 +790,7 @@ class TestChatEngineOllamaClient:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("search.chat.urllib.request.urlopen", return_value=mock_resp):
+        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
             with pytest.raises(ChatError, match="JSON 파싱 실패"):
                 engine._call_ollama_chat(
                     {"host": "http://localhost:11434", "model": "test",

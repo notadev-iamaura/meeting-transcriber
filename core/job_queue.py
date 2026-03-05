@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -205,6 +206,8 @@ class JobQueue:
         self._db_path = db_path
         self._max_retries = max_retries
         self._conn: Optional[sqlite3.Connection] = None
+        # 쓰기 직렬화 락 — 동시 쓰기로 인한 "database is locked" 방지
+        self._write_lock = threading.Lock()
 
         logger.info(
             f"JobQueue 초기화: db_path={db_path}, "
@@ -238,13 +241,17 @@ class JobQueue:
             # WAL 모드 설정 (읽기/쓰기 동시성 향상)
             self._conn.execute("PRAGMA journal_mode=WAL")
 
+            # 동시 쓰기 충돌 시 5초간 재시도 (STAB-011)
+            self._conn.execute("PRAGMA busy_timeout=5000")
+
             # 외래 키 제약 활성화
             self._conn.execute("PRAGMA foreign_keys=ON")
 
-            # 테이블 + 인덱스 생성
-            self._conn.execute(self._CREATE_TABLE_SQL)
-            self._conn.execute(self._CREATE_INDEX_SQL)
-            self._conn.commit()
+            # 테이블 + 인덱스 생성 (쓰기 직렬화)
+            with self._write_lock:
+                self._conn.execute(self._CREATE_TABLE_SQL)
+                self._conn.execute(self._CREATE_INDEX_SQL)
+                self._conn.commit()
 
             logger.info(f"JobQueue DB 초기화 완료: {self._db_path}")
 
@@ -322,24 +329,26 @@ class JobQueue:
         now = self._now_iso()
 
         try:
-            cursor = conn.execute(
-                """
-                INSERT INTO jobs
-                    (meeting_id, audio_path, status, retry_count,
-                     max_retries, error_message, created_at, updated_at)
-                VALUES (?, ?, ?, 0, ?, '', ?, ?)
-                """,
-                (
-                    meeting_id,
-                    audio_path,
-                    JobStatus.QUEUED.value,
-                    self._max_retries,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            job_id = cursor.lastrowid
+            # 쓰기 직렬화 (STAB-017)
+            with self._write_lock:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO jobs
+                        (meeting_id, audio_path, status, retry_count,
+                         max_retries, error_message, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, ?, '', ?, ?)
+                    """,
+                    (
+                        meeting_id,
+                        audio_path,
+                        JobStatus.QUEUED.value,
+                        self._max_retries,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                job_id = cursor.lastrowid
 
             logger.info(
                 f"작업 등록: id={job_id}, "
@@ -470,27 +479,29 @@ class JobQueue:
 
         now = self._now_iso()
 
-        # failed 전이 시 에러 메시지 기록
-        if new_status == JobStatus.FAILED:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (new_status.value, error_message, now, job_id),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = '', updated_at = ?
-                WHERE id = ?
-                """,
-                (new_status.value, now, job_id),
-            )
+        # 쓰기 직렬화 (STAB-017)
+        with self._write_lock:
+            # failed 전이 시 에러 메시지 기록
+            if new_status == JobStatus.FAILED:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_status.value, error_message, now, job_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, error_message = '', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_status.value, now, job_id),
+                )
 
-        conn.commit()
+            conn.commit()
 
         logger.info(
             f"작업 상태 변경: id={job_id}, "
@@ -535,15 +546,17 @@ class JobQueue:
         now = self._now_iso()
         new_retry_count = job.retry_count + 1
 
-        conn.execute(
-            """
-            UPDATE jobs
-            SET status = ?, retry_count = ?, error_message = '', updated_at = ?
-            WHERE id = ?
-            """,
-            (JobStatus.QUEUED.value, new_retry_count, now, job_id),
-        )
-        conn.commit()
+        # 쓰기 직렬화 (STAB-017)
+        with self._write_lock:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, retry_count = ?, error_message = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (JobStatus.QUEUED.value, new_retry_count, now, job_id),
+            )
+            conn.commit()
 
         logger.info(
             f"작업 재시도: id={job_id}, "
@@ -610,8 +623,10 @@ class JobQueue:
         # 존재 확인
         self.get_job(job_id)
 
-        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-        conn.commit()
+        # 쓰기 직렬화 (STAB-017)
+        with self._write_lock:
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            conn.commit()
 
         logger.info(f"작업 삭제: id={job_id}")
 
@@ -631,14 +646,16 @@ class JobQueue:
         from datetime import timedelta
         cutoff_str = (cutoff - timedelta(days=before_days)).isoformat()
 
-        cursor = conn.execute(
-            """
-            DELETE FROM jobs
-            WHERE status = ? AND updated_at < ?
-            """,
-            (JobStatus.COMPLETED.value, cutoff_str),
-        )
-        conn.commit()
+        # 쓰기 직렬화 (STAB-017)
+        with self._write_lock:
+            cursor = conn.execute(
+                """
+                DELETE FROM jobs
+                WHERE status = ? AND updated_at < ?
+                """,
+                (JobStatus.COMPLETED.value, cutoff_str),
+            )
+            conn.commit()
 
         deleted = cursor.rowcount
         if deleted > 0:

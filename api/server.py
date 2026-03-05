@@ -18,6 +18,7 @@ FastAPI 백엔드 서버 모듈 (FastAPI Backend Server Module)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -148,6 +149,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         app.state.zoom_detector = None
 
+    # 실행 중인 파이프라인 태스크 추적용 세트
+    app.state.running_tasks: set[asyncio.Task] = set()
+
     logger.info(
         f"FastAPI 서버 리소스 초기화 완료 — "
         f"DB: {db_path}, 포트: {config.server.port}"
@@ -157,6 +161,25 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # 실행 중인 파이프라인 태스크 정리
+    running_tasks = getattr(app.state, "running_tasks", set())
+    if running_tasks:
+        logger.info(
+            f"실행 중인 파이프라인 태스크 {len(running_tasks)}개 취소 중..."
+        )
+        for task in running_tasks:
+            task.cancel()
+        # 모든 태스크가 취소될 때까지 대기 (최대 30초)
+        done, pending = await asyncio.wait(
+            running_tasks, timeout=30, return_when=asyncio.ALL_COMPLETED,
+        )
+        if pending:
+            logger.warning(
+                f"파이프라인 태스크 {len(pending)}개가 "
+                f"30초 내 종료되지 않음"
+            )
+        logger.info("파이프라인 태스크 정리 완료")
 
     # ZoomDetector 정지
     if hasattr(app.state, "zoom_detector") and app.state.zoom_detector is not None:

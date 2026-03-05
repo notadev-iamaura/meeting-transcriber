@@ -19,14 +19,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import unicodedata
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
 from config import AppConfig, ChatConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.ollama_client import (
+    OllamaConnectionError,
+    OllamaResponseError,
+    OllamaTimeoutError,
+    check_connection as _check_ollama_connection,
+    chat as _ollama_chat,
+    chat_stream as _ollama_chat_stream,
+)
 from search.hybrid_search import (
     HybridSearchEngine,
     SearchResponse,
@@ -41,14 +48,6 @@ logger = logging.getLogger(__name__)
 
 class ChatError(Exception):
     """Chat 처리 중 발생하는 에러의 기본 클래스."""
-
-
-class OllamaConnectionError(ChatError):
-    """Ollama 서버에 연결할 수 없을 때 발생한다."""
-
-
-class OllamaTimeoutError(ChatError):
-    """Ollama 요청이 타임아웃되었을 때 발생한다."""
 
 
 class EmptyQueryError(ChatError):
@@ -429,7 +428,7 @@ class ChatEngine:
     def _create_ollama_client(self) -> dict[str, Any]:
         """Ollama 클라이언트 설정을 반환한다.
 
-        Ollama 서버 연결 가능 여부를 확인한 후 설정을 반환한다.
+        통합 ollama_client 모듈을 통해 연결을 확인하고 설정을 반환한다.
 
         Returns:
             Ollama 연결 설정 딕셔너리
@@ -437,26 +436,7 @@ class ChatEngine:
         Raises:
             OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
         """
-        try:
-            url = f"{self._llm_host}/api/tags"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status != 200:
-                    raise OllamaConnectionError(
-                        f"Ollama 서버 응답 오류: status={resp.status}"
-                    )
-        except urllib.error.URLError as e:
-            raise OllamaConnectionError(
-                f"Ollama 서버에 연결할 수 없습니다: {self._llm_host} — {e}"
-            ) from e
-        except OllamaConnectionError:
-            raise
-        except Exception as e:
-            raise OllamaConnectionError(
-                f"Ollama 서버 연결 확인 실패: {e}"
-            ) from e
-
-        logger.info(f"Ollama 서버 연결 확인 완료: {self._llm_host}")
+        _check_ollama_connection(self._llm_host)
 
         return {
             "host": self._llm_host,
@@ -473,7 +453,7 @@ class ChatEngine:
     ) -> str:
         """Ollama /api/chat 엔드포인트를 호출하여 응답을 반환한다.
 
-        stream=false로 전체 응답을 한 번에 수신한다.
+        통합 ollama_client 모듈을 사용하여 stream=false로 응답을 수신한다.
 
         Args:
             client_config: Ollama 연결 설정
@@ -487,53 +467,17 @@ class ChatEngine:
             OllamaTimeoutError: 타임아웃 시
             ChatError: 기타 API 오류 시
         """
-        url = f"{client_config['host']}/api/chat"
-        payload = {
-            "model": client_config["model"],
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": client_config["temperature"],
-                "num_ctx": client_config["num_ctx"],
-            },
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(
-                req, timeout=client_config["timeout"]
-            ) as resp:
-                response_data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as e:
-            cause = str(e).lower()
-            if "timed out" in cause or "timeout" in cause:
-                raise OllamaTimeoutError(
-                    f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
-                ) from e
-            raise OllamaConnectionError(
-                f"Ollama API 호출 실패: {e}"
-            ) from e
-        except TimeoutError as e:
-            raise OllamaTimeoutError(
-                f"Ollama 요청 타임아웃 ({client_config['timeout']}초)"
-            ) from e
-        except json.JSONDecodeError as e:
-            raise ChatError(
-                f"Ollama 응답 JSON 파싱 실패: {e}"
-            ) from e
-
-        content = response_data.get("message", {}).get("content", "")
-        if not content:
-            raise ChatError("Ollama 응답에 content가 없습니다")
-
-        return content
+            return _ollama_chat(
+                host=client_config["host"],
+                model=client_config["model"],
+                messages=messages,
+                temperature=client_config["temperature"],
+                num_ctx=client_config["num_ctx"],
+                timeout=client_config["timeout"],
+            )
+        except OllamaResponseError as e:
+            raise ChatError(str(e)) from e
 
     def _call_ollama_chat_stream(
         self,
@@ -542,7 +486,7 @@ class ChatEngine:
     ) -> list[str]:
         """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
 
-        stream=true로 응답을 토큰 단위로 수신한다.
+        통합 ollama_client 모듈을 사용하여 stream=true로 토큰을 수신한다.
         동기 함수이므로 asyncio.to_thread로 래핑하여 사용한다.
 
         Args:
@@ -555,61 +499,15 @@ class ChatEngine:
         Raises:
             OllamaConnectionError: 연결 실패 시
             OllamaTimeoutError: 타임아웃 시
-            ChatError: 기타 API 오류 시
         """
-        url = f"{client_config['host']}/api/chat"
-        payload = {
-            "model": client_config["model"],
-            "messages": messages,
-            "stream": True,
-            "options": {
-                "temperature": client_config["temperature"],
-                "num_ctx": client_config["num_ctx"],
-            },
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        chunks: list[str] = []
-        try:
-            with urllib.request.urlopen(
-                req, timeout=client_config["timeout"]
-            ) as resp:
-                for line in resp:
-                    line_str = line.decode("utf-8").strip()
-                    if not line_str:
-                        continue
-                    try:
-                        chunk_data = json.loads(line_str)
-                    except json.JSONDecodeError:
-                        continue
-                    token = chunk_data.get("message", {}).get("content", "")
-                    if token:
-                        chunks.append(token)
-                    # done 플래그 확인
-                    if chunk_data.get("done", False):
-                        break
-        except urllib.error.URLError as e:
-            cause = str(e).lower()
-            if "timed out" in cause or "timeout" in cause:
-                raise OllamaTimeoutError(
-                    f"Ollama 스트리밍 타임아웃 ({client_config['timeout']}초)"
-                ) from e
-            raise OllamaConnectionError(
-                f"Ollama 스트리밍 호출 실패: {e}"
-            ) from e
-        except TimeoutError as e:
-            raise OllamaTimeoutError(
-                f"Ollama 스트리밍 타임아웃 ({client_config['timeout']}초)"
-            ) from e
-
-        return chunks
+        return list(_ollama_chat_stream(
+            host=client_config["host"],
+            model=client_config["model"],
+            messages=messages,
+            temperature=client_config["temperature"],
+            num_ctx=client_config["num_ctx"],
+            timeout=client_config["timeout"],
+        ))
 
     def _truncate_context(
         self,
@@ -883,20 +781,61 @@ class ChatEngine:
         messages.extend(history_messages)
         messages.append({"role": "user", "content": user_prompt})
 
-        # 3. LLM 스트리밍 호출
+        # 3. LLM 스트리밍 호출 (Queue 브릿지를 통한 실시간 스트리밍)
         try:
             async with self._model_manager.acquire(
                 "exaone", self._create_ollama_client
             ) as client_config:
-                chunks = await asyncio.to_thread(
-                    self._call_ollama_chat_stream, client_config, messages
-                )
+                # 동기 스트리밍 스레드 ↔ 비동기 제너레이터 브릿지용 큐
+                token_queue: queue.Queue[str | None | Exception] = queue.Queue()
 
-            # 각 토큰을 이벤트로 전송
-            full_answer_parts: list[str] = []
-            for token in chunks:
-                full_answer_parts.append(token)
-                yield {"type": "token", "data": token}
+                def _stream_worker() -> None:
+                    """별도 스레드에서 Ollama 스트리밍 호출을 실행한다."""
+                    try:
+                        for token in _ollama_chat_stream(
+                            host=client_config["host"],
+                            model=client_config["model"],
+                            messages=messages,
+                            temperature=client_config["temperature"],
+                            num_ctx=client_config["num_ctx"],
+                            timeout=client_config["timeout"],
+                        ):
+                            token_queue.put(token)
+                    except Exception as e:
+                        # 에러도 큐로 전달하여 비동기 측에서 처리
+                        token_queue.put(e)
+                    finally:
+                        # 종료 신호 (None sentinel)
+                        token_queue.put(None)
+
+                # 별도 스레드에서 스트리밍 시작
+                loop = asyncio.get_event_loop()
+                stream_task = loop.run_in_executor(None, _stream_worker)
+
+                # 큐에서 토큰을 비동기로 꺼내면서 즉시 yield
+                full_answer_parts: list[str] = []
+                while True:
+                    try:
+                        item = await asyncio.to_thread(
+                            token_queue.get,
+                            timeout=client_config["timeout"],
+                        )
+                    except Exception:
+                        # 큐 타임아웃 등 예외 시 루프 종료
+                        break
+
+                    if item is None:
+                        # 스트리밍 완료 신호
+                        break
+                    if isinstance(item, Exception):
+                        # 스트리밍 스레드에서 발생한 에러 전파
+                        raise item
+
+                    full_answer_parts.append(item)
+                    yield {"type": "token", "data": item}
+
+                # 스레드 완료 대기
+                await stream_task
 
             full_answer = "".join(full_answer_parts)
             full_answer = unicodedata.normalize("NFC", full_answer.strip())

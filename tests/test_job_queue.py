@@ -85,6 +85,11 @@ class TestJobQueueInitialize:
         result = conn.execute("PRAGMA journal_mode").fetchone()
         assert result[0] == "wal"
 
+    def test_busy_timeout_설정(self, queue: JobQueue) -> None:
+        """busy_timeout PRAGMA가 설정되어 있는지 확인한다."""
+        result = queue._conn.execute("PRAGMA busy_timeout").fetchone()
+        assert result[0] == 5000
+
     def test_initialize_creates_jobs_table(self, queue: JobQueue) -> None:
         """jobs 테이블이 생성되었는지 확인한다."""
         conn = queue._ensure_connection()

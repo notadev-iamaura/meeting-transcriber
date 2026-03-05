@@ -100,6 +100,9 @@ class DiarizationConfig(BaseModel):
     min_speakers: int = Field(default=2, ge=1)
     max_speakers: int = Field(default=10, ge=1, le=20)
     huggingface_token: Optional[str] = None
+    timeout_seconds: int = Field(
+        default=1800, ge=60, description="화자분리 타임아웃 (초)"
+    )
 
     @field_validator("device")
     @classmethod
