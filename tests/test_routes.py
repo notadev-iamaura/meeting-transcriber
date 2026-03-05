@@ -1044,3 +1044,162 @@ class TestSummaryEndpoint:
             )
 
         assert response.status_code in (400, 404, 422)
+
+
+# === TestRecordingEndpoints ===
+
+
+class TestRecordingEndpoints:
+    """녹음 API 엔드포인트 테스트."""
+
+    def _setup_recorder(self, app: Any, is_recording: bool = False) -> MagicMock:
+        """테스트용 AudioRecorder 모킹을 설정한다.
+
+        Args:
+            app: FastAPI 앱 인스턴스
+            is_recording: 현재 녹음 상태
+
+        Returns:
+            모킹된 recorder 인스턴스
+        """
+        mock_recorder = MagicMock()
+        mock_recorder.is_recording = is_recording
+        mock_recorder.current_duration = 0.0 if not is_recording else 120.5
+        mock_recorder.state = MagicMock()
+        mock_recorder.state.value = "idle" if not is_recording else "recording"
+        mock_recorder.get_status = MagicMock(return_value={
+            "state": "idle" if not is_recording else "recording",
+            "is_recording": is_recording,
+            "duration_seconds": 0.0 if not is_recording else 120.5,
+            "audio_device": None,
+            "file_path": None,
+        })
+        mock_recorder.detect_audio_devices = AsyncMock(return_value=[])
+        mock_recorder.start_recording = AsyncMock()
+        mock_recorder.stop_recording = AsyncMock()
+        mock_recorder.cleanup = AsyncMock()
+        app.state.recorder = mock_recorder
+        return mock_recorder
+
+    def test_recording_status_조회(self, tmp_path: Path) -> None:
+        """GET /api/recording/status가 녹음 상태를 반환하는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            self._setup_recorder(app)
+            response = client.get("/api/recording/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "state" in data
+        assert "is_recording" in data
+
+    def test_recording_status_녹음중(self, tmp_path: Path) -> None:
+        """녹음 중 상태가 올바르게 반환되는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            self._setup_recorder(app, is_recording=True)
+            response = client.get("/api/recording/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_recording"] is True
+
+    def test_recording_start_성공(self, tmp_path: Path) -> None:
+        """POST /api/recording/start가 녹음을 시작하는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app)
+            response = client.post("/api/recording/start")
+
+        assert response.status_code == 200
+        mock_recorder.start_recording.assert_called_once()
+
+    def test_recording_start_이미_녹음중_409(self, tmp_path: Path) -> None:
+        """이미 녹음 중일 때 POST /api/recording/start가 409를 반환하는지 확인한다."""
+        from steps.recorder import AlreadyRecordingError
+
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app, is_recording=True)
+            mock_recorder.start_recording = AsyncMock(
+                side_effect=AlreadyRecordingError("이미 녹음 중"),
+            )
+            response = client.post("/api/recording/start")
+
+        assert response.status_code == 409
+
+    def test_recording_stop_성공(self, tmp_path: Path) -> None:
+        """POST /api/recording/stop이 녹음을 정지하는지 확인한다."""
+        from steps.recorder import RecordingResult
+
+        app = _make_test_app(tmp_path)
+
+        mock_result = MagicMock(spec=RecordingResult)
+        mock_result.file_path = Path("/tmp/test.wav")
+        mock_result.duration_seconds = 60.0
+        mock_result.audio_device = "MacBook Air 마이크"
+        mock_result.file_size_bytes = 1920000
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app, is_recording=True)
+            mock_recorder.stop_recording = AsyncMock(return_value=mock_result)
+            response = client.post("/api/recording/stop")
+
+        assert response.status_code == 200
+        mock_recorder.stop_recording.assert_called_once()
+
+    def test_recording_devices_조회(self, tmp_path: Path) -> None:
+        """GET /api/recording/devices가 오디오 장치 목록을 반환하는지 확인한다."""
+        from steps.recorder import AudioDevice
+
+        app = _make_test_app(tmp_path)
+
+        mock_devices = [
+            AudioDevice(index=0, name="MacBook Air 마이크", is_blackhole=False),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+        ]
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app)
+            mock_recorder.detect_audio_devices = AsyncMock(
+                return_value=mock_devices,
+            )
+            response = client.get("/api/recording/devices")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 2
+        assert data[1]["name"] == "BlackHole 2ch"
+        assert data[1]["is_blackhole"] is True
+
+    def test_recording_미초기화_503(self, tmp_path: Path) -> None:
+        """recorder가 None일 때 503을 반환하는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            app.state.recorder = None
+            response = client.get("/api/recording/status")
+
+        assert response.status_code == 503
+
+    def test_status_응답에_is_recording_포함(self, tmp_path: Path) -> None:
+        """GET /api/status 응답에 is_recording 필드가 포함되는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            app.state.job_queue.count_by_status = AsyncMock(
+                return_value={"completed": 1},
+            )
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[])
+            self._setup_recorder(app, is_recording=True)
+
+            response = client.get("/api/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "is_recording" in data
+        assert data["is_recording"] is True

@@ -230,6 +230,7 @@ def _ensure_minimal_dirs(config: AppConfig) -> None:
         config.paths.resolved_outputs_dir,
         config.paths.resolved_checkpoints_dir,
         config.paths.resolved_chroma_db_dir,
+        config.paths.resolved_recordings_temp_dir,
     ]
     for dir_path in dirs:
         try:

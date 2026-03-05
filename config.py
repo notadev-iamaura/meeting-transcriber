@@ -31,6 +31,7 @@ class PathsConfig(BaseModel):
     chroma_db_dir: str = "chroma_db"
     pipeline_db: str = "pipeline.db"
     meetings_db: str = "meetings.db"
+    recordings_temp_dir: str = "recordings_temp"
 
     def resolve_path(self, relative: str) -> Path:
         """base_dir 기준 상대 경로를 절대 경로로 변환한다.
@@ -77,6 +78,11 @@ class PathsConfig(BaseModel):
     def resolved_meetings_db(self) -> Path:
         """회의 DB 절대 경로"""
         return self.resolve_path(self.meetings_db)
+
+    @property
+    def resolved_recordings_temp_dir(self) -> Path:
+        """녹음 임시 폴더 절대 경로"""
+        return self.resolve_path(self.recordings_temp_dir)
 
 
 class STTConfig(BaseModel):
@@ -205,6 +211,18 @@ class SecurityConfig(BaseModel):
     exclude_from_timemachine: bool = True
 
 
+class RecordingConfig(BaseModel):
+    """오디오 녹음 설정 (Zoom 자동 녹음 포함)"""
+    enabled: bool = True
+    auto_record_on_zoom: bool = True
+    prefer_system_audio: bool = True  # BlackHole 설치 시 시스템 오디오 우선
+    sample_rate: int = Field(default=16000, ge=8000, le=48000)
+    channels: int = Field(default=1, ge=1, le=2)
+    max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간
+    min_duration_seconds: int = Field(default=5, ge=1)  # 최소 길이 미달 시 파기
+    ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
+
+
 class LifecycleConfig(BaseModel):
     """데이터 라이프사이클 관리 설정"""
     hot_days: int = Field(default=30, ge=1)
@@ -243,6 +261,7 @@ class AppConfig(BaseModel):
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
+    recording: RecordingConfig = Field(default_factory=RecordingConfig)
 
 
 def _apply_env_overrides(data: dict) -> dict:

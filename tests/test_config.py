@@ -21,6 +21,7 @@ from config import (
     DiarizationConfig,
     LifecycleConfig,
     PathsConfig,
+    RecordingConfig,
     load_config,
     get_config,
     reset_config,
@@ -284,3 +285,72 @@ class TestEnvOverrideFunction:
         result = _apply_env_overrides(data)
 
         assert result["server"]["log_level"] == "debug"
+
+
+class TestRecordingConfig:
+    """RecordingConfig 기본값 및 검증 테스트."""
+
+    def test_기본값(self) -> None:
+        """RecordingConfig 기본값이 올바른지 확인한다."""
+        rc = RecordingConfig()
+
+        assert rc.enabled is True
+        assert rc.auto_record_on_zoom is True
+        assert rc.prefer_system_audio is True
+        assert rc.sample_rate == 16000
+        assert rc.channels == 1
+        assert rc.max_duration_seconds == 14400
+        assert rc.min_duration_seconds == 5
+        assert rc.ffmpeg_graceful_timeout_seconds == 10
+
+    def test_커스텀_값(self) -> None:
+        """커스텀 값으로 올바르게 생성되는지 확인한다."""
+        rc = RecordingConfig(
+            enabled=False,
+            auto_record_on_zoom=False,
+            sample_rate=44100,
+            channels=2,
+            max_duration_seconds=3600,
+        )
+
+        assert rc.enabled is False
+        assert rc.auto_record_on_zoom is False
+        assert rc.sample_rate == 44100
+        assert rc.channels == 2
+        assert rc.max_duration_seconds == 3600
+
+    def test_sample_rate_범위_검증(self) -> None:
+        """sample_rate가 유효 범위를 벗어나면 에러가 발생하는지 확인한다."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            RecordingConfig(sample_rate=100)
+
+    def test_max_duration_최소값_검증(self) -> None:
+        """max_duration_seconds가 60 미만이면 에러가 발생하는지 확인한다."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            RecordingConfig(max_duration_seconds=30)
+
+    def test_AppConfig에_recording_포함(self, tmp_path: Path) -> None:
+        """AppConfig에 recording 필드가 존재하고 기본값이 적용되는지 확인한다."""
+        config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+
+        assert hasattr(config, "recording")
+        assert isinstance(config.recording, RecordingConfig)
+        assert config.recording.enabled is True
+
+    def test_recordings_temp_dir_경로_해석(self) -> None:
+        """recordings_temp_dir의 절대 경로가 올바르게 해석되는지 확인한다."""
+        paths = PathsConfig(base_dir="/tmp/mt")
+
+        base = Path("/tmp/mt").resolve()
+        assert paths.resolved_recordings_temp_dir == base / "recordings_temp"
+
+    def test_config_yaml에서_recording_로드(self) -> None:
+        """실제 config.yaml에서 recording 섹션이 정상 로드되는지 확인한다."""
+        config_path = Path(__file__).parent.parent / "config.yaml"
+        config = load_config(config_path)
+
+        assert hasattr(config, "recording")
+        assert config.recording.enabled is True
+        assert config.recording.sample_rate == 16000

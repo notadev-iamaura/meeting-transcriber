@@ -55,6 +55,10 @@ class EventType(str, Enum):
     JOB_FAILED = "job_failed"
     SYSTEM_STATUS = "system_status"
     CONNECTION_REJECTED = "connection_rejected"
+    RECORDING_STARTED = "recording_started"
+    RECORDING_STOPPED = "recording_stopped"
+    RECORDING_ERROR = "recording_error"
+    RECORDING_DURATION = "recording_duration"
 
 
 @dataclass

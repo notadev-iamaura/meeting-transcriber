@@ -478,6 +478,8 @@ class TestEventType:
             "heartbeat", "pipeline_status", "job_added",
             "job_completed", "job_failed", "system_status",
             "connection_rejected",
+            "recording_started", "recording_stopped",
+            "recording_error", "recording_duration",
         }
         actual_types = {e.value for e in EventType}
         assert expected_types == actual_types
@@ -486,3 +488,10 @@ class TestEventType:
         """EventType은 문자열과 직접 비교할 수 있다."""
         assert EventType.HEARTBEAT == "heartbeat"
         assert EventType.PIPELINE_STATUS == "pipeline_status"
+
+    def test_녹음_이벤트_타입_존재(self) -> None:
+        """녹음 관련 이벤트 타입 4개가 정의되어 있다."""
+        assert EventType.RECORDING_STARTED == "recording_started"
+        assert EventType.RECORDING_STOPPED == "recording_stopped"
+        assert EventType.RECORDING_ERROR == "recording_error"
+        assert EventType.RECORDING_DURATION == "recording_duration"

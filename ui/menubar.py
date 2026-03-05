@@ -134,7 +134,9 @@ def determine_status(status_data: dict[str, Any]) -> AppStatus:
     queue_summary = status_data.get("queue_summary", {})
     active_jobs = status_data.get("active_jobs", 0)
 
-    # 녹음 상태 최우선
+    # 녹음 상태 최우선 (is_recording 필드 또는 queue_summary)
+    if status_data.get("is_recording", False):
+        return AppStatus.RECORDING
     if queue_summary.get("recording", 0) > 0:
         return AppStatus.RECORDING
 
@@ -297,9 +299,18 @@ class MeetingTranscriberApp(rumps.App):
         self._menu_queue_header = rumps.MenuItem("📋 대기열")
         self._menu_queue_info = rumps.MenuItem("  정보 로딩 중...")
 
+        # 녹음 제어 메뉴
+        self._menu_recording = rumps.MenuItem(
+            "🎙️ 녹음 시작",
+            callback=self._on_toggle_recording,
+        )
+        self._is_recording = False
+
         # 메뉴 구성
         self.menu = [
             self._menu_status,
+            None,  # 구분선
+            self._menu_recording,
             None,  # 구분선
             self._menu_queue_header,
             self._menu_queue_info,
@@ -366,9 +377,52 @@ class MeetingTranscriberApp(rumps.App):
                 f"(작업 {info.active_jobs}/{info.total_jobs})"
             )
 
+        # 녹음 메뉴 업데이트
+        is_rec = info.status == AppStatus.RECORDING
+        if is_rec != self._is_recording:
+            self._is_recording = is_rec
+            if is_rec:
+                self._menu_recording.title = "⏹️ 녹음 정지"
+            else:
+                self._menu_recording.title = "🎙️ 녹음 시작"
+
         # 대기열 메뉴 업데이트
         lines = format_queue_summary(info.queue_summary)
         self._menu_queue_info.title = " | ".join(lines)
+
+    def _on_toggle_recording(self, _sender: Any) -> None:
+        """녹음 시작 또는 정지를 토글한다.
+
+        HTTP API를 호출하여 녹음 상태를 전환한다.
+
+        Args:
+            _sender: 메뉴 아이템 콜백 발신자 (사용 안함)
+        """
+        try:
+            if self._is_recording:
+                url = build_api_url(self.config, "/api/recording/stop")
+            else:
+                url = build_api_url(self.config, "/api/recording/start")
+
+            req = urllib.request.Request(
+                url,
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                logger.info(f"녹음 제어 응답: {result}")
+
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            logger.error(f"녹음 제어 실패: {e}")
+            rumps.alert(
+                title="녹음 오류",
+                message=f"녹음 제어에 실패했습니다: {e}",
+            )
+        except Exception as e:
+            logger.error(f"녹음 제어 중 예상치 못한 오류: {e}")
 
     def _on_open_web_ui(self, _sender: Any) -> None:
         """웹 UI를 기본 브라우저로 연다.

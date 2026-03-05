@@ -99,6 +99,55 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await ws_manager.start_heartbeat()
     logger.info("WebSocket ConnectionManager 초기화 완료")
 
+    # AudioRecorder 초기화
+    recorder = None
+    if config.recording.enabled:
+        try:
+            from steps.recorder import AudioRecorder
+            recorder = AudioRecorder(config=config, ws_manager=ws_manager)
+            app.state.recorder = recorder
+            logger.info("AudioRecorder 초기화 완료")
+        except Exception as e:
+            app.state.recorder = None
+            logger.warning(f"AudioRecorder 초기화 실패 (녹음 비활성화): {e}")
+    else:
+        app.state.recorder = None
+        logger.info("녹음 기능 비활성화 (recording.enabled=false)")
+
+    # ZoomDetector 초기화 + AudioRecorder 연동
+    zoom_detector = None
+    if config.recording.enabled and config.recording.auto_record_on_zoom:
+        try:
+            from steps.zoom_detector import ZoomDetector
+            zoom_detector = ZoomDetector(config=config)
+
+            if recorder is not None:
+                async def _on_zoom_meeting_change(is_active: bool) -> None:
+                    """Zoom 회의 시작/종료 시 녹음을 제어한다."""
+                    if is_active:
+                        logger.info("Zoom 회의 감지 → 자동 녹음 시작")
+                        try:
+                            await recorder.start_recording()
+                        except Exception as e:
+                            logger.error(f"Zoom 자동 녹음 시작 실패: {e}")
+                    else:
+                        logger.info("Zoom 회의 종료 감지 → 녹음 정지")
+                        try:
+                            await recorder.stop_recording()
+                        except Exception as e:
+                            logger.error(f"Zoom 자동 녹음 정지 실패: {e}")
+
+                zoom_detector.on_meeting_change(_on_zoom_meeting_change)
+
+            await zoom_detector.start()
+            app.state.zoom_detector = zoom_detector
+            logger.info("ZoomDetector 시작 완료 (자동 녹음 연동)")
+        except Exception as e:
+            app.state.zoom_detector = None
+            logger.warning(f"ZoomDetector 초기화 실패: {e}")
+    else:
+        app.state.zoom_detector = None
+
     logger.info(
         f"FastAPI 서버 리소스 초기화 완료 — "
         f"DB: {db_path}, 포트: {config.server.port}"
@@ -108,6 +157,16 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # ZoomDetector 정지
+    if hasattr(app.state, "zoom_detector") and app.state.zoom_detector is not None:
+        await app.state.zoom_detector.stop()
+        logger.info("ZoomDetector 정지 완료")
+
+    # AudioRecorder 정리 (녹음 중이면 정지)
+    if hasattr(app.state, "recorder") and app.state.recorder is not None:
+        await app.state.recorder.cleanup()
+        logger.info("AudioRecorder 정리 완료")
 
     # WebSocket 연결 종료
     if hasattr(app.state, "ws_manager"):

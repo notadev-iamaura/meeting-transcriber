@@ -153,6 +153,24 @@ class TestDetermineStatus:
         """빈 딕셔너리면 IDLE을 반환하는지 확인한다."""
         assert determine_status({}) == AppStatus.IDLE
 
+    def test_is_recording_필드_우선(self) -> None:
+        """is_recording=True이면 queue_summary보다 우선하여 RECORDING을 반환하는지 확인한다."""
+        data = {
+            "is_recording": True,
+            "queue_summary": {"completed": 5},
+            "active_jobs": 0,
+        }
+        assert determine_status(data) == AppStatus.RECORDING
+
+    def test_is_recording_False이면_일반_로직(self) -> None:
+        """is_recording=False이면 일반 상태 판별 로직을 따르는지 확인한다."""
+        data = {
+            "is_recording": False,
+            "queue_summary": {"transcribing": 1},
+            "active_jobs": 1,
+        }
+        assert determine_status(data) == AppStatus.PROCESSING
+
 
 # === TestParseStatusResponse ===
 
@@ -457,6 +475,8 @@ class TestMeetingTranscriberApp:
         app.title = get_status_title(AppStatus.DISCONNECTED)
         app._menu_status = MagicMock()
         app._menu_queue_info = MagicMock()
+        app._menu_recording = MagicMock()
+        app._is_recording = False
 
         # IDLE로 변경
         info = StatusInfo(status=AppStatus.IDLE, active_jobs=0, total_jobs=3)
@@ -481,6 +501,8 @@ class TestMeetingTranscriberApp:
         app.title = original_title
         app._menu_status = MagicMock()
         app._menu_queue_info = MagicMock()
+        app._menu_recording = MagicMock()
+        app._is_recording = False
 
         # 같은 IDLE 상태로 업데이트
         info = StatusInfo(status=AppStatus.IDLE)
@@ -503,6 +525,8 @@ class TestMeetingTranscriberApp:
         app.title = ""
         app._menu_status = MagicMock()
         app._menu_queue_info = MagicMock()
+        app._menu_recording = MagicMock()
+        app._is_recording = False
 
         info = StatusInfo(status=AppStatus.DISCONNECTED)
         app._update_ui(info)
