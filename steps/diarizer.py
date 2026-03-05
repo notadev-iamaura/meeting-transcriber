@@ -329,6 +329,11 @@ class Diarizer:
         """
         segments: list[DiarizationSegment] = []
 
+        # pyannote 4.x: DiarizeOutput 객체에서 Annotation 추출
+        # (DiarizeOutput은 itertracks 메서드가 없으므로 타입으로 구분)
+        if not callable(getattr(annotation, "itertracks", None)):
+            annotation = annotation.speaker_diarization
+
         for turn, _, speaker in annotation.itertracks(yield_label=True):
             # 유효한 구간만 포함 (duration > 0)
             if turn.end <= turn.start:
