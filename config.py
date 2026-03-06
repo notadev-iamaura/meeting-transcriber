@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,10 @@ class STTConfig(BaseModel):
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
     batch_size: int = Field(default=16, ge=1, le=64)
+    # 전사 작업 타임아웃 (초) — 무한 대기 방지 (STAB)
+    transcribe_timeout_seconds: int = Field(
+        default=1800, ge=60, description="전사 타임아웃 (초, 기본 30분)"
+    )
 
 
 class DiarizationConfig(BaseModel):
@@ -107,7 +111,14 @@ class DiarizationConfig(BaseModel):
     @field_validator("device")
     @classmethod
     def validate_device(cls, v: str) -> str:
-        """MPS 사용 금지 검증. pyannote는 반드시 CPU로 실행한다."""
+        """MPS 사용 금지 검증. pyannote는 반드시 CPU로 실행한다.
+        
+        Args:
+            v: 장치 문자열
+            
+        Returns:
+            검증된 장치 문자열 (MPS는 CPU로 변환)
+        """
         if v.lower() == "mps":
             logger.warning("pyannote에서 MPS 사용 금지. CPU로 강제 변경합니다.")
             return "cpu"
@@ -235,7 +246,17 @@ class LifecycleConfig(BaseModel):
     @field_validator("cold_action")
     @classmethod
     def validate_cold_action(cls, v: str) -> str:
-        """cold_action이 허용된 값인지 검증한다."""
+        """cold_action이 허용된 값인지 검증한다.
+        
+        Args:
+            v: cold_action 설정값
+            
+        Returns:
+            검증된 cold_action 문자열
+            
+        Raises:
+            ValueError: 허용되지 않는 값일 때
+        """
         allowed = {"delete_audio", "archive"}
         if v not in allowed:
             raise ValueError(f"cold_action은 {allowed} 중 하나여야 합니다. 입력값: {v}")
@@ -267,7 +288,7 @@ class AppConfig(BaseModel):
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
 
 
-def _apply_env_overrides(data: dict) -> dict:
+def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     """환경변수로 설정값을 오버라이드한다.
 
     지원하는 환경변수:
@@ -369,6 +390,6 @@ def get_config(config_path: Optional[Path] = None) -> AppConfig:
 
 
 def reset_config() -> None:
-    """싱글턴 인스턴스를 초기화한다. 테스트 용도."""
+    """싱글턴 인스턴스를 초기화한다. 테스트 용도로만 사용."""
     global _config_instance
     _config_instance = None

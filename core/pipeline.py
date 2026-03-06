@@ -62,12 +62,20 @@ class ResourceStatus:
 
     @property
     def all_ok(self) -> bool:
-        """모든 리소스가 충분한지 반환한다."""
+        """모든 리소스가 충분한지 반환한다.
+        
+        Returns:
+            모든 리소스 충분 여부
+        """
         return self.disk_ok and self.memory_ok
 
     @property
     def llm_available(self) -> bool:
-        """LLM 실행에 필요한 메모리가 충분한지 반환한다."""
+        """LLM 실행에 필요한 메모리가 충분한지 반환한다.
+        
+        Returns:
+            LLM 실행 가능 여부
+        """
         return self.memory_ok
 
 
@@ -105,6 +113,9 @@ class ResourceGuard:
 
         Returns:
             (충분 여부, 여유 공간 GB) 튜플
+            
+        Raises:
+            OSError: 디스크 정보 조회 실패 시 (내부에서 처리됨)
         """
         check_path = self._base_dir
         while not check_path.exists() and check_path.parent != check_path:
@@ -129,6 +140,9 @@ class ResourceGuard:
 
         Returns:
             (충분 여부, 가용 메모리 GB) 튜플
+            
+        Raises:
+            Exception: 메모리 정보 조회 실패 시 (내부에서 처리됨)
         """
         try:
             mem = psutil.virtual_memory()
@@ -144,7 +158,7 @@ class ResourceGuard:
         """디스크와 메모리를 모두 확인한다.
 
         Returns:
-            종합 리소스 상태
+            종합 리소스 상태 (ResourceStatus)
         """
         disk_ok, disk_free = self.check_disk()
         memory_ok, memory_free = self.check_memory()
@@ -921,8 +935,14 @@ class PipelineManager:
                         f"(시도 {attempt}/{self._retry_max}): {e}"
                     )
                     if attempt < self._retry_max:
-                        # 재시도 전 짧은 대기
-                        await asyncio.sleep(1.0)
+                        # 지수 백오프: 1초 → 2초 → 4초 → ...
+                        # (STAB: 지수 백오프로 일시적 장애 복구 확률 향상)
+                        backoff_seconds = min(2 ** (attempt - 1), 30)
+                        logger.info(
+                            f"재시도 대기: {backoff_seconds}초 "
+                            f"(지수 백오프, 시도 {attempt})"
+                        )
+                        await asyncio.sleep(backoff_seconds)
 
             step_elapsed = time.monotonic() - step_start
 

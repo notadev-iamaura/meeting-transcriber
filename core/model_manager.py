@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Optional, TypeVar, Union
@@ -50,7 +51,11 @@ class ModelInfo:
 
     @property
     def memory_delta_mb(self) -> float:
-        """모델 로드로 인한 메모리 증가량 (MB)"""
+        """모델 로드로 인한 메모리 증가량 (MB)
+        
+        Returns:
+            메모리 증가량 (MB)
+        """
         return self.memory_after_mb - self.memory_before_mb
 
 
@@ -83,17 +88,29 @@ class ModelLoadManager:
 
     @property
     def current_model_name(self) -> Optional[str]:
-        """현재 로드된 모델의 이름. 없으면 None."""
+        """현재 로드된 모델의 이름. 없으면 None.
+        
+        Returns:
+            모델명 또는 None
+        """
         return self._current.name if self._current else None
 
     @property
     def current_model(self) -> Optional[Any]:
-        """현재 로드된 모델 인스턴스. 없으면 None."""
+        """현재 로드된 모델 인스턴스. 없으면 None.
+        
+        Returns:
+            모델 인스턴스 또는 None
+        """
         return self._current.instance if self._current else None
 
     @property
     def is_model_loaded(self) -> bool:
-        """모델이 로드되어 있는지 여부."""
+        """모델이 로드되어 있는지 여부.
+        
+        Returns:
+            모델 로드 여부
+        """
         return self._current is not None
 
     def _get_memory_usage_mb(self) -> float:
@@ -102,7 +119,7 @@ class ModelLoadManager:
         Returns:
             메모리 사용량 (MB)
         """
-        process = psutil.Process()
+        process: psutil.Process = psutil.Process()
         return process.memory_info().rss / (1024 * 1024)
 
     def _get_memory_usage_gb(self) -> float:
@@ -260,7 +277,7 @@ class ModelLoadManager:
         self,
         name: str,
         loader: ModelLoader,
-    ) -> _ModelContext:
+    ) -> "_ModelContext":
         """컨텍스트 매니저로 모델을 로드하고, 블록 종료 시 자동 언로드한다.
 
         사용 예시:
@@ -324,12 +341,16 @@ class _ModelContext:
         await self._manager.unload_model()
 
 
-# 모듈 수준 싱글턴 인스턴스
+# 모듈 수준 싱글턴 인스턴스 (threading.Lock으로 경합 조건 방지)
 _manager_instance: Optional[ModelLoadManager] = None
+_manager_lock = threading.Lock()
 
 
 def get_model_manager() -> ModelLoadManager:
     """싱글턴 패턴으로 ModelLoadManager 인스턴스를 반환한다.
+
+    threading.Lock으로 동시 호출 시 경합 조건을 방지한다.
+    (STAB: 싱글턴 경합 조건 수정)
 
     첫 호출 시 인스턴스를 생성하고, 이후에는 캐시된 인스턴스를 반환한다.
 
@@ -338,11 +359,15 @@ def get_model_manager() -> ModelLoadManager:
     """
     global _manager_instance
     if _manager_instance is None:
-        _manager_instance = ModelLoadManager()
+        with _manager_lock:
+            # 더블 체크 패턴: 락 획득 후 재확인
+            if _manager_instance is None:
+                _manager_instance = ModelLoadManager()
     return _manager_instance
 
 
 def reset_model_manager() -> None:
-    """싱글턴 인스턴스를 초기화한다. 테스트 용도."""
+    """싱글턴 인스턴스를 초기화한다. 테스트 용도로만 사용."""
     global _manager_instance
-    _manager_instance = None
+    with _manager_lock:
+        _manager_instance = None

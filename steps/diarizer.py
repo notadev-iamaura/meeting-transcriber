@@ -44,7 +44,11 @@ class DiarizationSegment:
 
     @property
     def duration(self) -> float:
-        """발화 구간의 길이 (초)"""
+        """발화 구간의 길이 (초)
+        
+        Returns:
+            발화 길이 (초)
+        """
         return self.end - self.start
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,7 +57,7 @@ class DiarizationSegment:
         Returns:
             세그먼트 데이터 딕셔너리
         """
-        return asdict(self)
+        return asdict(self)  # type: ignore[return-value]
 
 
 @dataclass
@@ -72,14 +76,22 @@ class DiarizationResult:
 
     @property
     def total_duration(self) -> float:
-        """전체 오디오 길이 추정치 (마지막 세그먼트 종료 시간)."""
+        """전체 오디오 길이 추정치 (마지막 세그먼트 종료 시간).
+        
+        Returns:
+            오디오 전체 길이 (초)
+        """
         if not self.segments:
             return 0.0
         return max(seg.end for seg in self.segments)
 
     @property
     def speakers(self) -> list[str]:
-        """감지된 화자 라벨 목록 (중복 제거, 정렬)."""
+        """감지된 화자 라벨 목록 (중복 제거, 정렬).
+        
+        Returns:
+            화자 라벨 목록
+        """
         return sorted(set(seg.speaker for seg in self.segments))
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,6 +111,9 @@ class DiarizationResult:
 
         Args:
             output_path: 저장할 JSON 파일 경로
+            
+        Raises:
+            IOError: 파일 쓰기 실패 시
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
@@ -106,7 +121,7 @@ class DiarizationResult:
         logger.info(f"화자분리 체크포인트 저장: {output_path}")
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: Path) -> DiarizationResult:
+    def from_checkpoint(cls, checkpoint_path: Path) -> "DiarizationResult":
         """체크포인트 JSON 파일에서 화자분리 결과를 복원한다.
 
         Args:

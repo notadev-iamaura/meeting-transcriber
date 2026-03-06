@@ -52,7 +52,7 @@ class TranscriptSegment:
         Returns:
             세그먼트 데이터 딕셔너리
         """
-        return asdict(self)
+        return asdict(self)  # type: ignore[return-value]
 
 
 @dataclass
@@ -89,6 +89,9 @@ class TranscriptResult:
 
         Args:
             output_path: 저장할 JSON 파일 경로
+            
+        Raises:
+            IOError: 파일 쓰기 실패 시
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
@@ -96,7 +99,7 @@ class TranscriptResult:
         logger.info(f"전사 체크포인트 저장: {output_path}")
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: Path) -> TranscriptResult:
+    def from_checkpoint(cls, checkpoint_path: Path) -> "TranscriptResult":
         """체크포인트 JSON 파일에서 전사 결과를 복원한다.
 
         Args:
@@ -187,6 +190,7 @@ class Transcriber:
 
         Raises:
             ModelNotAvailableError: mlx-whisper가 설치되지 않았을 때
+            ImportError: 모듈 임포트 실패 시
         """
         try:
             import mlx_whisper  # type: ignore[import-untyped]
@@ -206,7 +210,7 @@ class Transcriber:
             audio_path: 검증할 오디오 파일 경로
 
         Raises:
-            FileNotFoundError: 파일이 존재하지 않을 때
+            FileNotFoundError: 파일이 존재하지 않거나 파일이 아닐 때
             EmptyAudioError: 파일 크기가 0일 때
         """
         if not audio_path.exists():
@@ -237,6 +241,9 @@ class Transcriber:
 
         Returns:
             NFC 정규화된 텍스트 (앞뒤 공백 제거)
+            
+        Raises:
+            TypeError: 텍스트가 문자열이 아닐 때
         """
         return unicodedata.normalize("NFC", text.strip())
 
@@ -252,6 +259,9 @@ class Transcriber:
 
         Returns:
             파싱된 TranscriptSegment 리스트 (빈 세그먼트 제외)
+            
+        Raises:
+            TypeError: raw_result 형식이 잘못되었을 때
         """
         segments: list[TranscriptSegment] = []
 
@@ -298,6 +308,11 @@ class Transcriber:
 
         logger.info(f"전사 시작: {audio_path.name}")
 
+        # 전사 타임아웃: 오디오 길이에 비례하여 설정
+        # 기본 30분 타임아웃 (매우 긴 오디오 고려)
+        # (STAB: 전사 작업 무한 대기 방지)
+        transcribe_timeout = self._config.stt.transcribe_timeout_seconds
+
         try:
             async with self._manager.acquire(
                 "whisper", self._load_whisper_module
@@ -305,13 +320,20 @@ class Transcriber:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
                 # mlx-whisper 0.4.x에서 beam_size는 직접 파라미터가 아닌
                 # decode_options로 전달해야 한다 (미구현 시 무시됨)
-                raw_result = await asyncio.to_thread(
-                    whisper_module.transcribe,
-                    str(audio_path),
-                    path_or_hf_repo=self._model_name,
-                    language=self._language,
-                    word_timestamps=False,
+                raw_result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        whisper_module.transcribe,
+                        str(audio_path),
+                        path_or_hf_repo=self._model_name,
+                        language=self._language,
+                        word_timestamps=False,
+                    ),
+                    timeout=transcribe_timeout,
                 )
+        except asyncio.TimeoutError:
+            raise TranscriptionError(
+                f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path}"
+            )
         except ModelNotAvailableError:
             raise
         except Exception as e:
