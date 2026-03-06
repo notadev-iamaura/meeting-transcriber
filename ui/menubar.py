@@ -210,6 +210,42 @@ def get_status_title(status: AppStatus) -> str:
     return STATUS_DISPLAY.get(status, "❓ 알 수 없음")
 
 
+def format_uptime(seconds: float) -> str:
+    """초 단위 시간을 HH:MM:SS 형식으로 변환한다.
+
+    Args:
+        seconds: 초 단위 시간
+
+    Returns:
+        HH:MM:SS 형식 문자열 (예: "02:15:30")
+    """
+    total = int(seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def format_recording_time(seconds: float) -> str:
+    """녹음 시간을 HH:MM:SS 형식으로 변환한다.
+
+    1시간 미만이면 MM:SS, 이상이면 HH:MM:SS를 반환한다.
+
+    Args:
+        seconds: 녹음 시간 (초)
+
+    Returns:
+        포맷된 시간 문자열
+    """
+    total = int(seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
 # === HTTP 폴링 ===
 
 
@@ -385,7 +421,7 @@ class MeetingTranscriberApp(rumps.App):
                 f"(작업 {info.active_jobs}/{info.total_jobs})"
             )
 
-        # 녹음 메뉴 업데이트
+        # 녹음 메뉴 업데이트 (녹음 중이면 경과 시간도 표시)
         is_rec = info.status == AppStatus.RECORDING
         if is_rec != self._is_recording:
             self._is_recording = is_rec
@@ -393,6 +429,11 @@ class MeetingTranscriberApp(rumps.App):
                 self._menu_recording.title = "⏹️ 녹음 정지"
             else:
                 self._menu_recording.title = "🎙️ 녹음 시작"
+
+        # 녹음 중일 때 가동 시간을 녹음 경과 시간으로 활용하여 타이틀에 표시
+        if is_rec and info.uptime_seconds > 0:
+            rec_time = format_recording_time(info.uptime_seconds)
+            self.title = f"🔴 녹음 {rec_time}"
 
         # 대기열 메뉴 업데이트 (개별 아이템으로 가독성 향상)
         lines = format_queue_summary(info.queue_summary)
@@ -494,18 +535,42 @@ class MeetingTranscriberApp(rumps.App):
     def _on_show_info(self, _sender: Any) -> None:
         """서버 정보를 알림으로 표시한다.
 
+        서버 URL, 데이터 경로, 현재 상태, 가동 시간,
+        작업 현황 등 상세 정보를 포함한다.
+
         Args:
             _sender: 메뉴 아이템 콜백 발신자 (사용 안함)
         """
         host = self.config.server.host
         port = self.config.server.port
 
+        # 서버 상태를 가져와서 상세 정보 구성
+        status_info = fetch_status(self._status_url)
+
+        if status_info is not None:
+            uptime_str = format_uptime(status_info.uptime_seconds)
+            jobs_str = (
+                f"진행: {status_info.active_jobs}건 / "
+                f"전체: {status_info.total_jobs}건"
+            )
+            status_str = STATUS_DISPLAY.get(
+                status_info.status, "알 수 없음"
+            )
+        else:
+            uptime_str = "-"
+            jobs_str = "-"
+            status_str = "서버 연결 안됨"
+
         rumps.alert(
-            title="회의 전사 시스템",
+            title="회의 전사 시스템 정보",
             message=(
-                f"서버: http://{host}:{port}\n"
-                f"데이터: {self.config.paths.resolved_base_dir}\n"
-                f"상태: {self._current_status.value}"
+                f"📡 서버: http://{host}:{port}\n"
+                f"🌐 웹 UI: {self._web_url}\n"
+                f"📁 데이터: {self.config.paths.resolved_base_dir}\n"
+                f"\n"
+                f"📊 상태: {status_str}\n"
+                f"⏱ 가동 시간: {uptime_str}\n"
+                f"📋 작업 현황: {jobs_str}"
             ),
         )
 

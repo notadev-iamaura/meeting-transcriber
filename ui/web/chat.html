@@ -83,6 +83,7 @@
                     ></textarea>
                 </div>
                 <button class="send-btn" id="sendBtn" disabled aria-label="메시지 전송">전송</button>
+                <button class="btn-cancel-send" id="cancelBtn" aria-label="응답 생성 취소">취소</button>
             </div>
             <div class="input-hint">Enter로 전송, Shift+Enter로 줄바꿈</div>
         </div>
@@ -126,6 +127,7 @@
             typingIndicator: document.getElementById("typingIndicator"),
             chatInput: document.getElementById("chatInput"),
             sendBtn: document.getElementById("sendBtn"),
+            cancelBtn: document.getElementById("cancelBtn"),
         };
 
         // === 에러 배너 초기화 (자동 숨김 타이머 포함) ===
@@ -146,6 +148,7 @@
         // === 상태 ===
         var isSending = false; // 전송 중 여부
         var messageCount = 0;  // 메시지 수 (환영 메시지 제어용)
+        var currentAbortController = null; // AI 응답 취소용 AbortController
 
         // === 메시지 렌더링 ===
 
@@ -287,6 +290,30 @@
                 body.appendChild(refsSection);
             }
 
+            // 복사 버튼 (AI 답변에만 표시)
+            var actions = document.createElement("div");
+            actions.className = "message-actions";
+            var copyBtn = document.createElement("button");
+            copyBtn.className = "btn-copy";
+            copyBtn.textContent = "\uD83D\uDCCB 복사";
+            copyBtn.setAttribute("aria-label", "답변 복사");
+            copyBtn.addEventListener("click", function () {
+                // 마크다운 원문 또는 텍스트 추출
+                var textToCopy = data.answer || bubble.textContent;
+                App.copyToClipboard(textToCopy).then(function (ok) {
+                    if (ok) {
+                        copyBtn.textContent = "\u2713 복사됨";
+                        copyBtn.classList.add("copied");
+                        setTimeout(function () {
+                            copyBtn.textContent = "\uD83D\uDCCB 복사";
+                            copyBtn.classList.remove("copied");
+                        }, 2000);
+                    }
+                });
+            });
+            actions.appendChild(copyBtn);
+            body.appendChild(actions);
+
             msg.appendChild(avatar);
             msg.appendChild(body);
             els.messagesArea.appendChild(msg);
@@ -310,8 +337,14 @@
             els.chatInput.disabled = sending;
             els.typingIndicator.classList.toggle("visible", sending);
 
+            // 전송 중이면 취소 버튼 표시, 전송 버튼 숨김
             if (sending) {
+                els.sendBtn.style.display = "none";
+                els.cancelBtn.classList.add("visible");
                 scrollToBottom();
+            } else {
+                els.sendBtn.style.display = "";
+                els.cancelBtn.classList.remove("visible");
             }
         }
 
@@ -348,6 +381,11 @@
             }
         });
 
+        /** 취소 버튼 클릭 — 진행 중인 AI 응답 요청을 중단한다 */
+        els.cancelBtn.addEventListener("click", function () {
+            cancelSending();
+        });
+
         // === 메시지 전송 ===
 
         /** 채팅 메시지를 전송한다 */
@@ -366,34 +404,67 @@
             // 전송 상태
             setSending(true);
 
+            // AbortController 생성 (취소 기능용)
+            currentAbortController = new AbortController();
+
             try {
                 // 검색 범위 필터
                 var meetingIdFilter = els.meetingFilter.value || null;
 
-                // API 호출
-                var result = await App.apiPost("/chat", {
-                    query: query,
-                    session_id: sessionId,
-                    meeting_id_filter: meetingIdFilter,
-                    date_filter: null,
-                    speaker_filter: null,
+                // API 호출 (AbortController signal 전달)
+                var result = await App.apiRequest("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        query: query,
+                        session_id: sessionId,
+                        meeting_id_filter: meetingIdFilter,
+                        date_filter: null,
+                        speaker_filter: null,
+                    }),
+                    signal: currentAbortController.signal,
                 });
+
+                // 빈 응답 처리
+                if (!result || (!result.answer && (!result.references || result.references.length === 0))) {
+                    result = result || {};
+                    result.answer = result.answer || "관련 회의 내용을 찾을 수 없습니다. 다른 키워드로 질문해 보세요.";
+                }
 
                 // AI 답변 표시
                 addAssistantMessage(result);
 
             } catch (e) {
+                // 사용자가 직접 취소한 경우
+                if (e.name === "AbortError") {
+                    // 취소된 요청은 에러 배너 표시하지 않음
+                    return;
+                }
+                // 사용자 친화적 에러 메시지 (한국어 통일)
                 if (e.status === 503) {
-                    errorBanner.show("Chat 엔진이 초기화되지 않았습니다. 서버 상태를 확인하세요.");
+                    errorBanner.show("AI 엔진이 아직 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.");
                 } else if (e.status === 400) {
-                    errorBanner.show("잘못된 요청입니다: " + e.message);
+                    errorBanner.show("입력 내용을 확인해 주세요: " + e.message);
+                } else if (e.status === 0) {
+                    errorBanner.show("서버에 연결할 수 없습니다. 네트워크 상태를 확인해 주세요.");
                 } else {
-                    errorBanner.show("답변 생성 실패: " + e.message);
+                    errorBanner.show("답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
                 }
             } finally {
+                currentAbortController = null;
                 setSending(false);
                 els.chatInput.focus();
             }
+        }
+
+        /** 진행 중인 AI 응답 요청을 취소한다 */
+        function cancelSending() {
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
+            setSending(false);
+            els.chatInput.focus();
         }
 
         // === 대화 초기화 ===

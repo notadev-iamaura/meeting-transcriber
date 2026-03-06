@@ -317,6 +317,23 @@ class Merger:
         utterances: list[MergedUtterance] = []
 
         for stt_seg in sorted_stt_segments:
+            # 빈 텍스트 세그먼트 방어: 텍스트가 없거나 공백만 있으면 건너뜀
+            if not stt_seg.text or not stt_seg.text.strip():
+                logger.debug(
+                    f"빈 세그먼트 건너뜀: start={stt_seg.start:.1f}, "
+                    f"end={stt_seg.end:.1f}"
+                )
+                continue
+
+            # 유효하지 않은 시간 구간 방어 (end <= start)
+            if stt_seg.end <= stt_seg.start:
+                logger.debug(
+                    f"유효하지 않은 시간 구간 건너뜀: "
+                    f"start={stt_seg.start:.1f}, end={stt_seg.end:.1f}, "
+                    f"text='{stt_seg.text[:30]}'"
+                )
+                continue
+
             speaker = _find_best_speaker(stt_seg, sorted_dia_segments)
 
             utterances.append(

@@ -151,6 +151,12 @@ class ZoomDetector:
             return returncode == 0
         except asyncio.TimeoutError:
             logger.warning("pgrep 명령 타임아웃 (10초 초과)")
+            # 타임아웃된 pgrep 프로세스를 강제 종료하여 고아 프로세스 방지
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass  # 이미 종료된 경우 무시
             # 타임아웃 시 이전 상태 유지 (안전한 기본값)
             return self._is_meeting_active
         except FileNotFoundError:
@@ -226,9 +232,11 @@ class ZoomDetector:
             f"'{self._process_name}' 프로세스 감시"
         )
 
-        # 연속 에러 카운터 (과도한 로깅 방지)
+        # 연속 에러 카운터 (과도한 로깅 방지 및 백오프)
         consecutive_errors: int = 0
         max_logged_errors: int = 5  # 이 횟수 초과 시 로그 레벨 낮춤
+        # 연속 에러 시 폴링 간격 배수 상한 (원래 간격의 최대 6배)
+        max_backoff_multiplier: int = 6
 
         while self._is_running:
             try:
@@ -257,9 +265,13 @@ class ZoomDetector:
                 logger.info("감지 루프 취소됨")
                 break
 
+            # 연속 에러 시 폴링 간격을 점진적으로 늘려 리소스 낭비 방지
+            backoff_multiplier = min(1 + consecutive_errors, max_backoff_multiplier)
+            sleep_interval = self._poll_interval * backoff_multiplier
+
             # 다음 폴링까지 대기
             try:
-                await asyncio.sleep(self._poll_interval)
+                await asyncio.sleep(sleep_interval)
             except asyncio.CancelledError:
                 logger.info("감지 루프 대기 중 취소됨")
                 break

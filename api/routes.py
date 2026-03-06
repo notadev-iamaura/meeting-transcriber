@@ -19,7 +19,6 @@ import logging
 import re
 import threading
 import time
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -504,21 +503,36 @@ async def get_status(request: Request) -> StatusResponse:
 
 
 @router.get("/meetings", response_model=MeetingsResponse)
-async def get_meetings(request: Request) -> MeetingsResponse:
-    """전체 회의 목록을 반환한다.
+async def get_meetings(
+    request: Request,
+    offset: int = 0,
+    limit: int = 50,
+) -> MeetingsResponse:
+    """회의 목록을 반환한다.
 
-    최신순으로 정렬된 모든 회의(작업) 목록을 반환한다.
+    PERF: 페이지네이션을 지원하여 대량 데이터 시 응답 속도를 개선한다.
+    최신순으로 정렬된 회의(작업) 목록을 offset/limit으로 페이징한다.
 
     Args:
         request: FastAPI Request 객체
+        offset: 건너뛸 항목 수 (기본 0)
+        limit: 반환할 최대 항목 수 (기본 50, 최대 200)
 
     Returns:
-        MeetingsResponse: 회의 목록
+        MeetingsResponse: 회의 목록 (페이징 적용)
     """
     queue = _get_job_queue(request)
 
+    # limit 상한 제한
+    limit = min(limit, 200)
+
     try:
         all_jobs = await queue.get_all_jobs()
+        total = len(all_jobs)
+
+        # PERF: 메모리에서 슬라이싱으로 페이지네이션 적용
+        # (SQLite 쿼리에 LIMIT/OFFSET 추가 시 JobQueue 인터페이스 변경 필요)
+        paged_jobs = all_jobs[offset:offset + limit]
 
         meetings = [
             MeetingItem(
@@ -531,12 +545,12 @@ async def get_meetings(request: Request) -> MeetingsResponse:
                 created_at=job.created_at,
                 updated_at=job.updated_at,
             )
-            for job in all_jobs
+            for job in paged_jobs
         ]
 
         return MeetingsResponse(
             meetings=meetings,
-            total=len(meetings),
+            total=total,
         )
     except Exception as e:
         logger.exception(f"회의 목록 조회 실패: {e}")

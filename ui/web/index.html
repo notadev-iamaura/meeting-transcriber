@@ -99,8 +99,8 @@
             </div>
             <div class="empty-state" id="searchEmpty" style="display:none;">
                 <div class="empty-state-icon">&#x1F50D;</div>
-                <div class="empty-state-text">검색 결과가 없습니다</div>
-                <div class="empty-state-sub">다른 검색어나 필터를 시도해보세요</div>
+                <div class="empty-state-text" id="searchEmptyText">검색 결과가 없습니다</div>
+                <div class="empty-state-sub" id="searchEmptySub">다른 검색어나 필터를 시도해보세요</div>
             </div>
         </section>
 
@@ -108,7 +108,15 @@
         <section>
             <div class="section-header">
                 <h2 class="section-title">회의 목록</h2>
-                <span class="section-count" id="meetingsCount"></span>
+                <div class="sort-controls">
+                    <select class="sort-select" id="sortSelect" aria-label="회의 목록 정렬">
+                        <option value="newest">최신순</option>
+                        <option value="oldest">오래된순</option>
+                        <option value="status">상태별</option>
+                        <option value="name">이름순</option>
+                    </select>
+                    <span class="section-count" id="meetingsCount"></span>
+                </div>
             </div>
             <div class="meetings-grid" id="meetingsGrid"></div>
             <div class="loading-overlay" id="meetingsLoading" role="status" aria-live="polite">
@@ -118,7 +126,10 @@
             <div class="empty-state" id="meetingsEmpty" style="display:none;">
                 <div class="empty-state-icon">&#x1F4CB;</div>
                 <div class="empty-state-text">아직 등록된 회의가 없습니다</div>
-                <div class="empty-state-sub">오디오 파일을 감시 폴더에 추가하면 자동으로 처리됩니다</div>
+                <div class="empty-state-sub">
+                    Zoom 회의를 녹음하거나, 오디오 파일(.m4a, .wav)을<br>
+                    감시 폴더에 추가하면 자동으로 전사가 시작됩니다.
+                </div>
             </div>
         </section>
     </main>
@@ -164,6 +175,7 @@
             meetingsEmpty: document.getElementById("meetingsEmpty"),
             recordingStatus: document.getElementById("recordingStatus"),
             recordingDuration: document.getElementById("recordingDuration"),
+            sortSelect: document.getElementById("sortSelect"),
         };
 
         // === 파이프라인 단계 정의 ===
@@ -215,14 +227,67 @@
 
         // === 회의 목록 ===
 
+        var allMeetings = []; // 전체 회의 데이터 보관 (정렬용)
+
+        // 상태별 정렬 우선순위 (처리 중 > 대기 > 실패 > 완료)
+        var STATUS_SORT_ORDER = {
+            recording: 0,
+            transcribing: 1,
+            diarizing: 2,
+            merging: 3,
+            embedding: 4,
+            queued: 5,
+            failed: 6,
+            completed: 7,
+        };
+
+        /**
+         * 회의 목록을 현재 선택된 정렬 기준으로 정렬한다.
+         * @param {Array} meetings - 회의 목록
+         * @returns {Array} 정렬된 회의 목록
+         */
+        function sortMeetings(meetings) {
+            var sortBy = elements.sortSelect.value;
+            var sorted = meetings.slice(); // 원본 보존
+
+            if (sortBy === "newest") {
+                sorted.sort(function (a, b) {
+                    return (b.created_at || "").localeCompare(a.created_at || "");
+                });
+            } else if (sortBy === "oldest") {
+                sorted.sort(function (a, b) {
+                    return (a.created_at || "").localeCompare(b.created_at || "");
+                });
+            } else if (sortBy === "status") {
+                sorted.sort(function (a, b) {
+                    var oa = STATUS_SORT_ORDER[a.status] != null ? STATUS_SORT_ORDER[a.status] : 99;
+                    var ob = STATUS_SORT_ORDER[b.status] != null ? STATUS_SORT_ORDER[b.status] : 99;
+                    if (oa !== ob) return oa - ob;
+                    return (b.created_at || "").localeCompare(a.created_at || "");
+                });
+            } else if (sortBy === "name") {
+                sorted.sort(function (a, b) {
+                    return (a.meeting_id || "").localeCompare(b.meeting_id || "");
+                });
+            }
+
+            return sorted;
+        }
+
         /** 회의 목록을 API에서 가져와 렌더링한다. */
         async function fetchMeetings() {
+            // 로딩 스켈레톤 표시 (기존 목록이 비어있을 때만)
+            if (allMeetings.length === 0) {
+                elements.meetingsGrid.innerHTML = "";
+                elements.meetingsGrid.appendChild(App.createSkeletonCards(3));
+            }
             elements.meetingsLoading.classList.add("visible");
             elements.meetingsEmpty.style.display = "none";
 
             try {
                 var data = await App.apiRequest("/meetings");
-                renderMeetings(data.meetings || []);
+                allMeetings = data.meetings || [];
+                renderMeetings(sortMeetings(allMeetings));
                 App.safeText(elements.meetingsCount, "총 " + (data.total || 0) + "건");
             } catch (e) {
                 errorBanner.show("회의 목록을 불러올 수 없습니다: " + e.message);
@@ -230,6 +295,13 @@
                 elements.meetingsLoading.classList.remove("visible");
             }
         }
+
+        // 정렬 드롭다운 변경 시 재렌더링
+        elements.sortSelect.addEventListener("change", function () {
+            if (allMeetings.length > 0) {
+                renderMeetings(sortMeetings(allMeetings));
+            }
+        });
 
         /**
          * 회의 목록을 카드 형태로 렌더링한다.
@@ -365,6 +437,38 @@
 
                 card.appendChild(progressEl);
 
+                // 액션 버튼 (실패 시 재시도, 완료/실패 시 삭제)
+                if (meeting.status === "failed" || meeting.status === "completed") {
+                    var actionsEl = document.createElement("div");
+                    actionsEl.className = "meeting-card-actions";
+
+                    // 실패한 회의: 재시도 버튼
+                    if (meeting.status === "failed") {
+                        var retryBtn = document.createElement("button");
+                        retryBtn.className = "meeting-card-action retry";
+                        retryBtn.textContent = "\u21BB 재시도";
+                        retryBtn.setAttribute("aria-label", meeting.meeting_id + " 재시도");
+                        retryBtn.addEventListener("click", function (e) {
+                            e.stopPropagation(); // 카드 클릭 이벤트 전파 방지
+                            retryMeeting(meeting.meeting_id);
+                        });
+                        actionsEl.appendChild(retryBtn);
+                    }
+
+                    // 삭제 버튼
+                    var deleteBtn = document.createElement("button");
+                    deleteBtn.className = "meeting-card-action delete";
+                    deleteBtn.textContent = "\u2715 삭제";
+                    deleteBtn.setAttribute("aria-label", meeting.meeting_id + " 삭제");
+                    deleteBtn.addEventListener("click", function (e) {
+                        e.stopPropagation(); // 카드 클릭 이벤트 전파 방지
+                        deleteMeeting(meeting.meeting_id);
+                    });
+                    actionsEl.appendChild(deleteBtn);
+
+                    card.appendChild(actionsEl);
+                }
+
                 // 클릭 → 뷰어 페이지로 이동
                 card.addEventListener("click", function () {
                     window.location.href = "/static/viewer.html?meeting_id=" +
@@ -437,6 +541,23 @@
             );
 
             if (results.length === 0) {
+                // 검색어에 따라 안내 메시지를 세분화
+                var emptyText = document.getElementById("searchEmptyText");
+                var emptySub = document.getElementById("searchEmptySub");
+                var query = elements.searchQuery.value.trim();
+
+                App.safeText(emptyText, "'" + query + "'에 대한 검색 결과가 없습니다");
+
+                // 필터가 적용된 경우 필터 해제 안내
+                var hasFilter = elements.filterDate.value || elements.filterSpeaker.value.trim();
+                if (hasFilter) {
+                    App.safeText(emptySub,
+                        "날짜/화자 필터를 해제하거나 다른 검색어를 시도해 보세요");
+                } else {
+                    App.safeText(emptySub,
+                        "다른 키워드를 사용하거나, AI Chat에서 자연어로 질문해 보세요");
+                }
+
                 elements.searchEmpty.style.display = "block";
                 return;
             }
@@ -536,6 +657,38 @@
 
                 elements.searchResultsList.appendChild(el);
             });
+        }
+
+        // === 회의 재시도/삭제 ===
+
+        /**
+         * 실패한 회의를 재시도한다.
+         * @param {string} meetingId - 재시도할 회의 ID
+         */
+        async function retryMeeting(meetingId) {
+            try {
+                await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/retry", {});
+                fetchMeetings(); // 목록 갱신
+            } catch (e) {
+                errorBanner.show("재시도 실패: " + e.message);
+            }
+        }
+
+        /**
+         * 회의를 삭제한다. 확인 대화 상자를 먼저 표시한다.
+         * @param {string} meetingId - 삭제할 회의 ID
+         */
+        async function deleteMeeting(meetingId) {
+            if (!confirm("'" + meetingId + "' 회의를 삭제하시겠습니까?\n삭제된 데이터는 복구할 수 없습니다.")) {
+                return;
+            }
+
+            try {
+                await App.apiDelete("/meetings/" + encodeURIComponent(meetingId));
+                fetchMeetings(); // 목록 갱신
+            } catch (e) {
+                errorBanner.show("삭제 실패: " + e.message);
+            }
         }
 
         // === 이벤트 바인딩 ===

@@ -3,7 +3,7 @@ Ollama HTTP 클라이언트 통합 모듈 (Unified Ollama HTTP Client)
 
 목적: Ollama API와의 HTTP 통신을 단일 모듈로 통합한다.
 주요 기능:
-    - 서버 연결 확인 (health check)
+    - 서버 연결 확인 (health check, PERF-024: 캐싱 지원)
     - /api/chat 엔드포인트 호출 (동기, stream=false)
     - /api/chat 스트리밍 호출 (동기, stream=true)
     - 통합 에러 계층 (OllamaConnectionError, OllamaTimeoutError)
@@ -14,11 +14,23 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
+
+# PERF-024: 연결 확인 캐시 — 파이프라인 실행 중 반복 호출 방지
+# (host → 마지막 성공 시각) 매핑. 캐시 유효 시간 내에는 재확인하지 않는다.
+_connection_cache: dict[str, float] = {}
+# 캐시 유효 시간 (초): 파이프라인 1회 실행 중에는 재확인 불필요
+_CONNECTION_CACHE_TTL_SECONDS: float = 300.0  # 5분
+
+
+def clear_connection_cache() -> None:
+    """연결 확인 캐시를 초기화한다. 테스트 용도로만 사용."""
+    _connection_cache.clear()
 
 
 # === 에러 계층 ===
@@ -47,6 +59,8 @@ def check_connection(host: str, timeout: int = 10) -> None:
     """Ollama 서버 연결을 확인한다.
 
     /api/tags 엔드포인트에 GET 요청을 보내 연결 가능 여부를 확인한다.
+    PERF-024: 캐시 유효 시간 내 동일 호스트에 대한 반복 확인을 건너뛴다.
+    파이프라인 실행 중 매 배치마다 호출되는 불필요한 네트워크 I/O를 제거한다.
 
     Args:
         host: Ollama 서버 호스트 URL (예: "http://127.0.0.1:11434")
@@ -55,6 +69,13 @@ def check_connection(host: str, timeout: int = 10) -> None:
     Raises:
         OllamaConnectionError: 서버에 연결할 수 없을 때
     """
+    # PERF-024: 캐시 유효 시간 내이면 재확인 건너뛰기
+    now = time.monotonic()
+    last_check = _connection_cache.get(host)
+    if last_check is not None and (now - last_check) < _CONNECTION_CACHE_TTL_SECONDS:
+        logger.debug(f"Ollama 연결 확인 캐시 히트: {host}")
+        return
+
     try:
         url = f"{host}/api/tags"
         req = urllib.request.Request(url, method="GET")
@@ -64,16 +85,22 @@ def check_connection(host: str, timeout: int = 10) -> None:
                     f"Ollama 서버 응답 오류: status={resp.status}"
                 )
     except urllib.error.URLError as e:
+        # 연결 실패 시 캐시 무효화
+        _connection_cache.pop(host, None)
         raise OllamaConnectionError(
             f"Ollama 서버에 연결할 수 없습니다: {host} — {e}"
         ) from e
     except OllamaConnectionError:
+        _connection_cache.pop(host, None)
         raise
     except Exception as e:
+        _connection_cache.pop(host, None)
         raise OllamaConnectionError(
             f"Ollama 서버 연결 확인 실패: {e}"
         ) from e
 
+    # 성공 시 캐시 갱신
+    _connection_cache[host] = now
     logger.info(f"Ollama 서버 연결 확인 완료: {host}")
 
 

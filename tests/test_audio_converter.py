@@ -271,30 +271,29 @@ class TestConvert:
         """정상적인 변환 플로우가 작동하는지 확인한다."""
         output_path = output_dir / "test_meeting_16k.wav"
 
-        # ffprobe 호출 (포맷 확인)
-        probe_result = MagicMock(
+        # PERF: mp3 포맷은 입력 ffprobe 건너뛰므로 ffmpeg + 출력 ffprobe 검증만 mock
+        convert_result = MagicMock(returncode=0, stderr="")
+        # 변환 후 무결성 검증용 ffprobe 호출
+        post_probe_result = MagicMock(
             returncode=0,
             stdout=json.dumps({
                 "streams": [{
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "codec_name": "mp3",
+                    "sample_rate": "16000",
+                    "channels": 1,
+                    "codec_name": "pcm_s16le",
                     "duration": "60.0",
                 }]
             }),
         )
 
-        # ffmpeg 호출 (변환)
-        convert_result = MagicMock(returncode=0, stderr="")
-
-        mock_run.side_effect = [probe_result, convert_result]
+        mock_run.side_effect = [convert_result, post_probe_result]
 
         # 출력 파일 생성 시뮬레이션
         output_path.write_bytes(b"\x00" * 512)
 
         result = converter.convert(sample_audio, output_dir)
         assert result == output_path
-        assert mock_run.call_count == 2  # ffprobe + ffmpeg
+        assert mock_run.call_count == 2  # ffmpeg + 출력 ffprobe 검증
 
     @patch("shutil.which", return_value="/usr/bin/mock")
     @patch("subprocess.run")
@@ -356,21 +355,9 @@ class TestConvert:
         output_dir: Path,
     ) -> None:
         """ffmpeg 변환 실패 시 ConversionFailedError를 발생시킨다."""
-        # ffprobe 성공
-        probe_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "codec_name": "aac",
-                    "duration": "60.0",
-                }]
-            }),
-        )
-        # ffmpeg 실패
+        # PERF: mp3 포맷은 ffprobe를 건너뛰므로 ffmpeg 실패만 mock
         convert_result = MagicMock(returncode=1, stderr="변환 오류 발생")
-        mock_run.side_effect = [probe_result, convert_result]
+        mock_run.side_effect = [convert_result]
 
         with pytest.raises(ConversionFailedError, match="ffmpeg 변환 실패"):
             converter.convert(sample_audio, output_dir)
@@ -386,22 +373,9 @@ class TestConvert:
         output_dir: Path,
     ) -> None:
         """ffmpeg 변환 타임아웃 시 ConversionFailedError를 발생시킨다."""
-        # ffprobe 성공
-        probe_result = MagicMock(
-            returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "codec_name": "aac",
-                    "duration": "3600.0",
-                }]
-            }),
-        )
-
+        # PERF: mp3 포맷은 ffprobe를 건너뛰므로 ffmpeg 타임아웃만 mock
         mock_run.side_effect = [
-            probe_result,
-            subprocess.TimeoutExpired(cmd="ffmpeg", timeout=300),
+            subprocess.TimeoutExpired(cmd="ffmpeg", timeout=600),
         ]
 
         with pytest.raises(ConversionFailedError, match="타임아웃"):
@@ -421,20 +395,20 @@ class TestConvert:
         nested_output = tmp_path / "a" / "b" / "c"
         output_path = nested_output / "test_meeting_16k.wav"
 
-        # ffprobe: 변환 필요
-        probe_result = MagicMock(
+        # PERF: mp3 포맷은 입력 ffprobe 건너뛰므로 ffmpeg + 출력 ffprobe 검증 mock
+        convert_result = MagicMock(returncode=0, stderr="")
+        post_probe_result = MagicMock(
             returncode=0,
             stdout=json.dumps({
                 "streams": [{
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "codec_name": "mp3",
+                    "sample_rate": "16000",
+                    "channels": 1,
+                    "codec_name": "pcm_s16le",
                     "duration": "60.0",
                 }]
             }),
         )
-        convert_result = MagicMock(returncode=0, stderr="")
-        mock_run.side_effect = [probe_result, convert_result]
+        mock_run.side_effect = [convert_result, post_probe_result]
 
         # 출력 파일 생성 시뮬레이션
         nested_output.mkdir(parents=True, exist_ok=True)
@@ -458,9 +432,20 @@ class TestConvert:
         custom_name = "회의_2026_03_04.wav"
         output_path = output_dir / custom_name
 
-        probe_result = MagicMock(returncode=1, stderr="")  # ffprobe 실패 → 변환 진행
+        # PERF: 비-WAV 포맷(mp3)은 입력 ffprobe를 건너뛰므로 ffmpeg + 출력 ffprobe 검증 mock
         convert_result = MagicMock(returncode=0, stderr="")
-        mock_run.side_effect = [probe_result, convert_result]
+        post_probe_result = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "streams": [{
+                    "sample_rate": "16000",
+                    "channels": 1,
+                    "codec_name": "pcm_s16le",
+                    "duration": "60.0",
+                }]
+            }),
+        )
+        mock_run.side_effect = [convert_result, post_probe_result]
 
         # 출력 파일 생성 시뮬레이션
         output_path.write_bytes(b"\x00" * 512)
@@ -482,9 +467,9 @@ class TestConvert:
         """변환 후 출력 파일이 0바이트면 ConversionFailedError를 발생시킨다."""
         output_path = output_dir / "test_meeting_16k.wav"
 
-        probe_result = MagicMock(returncode=1, stderr="")
+        # PERF: 비-WAV 포맷(mp3)은 ffprobe를 건너뛰므로 변환 결과만 모킹
         convert_result = MagicMock(returncode=0, stderr="")
-        mock_run.side_effect = [probe_result, convert_result]
+        mock_run.side_effect = [convert_result]
 
         # 빈 파일 생성
         output_path.write_bytes(b"")
@@ -510,19 +495,20 @@ class TestConvertAsync:
         """convert_async가 정상적으로 동작하는지 확인한다."""
         output_path = output_dir / "test_meeting_16k.wav"
 
-        probe_result = MagicMock(
+        # PERF: 비-WAV 포맷(mp3)은 입력 ffprobe를 건너뛰므로 ffmpeg + 출력 ffprobe 검증 mock
+        convert_result = MagicMock(returncode=0, stderr="")
+        post_probe_result = MagicMock(
             returncode=0,
             stdout=json.dumps({
                 "streams": [{
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "codec_name": "mp3",
+                    "sample_rate": "16000",
+                    "channels": 1,
+                    "codec_name": "pcm_s16le",
                     "duration": "60.0",
                 }]
             }),
         )
-        convert_result = MagicMock(returncode=0, stderr="")
-        mock_run.side_effect = [probe_result, convert_result]
+        mock_run.side_effect = [convert_result, post_probe_result]
 
         # 출력 파일 생성 시뮬레이션
         output_path.write_bytes(b"\x00" * 512)

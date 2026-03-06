@@ -25,6 +25,7 @@ from core.ollama_client import (
     OllamaConnectionError,
     OllamaResponseError,
     OllamaTimeoutError,
+    clear_connection_cache,
 )
 from steps.corrector import (
     CorrectedResult,
@@ -830,6 +831,10 @@ class TestCorrector한국어처리:
 
 class TestOllamaClient:
     """Ollama 연결 관련 테스트."""
+
+    def setup_method(self) -> None:
+        """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
+        clear_connection_cache()
 
     def test_연결_성공(self) -> None:
         """Ollama 서버 연결 성공 시 설정 딕셔너리 반환."""

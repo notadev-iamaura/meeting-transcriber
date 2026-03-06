@@ -19,10 +19,10 @@
     --border-color: #2a2a4a;
     --border-focus: #4361ee;
 
-    /* 텍스트 */
-    --text-primary: #e8e8f0;
-    --text-secondary: #a0a0b8;
-    --text-muted: #6c6c8a;
+    /* 텍스트 (WCAG AA 대비비 4.5:1 이상 보장) */
+    --text-primary: #ededf5;
+    --text-secondary: #b0b0c8;
+    --text-muted: #8888a6;
 
     /* 강조색 */
     --accent: #4361ee;
@@ -1676,4 +1676,270 @@ body.chat-page .error-banner {
     /* chat.html */
     .message-avatar { display: none; }
     .controls-label { display: none; }
+}
+
+
+/* ================================================================= */
+/* === 커스텀 스크롤바 스타일링 (다크 모드)                          === */
+/* ================================================================= */
+
+/* 웹킷 기반 브라우저 (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* Firefox 스크롤바 */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) var(--bg-primary);
+}
+
+
+/* ================================================================= */
+/* === 모바일 터치 타겟 크기 (WCAG 2.5.5: 44px 최소)               === */
+/* ================================================================= */
+
+@media (pointer: coarse) {
+    /* 터치 디바이스에서 모든 버튼/링크의 최소 터치 영역 보장 */
+    .nav-link {
+        min-height: 44px;
+        min-width: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .search-btn,
+    .send-btn,
+    .filter-clear-btn,
+    .search-bar-clear,
+    .search-close-btn,
+    .btn-small,
+    .error-banner-close {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    .tab-btn {
+        min-height: 44px;
+    }
+
+    /* 회의 카드의 액션 버튼 */
+    .meeting-card-action {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    /* 검색 결과 항목 */
+    .result-item {
+        min-height: 44px;
+    }
+
+    /* 체크박스 */
+    input[type="checkbox"] {
+        min-width: 20px;
+        min-height: 20px;
+    }
+}
+
+
+/* ================================================================= */
+/* === 메시지 복사 버튼 (chat.html)                                 === */
+/* ================================================================= */
+
+.message-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+    opacity: 0;
+    transition: opacity var(--transition);
+}
+
+.message:hover .message-actions,
+.message-actions:focus-within {
+    opacity: 1;
+}
+
+.btn-copy {
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all var(--transition);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btn-copy:hover {
+    border-color: var(--text-secondary);
+    color: var(--text-primary);
+}
+
+.btn-copy.copied {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+
+/* ================================================================= */
+/* === 정렬 드롭다운 (index.html 회의 목록 정렬)                    === */
+/* ================================================================= */
+
+.sort-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sort-select {
+    padding: 6px 12px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+}
+
+.sort-select:focus {
+    border-color: var(--border-focus);
+}
+
+
+/* ================================================================= */
+/* === 회의 카드 액션 버튼 (삭제/재시도)                             === */
+/* ================================================================= */
+
+.meeting-card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+}
+
+.meeting-card-action {
+    padding: 6px 12px;
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--transition);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.meeting-card-action:hover {
+    border-color: var(--text-secondary);
+}
+
+.meeting-card-action.retry {
+    color: var(--accent);
+}
+
+.meeting-card-action.retry:hover {
+    background-color: rgba(67, 97, 238, 0.1);
+    border-color: var(--accent);
+}
+
+.meeting-card-action.delete {
+    color: var(--error);
+}
+
+.meeting-card-action.delete:hover {
+    background-color: rgba(231, 76, 60, 0.1);
+    border-color: var(--error);
+}
+
+
+/* ================================================================= */
+/* === 로딩 스켈레톤 (빈 상태 개선)                                  === */
+/* ================================================================= */
+
+.skeleton-card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    animation: skeletonPulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-line {
+    height: 14px;
+    background: linear-gradient(
+        90deg,
+        var(--border-color) 25%,
+        var(--bg-hover) 50%,
+        var(--border-color) 75%
+    );
+    background-size: 200% 100%;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    animation: skeletonShimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-line.short { width: 60%; }
+.skeleton-line.medium { width: 80%; }
+.skeleton-line:last-child { margin-bottom: 0; }
+
+@keyframes skeletonPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+@keyframes skeletonShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+
+/* ================================================================= */
+/* === AI 응답 취소 버튼                                             === */
+/* ================================================================= */
+
+.btn-cancel-send {
+    padding: 12px 20px;
+    background-color: var(--error);
+    border: none;
+    border-radius: var(--radius-lg);
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color var(--transition), opacity var(--transition);
+    white-space: nowrap;
+    flex-shrink: 0;
+    height: 46px;
+    display: none;
+}
+
+.btn-cancel-send.visible {
+    display: block;
+}
+
+.btn-cancel-send:hover {
+    background-color: #c0392b;
 }

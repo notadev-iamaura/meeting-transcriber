@@ -21,13 +21,13 @@ import json
 import logging
 import sqlite3
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
-from steps.chunker import Chunk, ChunkedResult
+from steps.chunker import ChunkedResult
 
 logger = logging.getLogger(__name__)
 
@@ -503,6 +503,31 @@ class Embedder:
         # numpy 배열을 Python 리스트로 변환
         return [emb.tolist() for emb in embeddings]
 
+    def _compute_adaptive_batch_size(self, total_chunks: int) -> int:
+        """청크 수에 따라 임베딩 배치 크기를 자동 조절한다.
+
+        PERF: 소량 청크 시 오버헤드를 줄이고, 대량 청크 시 메모리를 관리한다.
+        - config 배치 크기 이내: 전체를 한 번에 처리 (배치 분할 오버헤드 제거)
+        - 일반: config 기본값 사용
+        - 100개 초과: 메모리 보호를 위해 기본값의 절반
+
+        Args:
+            total_chunks: 전체 청크 수
+
+        Returns:
+            조절된 배치 크기
+        """
+        if total_chunks <= self._batch_size:
+            return total_chunks
+        elif total_chunks > 100:
+            adaptive = max(8, self._batch_size // 2)
+            logger.info(
+                f"대량 청크 감지({total_chunks}개): 배치 크기 "
+                f"{self._batch_size} → {adaptive}으로 축소"
+            )
+            return adaptive
+        return self._batch_size
+
     def _process_chunks(
         self,
         model: Any,
@@ -520,12 +545,18 @@ class Embedder:
         chunks = chunked_result.chunks
         texts = [chunk.text for chunk in chunks]
 
-        logger.info(f"임베딩 생성 시작: {len(texts)}개 텍스트")
+        # PERF: 청크 수에 따라 배치 크기 자동 조절
+        effective_batch_size = self._compute_adaptive_batch_size(len(texts))
+
+        logger.info(
+            f"임베딩 생성 시작: {len(texts)}개 텍스트, "
+            f"배치 크기={effective_batch_size}"
+        )
 
         # 배치 단위로 임베딩 생성
         all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), self._batch_size):
-            batch_texts = texts[i:i + self._batch_size]
+        for i in range(0, len(texts), effective_batch_size):
+            batch_texts = texts[i:i + effective_batch_size]
             batch_embeddings = self._generate_embeddings(model, batch_texts)
             all_embeddings.extend(batch_embeddings)
             logger.debug(

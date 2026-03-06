@@ -204,7 +204,7 @@ def _build_correction_prompt(utterances: list[MergedUtterance]) -> str:
     Returns:
         번호가 매겨진 발화 텍스트
     """
-    lines = []
+    lines: list[str] = []
     for i, u in enumerate(utterances, 1):
         lines.append(f"[{i}] {u.text}")
     return "\n".join(lines)
@@ -313,6 +313,9 @@ class Corrector:
             "timeout": self._timeout,
         }
 
+    # 배치 보정 최대 재시도 횟수
+    _MAX_BATCH_RETRIES: int = 2
+
     def _correct_batch(
         self,
         client_config: dict[str, Any],
@@ -321,6 +324,7 @@ class Corrector:
         """발화 배치를 보정한다.
 
         배치 내 발화들을 하나의 프롬프트로 묶어서 LLM에 보정을 요청한다.
+        Ollama 호출 실패 시 최대 _MAX_BATCH_RETRIES회 재시도한다.
         보정 실패 시 원본 텍스트를 유지한다.
 
         Args:
@@ -331,25 +335,52 @@ class Corrector:
             (보정된 발화 목록, 보정된 수, 실패한 수) 튜플
         """
         prompt = _build_correction_prompt(batch)
+        corrections: dict[int, str] = {}
+        last_error: Optional[Exception] = None
 
-        try:
-            response_text = _ollama_chat(
-                host=client_config["host"],
-                model=client_config["model"],
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=client_config["temperature"],
-                num_ctx=client_config["num_ctx"],
-                timeout=client_config["timeout"],
-            )
-            corrections = _parse_correction_response(
-                response_text, len(batch)
-            )
-        except (CorrectionError, OllamaConnectionError, OllamaTimeoutError, OllamaResponseError) as e:
-            logger.warning(f"배치 보정 실패, 원본 유지: {e}")
-            corrections = {}
+        # 재시도 로직: OllamaTimeoutError, OllamaResponseError 발생 시 재시도
+        for attempt in range(1, self._MAX_BATCH_RETRIES + 2):
+            try:
+                response_text = _ollama_chat(
+                    host=client_config["host"],
+                    model=client_config["model"],
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=client_config["temperature"],
+                    num_ctx=client_config["num_ctx"],
+                    timeout=client_config["timeout"],
+                )
+                corrections = _parse_correction_response(
+                    response_text, len(batch)
+                )
+
+                # 파싱 결과가 원본 배치의 절반 미만이면 파싱 실패로 간주하고 재시도
+                if len(corrections) < len(batch) // 2 and attempt <= self._MAX_BATCH_RETRIES:
+                    logger.warning(
+                        f"배치 파싱 결과 부족 ({len(corrections)}/{len(batch)}), "
+                        f"재시도 {attempt}/{self._MAX_BATCH_RETRIES}"
+                    )
+                    continue
+
+                # 성공 — 루프 탈출
+                break
+
+            except OllamaConnectionError as conn_err:
+                # 연결 에러는 재시도 의미 없음 (서버 자체 불가)
+                logger.warning(f"배치 보정 연결 실패, 원본 유지: {conn_err}")
+                corrections = {}
+                break
+            except (OllamaTimeoutError, OllamaResponseError, CorrectionError) as e:
+                last_error = e
+                if attempt <= self._MAX_BATCH_RETRIES:
+                    logger.warning(
+                        f"배치 보정 실패 (시도 {attempt}/{self._MAX_BATCH_RETRIES + 1}): {e}"
+                    )
+                else:
+                    logger.warning(f"배치 보정 최종 실패, 원본 유지: {e}")
+                    corrections = {}
 
         results: list[CorrectedUtterance] = []
         corrected_count = 0
@@ -438,8 +469,10 @@ class Corrector:
         total_failed = 0
 
         try:
+            # PERF-001: 다음 단계(summarizer)에서도 exaone을 사용하므로
+            # keep_loaded=True로 모델을 유지하여 불필요한 해제/재로드 방지
             async with self._manager.acquire(
-                "exaone", self._create_ollama_client
+                "exaone", self._create_ollama_client, keep_loaded=True
             ) as client_config:
                 for batch_idx, batch in enumerate(batches):
                     logger.info(

@@ -128,6 +128,30 @@
     // === API 요청 ===
     // =================================================================
 
+    // HTTP 상태 코드별 한국어 에러 메시지 매핑
+    var HTTP_ERROR_MESSAGES = {
+        400: "잘못된 요청입니다. 입력 내용을 확인해 주세요.",
+        401: "인증이 필요합니다.",
+        403: "접근 권한이 없습니다.",
+        404: "요청한 데이터를 찾을 수 없습니다.",
+        408: "요청 시간이 초과되었습니다. 다시 시도해 주세요.",
+        429: "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+        500: "서버 내부 오류가 발생했습니다.",
+        502: "서버에 연결할 수 없습니다.",
+        503: "서비스가 일시적으로 이용 불가합니다. 잠시 후 다시 시도해 주세요.",
+        504: "서버 응답 시간이 초과되었습니다.",
+    };
+
+    /**
+     * HTTP 상태 코드에 해당하는 한국어 에러 메시지를 반환한다.
+     * @param {number} status - HTTP 상태 코드
+     * @param {string} [fallback] - 매핑되지 않은 경우 사용할 기본 메시지
+     * @returns {string} 한국어 에러 메시지
+     */
+    function getHttpErrorMessage(status, fallback) {
+        return HTTP_ERROR_MESSAGES[status] || fallback || "알 수 없는 오류가 발생했습니다.";
+    }
+
     /**
      * API 요청을 수행한다 (GET/POST 모두 지원).
      * @param {string} endpoint - API 경로 (예: "/status", "/chat")
@@ -137,7 +161,15 @@
      */
     async function apiRequest(endpoint, options) {
         var url = API_BASE + endpoint;
-        var response = await fetch(url, options || {});
+        var response;
+        try {
+            response = await fetch(url, options || {});
+        } catch (networkError) {
+            // 네트워크 오류 (서버 미연결, 오프라인 등) 한국어 처리
+            var err = new Error("서버에 연결할 수 없습니다. 네트워크 상태를 확인해 주세요.");
+            err.status = 0;
+            throw err;
+        }
         if (!response.ok) {
             var errorData;
             try {
@@ -145,7 +177,8 @@
             } catch (e) {
                 errorData = { detail: response.statusText };
             }
-            var err = new Error(errorData.detail || "API 요청 실패");
+            var detail = errorData.detail || getHttpErrorMessage(response.status);
+            var err = new Error(detail);
             err.status = response.status;
             throw err;
         }
@@ -501,12 +534,77 @@
     // === 공개 API ===
     // =================================================================
 
+    /**
+     * API DELETE 요청을 수행한다.
+     * @param {string} endpoint - API 경로
+     * @returns {Promise<Object>} 응답 JSON
+     */
+    async function apiDelete(endpoint) {
+        return apiRequest(endpoint, {
+            method: "DELETE",
+        });
+    }
+
+    /**
+     * 텍스트를 클립보드에 복사한다.
+     * @param {string} text - 복사할 텍스트
+     * @returns {Promise<boolean>} 복사 성공 여부
+     */
+    async function copyToClipboard(text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+            // 폴백: 임시 textarea 사용 (구형 브라우저)
+            var textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            var ok = document.execCommand("copy");
+            document.body.removeChild(textarea);
+            return ok;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * 로딩 스켈레톤 카드를 생성한다.
+     * @param {number} count - 생성할 스켈레톤 카드 수
+     * @returns {DocumentFragment} 스켈레톤 카드 프래그먼트
+     */
+    function createSkeletonCards(count) {
+        var fragment = document.createDocumentFragment();
+        for (var i = 0; i < count; i++) {
+            var card = document.createElement("div");
+            card.className = "skeleton-card";
+            card.setAttribute("aria-hidden", "true");
+
+            var line1 = document.createElement("div");
+            line1.className = "skeleton-line short";
+            var line2 = document.createElement("div");
+            line2.className = "skeleton-line medium";
+            var line3 = document.createElement("div");
+            line3.className = "skeleton-line";
+
+            card.appendChild(line1);
+            card.appendChild(line2);
+            card.appendChild(line3);
+            fragment.appendChild(card);
+        }
+        return fragment;
+    }
+
     window.MeetingApp = {
         // 상수
         API_BASE: API_BASE,
         STATUS_LABELS: STATUS_LABELS,
         SPEAKER_COLORS: SPEAKER_COLORS,
         PIPELINE_STEPS: PIPELINE_STEPS,
+        HTTP_ERROR_MESSAGES: HTTP_ERROR_MESSAGES,
 
         // 유틸리티
         formatTime: formatTime,
@@ -515,11 +613,15 @@
         safeText: safeText,
         getFileName: getFileName,
         getStatusLabel: getStatusLabel,
+        getHttpErrorMessage: getHttpErrorMessage,
         highlightText: highlightText,
+        copyToClipboard: copyToClipboard,
+        createSkeletonCards: createSkeletonCards,
 
         // API 요청
         apiRequest: apiRequest,
         apiPost: apiPost,
+        apiDelete: apiDelete,
 
         // UI 컴포넌트
         initErrorBanner: initErrorBanner,

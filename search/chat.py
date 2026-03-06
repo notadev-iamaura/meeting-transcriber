@@ -21,7 +21,7 @@ import json
 import logging
 import queue
 import unicodedata
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from config import AppConfig, ChatConfig, get_config
@@ -518,6 +518,9 @@ class ChatEngine:
     ) -> str:
         """컨텍스트 윈도우를 초과하지 않도록 사용자 프롬프트를 절단한다.
 
+        PERF: 단순 글자수 자르기 대신 검색 컨텍스트 경계를 존중하여 절단한다.
+        참조 블록 단위로 제거하여 불완전한 참조가 LLM에 전달되는 것을 방지한다.
+
         시스템 프롬프트 + 대화 이력 + 사용자 프롬프트의 총 토큰 수가
         max_tokens를 초과하면 사용자 프롬프트를 줄인다.
 
@@ -556,12 +559,39 @@ class ChatEngine:
         if current_tokens <= prompt_budget:
             return user_prompt
 
-        # 글자 수 기준으로 절단 (토큰 ≈ 글자/1.5)
+        # PERF: 참조 블록([참조 N]) 경계를 존중하여 뒤에서부터 제거
+        # "[참조 N]" 패턴으로 분리하여 블록 단위로 제거한다
+        ref_marker = "[참조 "
+        if ref_marker in user_prompt:
+            # 질문 부분(마지막 "위 회의 내용을..." 이후)은 보존
+            question_marker = "위 회의 내용을 참고하여"
+            question_idx = user_prompt.rfind(question_marker)
+
+            if question_idx > 0:
+                context_part = user_prompt[:question_idx]
+                question_part = user_prompt[question_idx:]
+
+                # 참조 블록들을 뒤에서부터 하나씩 제거
+                while _estimate_korean_tokens(context_part + question_part) > prompt_budget:
+                    # 마지막 "[참조 N]" 블록 찾아서 제거
+                    last_ref = context_part.rfind(ref_marker)
+                    if last_ref <= 0:
+                        break
+                    context_part = context_part[:last_ref].rstrip()
+
+                truncated = context_part + "\n\n" + question_part
+                logger.info(
+                    f"프롬프트 절단 (참조 블록 단위): "
+                    f"{current_tokens} → ~{_estimate_korean_tokens(truncated)} 토큰"
+                )
+                return truncated
+
+        # 참조 블록 패턴이 없는 경우 글자 수 기준 절단 (폴백)
         max_chars = int(prompt_budget * 1.5)
         truncated = user_prompt[:max_chars]
 
         logger.info(
-            f"프롬프트 절단: {current_tokens} → ~{prompt_budget} 토큰 "
+            f"프롬프트 절단 (글자 수): {current_tokens} → ~{prompt_budget} 토큰 "
             f"({len(user_prompt)} → {max_chars} 글자)"
         )
 

@@ -17,8 +17,8 @@ import logging
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -662,10 +662,8 @@ class JobQueue:
         """
         conn = self._ensure_connection()
 
-        # ISO 형식 기준 문자열 비교
-        cutoff = datetime.now()
-        from datetime import timedelta
-        cutoff_str = (cutoff - timedelta(days=before_days)).isoformat()
+        # PERF: 상단 import 사용, cutoff 계산 간소화
+        cutoff_str = (datetime.now() - timedelta(days=before_days)).isoformat()
 
         # 쓰기 직렬화 (STAB-017)
         with self._write_lock:

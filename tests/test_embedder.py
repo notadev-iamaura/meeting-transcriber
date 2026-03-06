@@ -431,19 +431,24 @@ class TestEmbedderSync:
         assert embedded[0].end_time == 20.0
 
     def test_process_chunks_다수_배치(self) -> None:
-        """배치 크기보다 많은 청크도 올바르게 처리된다."""
-        embedder = _make_embedder(_make_config(batch_size=2))
+        """배치 크기보다 많은 청크도 올바르게 처리된다.
+
+        PERF: _compute_adaptive_batch_size가 10개 이하 청크를
+        한 배치로 처리하므로, 배치 분할을 검증하려면 11개 이상이 필요하다.
+        batch_size=5, 청크 11개 → adaptive는 config값(5) 사용 → 3회 호출 (5+5+1)
+        """
+        embedder = _make_embedder(_make_config(batch_size=5))
         model = _make_fake_model()
 
         chunks = [
             _make_chunk(text=f"문장 {i}", chunk_index=i)
-            for i in range(5)
+            for i in range(11)
         ]
         chunked = _make_chunked_result(chunks)
 
         embedded = embedder._process_chunks(model, chunked)
-        assert len(embedded) == 5
-        # encode가 3번 호출되어야 함 (2+2+1)
+        assert len(embedded) == 11
+        # encode가 3번 호출되어야 함 (5+5+1)
         assert model.encode.call_count == 3
 
 

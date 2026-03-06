@@ -16,7 +16,7 @@ stt:
   model_name: "mlx-community/whisper-medium-mlx"  # mlx-whisper 모델 (한국어 지원)
   language: "ko"                             # 전사 언어
   beam_size: 5                               # 빔 서치 크기
-  batch_size: 16                             # 배치 크기
+  batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
 
 # === 화자분리 설정 ===
 diarization:
@@ -42,7 +42,7 @@ embedding:
   device: "mps"                              # Apple Silicon MPS 가속
   query_prefix: "query: "                    # 쿼리 접두사 (필수)
   passage_prefix: "passage: "                # 문서 접두사 (필수)
-  batch_size: 32                             # 배치 임베딩 크기
+  batch_size: 64                             # 배치 임베딩 크기 (PERF: MPS 가속 + 소형 모델, 더 큰 배치가 효율적)
 
 # === 청크 설정 ===
 chunking:
@@ -87,6 +87,8 @@ pipeline:
   retry_max_count: 3                         # 최대 재시도 횟수
   min_disk_free_gb: 2.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
+  diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)
+  step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화
 
 # === 서멀 관리 설정 ===
 thermal:
@@ -104,7 +106,7 @@ server:
 # === Zoom 감지 설정 ===
 zoom:
   process_name: "CptHost"                    # Zoom 미팅 프로세스명
-  poll_interval_seconds: 5                   # 감지 폴링 간격 (초)
+  poll_interval_seconds: 3                   # 감지 폴링 간격 (초, PERF: 더 빠른 Zoom 감지)
 
 # === 폴더 감시 설정 ===
 watcher:

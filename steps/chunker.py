@@ -469,6 +469,56 @@ def _build_chunk(
     )
 
 
+def _split_text_by_tokens(
+    text: str,
+    max_chars: int,
+) -> list[str]:
+    """긴 텍스트를 문자 수 기준으로 분할한다.
+
+    한국어 문장 부호(. ? ! 등)를 기준으로 분할을 시도하고,
+    문장 부호가 없으면 max_chars 단위로 강제 분할한다.
+    메모리 효율성을 위해 슬라이싱만 사용한다.
+
+    Args:
+        text: 분할할 텍스트
+        max_chars: 청크당 최대 문자 수
+
+    Returns:
+        분할된 텍스트 조각 목록
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    parts: list[str] = []
+    remaining = text
+
+    while len(remaining) > max_chars:
+        # 문장 부호 기준 분할 지점 탐색 (max_chars 이내)
+        split_pos = -1
+        for sep in ("。", ". ", "? ", "! ", ".\n", "\n"):
+            pos = remaining.rfind(sep, 0, max_chars)
+            if pos > 0:
+                split_pos = pos + len(sep)
+                break
+
+        if split_pos <= 0:
+            # 문장 부호 없으면 공백 기준 분할
+            space_pos = remaining.rfind(" ", 0, max_chars)
+            if space_pos > 0:
+                split_pos = space_pos + 1
+            else:
+                # 공백도 없으면 강제 분할
+                split_pos = max_chars
+
+        parts.append(remaining[:split_pos].rstrip())
+        remaining = remaining[split_pos:].lstrip()
+
+    if remaining:
+        parts.append(remaining)
+
+    return parts
+
+
 def _split_large_group(
     group: _UtteranceGroup,
     max_tokens: int,
@@ -479,6 +529,8 @@ def _split_large_group(
     """max_tokens를 초과하는 큰 그룹을 분할하여 청크 목록에 추가한다.
 
     개별 발화(문장) 단위로 분할하여 max_tokens에 맞춘다.
+    개별 발화 자체가 max_tokens를 초과하는 초대형 발화(1만자+)도
+    문자 수 기준으로 안전하게 분할한다.
 
     Args:
         group: 분할할 발화 그룹
@@ -489,10 +541,49 @@ def _split_large_group(
     """
     current_lines: list[str] = []
     current_tokens = 0
+    # max_tokens에 대응하는 대략적 문자 수 (1토큰 ≈ 1.5글자)
+    max_chars_per_chunk = int(max_tokens * 1.5)
 
     for text in group.texts:
         line = f"[{group.speaker}] {text}"
         line_tokens = _estimate_tokens(line)
+
+        # 개별 발화 자체가 max_tokens를 초과하는 초대형 발화 처리
+        if line_tokens > max_tokens:
+            # 먼저 축적된 내용이 있으면 flush
+            if current_lines:
+                chunk_text = "\n".join(current_lines)
+                chunks.append(Chunk(
+                    text=chunk_text,
+                    meeting_id=meeting_id,
+                    date=date,
+                    speakers=[group.speaker],
+                    start_time=group.start,
+                    end_time=group.end,
+                    estimated_tokens=_estimate_tokens(chunk_text),
+                    chunk_index=len(chunks),
+                ))
+                current_lines = []
+                current_tokens = 0
+
+            # 초대형 발화를 문자 수 기준으로 분할
+            sub_parts = _split_text_by_tokens(line, max_chars_per_chunk)
+            for sub_part in sub_parts:
+                chunks.append(Chunk(
+                    text=sub_part,
+                    meeting_id=meeting_id,
+                    date=date,
+                    speakers=[group.speaker],
+                    start_time=group.start,
+                    end_time=group.end,
+                    estimated_tokens=_estimate_tokens(sub_part),
+                    chunk_index=len(chunks),
+                ))
+
+            logger.debug(
+                f"초대형 발화({len(text)}자) → {len(sub_parts)}개 청크로 분할"
+            )
+            continue
 
         if current_tokens + line_tokens > max_tokens and current_lines:
             # 현재까지의 내용으로 청크 생성

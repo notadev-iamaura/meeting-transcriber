@@ -67,16 +67,19 @@
         <!-- 전사문 탭 (접근성: role="tabpanel") -->
         <div class="tab-panel active" id="panelTranscript"
              role="tabpanel" aria-labelledby="tabTranscript">
-            <!-- 인라인 검색 -->
+            <!-- 인라인 검색 (Ctrl+F 연동, 이전/다음 네비게이션) -->
             <div class="search-bar" id="searchBar" style="display:none;">
                 <input
                     type="text"
                     class="search-bar-input"
                     id="searchInput"
-                    placeholder="전사문 내 검색..."
+                    placeholder="전사문 내 검색... (Ctrl+F)"
                     autocomplete="off"
+                    aria-label="전사문 내 검색"
                 />
-                <span class="search-bar-info" id="searchInfo"></span>
+                <span class="search-bar-info" id="searchInfo" role="status" aria-live="polite"></span>
+                <button class="search-bar-clear" id="searchPrev" aria-label="이전 결과" style="display:none;">&#x25B2;</button>
+                <button class="search-bar-clear" id="searchNext" aria-label="다음 결과" style="display:none;">&#x25BC;</button>
                 <button class="search-bar-clear" id="searchClear">초기화</button>
             </div>
 
@@ -90,7 +93,10 @@
             <div class="empty-state" id="transcriptEmpty" style="display:none;">
                 <div class="empty-state-icon">&#x1F4DD;</div>
                 <div class="empty-state-text">전사문이 아직 생성되지 않았습니다</div>
-                <div class="empty-state-sub">회의 처리가 완료되면 전사문이 표시됩니다</div>
+                <div class="empty-state-sub">
+                    파이프라인이 처리 중이라면 잠시 기다려 주세요.<br>
+                    완료되면 전사문이 자동으로 표시됩니다.
+                </div>
             </div>
         </div>
 
@@ -107,7 +113,10 @@
             <div class="empty-state" id="summaryEmpty" style="display:none;">
                 <div class="empty-state-icon">&#x1F4CB;</div>
                 <div class="empty-state-text">회의록이 아직 생성되지 않았습니다</div>
-                <div class="empty-state-sub">AI 요약이 완료되면 회의록이 표시됩니다</div>
+                <div class="empty-state-sub">
+                    AI 요약 단계까지 파이프라인이 진행되면<br>
+                    자동으로 회의록이 생성됩니다.
+                </div>
             </div>
         </div>
     </main>
@@ -160,6 +169,8 @@
             searchInput: document.getElementById("searchInput"),
             searchInfo: document.getElementById("searchInfo"),
             searchClear: document.getElementById("searchClear"),
+            searchPrev: document.getElementById("searchPrev"),
+            searchNext: document.getElementById("searchNext"),
         };
 
         // === 에러 배너 초기화 (자동 숨김 타이머 포함) ===
@@ -180,6 +191,8 @@
         var speakerColorMap = {}; // 화자 → 색상 매핑
         var allUtterances = []; // 전사문 발화 데이터 보관
         var currentQuery = ""; // 현재 검색어
+        var currentMatchIndex = -1; // 현재 하이라이트 인덱스 (검색 결과 네비게이션)
+        var totalMatches = 0; // 전체 검색 결과 수
 
         // === 화자 색상 매핑 ===
 
@@ -269,9 +282,22 @@
                 elements.timeline.appendChild(el);
             });
 
-            // 검색 정보 업데이트
+            // 검색 정보 업데이트 (카운트 및 네비게이션 버튼)
+            totalMatches = matchCount;
             if (query) {
-                App.safeText(elements.searchInfo, matchCount + "건 일치");
+                if (matchCount > 0) {
+                    currentMatchIndex = 0;
+                    App.safeText(elements.searchInfo,
+                        "1 / " + matchCount + "건 일치");
+                    // 이전/다음 버튼 표시
+                    elements.searchPrev.style.display = "inline-block";
+                    elements.searchNext.style.display = "inline-block";
+                } else {
+                    currentMatchIndex = -1;
+                    App.safeText(elements.searchInfo, "결과 없음");
+                    elements.searchPrev.style.display = "none";
+                    elements.searchNext.style.display = "none";
+                }
 
                 // 첫 번째 하이라이트로 스크롤
                 var firstHighlight = elements.timeline.querySelector(".highlighted");
@@ -279,7 +305,11 @@
                     firstHighlight.scrollIntoView({ behavior: "smooth", block: "center" });
                 }
             } else {
+                currentMatchIndex = -1;
+                totalMatches = 0;
                 App.safeText(elements.searchInfo, "");
+                elements.searchPrev.style.display = "none";
+                elements.searchNext.style.display = "none";
             }
         }
 
@@ -371,6 +401,47 @@
             elements.searchInput.value = "";
             currentQuery = "";
             renderTimeline(allUtterances, "");
+        });
+
+        /** 검색 결과 이전/다음 항목으로 스크롤하는 함수 */
+        function navigateSearchResult(direction) {
+            var highlights = elements.timeline.querySelectorAll(".highlighted");
+            if (highlights.length === 0) return;
+
+            currentMatchIndex += direction;
+            if (currentMatchIndex < 0) currentMatchIndex = highlights.length - 1;
+            if (currentMatchIndex >= highlights.length) currentMatchIndex = 0;
+
+            highlights[currentMatchIndex].scrollIntoView({ behavior: "smooth", block: "center" });
+            App.safeText(elements.searchInfo,
+                (currentMatchIndex + 1) + " / " + highlights.length + "건 일치");
+        }
+
+        elements.searchPrev.addEventListener("click", function () {
+            navigateSearchResult(-1);
+        });
+
+        elements.searchNext.addEventListener("click", function () {
+            navigateSearchResult(1);
+        });
+
+        // Ctrl+F (Mac: Cmd+F) 키보드 단축키 → 인라인 검색창에 포커스
+        document.addEventListener("keydown", function (e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+                // 검색바가 표시된 상태에서만 동작
+                if (elements.searchBar.style.display !== "none") {
+                    e.preventDefault(); // 브라우저 기본 검색 방지
+                    elements.searchInput.focus();
+                    elements.searchInput.select();
+                }
+            }
+            // ESC 키로 검색 초기화
+            if (e.key === "Escape" && document.activeElement === elements.searchInput) {
+                elements.searchInput.value = "";
+                currentQuery = "";
+                renderTimeline(allUtterances, "");
+                elements.searchInput.blur();
+            }
         });
 
         // === 데이터 로드 ===

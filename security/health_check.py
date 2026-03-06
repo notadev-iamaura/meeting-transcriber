@@ -463,6 +463,34 @@ class HealthChecker:
                     msg += f"\n         → {result.guide}"
                 logger.warning(msg)
 
+    def get_failure_summary(self, report: HealthReport) -> Optional[str]:
+        """헬스체크 실패 시 알림에 사용할 요약 메시지를 생성한다.
+
+        모든 항목이 통과하면 None을 반환한다.
+        실패/경고가 있으면 간결한 요약 문자열을 반환한다.
+        메뉴바 알림, WebSocket 알림 등에서 활용할 수 있다.
+
+        Args:
+            report: 헬스체크 결과 보고서
+
+        Returns:
+            실패 요약 문자열 또는 None (모두 통과 시)
+        """
+        if report.all_passed:
+            return None
+
+        issues: list[str] = []
+        for result in report.results:
+            if result.status == CheckStatus.FAIL:
+                issues.append(f"[실패] {result.name}: {result.message}")
+            elif result.status == CheckStatus.WARN:
+                issues.append(f"[경고] {result.name}: {result.message}")
+
+        return (
+            f"헬스체크 문제 발견 ({report.fail_count}개 실패, "
+            f"{report.warn_count}개 경고):\n" + "\n".join(issues)
+        )
+
 
 def _is_writable(dir_path: Path) -> bool:
     """디렉토리에 쓰기가 가능한지 확인한다.

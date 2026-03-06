@@ -18,9 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Callable, Optional
 
 from config import AppConfig, ThermalConfig
@@ -216,7 +215,14 @@ class ThermalManager:
                 self._temp_reader_available = True
                 return temp
         except Exception as e:
-            logger.debug(f"CPU 온도 읽기 실패: {e}")
+            # 이전에 읽기 성공했다가 실패하는 경우: 일시적 오류 가능성
+            if self._temp_reader_available is True:
+                logger.warning(
+                    f"CPU 온도 읽기 일시 실패 (이전에는 성공): {e}. "
+                    f"배치 카운터 기반 쿨다운으로 폴백합니다."
+                )
+            else:
+                logger.debug(f"CPU 온도 읽기 실패: {e}")
 
         # 첫 시도에서 실패한 경우
         if self._temp_reader_available is None:
@@ -305,6 +311,7 @@ class ThermalManager:
 
         배치 카운터가 한도에 도달하면 호출된다.
         설정된 시간만큼 대기하고 배치 카운터를 리셋한다.
+        asyncio.CancelledError 발생 시에도 쿨다운 상태를 정리한다.
         """
         self._cooling = True
         self._cooldown_start_time = time.monotonic()
@@ -317,7 +324,15 @@ class ThermalManager:
             f"{self._config.cooldown_seconds}초 대기..."
         )
 
-        await asyncio.sleep(self._config.cooldown_seconds)
+        try:
+            await asyncio.sleep(self._config.cooldown_seconds)
+        except asyncio.CancelledError:
+            # 취소 시에도 쿨다운 상태를 정리하여 불일치 방지
+            logger.info("쿨다운 중 작업 취소됨. 쿨다운 상태 정리.")
+            self._cooling = False
+            self._cooldown_start_time = None
+            self._batch_count = 0
+            raise
 
         # 쿨다운 완료
         self._cooling = False

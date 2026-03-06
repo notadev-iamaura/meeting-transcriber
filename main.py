@@ -242,7 +242,28 @@ def _ensure_minimal_dirs(config: AppConfig) -> None:
 # === FastAPI 서버 스레드 ===
 
 
-def start_server_thread(config: AppConfig) -> threading.Thread:
+class _ServerThread(threading.Thread):
+    """FastAPI 서버를 데몬 스레드에서 실행하며 예외를 저장하는 스레드.
+
+    서버 스레드에서 발생한 예외를 메인 스레드에서 확인할 수 있도록
+    exception 속성에 저장한다.
+    """
+
+    def __init__(self, server: "uvicorn.Server") -> None:
+        super().__init__(name="fastapi-server", daemon=True)
+        self._server = server
+        self.exception: Optional[Exception] = None
+
+    def run(self) -> None:
+        """서버를 실행하고 예외 발생 시 저장한다."""
+        try:
+            self._server.run()
+        except Exception as e:
+            self.exception = e
+            logger.error(f"FastAPI 서버 실행 중 오류: {e}", exc_info=True)
+
+
+def start_server_thread(config: AppConfig) -> _ServerThread:
     """FastAPI 서버를 데몬 스레드에서 시작한다.
 
     uvicorn.Server를 직접 사용하여 비메인 스레드에서도
@@ -252,7 +273,7 @@ def start_server_thread(config: AppConfig) -> threading.Thread:
         config: 앱 설정
 
     Returns:
-        시작된 서버 데몬 스레드
+        시작된 서버 데몬 스레드 (_ServerThread)
     """
     import uvicorn
 
@@ -268,18 +289,7 @@ def start_server_thread(config: AppConfig) -> threading.Thread:
     )
     server = uvicorn.Server(uv_config)
 
-    def _run_server() -> None:
-        """서버 실행 래퍼 (스레드 타겟)."""
-        try:
-            server.run()
-        except Exception as e:
-            logger.error(f"FastAPI 서버 실행 중 오류: {e}", exc_info=True)
-
-    thread = threading.Thread(
-        target=_run_server,
-        name="fastapi-server",
-        daemon=True,
-    )
+    thread = _ServerThread(server)
     thread.start()
 
     logger.info(
@@ -365,6 +375,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     # 4. 데이터 디렉토리 초기화
     ensure_data_directories(config)
 
+    # 시그널 핸들러 등록 (모든 모드에서 SIGTERM 처리)
+    _setup_signal_handlers()
+
     # 5-6. 실행 모드 분기
     if args.no_menubar:
         # 헤드리스 모드: 서버를 메인 스레드에서 직접 실행
@@ -378,7 +391,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         # 메뉴바 모드: 서버 데몬 스레드 + rumps 메인 스레드
         server_thread = start_server_thread(config)
-        _setup_signal_handlers()
+
+        # 서버 스레드가 즉시 실패했는지 짧은 대기 후 확인
+        server_thread.join(timeout=1.0)
+        if not server_thread.is_alive() and server_thread.exception is not None:
+            logger.critical(
+                f"FastAPI 서버 시작 실패: {server_thread.exception}"
+            )
+            sys.exit(1)
 
         logger.info("메뉴바 모드 — rumps 앱 시작")
         try:

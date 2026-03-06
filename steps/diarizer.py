@@ -314,6 +314,8 @@ class Diarizer:
     def _run_pipeline(self, pipeline: Any, audio_path: Path) -> Any:
         """pyannote 파이프라인을 실행한다 (동기, 스레드에서 호출).
 
+        PERF: 화자분리 진행 상태를 중간 로깅하여 장시간 작업의 진행 상황을 파악한다.
+
         Args:
             pipeline: pyannote Pipeline 인스턴스
             audio_path: 오디오 파일 경로
@@ -321,18 +323,32 @@ class Diarizer:
         Returns:
             pyannote Annotation 객체
         """
+        import time as _time
+
         params: dict[str, Any] = {}
         if self._min_speakers is not None:
             params["min_speakers"] = self._min_speakers
         if self._max_speakers is not None:
             params["max_speakers"] = self._max_speakers
 
+        # 파일 크기로 예상 소요 시간 안내
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
         logger.info(
             f"화자분리 실행: {audio_path.name} | "
-            f"speakers={self._min_speakers}~{self._max_speakers}"
+            f"파일 크기: {file_size_mb:.1f}MB | "
+            f"speakers={self._min_speakers}~{self._max_speakers} | "
+            f"device={self._device}"
         )
 
-        return pipeline(str(audio_path), **params)
+        start_time = _time.monotonic()
+        result = pipeline(str(audio_path), **params)
+        elapsed = _time.monotonic() - start_time
+
+        logger.info(
+            f"화자분리 파이프라인 실행 완료: {elapsed:.1f}초 소요"
+        )
+
+        return result
 
     def _parse_annotation(
         self, annotation: Any

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import stat
 import subprocess
 from pathlib import Path
 from typing import Optional

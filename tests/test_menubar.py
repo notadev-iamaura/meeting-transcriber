@@ -26,6 +26,8 @@ from ui.menubar import (
     determine_status,
     fetch_status,
     format_queue_summary,
+    format_recording_time,
+    format_uptime,
     get_status_title,
     parse_status_response,
 )
@@ -577,6 +579,46 @@ class TestMeetingTranscriberApp:
 
 
 # === TestAppStatusEnum ===
+
+
+class TestFormatUptime:
+    """format_uptime 함수 테스트."""
+
+    def test_0초(self) -> None:
+        """0초가 00:00:00으로 변환되는지 확인한다."""
+        assert format_uptime(0) == "00:00:00"
+
+    def test_1시간_이상(self) -> None:
+        """1시간 15분 30초가 올바르게 변환되는지 확인한다."""
+        assert format_uptime(4530.0) == "01:15:30"
+
+    def test_하루_이상(self) -> None:
+        """24시간 이상도 올바르게 표시되는지 확인한다."""
+        assert format_uptime(86400.0) == "24:00:00"
+
+    def test_소수점_버림(self) -> None:
+        """소수점 이하 초는 버려지는지 확인한다."""
+        assert format_uptime(61.9) == "00:01:01"
+
+
+class TestFormatRecordingTime:
+    """format_recording_time 함수 테스트."""
+
+    def test_1시간_미만(self) -> None:
+        """1시간 미만이면 MM:SS 형식인지 확인한다."""
+        assert format_recording_time(125) == "02:05"
+
+    def test_0초(self) -> None:
+        """0초가 00:00으로 변환되는지 확인한다."""
+        assert format_recording_time(0) == "00:00"
+
+    def test_1시간_이상(self) -> None:
+        """1시간 이상이면 HH:MM:SS 형식인지 확인한다."""
+        assert format_recording_time(3661) == "01:01:01"
+
+    def test_소수점_버림(self) -> None:
+        """소수점 이하 초는 버려지는지 확인한다."""
+        assert format_recording_time(59.9) == "00:59"
 
 
 class TestAppStatusEnum:

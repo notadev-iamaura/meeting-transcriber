@@ -36,7 +36,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config import AppConfig, ChatConfig, EmbeddingConfig, LLMConfig, SearchConfig
-from core.ollama_client import OllamaConnectionError, OllamaTimeoutError
+from core.ollama_client import OllamaConnectionError, OllamaTimeoutError, clear_connection_cache
 from search.chat import (
     ChatEngine,
     ChatError,
@@ -704,6 +704,10 @@ class TestChatEngineStreaming:
 
 class TestChatEngineOllamaClient:
     """Ollama 클라이언트 테스트 클래스."""
+
+    def setup_method(self) -> None:
+        """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
+        clear_connection_cache()
 
     def _make_engine(self) -> ChatEngine:
         """테스트용 ChatEngine을 생성한다."""

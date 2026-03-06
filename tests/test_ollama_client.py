@@ -24,6 +24,7 @@ from core.ollama_client import (
     chat,
     chat_stream,
     check_connection,
+    clear_connection_cache,
 )
 
 
@@ -130,6 +131,10 @@ class TestOllamaErrorHierarchy:
 
 class TestCheckConnection:
     """check_connection 함수 테스트."""
+
+    def setup_method(self) -> None:
+        """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
+        clear_connection_cache()
 
     def test_연결_성공(self) -> None:
         """서버 연결 성공 시 정상 반환한다."""

@@ -984,9 +984,17 @@ class PipelineManager:
         state.current_step = ""
         state.save(state_path)
 
+        # PERF: 파이프라인 성능 프로파일 — 각 단계별 소요 시간 요약 로그
+        step_timing_parts: list[str] = []
+        for sr in state.step_results:
+            elapsed = sr.get("elapsed_seconds", 0.0)
+            step_name = sr.get("step", "?")
+            step_timing_parts.append(f"{step_name}={elapsed:.1f}s")
+        timing_summary = ", ".join(step_timing_parts)
+
         completion_msg = (
             f"파이프라인 완료: meeting_id={meeting_id}, "
-            f"소요 시간: {pipeline_elapsed:.1f}초"
+            f"총 소요 시간: {pipeline_elapsed:.1f}초"
         )
         if state.degraded:
             completion_msg += (
@@ -994,6 +1002,7 @@ class PipelineManager:
                 f"건너뛴 단계: {state.skipped_steps}"
             )
         logger.info(completion_msg)
+        logger.info(f"단계별 소요 시간: [{timing_summary}]")
 
         return state
 

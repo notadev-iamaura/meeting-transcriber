@@ -206,18 +206,24 @@ class AudioConverter:
         self._check_ffmpeg_installed()
         self._validate_input(input_path)
 
-        # ffprobe로 현재 포맷 확인
-        info = self.probe(input_path)
-        if info is not None:
-            logger.info(
-                f"입력 오디오 정보: {info.codec}, "
-                f"{info.sample_rate}Hz, {info.channels}ch, "
-                f"{info.duration:.1f}초"
-            )
-            # 이미 목표 포맷이면 변환 스킵
-            if self._is_already_target_format(info):
-                logger.info(f"이미 목표 포맷입니다. 변환을 건너뜁니다: {input_path}")
-                return input_path
+        # PERF: WAV 파일일 때만 ffprobe로 포맷 확인 (변환 스킵 판단용)
+        # 비-WAV 포맷(mp3, m4a 등)은 항상 변환이 필요하므로 ffprobe 생략
+        ext = input_path.suffix.lower().lstrip(".")
+        info = None
+        if ext == "wav":
+            info = self.probe(input_path)
+            if info is not None:
+                logger.info(
+                    f"입력 오디오 정보: {info.codec}, "
+                    f"{info.sample_rate}Hz, {info.channels}ch, "
+                    f"{info.duration:.1f}초"
+                )
+                # 이미 목표 포맷이면 변환 스킵
+                if self._is_already_target_format(info):
+                    logger.info(f"이미 목표 포맷입니다. 변환을 건너뜁니다: {input_path}")
+                    return input_path
+        else:
+            logger.info(f"비-WAV 포맷 ({ext}), ffprobe 건너뛰고 바로 변환")
 
         # 출력 경로 결정
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -244,11 +250,18 @@ class AudioConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5분 타임아웃 (긴 녹음 파일 대비)
+                timeout=600,  # 10분 타임아웃 (긴 녹음 파일 대비)
             )
         except subprocess.TimeoutExpired as e:
+            # 타임아웃 시 불완전한 출력 파일 정리
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                    logger.info(f"타임아웃으로 인한 불완전 출력 파일 삭제: {output_path}")
+                except OSError as cleanup_err:
+                    logger.warning(f"불완전 출력 파일 삭제 실패: {cleanup_err}")
             raise ConversionFailedError(
-                f"오디오 변환 타임아웃 (300초 초과): {input_path}"
+                f"오디오 변환 타임아웃 (600초 초과): {input_path}"
             ) from e
 
         if result.returncode != 0:
@@ -266,15 +279,33 @@ class AudioConverter:
             )
 
         # 출력 파일 크기가 0이면 실패로 간주
-        if output_path.stat().st_size == 0:
+        output_size = output_path.stat().st_size
+        if output_size == 0:
             output_path.unlink()
             raise ConversionFailedError(
                 f"변환된 파일 크기가 0입니다: {output_path}"
             )
 
+        # 출력 파일이 너무 작으면 (44바이트 = WAV 헤더만 있는 빈 파일) 경고
+        if output_size <= 44:
+            output_path.unlink()
+            raise ConversionFailedError(
+                f"변환된 파일이 WAV 헤더만 포함합니다 ({output_size} bytes): {output_path}"
+            )
+
+        # ffprobe로 변환 결과 무결성 검증 (best-effort — 실패해도 계속 진행)
+        try:
+            output_info = self.probe(output_path)
+            if output_info is not None and output_info.duration <= 0.0:
+                logger.warning(
+                    f"변환된 파일의 duration이 0입니다. 파일이 손상되었을 수 있습니다: {output_path}"
+                )
+        except Exception as probe_err:
+            logger.debug(f"변환 후 ffprobe 검증 실패 (무시): {probe_err}")
+
         logger.info(
             f"오디오 변환 완료: {output_path} "
-            f"({output_path.stat().st_size / 1024:.1f}KB)"
+            f"({output_size / 1024:.1f}KB)"
         )
         return output_path
 

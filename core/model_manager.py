@@ -166,20 +166,29 @@ class ModelLoadManager:
         self._current.instance = None
         self._current = None
 
-        # 가비지 컬렉션 수행
-        gc.collect()
+        # 가비지 컬렉션 수행 (실패해도 언로드 자체는 완료된 것으로 처리)
+        try:
+            gc.collect()
+        except Exception as gc_err:
+            logger.warning(f"gc.collect() 실행 중 오류 (무시): {gc_err}")
 
         # Apple Silicon Metal 캐시 정리
         self._clear_gpu_cache()
 
-        mem_after_unload = self._get_memory_usage_mb()
-        freed_mb = mem_before_unload - mem_after_unload
-
-        logger.info(
-            f"모델 언로드 완료: {model_name} | "
-            f"해제된 메모리: {freed_mb:.1f}MB | "
-            f"현재 메모리: {mem_after_unload:.1f}MB"
-        )
+        try:
+            mem_after_unload = self._get_memory_usage_mb()
+            freed_mb = mem_before_unload - mem_after_unload
+            logger.info(
+                f"모델 언로드 완료: {model_name} | "
+                f"해제된 메모리: {freed_mb:.1f}MB | "
+                f"현재 메모리: {mem_after_unload:.1f}MB"
+            )
+        except Exception as mem_err:
+            # 메모리 측정 실패 시에도 언로드 자체는 정상 완료
+            logger.info(
+                f"모델 언로드 완료: {model_name} | "
+                f"메모리 측정 실패: {mem_err}"
+            )
 
     def _check_memory_limit(self) -> None:
         """현재 메모리 사용량이 peak_ram_limit_gb를 초과하는지 확인한다.
@@ -277,6 +286,8 @@ class ModelLoadManager:
         self,
         name: str,
         loader: ModelLoader,
+        *,
+        keep_loaded: bool = False,
     ) -> "_ModelContext":
         """컨텍스트 매니저로 모델을 로드하고, 블록 종료 시 자동 언로드한다.
 
@@ -285,14 +296,19 @@ class ModelLoadManager:
                 result = model.transcribe(audio)
             # 블록 종료 시 자동 언로드
 
+        PERF-001: keep_loaded=True 시 블록 종료 후에도 모델을 언로드하지 않는다.
+        연속으로 동일 모델을 사용하는 단계(corrector → summarizer)에서
+        불필요한 해제/재로드를 방지한다.
+
         Args:
             name: 모델 식별 이름
             loader: 모델 로드 함수 (동기 또는 비동기)
+            keep_loaded: True면 블록 종료 후에도 모델 유지 (기본 False)
 
         Returns:
             비동기 컨텍스트 매니저 (_ModelContext)
         """
-        return _ModelContext(self, name, loader)
+        return _ModelContext(self, name, loader, keep_loaded=keep_loaded)
 
     def get_status(self) -> dict[str, Any]:
         """현재 모델 매니저의 상태 정보를 딕셔너리로 반환한다.
@@ -320,6 +336,8 @@ class _ModelContext:
 
     __aenter__에서 모델을 로드하고, __aexit__에서 자동 언로드한다.
     예외가 발생해도 반드시 언로드를 수행한다.
+
+    PERF-001: keep_loaded=True 시 블록 종료 후에도 모델을 유지한다.
     """
 
     def __init__(
@@ -327,17 +345,24 @@ class _ModelContext:
         manager: ModelLoadManager,
         name: str,
         loader: ModelLoader,
+        *,
+        keep_loaded: bool = False,
     ) -> None:
         self._manager = manager
         self._name = name
         self._loader = loader
+        self._keep_loaded = keep_loaded
 
     async def __aenter__(self) -> Any:
         """모델을 로드하고 인스턴스를 반환한다."""
         return await self._manager.load_model(self._name, self._loader)
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """모델을 언로드한다. 예외 발생 여부와 무관하게 반드시 수행."""
+        """모델을 언로드한다. keep_loaded=True면 유지, 예외 시에는 항상 언로드."""
+        # PERF-001: keep_loaded=True이고 예외가 없으면 모델 유지
+        if self._keep_loaded and exc_type is None:
+            logger.debug(f"모델 유지 (keep_loaded=True): {self._name}")
+            return
         await self._manager.unload_model()
 
 

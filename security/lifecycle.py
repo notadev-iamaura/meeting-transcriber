@@ -21,7 +21,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -138,6 +138,8 @@ class LifecycleManager:
     outputs 디렉토리 내 회의 데이터를 Hot/Warm/Cold로 분류하고
     적절한 관리 작업을 수행한다.
 
+    동시 실행 방지: _running 플래그로 중복 실행을 차단한다.
+
     Args:
         config: 애플리케이션 설정 인스턴스
         now: 현재 시각 (테스트용 주입, None이면 실제 시각 사용)
@@ -148,6 +150,9 @@ class LifecycleManager:
         result = manager.run()
         logger.info(f"압축: {result.compressed}, 삭제: {result.deleted}")
     """
+
+    # FLAC 변환 시 최소 필요 디스크 여유 공간 (바이트)
+    _MIN_DISK_FREE_BYTES = 500 * 1024 * 1024  # 500MB
 
     def __init__(
         self,
@@ -160,6 +165,8 @@ class LifecycleManager:
         self._warm_days = config.lifecycle.warm_days
         self._cold_action = ColdAction(config.lifecycle.cold_action)
         self._now = now or datetime.now()
+        # 동시 실행 방지 플래그
+        self._running = False
 
     @property
     def outputs_dir(self) -> Path:
@@ -171,10 +178,45 @@ class LifecycleManager:
 
         outputs 디렉토리 내 모든 회의를 스캔하고,
         각 회의의 나이에 따라 적절한 작업을 수행한다.
+        동시 실행을 방지하여 파일 충돌을 예방한다.
 
         Returns:
             실행 결과 (압축/삭제/스킵 수, 에러 목록, 절약 바이트)
         """
+        # 동시 실행 방지
+        if self._running:
+            logger.warning("라이프사이클 관리가 이미 실행 중입니다. 중복 실행을 건너뜁니다.")
+            return LifecycleResult()
+
+        self._running = True
+        try:
+            return self._run_internal()
+        finally:
+            self._running = False
+
+    def _check_disk_space(self) -> bool:
+        """FLAC 변환을 위한 디스크 여유 공간을 확인한다.
+
+        Returns:
+            충분한 공간이 있으면 True, 부족하면 False
+        """
+        try:
+            usage = shutil.disk_usage(str(self._outputs_dir))
+            if usage.free < self._MIN_DISK_FREE_BYTES:
+                logger.warning(
+                    f"디스크 여유 공간 부족: {usage.free / (1024 * 1024):.0f}MB "
+                    f"(최소 {self._MIN_DISK_FREE_BYTES / (1024 * 1024):.0f}MB 필요). "
+                    f"FLAC 변환을 건너뜁니다."
+                )
+                return False
+            return True
+        except OSError as e:
+            logger.warning(f"디스크 공간 확인 실패: {e}")
+            # 확인 실패 시 안전하게 진행 (변환 시 실패하면 자체 에러 처리가 됨)
+            return True
+
+    def _run_internal(self) -> LifecycleResult:
+        """라이프사이클 관리의 실제 실행 로직."""
         result = LifecycleResult()
 
         if not self._outputs_dir.exists():
@@ -184,8 +226,15 @@ class LifecycleManager:
         meetings = self.scan_meetings()
         result.total_scanned = len(meetings)
 
+        # 디스크 여유 공간 사전 확인
+        has_disk_space = self._check_disk_space()
+
         for info in meetings:
             try:
+                # 디스크 부족 시 WARM 단계(FLAC 변환)는 건너뜀
+                if not has_disk_space and info.tier == DataTier.WARM:
+                    result.skipped += 1
+                    continue
                 self._process_meeting(info, result)
             except LifecycleError as e:
                 result.errors.append((info.meeting_id, str(e)))

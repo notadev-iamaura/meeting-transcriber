@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.ollama_client import OllamaConnectionError, OllamaTimeoutError
+from core.ollama_client import OllamaConnectionError, OllamaTimeoutError, clear_connection_cache
 from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.summarizer import (
     EmptySummaryInputError,
@@ -363,8 +363,9 @@ class TestSplitUtterances:
             )
             for i in range(5)
         ]
-        # 각 발화가 약 8토큰([A] 발화N\n)이므로 max_tokens=20이면 약 2개씩 분할
-        chunks = _split_utterances(utterances, max_tokens=20)
+        # PERF: 개선된 토큰 추정(한국어/ASCII 분리)에서 각 발화는 약 2~3토큰
+        # max_tokens=5이면 2~3개씩 분할됨
+        chunks = _split_utterances(utterances, max_tokens=5)
         assert len(chunks) >= 2
 
 
@@ -551,6 +552,10 @@ class TestSummaryErrors:
 
 class TestSummarizer:
     """Summarizer 클래스 테스트."""
+
+    def setup_method(self) -> None:
+        """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
+        clear_connection_cache()
 
     def test_초기화(self) -> None:
         """__new__ 패턴으로 초기화된 인스턴스의 속성을 확인한다."""
