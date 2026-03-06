@@ -28,8 +28,11 @@ diarization:
 
 # === LLM 설정 (EXAONE via Ollama) ===
 llm:
-  model_name: "exaone3.5:7.8b-instruct-q4_K_M"
+  backend: "ollama"                           # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
+  model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
+  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # MLX 모델명
+  mlx_max_tokens: 2000                       # MLX 최대 생성 토큰
   max_context_tokens: 8192                   # 컨텍스트 윈도우
   temperature: 0.3                           # 생성 온도
   correction_batch_size: 15                  # 보정 시 배치 크기 (발화 수, PERF: 8192 컨텍스트 윈도우 활용도 개선)

@@ -162,6 +162,14 @@ class ModelLoadManager:
 
         logger.info(f"모델 언로드 시작: {model_name}")
 
+        # 백엔드별 정리 (MLX: 모델 해제 + Metal 캐시, Ollama: no-op)
+        if self._current.instance is not None:
+            if hasattr(self._current.instance, "cleanup"):
+                try:
+                    self._current.instance.cleanup()
+                except Exception as cleanup_err:
+                    logger.warning(f"cleanup() 실행 중 오류 (무시): {cleanup_err}")
+
         # 모델 참조 제거
         self._current.instance = None
         self._current = None

@@ -5,13 +5,13 @@ RAG 기반 AI Chat 엔진 모듈 (RAG-based AI Chat Engine Module)
       회의 내용 기반 질의응답을 수행한다.
 주요 기능:
     - 하이브리드 검색(벡터 + FTS5) → 상위 5청크 컨텍스트 구성
-    - EXAONE 3.5 LLM을 통한 RAG 응답 생성 (Ollama API)
+    - LLM 백엔드(Ollama/MLX)를 통한 RAG 응답 생성
     - 대화 이력 슬라이딩 윈도우 (최근 3쌍 유지)
     - 참조 출처(회의 ID, 화자, 시간) 표시
     - 스트리밍 응답 지원 (stream=True)
-    - Ollama 실패 시 검색 결과만 반환 (graceful degradation)
+    - LLM 실패 시 검색 결과만 반환 (graceful degradation)
     - 비동기(async) 인터페이스 지원
-의존성: config 모듈, search/hybrid_search 모듈, core/model_manager 모듈
+의존성: config 모듈, search/hybrid_search 모듈, core/model_manager 모듈, core/llm_backend 모듈
 """
 
 from __future__ import annotations
@@ -25,15 +25,13 @@ from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from config import AppConfig, ChatConfig, get_config
-from core.model_manager import ModelLoadManager, get_model_manager
-from core.ollama_client import (
-    OllamaConnectionError,
-    OllamaResponseError,
-    OllamaTimeoutError,
-    check_connection as _check_ollama_connection,
-    chat as _ollama_chat,
-    chat_stream as _ollama_chat_stream,
+from core.llm_backend import (
+    LLMBackend,
+    LLMConnectionError,
+    LLMGenerationError,
+    create_backend,
 )
+from core.model_manager import ModelLoadManager, get_model_manager
 from search.hybrid_search import (
     HybridSearchEngine,
     SearchResponse,
@@ -372,12 +370,8 @@ class ChatEngine:
         self._max_history_pairs = self._chat_config.max_history_pairs
         self._system_prompt = self._chat_config.system_prompt
 
-        # LLM 설정 캐시
-        self._llm_host = self._config.llm.host
-        self._llm_model = self._config.llm.model_name
-        self._temperature = self._config.llm.temperature
+        # LLM 설정 캐시 (컨텍스트 윈도우는 truncation에 사용)
         self._max_context_tokens = self._config.llm.max_context_tokens
-        self._request_timeout = self._config.llm.request_timeout_seconds
 
         # 검색 설정
         self._top_k = self._config.search.top_k
@@ -389,7 +383,7 @@ class ChatEngine:
         )
 
         logger.info(
-            f"ChatEngine 초기화: model={self._llm_model}, "
+            f"ChatEngine 초기화: backend={self._config.llm.backend}, "
             f"max_history_pairs={self._max_history_pairs}, "
             f"top_k={self._top_k}"
         )
@@ -425,89 +419,43 @@ class ChatEngine:
         session.clear()
         logger.info(f"대화 세션 초기화: session_id={session_id or 'default'}")
 
-    def _create_ollama_client(self) -> dict[str, Any]:
-        """Ollama 클라이언트 설정을 반환한다.
+    def _create_backend(self) -> LLMBackend:
+        """LLM 백엔드를 생성하여 반환한다.
 
-        통합 ollama_client 모듈을 통해 연결을 확인하고 설정을 반환한다.
+        ModelLoadManager의 loader 함수로 사용된다.
+        config.llm.backend에 따라 Ollama 또는 MLX 백엔드를 선택한다.
 
         Returns:
-            Ollama 연결 설정 딕셔너리
+            LLMBackend 인스턴스
 
         Raises:
-            OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
+            LLMConnectionError: 백엔드 연결 실패 시
         """
-        _check_ollama_connection(self._llm_host)
+        return create_backend(self._config.llm)
 
-        return {
-            "host": self._llm_host,
-            "model": self._llm_model,
-            "temperature": self._temperature,
-            "num_ctx": self._max_context_tokens,
-            "timeout": self._request_timeout,
-        }
-
-    def _call_ollama_chat(
+    def _call_llm_chat(
         self,
-        client_config: dict[str, Any],
+        backend: LLMBackend,
         messages: list[dict[str, str]],
     ) -> str:
-        """Ollama /api/chat 엔드포인트를 호출하여 응답을 반환한다.
-
-        통합 ollama_client 모듈을 사용하여 stream=false로 응답을 수신한다.
+        """LLM 백엔드를 호출하여 응답을 반환한다.
 
         Args:
-            client_config: Ollama 연결 설정
-            messages: Ollama messages 형식의 대화 목록
+            backend: LLM 백엔드 인스턴스
+            messages: 대화 메시지 목록
 
         Returns:
             LLM 응답 텍스트
 
         Raises:
-            OllamaConnectionError: 연결 실패 시
-            OllamaTimeoutError: 타임아웃 시
+            LLMConnectionError: 연결 실패 시
+            LLMGenerationError: 타임아웃 시
             ChatError: 기타 API 오류 시
         """
         try:
-            return _ollama_chat(
-                host=client_config["host"],
-                model=client_config["model"],
-                messages=messages,
-                temperature=client_config["temperature"],
-                num_ctx=client_config["num_ctx"],
-                timeout=client_config["timeout"],
-            )
-        except OllamaResponseError as e:
+            return backend.chat(messages=messages)
+        except LLMGenerationError as e:
             raise ChatError(str(e)) from e
-
-    def _call_ollama_chat_stream(
-        self,
-        client_config: dict[str, Any],
-        messages: list[dict[str, str]],
-    ) -> list[str]:
-        """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
-
-        통합 ollama_client 모듈을 사용하여 stream=true로 토큰을 수신한다.
-        동기 함수이므로 asyncio.to_thread로 래핑하여 사용한다.
-
-        Args:
-            client_config: Ollama 연결 설정
-            messages: Ollama messages 형식의 대화 목록
-
-        Returns:
-            토큰 청크 목록
-
-        Raises:
-            OllamaConnectionError: 연결 실패 시
-            OllamaTimeoutError: 타임아웃 시
-        """
-        return list(_ollama_chat_stream(
-            host=client_config["host"],
-            model=client_config["model"],
-            messages=messages,
-            temperature=client_config["temperature"],
-            num_ctx=client_config["num_ctx"],
-            timeout=client_config["timeout"],
-        ))
 
     def _truncate_context(
         self,
@@ -678,10 +626,10 @@ class ChatEngine:
         # 3. LLM 호출
         try:
             async with self._model_manager.acquire(
-                "exaone", self._create_ollama_client
-            ) as client_config:
+                "exaone", self._create_backend
+            ) as backend:
                 answer = await asyncio.to_thread(
-                    self._call_ollama_chat, client_config, messages
+                    self._call_llm_chat, backend, messages
                 )
 
             # NFC 정규화 적용
@@ -704,7 +652,7 @@ class ChatEngine:
                 llm_used=True,
             )
 
-        except (OllamaConnectionError, OllamaTimeoutError) as e:
+        except (LLMConnectionError, LLMGenerationError) as e:
             # LLM 실패 시 검색 결과만 반환 (graceful degradation)
             logger.warning(f"LLM 호출 실패, 검색 결과만 반환: {e}")
 
@@ -814,21 +762,16 @@ class ChatEngine:
         # 3. LLM 스트리밍 호출 (Queue 브릿지를 통한 실시간 스트리밍)
         try:
             async with self._model_manager.acquire(
-                "exaone", self._create_ollama_client
-            ) as client_config:
+                "exaone", self._create_backend
+            ) as backend:
                 # 동기 스트리밍 스레드 ↔ 비동기 제너레이터 브릿지용 큐
                 token_queue: queue.Queue[str | None | Exception] = queue.Queue()
 
                 def _stream_worker() -> None:
-                    """별도 스레드에서 Ollama 스트리밍 호출을 실행한다."""
+                    """별도 스레드에서 LLM 스트리밍 호출을 실행한다."""
                     try:
-                        for token in _ollama_chat_stream(
-                            host=client_config["host"],
-                            model=client_config["model"],
+                        for token in backend.chat_stream(
                             messages=messages,
-                            temperature=client_config["temperature"],
-                            num_ctx=client_config["num_ctx"],
-                            timeout=client_config["timeout"],
                         ):
                             token_queue.put(token)
                     except Exception as e:
@@ -844,11 +787,12 @@ class ChatEngine:
 
                 # 큐에서 토큰을 비동기로 꺼내면서 즉시 yield
                 full_answer_parts: list[str] = []
+                timeout_seconds = self._config.llm.request_timeout_seconds
                 while True:
                     try:
                         item = await asyncio.to_thread(
                             token_queue.get,
-                            timeout=client_config["timeout"],
+                            timeout=timeout_seconds,
                         )
                     except Exception:
                         # 큐 타임아웃 등 예외 시 루프 종료
@@ -878,7 +822,7 @@ class ChatEngine:
                 "data": {"answer": full_answer},
             }
 
-        except (OllamaConnectionError, OllamaTimeoutError, ChatError) as e:
+        except (LLMConnectionError, LLMGenerationError, ChatError) as e:
             logger.warning(f"스트리밍 LLM 호출 실패: {e}")
             yield {
                 "type": "error",

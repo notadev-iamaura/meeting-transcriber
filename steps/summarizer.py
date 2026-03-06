@@ -1,7 +1,7 @@
 """
 회의록 생성기 모듈 (Meeting Summarizer Module)
 
-목적: Ollama API를 통해 EXAONE 3.5 LLM으로 보정된 전사문을
+목적: LLM 백엔드(Ollama/MLX)를 통해 EXAONE 3.5 LLM으로 보정된 전사문을
       구조화된 마크다운 회의록으로 변환한다.
 주요 기능:
     - 전사문 → 마크다운 회의록 자동 생성 (주요 안건, 결정 사항, 액션 아이템)
@@ -10,7 +10,7 @@
     - 요약 실패 시 원본 전사문 기반 폴백 회의록 생성 (graceful degradation)
     - JSON 체크포인트 저장/복원 지원
     - 비동기(async) 인터페이스 지원
-의존성: config 모듈, core/model_manager 모듈, steps/corrector 모듈, Ollama (localhost)
+의존성: config 모듈, core/model_manager 모듈, core/llm_backend 모듈, steps/corrector 모듈
 """
 
 from __future__ import annotations
@@ -25,14 +25,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import AppConfig, get_config
-from core.model_manager import ModelLoadManager, get_model_manager
-from core.ollama_client import (
-    OllamaConnectionError,
-    OllamaResponseError,
-    OllamaTimeoutError,
-    check_connection as _check_ollama_connection,
-    chat as _ollama_chat,
+from core.llm_backend import (
+    LLMBackend,
+    LLMConnectionError,
+    LLMGenerationError,
+    create_backend,
 )
+from core.model_manager import ModelLoadManager, get_model_manager
 from steps.corrector import CorrectedResult, CorrectedUtterance
 
 logger = logging.getLogger(__name__)
@@ -370,54 +369,40 @@ class Summarizer:
         self._manager = model_manager or get_model_manager()
 
         # LLM 설정 캐시
-        self._model_name = self._config.llm.model_name
-        self._host = self._config.llm.host
-        self._temperature = self._config.llm.temperature
         self._max_context = self._config.llm.max_context_tokens
-        self._timeout = self._config.llm.request_timeout_seconds
 
         # 입력 토큰 한도 (컨텍스트 윈도우 - 예약 토큰)
         self._max_input_tokens = self._max_context - _RESERVED_TOKENS
 
         logger.info(
-            f"Summarizer 초기화: model={self._model_name}, "
-            f"host={self._host}, max_input_tokens={self._max_input_tokens}"
+            f"Summarizer 초기화: backend={self._config.llm.backend}, "
+            f"max_input_tokens={self._max_input_tokens}"
         )
 
-    def _create_ollama_client(self) -> dict[str, Any]:
-        """Ollama 클라이언트 설정을 반환한다.
+    def _create_backend(self) -> LLMBackend:
+        """LLM 백엔드를 생성하여 반환한다.
 
         ModelLoadManager의 loader 함수로 사용된다.
-        통합 ollama_client 모듈을 통해 연결을 확인하고 설정을 반환한다.
+        config.llm.backend에 따라 Ollama 또는 MLX 백엔드를 선택한다.
 
         Returns:
-            Ollama 연결 설정 딕셔너리
+            LLMBackend 인스턴스
 
         Raises:
-            OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
+            LLMConnectionError: 백엔드 연결 실패 시
         """
-        _check_ollama_connection(self._host)
+        return create_backend(self._config.llm)
 
-        return {
-            "host": self._host,
-            "model": self._model_name,
-            "temperature": self._temperature,
-            "num_ctx": self._max_context,
-            "timeout": self._timeout,
-        }
-
-    def _call_ollama(
+    def _call_llm(
         self,
-        client_config: dict[str, Any],
+        backend: LLMBackend,
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        """Ollama API를 호출하여 응답을 반환한다.
-
-        통합 ollama_client 모듈을 사용하여 /api/chat 엔드포인트를 호출한다.
+        """LLM 백엔드를 호출하여 응답을 반환한다.
 
         Args:
-            client_config: Ollama 연결 설정
+            backend: LLM 백엔드 인스턴스
             system_prompt: 시스템 프롬프트
             user_prompt: 사용자 프롬프트 (전사문 텍스트)
 
@@ -425,30 +410,25 @@ class Summarizer:
             LLM 응답 텍스트 (NFC 정규화 적용)
 
         Raises:
-            OllamaConnectionError: 연결 실패 시
-            OllamaTimeoutError: 타임아웃 시
+            LLMConnectionError: 연결 실패 시
+            LLMGenerationError: 타임아웃 시
             SummaryError: 기타 API 오류 시
         """
         try:
-            content = _ollama_chat(
-                host=client_config["host"],
-                model=client_config["model"],
+            content = backend.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=client_config["temperature"],
-                num_ctx=client_config["num_ctx"],
-                timeout=client_config["timeout"],
             )
-        except OllamaResponseError as e:
+        except LLMGenerationError as e:
             raise SummaryError(str(e)) from e
 
         return unicodedata.normalize("NFC", content.strip())
 
     def _summarize_single(
         self,
-        client_config: dict[str, Any],
+        backend: LLMBackend,
         transcript: str,
         speakers: list[str],
     ) -> str:
@@ -457,7 +437,7 @@ class Summarizer:
         전사문이 컨텍스트 윈도우에 들어가는 경우 사용한다.
 
         Args:
-            client_config: Ollama 연결 설정
+            backend: LLM 백엔드 인스턴스
             transcript: 포맷팅된 전사문 텍스트
             speakers: 화자 라벨 목록
 
@@ -468,13 +448,13 @@ class Summarizer:
             f"참석자: {', '.join(speakers)}\n\n"
             f"=== 전사문 ===\n{transcript}"
         )
-        return self._call_ollama(
-            client_config, _SYSTEM_PROMPT, user_prompt
+        return self._call_llm(
+            backend, _SYSTEM_PROMPT, user_prompt
         )
 
     def _summarize_chunked(
         self,
-        client_config: dict[str, Any],
+        backend: LLMBackend,
         chunks: list[list[CorrectedUtterance]],
         speakers: list[str],
     ) -> str:
@@ -485,7 +465,7 @@ class Summarizer:
         2단계: 부분 요약들을 통합하여 최종 회의록 생성
 
         Args:
-            client_config: Ollama 연결 설정
+            backend: LLM 백엔드 인스턴스
             chunks: 분할된 발화 청크 목록
             speakers: 화자 라벨 목록
 
@@ -507,13 +487,13 @@ class Summarizer:
             )
 
             try:
-                partial = self._call_ollama(
-                    client_config, _CHUNK_SUMMARY_PROMPT, user_prompt
+                partial = self._call_llm(
+                    backend, _CHUNK_SUMMARY_PROMPT, user_prompt
                 )
                 partial_summaries.append(
                     f"### 파트 {i + 1}\n{partial}"
                 )
-            except (OllamaConnectionError, OllamaTimeoutError):
+            except (LLMConnectionError, LLMGenerationError):
                 raise
             except SummaryError as e:
                 logger.warning(f"청크 {i + 1} 요약 실패: {e}")
@@ -541,10 +521,10 @@ class Summarizer:
         )
 
         try:
-            return self._call_ollama(
-                client_config, _MERGE_SUMMARY_PROMPT, user_prompt
+            return self._call_llm(
+                backend, _MERGE_SUMMARY_PROMPT, user_prompt
             )
-        except (SummaryError, OllamaResponseError) as e:
+        except (SummaryError, LLMGenerationError) as e:
             # 통합 단계 실패 시 부분 요약들을 이어붙여 폴백 반환
             logger.warning(f"부분 요약 통합 실패, 파트별 요약 병합으로 대체: {e}")
             fallback_lines = [
@@ -574,8 +554,8 @@ class Summarizer:
 
         Raises:
             EmptySummaryInputError: 요약할 발화가 없을 때
-            OllamaConnectionError: Ollama 서버 연결 실패 시
-            OllamaTimeoutError: Ollama 요청 타임아웃 시
+            LLMConnectionError: LLM 백엔드 연결 실패 시
+            LLMGenerationError: LLM 생성 실패/타임아웃 시
         """
         if not corrected.utterances:
             raise EmptySummaryInputError("요약할 발화가 비어있습니다.")
@@ -601,8 +581,8 @@ class Summarizer:
 
         try:
             async with self._manager.acquire(
-                "exaone", self._create_ollama_client
-            ) as client_config:
+                "exaone", self._create_backend
+            ) as backend:
                 if needs_chunking:
                     # 분할 요약
                     chunks = _split_utterances(
@@ -617,7 +597,7 @@ class Summarizer:
 
                     markdown = await asyncio.to_thread(
                         self._summarize_chunked,
-                        client_config,
+                        backend,
                         chunks,
                         speakers,
                     )
@@ -627,12 +607,12 @@ class Summarizer:
 
                     markdown = await asyncio.to_thread(
                         self._summarize_single,
-                        client_config,
+                        backend,
                         full_transcript,
                         speakers,
                     )
 
-        except (OllamaConnectionError, OllamaTimeoutError):
+        except (LLMConnectionError, LLMGenerationError):
             raise
         except SummaryError as e:
             # 요약 실패 시 폴백 회의록 생성

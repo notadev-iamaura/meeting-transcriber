@@ -9,7 +9,7 @@
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
 - **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
-- **AI 교정**: EXAONE 3.5 7.8B (Ollama) 로컬 LLM으로 전사 오류 교정
+- **AI 교정**: EXAONE 3.5 7.8B 로컬 LLM으로 전사 오류 교정 (Ollama 또는 MLX 백엔드 선택 가능)
 - **시맨틱 검색**: ChromaDB + SQLite FTS5 하이브리드 검색
 - **AI 채팅**: 회의 내용 기반 질의응답
 - **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
@@ -29,7 +29,26 @@
 | RAM | 16GB 이상 |
 | 디스크 | 20GB 이상 여유 공간 |
 | Python | 3.11 이상 |
-| 기타 | ffmpeg, Ollama |
+| 기타 | ffmpeg |
+
+> **참고**: LLM 백엔드로 Ollama 또는 MLX를 선택할 수 있습니다.
+> Ollama 선택 시 별도 Ollama 앱 설치가 필요하고, MLX 선택 시 추가 설치 없이 동작합니다.
+
+### 내 Mac에 맞는 LLM 백엔드 확인
+
+```bash
+# 칩 종류 확인
+sysctl -n machdep.cpu.brand_string
+
+# RAM 확인
+echo "$(( $(sysctl -n hw.memsize) / 1073741824 ))GB"
+```
+
+| 내 Mac | 권장 백엔드 | 이유 |
+|--------|-------------|------|
+| **M3/M4 + 16GB 이상** | `mlx` (권장) | 통합 메모리 네이티브, 10~30% 빠름, Ollama 설치 불필요 |
+| **M1/M2 + 16GB 이상** | `mlx` 또는 `ollama` | 둘 다 사용 가능 |
+| **M1/M2 + 8GB** | `ollama` | MLX in-process 로드 시 메모리 부족 위험 |
 
 ## 빠른 시작
 
@@ -88,9 +107,33 @@ bash scripts/install.sh
 - Homebrew 확인
 - Python 3.11+ 확인
 - ffmpeg 설치
-- Ollama 확인
+- Ollama 확인 (Ollama 백엔드 사용 시)
 - EXAONE 3.5 모델 다운로드
 - 데이터 디렉토리 생성 + 보안 설정
+
+### 4-1. LLM 백엔드 선택
+
+위 "내 Mac에 맞는 LLM 백엔드 확인" 결과에 따라 택 1:
+
+**옵션 A: Ollama 백엔드 (기본값)**
+```bash
+# Ollama 앱 설치 필요: https://ollama.com
+ollama pull exaone3.5:7.8b-instruct-q4_K_M
+# config.yaml 변경 불필요 (기본값이 ollama)
+```
+
+**옵션 B: MLX 백엔드 (M3/M4 + 16GB 이상 권장)**
+```bash
+# mlx-lm은 pip install 시 자동 설치됨
+# config.yaml에서 백엔드만 변경:
+sed -i '' 's/backend: "ollama"/backend: "mlx"/' config.yaml
+
+# 또는 환경변수로 설정 (config.yaml 변경 없이):
+export MT_LLM_BACKEND=mlx
+```
+
+> MLX 백엔드는 별도 서버 없이 파이썬 프로세스 내에서 모델을 직접 로드합니다.
+> 최초 실행 시 HuggingFace에서 모델이 자동 다운로드됩니다 (~5GB).
 
 ### 5. HuggingFace 토큰 설정 (화자 분리에 필요)
 
@@ -243,8 +286,11 @@ bash scripts/setup_launchagent.sh
 |------|------|--------|
 | `paths.base_dir` | 데이터 디렉토리 | `~/.meeting-transcriber` |
 | `stt.model_name` | Whisper 모델 | `whisper-medium-ko-zeroth` |
-| `llm.model_name` | LLM 모델 | `exaone3.5:7.8b-instruct-q4_K_M` |
-| `llm.host` | Ollama 주소 | `http://127.0.0.1:11434` |
+| `llm.backend` | LLM 백엔드 (`"ollama"` 또는 `"mlx"`) | `"ollama"` |
+| `llm.model_name` | Ollama 모델명 | `exaone3.5:7.8b-instruct-q4_K_M` |
+| `llm.mlx_model_name` | MLX 모델명 | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` |
+| `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
+| `llm.host` | Ollama 주소 (Ollama 백엔드 시) | `http://127.0.0.1:11434` |
 | `server.port` | 웹 서버 포트 | `8765` |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |
@@ -260,6 +306,7 @@ bash scripts/setup_launchagent.sh
 |----------|------|
 | `MT_BASE_DIR` | 데이터 디렉토리 |
 | `MT_SERVER_PORT` | 서버 포트 |
+| `MT_LLM_BACKEND` | LLM 백엔드 (`ollama` 또는 `mlx`) |
 | `MT_LLM_HOST` | Ollama 호스트 |
 | `HUGGINGFACE_TOKEN` | HuggingFace 토큰 |
 
@@ -318,7 +365,7 @@ meeting-transcriber/
 |------|------|
 | STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) (Apple MLX) |
 | 화자 분리 | [pyannote-audio](https://github.com/pyannote/pyannote-audio) 3.1 (CPU) |
-| LLM | [EXAONE 3.5](https://huggingface.co/LGAI-EXAONE) 7.8B Q4 via [Ollama](https://ollama.com) |
+| LLM | [EXAONE 3.5](https://huggingface.co/LGAI-EXAONE) 7.8B Q4 via [Ollama](https://ollama.com) 또는 [MLX](https://github.com/ml-explore/mlx-examples) |
 | 임베딩 | [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (MPS) |
 | 벡터 DB | [ChromaDB](https://www.trychroma.com/) |
 | 키워드 검색 | SQLite FTS5 |
@@ -328,6 +375,7 @@ meeting-transcriber/
 ## 아키텍처 특징
 
 - **100% 오프라인**: 모든 AI 모델이 로컬에서 실행, 외부 API 호출 없음
+- **듀얼 LLM 백엔드**: Ollama (서버 모드) 또는 MLX (in-process) 중 하드웨어에 맞게 선택
 - **Zoom 자동 녹음**: 회의 감지 → 녹음 → 전사까지 완전 자동화
 - **순차 모델 로드**: RAM 16GB 제한 내에서 피크 9.5GB 유지
 - **서멀 관리**: 팬리스 MacBook Air에서도 안정적 실행 (2-job 배치 + 3분 쿨다운)

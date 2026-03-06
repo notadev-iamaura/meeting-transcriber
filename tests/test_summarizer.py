@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.llm_backend import LLMConnectionError, LLMGenerationError
 from core.ollama_client import OllamaConnectionError, OllamaTimeoutError, clear_connection_cache
 from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.summarizer import (
@@ -131,11 +132,7 @@ def _create_summarizer() -> Summarizer:
     instance = Summarizer.__new__(Summarizer)
     instance._config = MagicMock()
     instance._manager = MagicMock()
-    instance._model_name = "exaone3.5:7.8b-instruct-q4_K_M"
-    instance._host = "http://127.0.0.1:11434"
-    instance._temperature = 0.3
     instance._max_context = 8192
-    instance._timeout = 120
     instance._max_input_tokens = 8192 - 2000  # 6192
     return instance
 
@@ -560,188 +557,133 @@ class TestSummarizer:
     def test_초기화(self) -> None:
         """__new__ 패턴으로 초기화된 인스턴스의 속성을 확인한다."""
         summarizer = _create_summarizer()
-        assert summarizer._model_name == "exaone3.5:7.8b-instruct-q4_K_M"
-        assert summarizer._host == "http://127.0.0.1:11434"
-        assert summarizer._temperature == 0.3
         assert summarizer._max_context == 8192
         assert summarizer._max_input_tokens == 6192
 
-    def test_create_ollama_client_성공(self) -> None:
-        """Ollama 서버 연결 성공 시 설정 딕셔너리를 반환한다."""
+    def test_create_backend_성공(self) -> None:
+        """LLM 백엔드 생성 성공 시 OllamaBackend 인스턴스를 반환한다."""
         summarizer = _create_summarizer()
+
+        # config.llm 설정
+        summarizer._config.llm.backend = "ollama"
+        summarizer._config.llm.host = "http://127.0.0.1:11434"
+        summarizer._config.llm.model_name = "exaone3.5:7.8b-instruct-q4_K_M"
+        summarizer._config.llm.temperature = 0.3
+        summarizer._config.llm.max_context_tokens = 8192
+        summarizer._config.llm.request_timeout_seconds = 120
 
         mock_resp = _make_mock_urlopen(b'{"models": []}')
         with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            config = summarizer._create_ollama_client()
+            backend = summarizer._create_backend()
 
-        assert config["host"] == "http://127.0.0.1:11434"
-        assert config["model"] == "exaone3.5:7.8b-instruct-q4_K_M"
-        assert config["temperature"] == 0.3
+        from core.llm_backend import OllamaBackend
+        assert isinstance(backend, OllamaBackend)
 
-    def test_create_ollama_client_연결_실패(self) -> None:
-        """Ollama 서버 연결 실패 시 OllamaConnectionError를 발생한다."""
+    def test_create_backend_연결_실패(self) -> None:
+        """LLM 백엔드 생성 시 연결 실패하면 LLMConnectionError를 발생한다."""
         summarizer = _create_summarizer()
+
+        # config.llm 설정
+        summarizer._config.llm.backend = "ollama"
+        summarizer._config.llm.host = "http://127.0.0.1:11434"
+        summarizer._config.llm.model_name = "exaone3.5:7.8b-instruct-q4_K_M"
+        summarizer._config.llm.temperature = 0.3
+        summarizer._config.llm.max_context_tokens = 8192
+        summarizer._config.llm.request_timeout_seconds = 120
 
         with patch(
             "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
-            with pytest.raises(OllamaConnectionError):
-                summarizer._create_ollama_client()
+            with pytest.raises(LLMConnectionError):
+                summarizer._create_backend()
 
-    def test_call_ollama_성공(self) -> None:
-        """Ollama API 호출이 성공하면 응답 텍스트를 반환한다."""
+    def test_call_llm_성공(self) -> None:
+        """LLM 백엔드 호출이 성공하면 응답 텍스트를 반환한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "exaone3.5:7.8b-instruct-q4_K_M",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        backend.chat.return_value = "## 회의 개요\n- 테스트"
 
-        response_bytes = _make_ollama_response("## 회의 개요\n- 테스트")
-        mock_resp = _make_mock_urlopen(response_bytes)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            result = summarizer._call_ollama(
-                client_config, "시스템 프롬프트", "사용자 프롬프트"
-            )
+        result = summarizer._call_llm(
+            backend, "시스템 프롬프트", "사용자 프롬프트"
+        )
 
         assert "회의 개요" in result
+        backend.chat.assert_called_once()
 
-    def test_call_ollama_타임아웃(self) -> None:
-        """Ollama API 타임아웃 시 OllamaTimeoutError를 발생한다."""
+    def test_call_llm_타임아웃(self) -> None:
+        """LLM 백엔드 타임아웃 시 SummaryError를 발생한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        backend.chat.side_effect = LLMGenerationError("timed out")
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("timed out"),
-        ):
-            with pytest.raises(OllamaTimeoutError):
-                summarizer._call_ollama(
-                    client_config, "시스템", "사용자"
-                )
+        with pytest.raises(SummaryError):
+            summarizer._call_llm(
+                backend, "시스템", "사용자"
+            )
 
-    def test_call_ollama_연결_실패(self) -> None:
-        """Ollama API 연결 실패 시 OllamaConnectionError를 발생한다."""
+    def test_call_llm_연결_실패(self) -> None:
+        """LLM 백엔드 연결 실패 시 LLMConnectionError를 전파한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        backend.chat.side_effect = LLMConnectionError("Connection refused")
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
-        ):
-            with pytest.raises(OllamaConnectionError):
-                summarizer._call_ollama(
-                    client_config, "시스템", "사용자"
-                )
+        with pytest.raises(LLMConnectionError):
+            summarizer._call_llm(
+                backend, "시스템", "사용자"
+            )
 
-    def test_call_ollama_json_파싱_실패(self) -> None:
-        """Ollama 응답 JSON 파싱 실패 시 SummaryError를 발생한다."""
+    def test_call_llm_응답_파싱_실패(self) -> None:
+        """LLM 백엔드 응답 파싱 실패 시 SummaryError를 발생한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        # OllamaResponseError는 LLMGenerationError의 하위 클래스
+        from core.ollama_client import OllamaResponseError
+        backend.chat.side_effect = OllamaResponseError("JSON 파싱 실패")
 
-        # 잘못된 JSON 응답
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b"not json"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        with pytest.raises(SummaryError, match="JSON 파싱"):
+            summarizer._call_llm(
+                backend, "시스템", "사용자"
+            )
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(SummaryError, match="JSON 파싱"):
-                summarizer._call_ollama(
-                    client_config, "시스템", "사용자"
-                )
-
-    def test_call_ollama_빈_content(self) -> None:
-        """Ollama 응답에 content가 없으면 SummaryError를 발생한다."""
+    def test_call_llm_빈_content(self) -> None:
+        """LLM 백엔드가 빈 응답을 반환하면 빈 문자열을 반환한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        backend.chat.return_value = ""
 
-        empty_response = json.dumps({
-            "model": "test",
-            "message": {"role": "assistant", "content": ""},
-            "done": True,
-        }).encode("utf-8")
-        mock_resp = _make_mock_urlopen(empty_response)
+        result = summarizer._call_llm(
+            backend, "시스템", "사용자"
+        )
+        assert result == ""
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(SummaryError, match="content가 없습니다"):
-                summarizer._call_ollama(
-                    client_config, "시스템", "사용자"
-                )
-
-    def test_call_ollama_NFC_정규화(self) -> None:
-        """Ollama 응답에 NFC 정규화가 적용된다."""
+    def test_call_llm_NFC_정규화(self) -> None:
+        """LLM 응답에 NFC 정규화가 적용된다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
 
         # NFD 형태의 한국어 (ㅎㅏㄴ ㄱㅜㄱ)
         import unicodedata
         nfd_text = unicodedata.normalize("NFD", "한국어 회의록")
-        response_bytes = _make_ollama_response(nfd_text)
-        mock_resp = _make_mock_urlopen(response_bytes)
+        backend.chat.return_value = nfd_text
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            result = summarizer._call_ollama(
-                client_config, "시스템", "사용자"
-            )
+        result = summarizer._call_llm(
+            backend, "시스템", "사용자"
+        )
 
         # 결과가 NFC로 정규화되어야 함
         assert result == unicodedata.normalize("NFC", nfd_text)
 
-    def test_call_ollama_TimeoutError(self) -> None:
-        """Python TimeoutError 발생 시 OllamaTimeoutError를 발생한다."""
+    def test_call_llm_LLMGenerationError(self) -> None:
+        """LLMGenerationError 발생 시 SummaryError를 발생한다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
+        backend.chat.side_effect = LLMGenerationError("timed out")
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=TimeoutError("timed out"),
-        ):
-            with pytest.raises(OllamaTimeoutError):
-                summarizer._call_ollama(
-                    client_config, "시스템", "사용자"
-                )
+        with pytest.raises(SummaryError):
+            summarizer._call_llm(
+                backend, "시스템", "사용자"
+            )
 
 
 # === Summarizer.summarize() 비동기 테스트 ===
@@ -755,26 +697,15 @@ class TestSummarizeSingle:
         summarizer = _create_summarizer()
         corrected = _make_simple_corrected_result()
 
-        # ModelLoadManager 모킹
+        # ModelLoadManager 모킹 — acquire 컨텍스트에서 backend Mock 반환
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        backend.chat.return_value = _SAMPLE_MARKDOWN
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # Ollama 응답 모킹
-        response_bytes = _make_ollama_response(_SAMPLE_MARKDOWN)
-        mock_resp = _make_mock_urlopen(response_bytes)
-
-        # 연결 확인 + 요약 호출을 위해 side_effect 사용
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            result = await summarizer.summarize(corrected)
+        result = await summarizer.summarize(corrected)
 
         assert isinstance(result, SummaryResult)
         assert "회의 개요" in result.markdown
@@ -804,20 +735,14 @@ class TestSummarizeSingle:
 
         # ModelLoadManager 모킹
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # SummaryError 발생 (_call_ollama 메서드를 직접 모킹)
+        # SummaryError 발생 (_call_llm 메서드를 직접 모킹)
         with patch.object(
-            summarizer, "_call_ollama",
+            summarizer, "_call_llm",
             side_effect=SummaryError("테스트 실패"),
         ):
             result = await summarizer.summarize(corrected)
@@ -825,36 +750,36 @@ class TestSummarizeSingle:
         assert "AI 요약 실패" in result.markdown
         assert "안녕하세요" in result.markdown
 
-    async def test_Ollama_연결_실패_전파(self) -> None:
-        """OllamaConnectionError는 폴백 없이 전파된다."""
+    async def test_LLM_연결_실패_전파(self) -> None:
+        """LLMConnectionError는 폴백 없이 전파된다."""
         summarizer = _create_summarizer()
         corrected = _make_simple_corrected_result()
 
-        # ModelLoadManager가 OllamaConnectionError를 발생
+        # ModelLoadManager가 LLMConnectionError를 발생
         ctx = MagicMock()
         ctx.__aenter__ = AsyncMock(
-            side_effect=OllamaConnectionError("연결 실패")
+            side_effect=LLMConnectionError("연결 실패")
         )
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        with pytest.raises(OllamaConnectionError):
+        with pytest.raises(LLMConnectionError):
             await summarizer.summarize(corrected)
 
-    async def test_Ollama_타임아웃_전파(self) -> None:
-        """OllamaTimeoutError는 폴백 없이 전파된다."""
+    async def test_LLM_타임아웃_전파(self) -> None:
+        """LLMGenerationError는 폴백 없이 전파된다."""
         summarizer = _create_summarizer()
         corrected = _make_simple_corrected_result()
 
-        # ModelLoadManager가 OllamaTimeoutError를 발생
+        # ModelLoadManager가 LLMGenerationError를 발생
         ctx = MagicMock()
         ctx.__aenter__ = AsyncMock(
-            side_effect=OllamaTimeoutError("타임아웃")
+            side_effect=LLMGenerationError("타임아웃")
         )
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        with pytest.raises(OllamaTimeoutError):
+        with pytest.raises(LLMGenerationError):
             await summarizer.summarize(corrected)
 
     async def test_예상치_못한_오류_폴백(self) -> None:
@@ -864,20 +789,14 @@ class TestSummarizeSingle:
 
         # ModelLoadManager 모킹
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # RuntimeError 발생 (예상치 못한 오류 — _call_ollama 메서드를 직접 모킹)
+        # RuntimeError 발생 (예상치 못한 오류 — _call_llm 메서드를 직접 모킹)
         with patch.object(
-            summarizer, "_call_ollama",
+            summarizer, "_call_llm",
             side_effect=RuntimeError("unexpected"),
         ):
             result = await summarizer.summarize(corrected)
@@ -890,22 +809,13 @@ class TestSummarizeSingle:
         corrected = _make_simple_corrected_result()
 
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        backend.chat.return_value = _SAMPLE_MARKDOWN
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        response_bytes = _make_ollama_response(_SAMPLE_MARKDOWN)
-        mock_resp = _make_mock_urlopen(response_bytes)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            await summarizer.summarize(corrected)
+        await summarizer.summarize(corrected)
 
         # acquire가 "exaone"으로 호출되었는지 확인
         summarizer._manager.acquire.assert_called_once()
@@ -924,41 +834,26 @@ class TestSummarizeChunked:
 
         corrected = _make_simple_corrected_result()
 
-        # ModelLoadManager 모킹
+        # ModelLoadManager 모킹 — acquire 컨텍스트에서 backend Mock 반환
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        summarizer._manager.acquire = MagicMock(return_value=ctx)
-
+        backend = MagicMock()
         # 부분 요약 + 통합 요약 응답
         call_count = 0
 
-        def mock_urlopen_side_effect(req, timeout=None):
+        def mock_chat_side_effect(*, messages, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 5:
-                # 부분 요약 응답
-                return _make_mock_urlopen(
-                    _make_ollama_response(f"파트 {call_count} 요약 내용")
-                )
+                return f"파트 {call_count} 요약 내용"
             else:
-                # 통합 요약 응답
-                return _make_mock_urlopen(
-                    _make_ollama_response(_SAMPLE_MARKDOWN)
-                )
+                return _SAMPLE_MARKDOWN
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=mock_urlopen_side_effect,
-        ):
-            result = await summarizer.summarize(corrected)
+        backend.chat.side_effect = mock_chat_side_effect
+        ctx.__aenter__ = AsyncMock(return_value=backend)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        summarizer._manager.acquire = MagicMock(return_value=ctx)
+
+        result = await summarizer.summarize(corrected)
 
         assert result.was_chunked is True
         assert result.chunk_count > 1
@@ -971,29 +866,22 @@ class TestSummarizeChunked:
         corrected = _make_simple_corrected_result()
 
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        # _call_ollama를 직접 모킹하여 첫 호출만 실패하도록 설정
+        # _call_llm를 직접 모킹하여 첫 호출만 실패하도록 설정
         call_count = 0
-        original_call_ollama = summarizer._call_ollama
 
-        def mock_call_ollama(client_config, system_prompt, user_prompt):
+        def mock_call_llm(backend, system_prompt, user_prompt):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise SummaryError("첫 청크 실패")
             return "요약 내용"
 
-        with patch.object(summarizer, "_call_ollama", side_effect=mock_call_ollama):
+        with patch.object(summarizer, "_call_llm", side_effect=mock_call_llm):
             result = await summarizer.summarize(corrected)
 
         # 폴백 없이 결과가 생성되어야 함 (부분 실패는 원본으로 대체)
@@ -1007,23 +895,14 @@ class TestSummarizeChunked:
         corrected = _make_simple_corrected_result()
 
         ctx = MagicMock()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
-        ctx.__aenter__ = AsyncMock(return_value=client_config)
+        backend = MagicMock()
+        backend.chat.side_effect = LLMConnectionError("Connection refused")
+        ctx.__aenter__ = AsyncMock(return_value=backend)
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
-        ):
-            with pytest.raises(OllamaConnectionError):
-                await summarizer.summarize(corrected)
+        with pytest.raises(LLMConnectionError):
+            await summarizer.summarize(corrected)
 
 
 class TestSummarizerSingleMethod:
@@ -1032,32 +911,25 @@ class TestSummarizerSingleMethod:
     def test_단일_요약_프롬프트_구성(self) -> None:
         """단일 요약 시 참석자와 전사문이 프롬프트에 포함된다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
 
-        response_bytes = _make_ollama_response("## 회의 개요")
-        mock_resp = _make_mock_urlopen(response_bytes)
+        # backend.chat 호출 시 messages 인자를 캡처
+        captured_messages = {}
 
-        captured_data = {}
+        def capture_chat(*, messages, **kwargs):
+            captured_messages["messages"] = messages
+            return "## 회의 개요"
 
-        def capture_urlopen(req, timeout=None):
-            captured_data["body"] = json.loads(req.data.decode("utf-8"))
-            return mock_resp
+        backend.chat.side_effect = capture_chat
 
-        with patch("core.ollama_client.urllib.request.urlopen", side_effect=capture_urlopen):
-            summarizer._summarize_single(
-                client_config,
-                "[SPEAKER_00] 안녕하세요",
-                ["SPEAKER_00", "SPEAKER_01"],
-            )
+        summarizer._summarize_single(
+            backend,
+            "[SPEAKER_00] 안녕하세요",
+            ["SPEAKER_00", "SPEAKER_01"],
+        )
 
         # 프롬프트에 참석자 정보가 포함되어야 함
-        user_content = captured_data["body"]["messages"][1]["content"]
+        user_content = captured_messages["messages"][1]["content"]
         assert "SPEAKER_00" in user_content
         assert "SPEAKER_01" in user_content
         assert "안녕하세요" in user_content
@@ -1069,13 +941,7 @@ class TestSummarizerChunkedMethod:
     def test_분할_요약_2단계_호출(self) -> None:
         """분할 요약은 부분 요약 + 통합 요약 2단계로 호출된다."""
         summarizer = _create_summarizer()
-        client_config = {
-            "host": "http://127.0.0.1:11434",
-            "model": "test",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        }
+        backend = MagicMock()
 
         chunks = [
             [CorrectedUtterance(
@@ -1090,20 +956,16 @@ class TestSummarizerChunkedMethod:
 
         call_count = 0
 
-        def mock_urlopen_side_effect(req, timeout=None):
+        def mock_chat_side_effect(*, messages, **kwargs):
             nonlocal call_count
             call_count += 1
-            return _make_mock_urlopen(
-                _make_ollama_response(f"요약 {call_count}")
-            )
+            return f"요약 {call_count}"
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=mock_urlopen_side_effect,
-        ):
-            result = summarizer._summarize_chunked(
-                client_config, chunks, ["A", "B"]
-            )
+        backend.chat.side_effect = mock_chat_side_effect
+
+        result = summarizer._summarize_chunked(
+            backend, chunks, ["A", "B"]
+        )
 
         # 2개 청크 부분 요약 + 1개 통합 = 3회 호출
         assert call_count == 3

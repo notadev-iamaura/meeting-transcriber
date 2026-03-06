@@ -126,13 +126,44 @@ class DiarizationConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM (EXAONE via Ollama) 설정"""
+    """LLM (EXAONE via Ollama/MLX) 설정"""
+    # 백엔드 선택: "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
+    backend: str = Field(default="ollama")
+
+    # Ollama 전용 설정
     model_name: str = "exaone3.5:7.8b-instruct-q4_K_M"
     host: str = "http://127.0.0.1:11434"
+
+    # MLX 전용 설정
+    mlx_model_name: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+    mlx_max_tokens: int = Field(default=2000, ge=100)
+
+    # 공통 설정
     max_context_tokens: int = Field(default=8192, ge=1024)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     correction_batch_size: int = Field(default=10, ge=1, le=50)
     request_timeout_seconds: int = Field(default=120, ge=10)
+
+    @field_validator("backend")
+    @classmethod
+    def validate_backend(cls, v: str) -> str:
+        """백엔드 값을 검증한다.
+
+        Args:
+            v: 백엔드 문자열
+
+        Returns:
+            검증된 백엔드 문자열
+
+        Raises:
+            ValueError: 지원하지 않는 백엔드 값
+        """
+        allowed = {"ollama", "mlx"}
+        if v not in allowed:
+            raise ValueError(
+                f"backend는 {allowed} 중 하나여야 합니다: '{v}'"
+            )
+        return v
 
 
 class EmbeddingConfig(BaseModel):
@@ -296,6 +327,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         MT_SERVER_PORT: 서버 포트
         MT_SERVER_HOST: 서버 호스트
         MT_LLM_HOST: Ollama 호스트 URL
+        MT_LLM_BACKEND: LLM 백엔드 ("ollama" 또는 "mlx")
         MT_LOG_LEVEL: 로그 레벨
         HUGGINGFACE_TOKEN: HuggingFace 인증 토큰
         OLLAMA_HOST: Ollama 호스트 (MT_LLM_HOST 미설정 시 사용)
@@ -325,6 +357,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     # 로그 레벨 오버라이드
     if env_log := os.environ.get("MT_LOG_LEVEL"):
         data.setdefault("server", {})["log_level"] = env_log
+
+    # LLM 백엔드 오버라이드
+    if env_backend := os.environ.get("MT_LLM_BACKEND"):
+        data.setdefault("llm", {})["backend"] = env_backend
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     if env_hf := os.environ.get("HUGGINGFACE_TOKEN"):

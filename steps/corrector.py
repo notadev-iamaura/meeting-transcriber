@@ -1,7 +1,7 @@
 """
 EXAONE 전사문 보정기 모듈 (Transcript Corrector Module)
 
-목적: Ollama API를 통해 EXAONE 3.5 LLM으로 STT 전사문의 오타/문법을 보정한다.
+목적: LLM 백엔드(Ollama/MLX)를 통해 EXAONE 3.5 LLM으로 STT 전사문의 오타/문법을 보정한다.
 주요 기능:
     - 배치 처리 (발화 N개씩 묶어서 보정, 기본 10개)
     - ModelLoadManager를 통한 LLM 사용 관리 (뮤텍스)
@@ -9,7 +9,7 @@ EXAONE 전사문 보정기 모듈 (Transcript Corrector Module)
     - 보정 실패 시 원본 텍스트 유지 (graceful degradation)
     - JSON 체크포인트 저장/복원 지원
     - 비동기(async) 인터페이스 지원
-의존성: config 모듈, core/model_manager 모듈, Ollama (localhost)
+의존성: config 모듈, core/model_manager 모듈, core/llm_backend 모듈
 """
 
 from __future__ import annotations
@@ -24,14 +24,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import AppConfig, get_config
-from core.model_manager import ModelLoadManager, get_model_manager
-from core.ollama_client import (
-    OllamaConnectionError,
-    OllamaResponseError,
-    OllamaTimeoutError,
-    check_connection as _check_ollama_connection,
-    chat as _ollama_chat,
+from core.llm_backend import (
+    LLMBackend,
+    LLMConnectionError,
+    LLMGenerationError,
+    create_backend,
 )
+from core.model_manager import ModelLoadManager, get_model_manager
 from steps.merger import MergedResult, MergedUtterance
 
 logger = logging.getLogger(__name__)
@@ -279,56 +278,43 @@ class Corrector:
         self._manager = model_manager or get_model_manager()
 
         # LLM 설정 캐시
-        self._model_name = self._config.llm.model_name
-        self._host = self._config.llm.host
-        self._temperature = self._config.llm.temperature
-        self._max_context = self._config.llm.max_context_tokens
         self._batch_size = self._config.llm.correction_batch_size
-        self._timeout = self._config.llm.request_timeout_seconds
 
         logger.info(
-            f"Corrector 초기화: model={self._model_name}, "
-            f"host={self._host}, batch_size={self._batch_size}"
+            f"Corrector 초기화: backend={self._config.llm.backend}, "
+            f"batch_size={self._batch_size}"
         )
 
-    def _create_ollama_client(self) -> dict[str, Any]:
-        """Ollama 클라이언트 설정을 반환한다.
+    def _create_backend(self) -> LLMBackend:
+        """LLM 백엔드를 생성하여 반환한다.
 
         ModelLoadManager의 loader 함수로 사용된다.
-        통합 ollama_client 모듈을 통해 연결을 확인하고 설정을 반환한다.
+        config.llm.backend에 따라 Ollama 또는 MLX 백엔드를 선택한다.
 
         Returns:
-            Ollama 연결 설정 딕셔너리
+            LLMBackend 인스턴스
 
         Raises:
-            OllamaConnectionError: Ollama 서버에 연결할 수 없을 때
+            LLMConnectionError: 백엔드 연결 실패 시
         """
-        _check_ollama_connection(self._host)
-
-        return {
-            "host": self._host,
-            "model": self._model_name,
-            "temperature": self._temperature,
-            "num_ctx": self._max_context,
-            "timeout": self._timeout,
-        }
+        return create_backend(self._config.llm)
 
     # 배치 보정 최대 재시도 횟수
     _MAX_BATCH_RETRIES: int = 2
 
     def _correct_batch(
         self,
-        client_config: dict[str, Any],
+        backend: LLMBackend,
         batch: list[MergedUtterance],
     ) -> tuple[list[CorrectedUtterance], int, int]:
         """발화 배치를 보정한다.
 
         배치 내 발화들을 하나의 프롬프트로 묶어서 LLM에 보정을 요청한다.
-        Ollama 호출 실패 시 최대 _MAX_BATCH_RETRIES회 재시도한다.
+        LLM 호출 실패 시 최대 _MAX_BATCH_RETRIES회 재시도한다.
         보정 실패 시 원본 텍스트를 유지한다.
 
         Args:
-            client_config: Ollama 연결 설정
+            backend: LLM 백엔드 인스턴스
             batch: 보정할 발화 배치
 
         Returns:
@@ -338,19 +324,14 @@ class Corrector:
         corrections: dict[int, str] = {}
         last_error: Optional[Exception] = None
 
-        # 재시도 로직: OllamaTimeoutError, OllamaResponseError 발생 시 재시도
+        # 재시도 로직: LLMGenerationError 발생 시 재시도
         for attempt in range(1, self._MAX_BATCH_RETRIES + 2):
             try:
-                response_text = _ollama_chat(
-                    host=client_config["host"],
-                    model=client_config["model"],
+                response_text = backend.chat(
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=client_config["temperature"],
-                    num_ctx=client_config["num_ctx"],
-                    timeout=client_config["timeout"],
                 )
                 corrections = _parse_correction_response(
                     response_text, len(batch)
@@ -367,12 +348,12 @@ class Corrector:
                 # 성공 — 루프 탈출
                 break
 
-            except OllamaConnectionError as conn_err:
+            except LLMConnectionError as conn_err:
                 # 연결 에러는 재시도 의미 없음 (서버 자체 불가)
                 logger.warning(f"배치 보정 연결 실패, 원본 유지: {conn_err}")
                 corrections = {}
                 break
-            except (OllamaTimeoutError, OllamaResponseError, CorrectionError) as e:
+            except (LLMGenerationError, CorrectionError) as e:
                 last_error = e
                 if attempt <= self._MAX_BATCH_RETRIES:
                     logger.warning(
@@ -444,7 +425,7 @@ class Corrector:
 
         Raises:
             EmptyInputError: 보정할 발화가 없을 때
-            OllamaConnectionError: Ollama 서버 연결 실패 시
+            LLMConnectionError: LLM 백엔드 연결 실패 시
             CorrectionError: 보정 처리 중 오류 발생 시
         """
         if not merged.utterances:
@@ -472,18 +453,18 @@ class Corrector:
             # PERF-001: 다음 단계(summarizer)에서도 exaone을 사용하므로
             # keep_loaded=True로 모델을 유지하여 불필요한 해제/재로드 방지
             async with self._manager.acquire(
-                "exaone", self._create_ollama_client, keep_loaded=True
-            ) as client_config:
+                "exaone", self._create_backend, keep_loaded=True
+            ) as backend:
                 for batch_idx, batch in enumerate(batches):
                     logger.info(
                         f"배치 {batch_idx + 1}/{len(batches)} 보정 중 "
                         f"({len(batch)}개 발화)"
                     )
 
-                    # 별도 스레드에서 실행 (HTTP 호출이 블로킹이므로)
+                    # 별도 스레드에서 실행 (동기 호출이 블로킹이므로)
                     corrected, batch_corrected, batch_failed = (
                         await asyncio.to_thread(
-                            self._correct_batch, client_config, batch
+                            self._correct_batch, backend, batch
                         )
                     )
 
@@ -491,7 +472,7 @@ class Corrector:
                     total_failed += batch_failed
                     all_corrected.extend(corrected)
 
-        except (OllamaConnectionError, OllamaTimeoutError):
+        except (LLMConnectionError, LLMGenerationError):
             raise
         except CorrectionError:
             raise

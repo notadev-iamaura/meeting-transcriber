@@ -354,3 +354,60 @@ class TestRecordingConfig:
         assert hasattr(config, "recording")
         assert config.recording.enabled is True
         assert config.recording.sample_rate == 16000
+
+
+class TestLLMBackendConfig:
+    """LLM 백엔드 설정 테스트."""
+
+    def test_backend_기본값_ollama(self) -> None:
+        """backend 기본값이 'ollama'인지 확인한다."""
+        from config import LLMConfig
+        llm = LLMConfig()
+        assert llm.backend == "ollama"
+
+    def test_backend_mlx_설정(self) -> None:
+        """backend를 'mlx'로 설정할 수 있는지 확인한다."""
+        from config import LLMConfig
+        llm = LLMConfig(backend="mlx")
+        assert llm.backend == "mlx"
+
+    def test_backend_잘못된_값_거부(self) -> None:
+        """backend에 허용되지 않은 값이 들어오면 에러가 발생하는지 확인한다."""
+        from pydantic import ValidationError
+        from config import LLMConfig
+        with pytest.raises(ValidationError, match="backend"):
+            LLMConfig(backend="unknown")
+
+    def test_mlx_model_name_기본값(self) -> None:
+        """mlx_model_name 기본값이 올바른지 확인한다."""
+        from config import LLMConfig
+        llm = LLMConfig()
+        assert llm.mlx_model_name == "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+
+    def test_mlx_max_tokens_기본값(self) -> None:
+        """mlx_max_tokens 기본값이 2000인지 확인한다."""
+        from config import LLMConfig
+        llm = LLMConfig()
+        assert llm.mlx_max_tokens == 2000
+
+    def test_mlx_max_tokens_범위_검증(self) -> None:
+        """mlx_max_tokens가 최소값(100) 미만이면 에러가 발생하는지 확인한다."""
+        from pydantic import ValidationError
+        from config import LLMConfig
+        with pytest.raises(ValidationError):
+            LLMConfig(mlx_max_tokens=50)
+
+    def test_MT_LLM_BACKEND_환경변수_오버라이드(self, tmp_path, monkeypatch) -> None:
+        """MT_LLM_BACKEND 환경변수로 backend가 오버라이드되는지 확인한다."""
+        monkeypatch.setenv("MT_LLM_BACKEND", "mlx")
+        empty_yaml = tmp_path / "test.yaml"
+        empty_yaml.write_text("", encoding="utf-8")
+
+        config = load_config(empty_yaml)
+        assert config.llm.backend == "mlx"
+
+    def test_config_yaml에서_backend_로드(self) -> None:
+        """실제 config.yaml에서 backend 필드가 정상 로드되는지 확인한다."""
+        config_path = Path(__file__).parent.parent / "config.yaml"
+        config = load_config(config_path)
+        assert config.llm.backend in {"ollama", "mlx"}

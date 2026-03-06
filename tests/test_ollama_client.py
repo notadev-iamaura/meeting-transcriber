@@ -26,6 +26,7 @@ from core.ollama_client import (
     check_connection,
     clear_connection_cache,
 )
+from core.llm_backend import LLMBackendError, LLMConnectionError, LLMGenerationError
 
 
 # === 헬퍼 함수 ===
@@ -379,3 +380,33 @@ class TestChatStream:
                     model="test",
                     messages=[{"role": "user", "content": "질문"}],
                 ))
+
+
+class TestLLMBackendErrorIntegration:
+    """Ollama 에러가 LLMBackendError 계층을 올바르게 상속하는지 검증."""
+
+    def test_OllamaError는_LLMBackendError_하위(self) -> None:
+        """OllamaError는 LLMBackendError의 하위 클래스이다."""
+        assert issubclass(OllamaError, LLMBackendError)
+
+    def test_OllamaConnectionError는_LLMConnectionError_하위(self) -> None:
+        """OllamaConnectionError는 LLMConnectionError의 하위 클래스이다."""
+        assert issubclass(OllamaConnectionError, LLMConnectionError)
+
+    def test_OllamaTimeoutError는_LLMGenerationError_하위(self) -> None:
+        """OllamaTimeoutError는 LLMGenerationError의 하위 클래스이다."""
+        assert issubclass(OllamaTimeoutError, LLMGenerationError)
+
+    def test_OllamaResponseError는_LLMGenerationError_하위(self) -> None:
+        """OllamaResponseError는 LLMGenerationError의 하위 클래스이다."""
+        assert issubclass(OllamaResponseError, LLMGenerationError)
+
+    def test_LLMBackendError로_OllamaConnectionError_잡기(self) -> None:
+        """소비자 코드에서 LLMBackendError로 Ollama 에러를 잡을 수 있는지 검증."""
+        with pytest.raises(LLMBackendError):
+            raise OllamaConnectionError("테스트")
+
+    def test_LLMConnectionError로_OllamaConnectionError_잡기(self) -> None:
+        """소비자 코드에서 LLMConnectionError로 연결 에러를 잡을 수 있는지 검증."""
+        with pytest.raises(LLMConnectionError):
+            raise OllamaConnectionError("테스트")

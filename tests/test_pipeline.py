@@ -2071,7 +2071,7 @@ class TestE2EErrorPropagation:
         wav_path = audio_file.parent / "test_16k.wav"
         wav_path.write_bytes(b"fake wav content")
 
-        from steps.corrector import OllamaConnectionError
+        from core.llm_backend import LLMConnectionError
 
         with (
             patch.object(
@@ -2096,7 +2096,7 @@ class TestE2EErrorPropagation:
             patch.object(
                 pipeline, "_run_step_correct",
                 new_callable=AsyncMock,
-                side_effect=OllamaConnectionError("Ollama 연결 불가"),
+                side_effect=LLMConnectionError("LLM 연결 불가"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
@@ -2124,7 +2124,7 @@ class TestE2EErrorPropagation:
         wav_path = audio_file.parent / "test_16k.wav"
         wav_path.write_bytes(b"fake wav content")
 
-        from steps.corrector import OllamaTimeoutError
+        from core.llm_backend import LLMGenerationError
 
         with (
             patch.object(
@@ -2154,7 +2154,7 @@ class TestE2EErrorPropagation:
             patch.object(
                 pipeline, "_run_step_summarize",
                 new_callable=AsyncMock,
-                side_effect=OllamaTimeoutError("요약 타임아웃"),
+                side_effect=LLMGenerationError("요약 타임아웃"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:

@@ -36,7 +36,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config import AppConfig, ChatConfig, EmbeddingConfig, LLMConfig, SearchConfig
-from core.ollama_client import OllamaConnectionError, OllamaTimeoutError, clear_connection_cache
+from core.llm_backend import LLMConnectionError, LLMGenerationError
+from core.ollama_client import OllamaConnectionError, clear_connection_cache
 from search.chat import (
     ChatEngine,
     ChatError,
@@ -314,15 +315,10 @@ class TestChatEngine:
 
         if model_manager is None:
             model_manager = MagicMock()
-            # acquire 컨텍스트 매니저 모킹
+            # acquire 컨텍스트 매니저 모킹 (LLMBackend 목 반환)
             ctx = AsyncMock()
-            ctx.__aenter__ = AsyncMock(return_value={
-                "host": "http://127.0.0.1:11434",
-                "model": "exaone3.5:7.8b-instruct-q4_K_M",
-                "temperature": 0.3,
-                "num_ctx": 8192,
-                "timeout": 120,
-            })
+            backend_mock = MagicMock()
+            ctx.__aenter__ = AsyncMock(return_value=backend_mock)
             ctx.__aexit__ = AsyncMock(return_value=None)
             model_manager.acquire = MagicMock(return_value=ctx)
 
@@ -354,19 +350,11 @@ class TestChatEngine:
         """정상적인 RAG Chat 응답이 생성되는지 확인한다."""
         engine = self._make_engine()
 
-        # Ollama 응답 모킹
-        mock_response_data = json.dumps({
-            "message": {"content": "프로젝트 일정은 다음 주 월요일까지입니다."},
-        }).encode("utf-8")
+        # LLM 백엔드 목의 chat 반환값 설정
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat.return_value = "프로젝트 일정은 다음 주 월요일까지입니다."
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            response = await engine.chat("프로젝트 일정이 어떻게 되나요?")
+        response = await engine.chat("프로젝트 일정이 어떻게 되나요?")
 
         assert response.answer == "프로젝트 일정은 다음 주 월요일까지입니다."
         assert response.llm_used is True
@@ -382,18 +370,11 @@ class TestChatEngine:
 
         engine = self._make_engine(search_engine=search_engine)
 
-        mock_response_data = json.dumps({
-            "message": {"content": "검색 결과 없이 답변합니다."},
-        }).encode("utf-8")
+        # LLM 백엔드 목의 chat 반환값 설정
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat.return_value = "검색 결과 없이 답변합니다."
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            response = await engine.chat("질문입니다")
+        response = await engine.chat("질문입니다")
 
         assert response.llm_used is True
         assert response.has_context is False
@@ -401,13 +382,13 @@ class TestChatEngine:
 
     @pytest.mark.asyncio
     async def test_ollama_연결_실패_graceful_degradation(self) -> None:
-        """Ollama 연결 실패 시 검색 결과만 반환하는지 확인한다."""
+        """LLM 연결 실패 시 검색 결과만 반환하는지 확인한다."""
         engine = self._make_engine()
 
-        # ModelLoadManager.acquire가 OllamaConnectionError를 발생시키도록 설정
+        # ModelLoadManager.acquire가 LLMConnectionError를 발생시키도록 설정
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(
-            side_effect=OllamaConnectionError("연결 실패")
+            side_effect=LLMConnectionError("연결 실패")
         )
         ctx.__aexit__ = AsyncMock(return_value=None)
         engine._model_manager.acquire = MagicMock(return_value=ctx)
@@ -424,18 +405,11 @@ class TestChatEngine:
         """대화 이력이 세션에 저장되는지 확인한다."""
         engine = self._make_engine()
 
-        mock_response_data = json.dumps({
-            "message": {"content": "답변1"},
-        }).encode("utf-8")
+        # LLM 백엔드 목의 chat 반환값 설정
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat.return_value = "답변1"
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            await engine.chat("질문1")
+        await engine.chat("질문1")
 
         session = engine.get_session()
         assert session.pair_count == 1
@@ -447,19 +421,12 @@ class TestChatEngine:
         """session_id별로 이력이 분리되는지 확인한다."""
         engine = self._make_engine()
 
-        mock_response_data = json.dumps({
-            "message": {"content": "답변"},
-        }).encode("utf-8")
+        # LLM 백엔드 목의 chat 반환값 설정
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat.return_value = "답변"
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            await engine.chat("질문A", session_id="session_a")
-            await engine.chat("질문B", session_id="session_b")
+        await engine.chat("질문A", session_id="session_a")
+        await engine.chat("질문B", session_id="session_b")
 
         session_a = engine.get_session("session_a")
         session_b = engine.get_session("session_b")
@@ -487,23 +454,16 @@ class TestChatEngine:
         )
         engine = self._make_engine(search_engine=search_engine)
 
-        mock_response_data = json.dumps({
-            "message": {"content": "답변"},
-        }).encode("utf-8")
+        # LLM 백엔드 목의 chat 반환값 설정
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat.return_value = "답변"
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.status = 200
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            await engine.chat(
-                "질문",
-                meeting_id_filter="m001",
-                date_filter="2026-03-04",
-                speaker_filter="SPEAKER_00",
-            )
+        await engine.chat(
+            "질문",
+            meeting_id_filter="m001",
+            date_filter="2026-03-04",
+            speaker_filter="SPEAKER_00",
+        )
 
         search_engine.search.assert_called_once_with(
             query="질문",
@@ -603,14 +563,10 @@ class TestChatEngineStreaming:
         config = _make_config()
 
         model_manager = MagicMock()
+        # acquire 컨텍스트 매니저 모킹 (LLMBackend 목 반환)
         ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value={
-            "host": "http://127.0.0.1:11434",
-            "model": "exaone3.5:7.8b-instruct-q4_K_M",
-            "temperature": 0.3,
-            "num_ctx": 8192,
-            "timeout": 120,
-        })
+        backend_mock = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=backend_mock)
         ctx.__aexit__ = AsyncMock(return_value=None)
         model_manager.acquire = MagicMock(return_value=ctx)
 
@@ -635,22 +591,13 @@ class TestChatEngineStreaming:
         """스트리밍 응답이 올바른 이벤트 순서로 생성되는지 확인한다."""
         engine = self._make_engine()
 
-        # 스트리밍 응답 모킹: 3개 토큰 + done
-        stream_lines = [
-            json.dumps({"message": {"content": "프로젝트"}, "done": False}).encode(),
-            json.dumps({"message": {"content": " 일정은"}, "done": False}).encode(),
-            json.dumps({"message": {"content": " 월요일"}, "done": True}).encode(),
-        ]
+        # LLM 백엔드 목의 chat_stream 반환값 설정 (동기 Iterator[str])
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend_mock.chat_stream.return_value = iter(["프로젝트", " 일정은", " 월요일"])
 
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.__iter__ = MagicMock(return_value=iter(stream_lines))
-
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            events = []
-            async for event in engine.stream_chat("프로젝트 일정"):
-                events.append(event)
+        events = []
+        async for event in engine.stream_chat("프로젝트 일정"):
+            events.append(event)
 
         # 첫 이벤트: references
         assert events[0]["type"] == "references"
@@ -682,10 +629,10 @@ class TestChatEngineStreaming:
         """스트리밍 중 LLM 실패 시 error 이벤트가 생성되는지 확인한다."""
         engine = self._make_engine()
 
-        # acquire에서 에러 발생
+        # acquire에서 LLMConnectionError 발생
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(
-            side_effect=OllamaConnectionError("스트리밍 연결 실패")
+            side_effect=LLMConnectionError("스트리밍 연결 실패")
         )
         ctx.__aexit__ = AsyncMock(return_value=None)
         engine._model_manager.acquire = MagicMock(return_value=ctx)
@@ -702,8 +649,8 @@ class TestChatEngineStreaming:
         assert "스트리밍 연결 실패" in error_event["data"]["message"]
 
 
-class TestChatEngineOllamaClient:
-    """Ollama 클라이언트 테스트 클래스."""
+class TestChatEngineBackend:
+    """LLM 백엔드 생성 및 호출 테스트 클래스."""
 
     def setup_method(self) -> None:
         """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
@@ -720,24 +667,24 @@ class TestChatEngineOllamaClient:
             search_engine=search_engine,
         )
 
-    def test_ollama_연결_성공(self) -> None:
-        """Ollama 서버 연결 확인이 성공하는지 확인한다."""
+    def test_백엔드_생성_성공(self) -> None:
+        """_create_backend()가 OllamaBackend 인스턴스를 반환하는지 확인한다."""
         engine = self._make_engine()
 
+        # Ollama 연결 확인 모킹
         mock_resp = MagicMock()
         mock_resp.status = 200
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            client_config = engine._create_ollama_client()
+            backend = engine._create_backend()
 
-        assert client_config["host"] == "http://127.0.0.1:11434"
-        assert client_config["model"] == "exaone3.5:7.8b-instruct-q4_K_M"
-        assert client_config["temperature"] == 0.3
+        from core.llm_backend import OllamaBackend
+        assert isinstance(backend, OllamaBackend)
 
-    def test_ollama_연결_실패(self) -> None:
-        """Ollama 서버 연결 실패 시 OllamaConnectionError가 발생하는지 확인한다."""
+    def test_백엔드_생성_연결_실패(self) -> None:
+        """백엔드 생성 시 연결 실패하면 LLMConnectionError가 발생하는지 확인한다."""
         engine = self._make_engine()
 
         import urllib.error
@@ -745,62 +692,50 @@ class TestChatEngineOllamaClient:
             "core.ollama_client.urllib.request.urlopen",
             side_effect=urllib.error.URLError("연결 거부"),
         ):
-            with pytest.raises(OllamaConnectionError):
-                engine._create_ollama_client()
+            with pytest.raises((OllamaConnectionError, LLMConnectionError)):
+                engine._create_backend()
 
-    def test_ollama_chat_빈_응답(self) -> None:
-        """Ollama 응답에 content가 없으면 ChatError가 발생하는지 확인한다."""
+    def test_llm_chat_빈_응답(self) -> None:
+        """LLM 백엔드가 빈 문자열을 반환하면 ChatError가 발생하는지 확인한다."""
         engine = self._make_engine()
 
-        mock_response_data = json.dumps({
-            "message": {"content": ""},
-        }).encode("utf-8")
+        # LLMGenerationError를 발생시키는 백엔드 목
+        backend_mock = MagicMock()
+        backend_mock.chat.side_effect = LLMGenerationError("빈 응답: content가 없습니다")
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_response_data
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        with pytest.raises(ChatError):
+            engine._call_llm_chat(
+                backend_mock,
+                [{"role": "user", "content": "질문"}],
+            )
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(ChatError, match="content가 없습니다"):
-                engine._call_ollama_chat(
-                    {"host": "http://localhost:11434", "model": "test",
-                     "temperature": 0.3, "num_ctx": 8192, "timeout": 120},
-                    [{"role": "user", "content": "질문"}],
-                )
-
-    def test_ollama_chat_타임아웃(self) -> None:
-        """Ollama 타임아웃 시 OllamaTimeoutError가 발생하는지 확인한다."""
+    def test_llm_chat_타임아웃(self) -> None:
+        """LLM 백엔드 타임아웃 시 ChatError가 발생하는지 확인한다."""
         engine = self._make_engine()
 
-        import urllib.error
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("timed out"),
-        ):
-            with pytest.raises(OllamaTimeoutError):
-                engine._call_ollama_chat(
-                    {"host": "http://localhost:11434", "model": "test",
-                     "temperature": 0.3, "num_ctx": 8192, "timeout": 120},
-                    [{"role": "user", "content": "질문"}],
-                )
+        # LLMGenerationError를 발생시키는 백엔드 목
+        backend_mock = MagicMock()
+        backend_mock.chat.side_effect = LLMGenerationError("요청 타임아웃")
 
-    def test_ollama_chat_json_파싱_실패(self) -> None:
-        """Ollama 응답 JSON 파싱 실패 시 ChatError가 발생하는지 확인한다."""
+        with pytest.raises(ChatError):
+            engine._call_llm_chat(
+                backend_mock,
+                [{"role": "user", "content": "질문"}],
+            )
+
+    def test_llm_chat_연결_에러_전파(self) -> None:
+        """LLM 백엔드 연결 에러가 LLMConnectionError로 전파되는지 확인한다."""
         engine = self._make_engine()
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"not json"
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        # LLMConnectionError를 발생시키는 백엔드 목
+        backend_mock = MagicMock()
+        backend_mock.chat.side_effect = LLMConnectionError("연결 거부")
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(ChatError, match="JSON 파싱 실패"):
-                engine._call_ollama_chat(
-                    {"host": "http://localhost:11434", "model": "test",
-                     "temperature": 0.3, "num_ctx": 8192, "timeout": 120},
-                    [{"role": "user", "content": "질문"}],
-                )
+        with pytest.raises(LLMConnectionError):
+            engine._call_llm_chat(
+                backend_mock,
+                [{"role": "user", "content": "질문"}],
+            )
 
 
 class TestChatEngineEdgeCases:

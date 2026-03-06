@@ -19,6 +19,12 @@ import urllib.error
 import urllib.request
 from typing import Any, Iterator
 
+from core.llm_backend import (
+    LLMBackendError,
+    LLMConnectionError,
+    LLMGenerationError,
+)
+
 logger = logging.getLogger(__name__)
 
 # PERF-024: 연결 확인 캐시 — 파이프라인 실행 중 반복 호출 방지
@@ -36,19 +42,19 @@ def clear_connection_cache() -> None:
 # === 에러 계층 ===
 
 
-class OllamaError(Exception):
-    """Ollama 관련 에러의 기본 클래스."""
+class OllamaError(LLMBackendError):
+    """Ollama 관련 에러의 기본 클래스. LLMBackendError를 상속한다."""
 
 
-class OllamaConnectionError(OllamaError):
+class OllamaConnectionError(OllamaError, LLMConnectionError):
     """Ollama 서버에 연결할 수 없을 때 발생한다."""
 
 
-class OllamaTimeoutError(OllamaError):
+class OllamaTimeoutError(OllamaError, LLMGenerationError):
     """Ollama 요청이 타임아웃되었을 때 발생한다."""
 
 
-class OllamaResponseError(OllamaError):
+class OllamaResponseError(OllamaError, LLMGenerationError):
     """Ollama 응답 파싱 또는 내용 오류 시 발생한다."""
 
 

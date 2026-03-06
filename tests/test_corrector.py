@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.llm_backend import LLMConnectionError, LLMGenerationError
 from core.ollama_client import (
     OllamaConnectionError,
     OllamaResponseError,
@@ -109,23 +110,17 @@ def _make_mock_urlopen(response_bytes: bytes) -> MagicMock:
 def _make_mock_manager() -> MagicMock:
     """ModelLoadManager의 acquire() 모킹을 생성한다.
 
-    acquire()가 Ollama 클라이언트 설정 딕셔너리를 반환하도록 한다.
+    acquire()가 LLMBackend Mock 인스턴스를 반환하도록 한다.
 
     Returns:
         모킹된 ModelLoadManager
     """
     manager = MagicMock()
-    client_config = {
-        "host": "http://127.0.0.1:11434",
-        "model": "exaone3.5:7.8b-instruct-q4_K_M",
-        "temperature": 0.3,
-        "num_ctx": 8192,
-        "timeout": 120,
-    }
+    backend = MagicMock()
 
     # acquire()가 async context manager를 반환하도록 설정
     ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=client_config)
+    ctx.__aenter__ = AsyncMock(return_value=backend)
     ctx.__aexit__ = AsyncMock(return_value=False)
     manager.acquire.return_value = ctx
 
@@ -398,33 +393,18 @@ class TestCorrector정상보정:
             ("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0),
         ])
 
-        corrected_response = _make_ollama_response(
-            "[1] 오늘 회의를 시작하겠습니다"
-        )
-        tags_response = json.dumps({"models": []}).encode("utf-8")
-
         manager = _make_mock_manager()
+        # acquire()가 반환하는 backend Mock의 chat 동작 설정
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._config = MagicMock()
+        corrector._config.llm.correction_batch_size = 10
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._config = MagicMock()
-            corrector._config.llm.model_name = "exaone3.5:7.8b-instruct-q4_K_M"
-            corrector._config.llm.host = "http://127.0.0.1:11434"
-            corrector._config.llm.temperature = 0.3
-            corrector._config.llm.max_context_tokens = 8192
-            corrector._config.llm.correction_batch_size = 10
-            corrector._config.llm.request_timeout_seconds = 120
-            corrector._manager = manager
-            corrector._model_name = "exaone3.5:7.8b-instruct-q4_K_M"
-            corrector._host = "http://127.0.0.1:11434"
-            corrector._temperature = 0.3
-            corrector._max_context = 8192
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert len(result.utterances) == 1
         assert result.utterances[0].text == "오늘 회의를 시작하겠습니다"
@@ -440,23 +420,19 @@ class TestCorrector정상보정:
             ("다음 안건으로 넘어가죠", "SPEAKER_00", 10.0, 15.0),
         ])
 
-        corrected_response = _make_ollama_response(
+        manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = (
             "[1] 회의 안건을 말씀드리겠습니다\n"
             "[2] 네 알겠습니다\n"
             "[3] 다음 안건으로 넘어가죠"
         )
 
-        manager = _make_mock_manager()
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
-
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert len(result.utterances) == 3
         assert result.utterances[0].text == "회의 안건을 말씀드리겠습니다"
@@ -473,21 +449,15 @@ class TestCorrector정상보정:
             ("정확한 문장입니다", "SPEAKER_00", 0.0, 5.0),
         ])
 
-        corrected_response = _make_ollama_response(
-            "[1] 정확한 문장입니다"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 정확한 문장입니다"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert result.utterances[0].was_corrected is False
         assert result.total_corrected == 0
@@ -507,20 +477,15 @@ class TestCorrector배치처리:
         ]
         merged = _make_merged_result(utterances)
 
-        response = "[1] 발화 0\n[2] 발화 1\n[3] 발화 2"
-        corrected_response = _make_ollama_response(response)
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 발화 0\n[2] 발화 1\n[3] 발화 2"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert len(result.utterances) == 3
 
@@ -532,28 +497,19 @@ class TestCorrector배치처리:
         ]
         merged = _make_merged_result(utterances)
 
-        # 배치1 응답 (10개)
+        # 배치1 응답 (10개), 배치2 응답 (5개)
         batch1_lines = "\n".join(f"[{i+1}] 발화 {i}" for i in range(10))
-        batch1_response = _make_ollama_response(batch1_lines)
-
-        # 배치2 응답 (5개)
         batch2_lines = "\n".join(f"[{i+1}] 발화 {i+10}" for i in range(5))
-        batch2_response = _make_ollama_response(batch2_lines)
 
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.side_effect = [batch1_lines, batch2_lines]
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = [
-                _make_mock_urlopen(batch1_response),
-                _make_mock_urlopen(batch2_response),
-            ]
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert len(result.utterances) == 15
 
@@ -566,19 +522,16 @@ class TestCorrector배치처리:
         merged = _make_merged_result(utterances)
 
         lines = "\n".join(f"[{i+1}] 발화 {i}" for i in range(10))
-        corrected_response = _make_ollama_response(lines)
 
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = lines
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert len(result.utterances) == 10
 
@@ -600,22 +553,21 @@ class TestCorrector에러처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
-        corrector._timeout = 120
 
         with pytest.raises(EmptyInputError):
             await corrector.correct(merged)
 
-    async def test_Ollama_연결_실패(self) -> None:
-        """Ollama 서버 연결 실패 시 OllamaConnectionError 발생."""
+    async def test_LLM_연결_실패(self) -> None:
+        """LLM 백엔드 연결 실패 시 LLMConnectionError 발생."""
         merged = _make_merged_result([
             ("테스트", "S0", 0.0, 5.0),
         ])
 
-        # acquire에서 OllamaConnectionError 발생하도록 설정
+        # acquire에서 LLMConnectionError 발생하도록 설정
         manager = MagicMock()
         ctx = MagicMock()
         ctx.__aenter__ = AsyncMock(
-            side_effect=OllamaConnectionError("연결 실패")
+            side_effect=LLMConnectionError("연결 실패")
         )
         ctx.__aexit__ = AsyncMock(return_value=False)
         manager.acquire.return_value = ctx
@@ -623,9 +575,8 @@ class TestCorrector에러처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
-        corrector._timeout = 120
 
-        with pytest.raises(OllamaConnectionError):
+        with pytest.raises(LLMConnectionError):
             await corrector.correct(merged)
 
     async def test_배치_실패_시_원본_유지(self) -> None:
@@ -636,17 +587,14 @@ class TestCorrector에러처리:
         ])
 
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.side_effect = LLMGenerationError("생성 실패")
 
-        import urllib.error
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         # 모든 발화가 원본 텍스트로 유지됨
         assert result.utterances[0].text == "오타있는 텍스트"
@@ -656,23 +604,21 @@ class TestCorrector에러처리:
         assert result.total_corrected == 0
         assert result.total_failed == 2
 
-    async def test_Ollama_타임아웃(self) -> None:
-        """Ollama 타임아웃 발생 시 원본 유지 (배치 단위 graceful degradation)."""
+    async def test_LLM_타임아웃(self) -> None:
+        """LLM 타임아웃 발생 시 원본 유지 (배치 단위 graceful degradation)."""
         merged = _make_merged_result([
             ("텍스트", "S0", 0.0, 5.0),
         ])
 
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.side_effect = LLMGenerationError("timed out")
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = TimeoutError("timed out")
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         # 타임아웃 시 원본 유지
         assert result.utterances[0].text == "텍스트"
@@ -684,51 +630,35 @@ class TestCorrector에러처리:
             ("테스트", "S0", 0.0, 5.0),
         ])
 
-        # 포맷이 맞지 않는 응답
-        bad_response = _make_ollama_response(
-            "보정된 텍스트입니다 (번호 없음)"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "보정된 텍스트입니다 (번호 없음)"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(bad_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         # 파싱 실패 → 원본 유지
         assert result.utterances[0].text == "테스트"
         assert result.utterances[0].was_corrected is False
 
     async def test_빈_content_응답(self) -> None:
-        """Ollama 응답에 content가 비어있을 때 원본 유지."""
+        """LLM 응답이 빈 문자열일 때 원본 유지."""
         merged = _make_merged_result([
             ("테스트", "S0", 0.0, 5.0),
         ])
 
-        # content가 빈 응답
-        empty_response = json.dumps({
-            "model": "test",
-            "message": {"role": "assistant", "content": ""},
-            "done": True,
-        }).encode("utf-8")
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = ""
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(empty_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         # 빈 응답 → 원본 유지
         assert result.utterances[0].text == "테스트"
@@ -747,28 +677,21 @@ class TestCorrector한국어처리:
 
         # NFD 형식의 한국어 (자모 분리형)
         nfd_text = unicodedata.normalize("NFD", "한국어")
-        nfc_text = unicodedata.normalize("NFC", "한국어")
 
         merged = _make_merged_result([
             (nfd_text, "S0", 0.0, 5.0),
         ])
 
-        # LLM 응답도 NFD 형식
-        corrected_response = _make_ollama_response(
-            f"[1] {unicodedata.normalize('NFD', '한국어 보정')}"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        # LLM 응답도 NFD 형식
+        backend.chat.return_value = f"[1] {unicodedata.normalize('NFD', '한국어 보정')}"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         # NFC 정규화 확인
         assert result.utterances[0].text == unicodedata.normalize(
@@ -781,21 +704,15 @@ class TestCorrector한국어처리:
             ("프로젝트를 진행 상황을 말씀해 주세요", "S0", 0.0, 5.0),
         ])
 
-        corrected_response = _make_ollama_response(
-            "[1] 프로젝트 진행 상황을 말씀해 주세요"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 프로젝트 진행 상황을 말씀해 주세요"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert result.utterances[0].text == "프로젝트 진행 상황을 말씀해 주세요"
         assert result.utterances[0].was_corrected is True
@@ -806,75 +723,72 @@ class TestCorrector한국어처리:
             ("매출이 120프로 증가했습니다!", "S0", 0.0, 5.0),
         ])
 
-        corrected_response = _make_ollama_response(
-            "[1] 매출이 120% 증가했습니다!"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 매출이 120% 증가했습니다!"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert result.utterances[0].text == "매출이 120% 증가했습니다!"
         assert result.utterances[0].was_corrected is True
 
 
-# === _create_ollama_client 테스트 ===
+# === _create_backend 테스트 ===
 
 
-class TestOllamaClient:
-    """Ollama 연결 관련 테스트."""
+class TestCreateBackendFromCorrector:
+    """Corrector의 백엔드 생성 관련 테스트."""
 
     def setup_method(self) -> None:
         """각 테스트 전 Ollama 연결 캐시를 초기화한다."""
         clear_connection_cache()
 
-    def test_연결_성공(self) -> None:
-        """Ollama 서버 연결 성공 시 설정 딕셔너리 반환."""
+    def test_백엔드_생성_성공(self) -> None:
+        """Ollama 서버 연결 성공 시 LLMBackend 반환."""
         tags_response = json.dumps({"models": []}).encode("utf-8")
         mock_resp = _make_mock_urlopen(tags_response)
 
         corrector = Corrector.__new__(Corrector)
-        corrector._host = "http://127.0.0.1:11434"
-        corrector._model_name = "exaone3.5:7.8b-instruct-q4_K_M"
-        corrector._temperature = 0.3
-        corrector._max_context = 8192
-        corrector._timeout = 120
+        corrector._config = MagicMock()
+        corrector._config.llm.backend = "ollama"
+        corrector._config.llm.host = "http://127.0.0.1:11434"
+        corrector._config.llm.model_name = "exaone3.5:7.8b-instruct-q4_K_M"
+        corrector._config.llm.temperature = 0.3
+        corrector._config.llm.max_context_tokens = 8192
+        corrector._config.llm.request_timeout_seconds = 120
 
         with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = mock_resp
 
-            client_config = corrector._create_ollama_client()
+            backend = corrector._create_backend()
 
-        assert client_config["host"] == "http://127.0.0.1:11434"
-        assert client_config["model"] == "exaone3.5:7.8b-instruct-q4_K_M"
-        assert client_config["temperature"] == 0.3
+        from core.llm_backend import OllamaBackend
+        assert isinstance(backend, OllamaBackend)
 
-    def test_연결_실패(self) -> None:
-        """Ollama 서버 연결 실패 시 OllamaConnectionError 발생."""
+    def test_백엔드_생성_연결_실패(self) -> None:
+        """Ollama 서버 연결 실패 시 LLMConnectionError 발생."""
         import urllib.error
 
         corrector = Corrector.__new__(Corrector)
-        corrector._host = "http://127.0.0.1:99999"
-        corrector._model_name = "test"
-        corrector._temperature = 0.3
-        corrector._max_context = 8192
-        corrector._timeout = 120
+        corrector._config = MagicMock()
+        corrector._config.llm.backend = "ollama"
+        corrector._config.llm.host = "http://127.0.0.1:99999"
+        corrector._config.llm.model_name = "test"
+        corrector._config.llm.temperature = 0.3
+        corrector._config.llm.max_context_tokens = 8192
+        corrector._config.llm.request_timeout_seconds = 120
 
         with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError(
                 "Connection refused"
             )
 
-            with pytest.raises(OllamaConnectionError):
-                corrector._create_ollama_client()
+            with pytest.raises(LLMConnectionError):
+                corrector._create_backend()
 
 
 # === ollama_client.chat 통합 테스트 (corrector 관점) ===
@@ -997,18 +911,15 @@ class TestModelManagerIntegration:
             ("테스트", "S0", 0.0, 5.0),
         ])
 
-        corrected_response = _make_ollama_response("[1] 테스트")
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 테스트"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            await corrector.correct(merged)
+        await corrector.correct(merged)
 
         # acquire가 "exaone" 이름으로 호출되었는지 확인
         manager.acquire.assert_called_once()
@@ -1022,21 +933,15 @@ class TestModelManagerIntegration:
             ("발화2", "SPEAKER_01", 5.0, 10.0),
         ])
 
-        corrected_response = _make_ollama_response(
-            "[1] 발화1\n[2] 발화2"
-        )
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 발화1\n[2] 발화2"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert result.utterances[0].speaker == "SPEAKER_00"
         assert result.utterances[1].speaker == "SPEAKER_01"
@@ -1048,19 +953,15 @@ class TestModelManagerIntegration:
             ("텍스트", "S0", 3.5, 8.2),
         ])
 
-        corrected_response = _make_ollama_response("[1] 텍스트")
-
         manager = _make_mock_manager()
+        backend = manager.acquire.return_value.__aenter__.return_value
+        backend.chat.return_value = "[1] 텍스트"
 
-        with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.return_value = _make_mock_urlopen(corrected_response)
+        corrector = Corrector.__new__(Corrector)
+        corrector._manager = manager
+        corrector._batch_size = 10
 
-            corrector = Corrector.__new__(Corrector)
-            corrector._manager = manager
-            corrector._batch_size = 10
-            corrector._timeout = 120
-
-            result = await corrector.correct(merged)
+        result = await corrector.correct(merged)
 
         assert result.utterances[0].start == pytest.approx(3.5)
         assert result.utterances[0].end == pytest.approx(8.2)
