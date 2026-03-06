@@ -618,6 +618,10 @@ class TestHybridSearchEngine:
         engine._chroma_client = None
         engine._chroma_collection = None
         engine._chroma_lock = threading.Lock()
+
+        # PERF: FTS5 SQLite 연결 캐시 (테스트에서는 None으로 설정)
+        engine._fts_conn = None
+        engine._fts_conn_lock = threading.Lock()
         return engine
 
     async def test_빈_쿼리_에러(self) -> None:
@@ -971,6 +975,10 @@ class TestPerformanceOptimizations:
         engine._chroma_client = None
         engine._chroma_collection = None
         engine._chroma_lock = threading.Lock()
+
+        # PERF: FTS5 SQLite 연결 캐시
+        engine._fts_conn = None
+        engine._fts_conn_lock = threading.Lock()
         return engine
 
     def test_PERF005_임베딩_모델_캐시_재사용(self) -> None:

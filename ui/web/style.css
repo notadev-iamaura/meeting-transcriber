@@ -144,6 +144,32 @@ body {
 }
 
 
+/* === 접근성: 포커스 가시성 (UIUX: :focus-visible 스타일) === */
+
+/* 모든 대화형 요소에 :focus-visible 아웃라인 제공 */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* 마우스 클릭 시에는 아웃라인 숨김 (키보드 탐색에만 표시) */
+a:focus:not(:focus-visible),
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+[role="button"]:focus:not(:focus-visible),
+[tabindex]:focus:not(:focus-visible) {
+    outline: none;
+}
+
+
 /* === 4. 메인 컨테이너 === */
 
 .container {
@@ -180,6 +206,28 @@ body {
     cursor: pointer;
     font-size: 16px;
     padding: 0 4px;
+}
+
+/* 에러 배너 자동 숨김 전환 애니메이션 */
+.error-banner.auto-hiding {
+    animation: fadeOutBanner 0.5s ease forwards;
+}
+
+@keyframes fadeOutBanner {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+/* === WebSocket 연결 끊김 상태 표시 === */
+
+.status-dot.disconnected {
+    background-color: var(--warning);
+    animation: wsPulse 2s infinite;
+}
+
+@keyframes wsPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
 }
 
 

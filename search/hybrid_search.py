@@ -411,10 +411,12 @@ def _search_fts(
     date_filter: Optional[str] = None,
     speaker_filter: Optional[str] = None,
     meeting_id_filter: Optional[str] = None,
+    cached_conn: Optional[sqlite3.Connection] = None,
 ) -> list[dict[str, Any]]:
     """SQLite FTS5에서 키워드 검색을 수행한다.
 
     FTS5 MATCH 구문으로 전문 검색하고, bm25 점수로 정렬한다.
+    PERF: cached_conn이 제공되면 매번 connect/close를 반복하지 않고 재사용한다.
 
     Args:
         query: 검색 쿼리 문자열
@@ -423,21 +425,26 @@ def _search_fts(
         date_filter: 날짜 필터 (정확 매칭)
         speaker_filter: 화자 필터 (포함 매칭)
         meeting_id_filter: 회의 ID 필터 (정확 매칭)
+        cached_conn: 캐시된 SQLite 연결 (None이면 새 연결 생성 후 닫음)
 
     Returns:
         검색 결과 딕셔너리 목록
     """
     try:
-        if not db_path.exists():
-            logger.warning(f"FTS5 데이터베이스 없음: {db_path}")
-            return []
+        # PERF: 캐시된 연결 사용 시 connect/close 생략
+        conn: Optional[sqlite3.Connection] = cached_conn
+        should_close = False
 
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        if conn is None:
+            if not db_path.exists():
+                logger.warning(f"FTS5 데이터베이스 없음: {db_path}")
+                return []
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            should_close = True
 
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-
             # FTS5 테이블 존재 확인
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -448,8 +455,6 @@ def _search_fts(
                 return []
 
             # FTS5 MATCH 쿼리 구성
-            # FTS5는 text 컬럼에 대해 MATCH 수행
-            # bm25()으로 관련도 점수 계산
             fts_query = _build_fts_query(query)
             if not fts_query:
                 return []
@@ -501,7 +506,9 @@ def _search_fts(
             return output
 
         finally:
-            conn.close()
+            # 캐시된 연결은 닫지 않음
+            if should_close:
+                conn.close()
 
     except Exception as e:
         logger.exception(f"FTS5 검색 실패: {e}")
@@ -607,6 +614,10 @@ class HybridSearchEngine:
         self._chroma_collection: Any = None
         self._chroma_lock = threading.Lock()
 
+        # PERF: FTS5 SQLite 연결 캐시 (매 검색마다 connect/close 반복 제거)
+        self._fts_conn: Optional[sqlite3.Connection] = None
+        self._fts_conn_lock = threading.Lock()
+
         logger.info(
             f"HybridSearchEngine 초기화: "
             f"vector_weight={self._vector_weight}, "
@@ -684,6 +695,43 @@ class HybridSearchEngine:
 
             self._embed_model = self._load_model()
             return self._embed_model
+
+    def _get_fts_connection(self) -> Optional[sqlite3.Connection]:
+        """캐시된 FTS5 SQLite 연결을 반환한다 (지연 초기화).
+
+        첫 호출 시 WAL 모드로 연결을 생성하고 캐시한다.
+        이후 호출에서는 캐시된 연결을 재사용하여 연결 생성 오버헤드를 제거한다.
+        DB 파일이 없으면 None을 반환한다.
+
+        Returns:
+            sqlite3.Connection 또는 None (DB 파일 미존재 시)
+        """
+        # 빠른 경로: 이미 초기화된 경우 락 없이 반환
+        if self._fts_conn is not None:
+            return self._fts_conn
+
+        with self._fts_conn_lock:
+            # 더블 체크 락킹 (Double-Checked Locking)
+            if self._fts_conn is not None:
+                return self._fts_conn
+
+            if not self._meetings_db.exists():
+                logger.warning(f"FTS5 데이터베이스 없음: {self._meetings_db}")
+                return None
+
+            try:
+                conn = sqlite3.connect(
+                    str(self._meetings_db),
+                    check_same_thread=False,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                self._fts_conn = conn
+                logger.info(f"FTS5 SQLite 연결 캐시 완료: {self._meetings_db}")
+                return self._fts_conn
+            except Exception as e:
+                logger.exception(f"FTS5 SQLite 연결 실패: {e}")
+                return None
 
     def _load_model(self) -> Any:
         """sentence_transformers 모델을 로드한다.
@@ -816,6 +864,8 @@ class HybridSearchEngine:
             speaker_filter,
             meeting_id_filter,
         )
+        # PERF: 캐시된 FTS SQLite 연결 사용 (매 검색마다 connect/close 제거)
+        fts_conn = self._get_fts_connection()
         fts_task = asyncio.to_thread(
             _search_fts,
             query,
@@ -824,6 +874,7 @@ class HybridSearchEngine:
             date_filter,
             speaker_filter,
             meeting_id_filter,
+            fts_conn,
         )
         vector_results, fts_results = await asyncio.gather(
             vector_task, fts_task

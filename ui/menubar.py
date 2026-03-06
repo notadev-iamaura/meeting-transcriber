@@ -254,7 +254,8 @@ class MeetingTranscriberApp(rumps.App):
         _status_url: 상태 조회 API URL
         _web_url: 웹 UI URL
         _menu_status: 상태 표시 메뉴 아이템
-        _menu_queue_info: 대기열 정보 메뉴 아이템
+        _menu_queue_header: 대기열 헤더 메뉴 아이템
+        _menu_queue_items: 대기열 개별 아이템 리스트
     """
 
     def __init__(self, config: Optional[AppConfig] = None) -> None:
@@ -295,9 +296,11 @@ class MeetingTranscriberApp(rumps.App):
             "상태: 서버 연결 확인 중...",
         )
 
-        # 대기열 정보 (정보용)
+        # 대기열 정보 (정보용, 개별 아이템 리스트로 가독성 개선)
         self._menu_queue_header = rumps.MenuItem("📋 대기열")
-        self._menu_queue_info = rumps.MenuItem("  정보 로딩 중...")
+        self._menu_queue_items: list[rumps.MenuItem] = [
+            rumps.MenuItem("  정보 로딩 중..."),
+        ]
 
         # 녹음 제어 메뉴
         self._menu_recording = rumps.MenuItem(
@@ -306,14 +309,18 @@ class MeetingTranscriberApp(rumps.App):
         )
         self._is_recording = False
 
-        # 메뉴 구성
-        self.menu = [
+        # 메뉴 구성 (대기열은 개별 아이템으로 구성)
+        menu_items: list[Any] = [
             self._menu_status,
             None,  # 구분선
             self._menu_recording,
             None,  # 구분선
             self._menu_queue_header,
-            self._menu_queue_info,
+        ]
+        # 대기열 개별 아이템 추가
+        for item in self._menu_queue_items:
+            menu_items.append(item)
+        menu_items.extend([
             None,  # 구분선
             rumps.MenuItem(
                 "🌐 웹 UI 열기",
@@ -330,7 +337,8 @@ class MeetingTranscriberApp(rumps.App):
             ),
             None,  # 구분선
             rumps.MenuItem("종료", callback=self._on_quit),
-        ]
+        ])
+        self.menu = menu_items
 
     @rumps.timer(POLL_INTERVAL_SECONDS)
     def _poll_status(self, _sender: Any) -> None:
@@ -386,9 +394,41 @@ class MeetingTranscriberApp(rumps.App):
             else:
                 self._menu_recording.title = "🎙️ 녹음 시작"
 
-        # 대기열 메뉴 업데이트
+        # 대기열 메뉴 업데이트 (개별 아이템으로 가독성 향상)
         lines = format_queue_summary(info.queue_summary)
-        self._menu_queue_info.title = " | ".join(lines)
+        self._update_queue_items(lines)
+
+    def _update_queue_items(self, lines: list[str]) -> None:
+        """대기열 메뉴 아이템을 개별 줄로 업데이트한다.
+
+        기존 아이템의 타이틀을 변경하고, 부족하면 새로 추가하고,
+        남으면 빈 문자열로 숨긴다.
+
+        Args:
+            lines: 표시할 문자열 리스트
+        """
+        # 기존 아이템 수와 새 라인 수 비교
+        for i, line in enumerate(lines):
+            if i < len(self._menu_queue_items):
+                # 기존 아이템 타이틀 업데이트
+                self._menu_queue_items[i].title = line
+            else:
+                # 새 아이템 추가 (메뉴에 동적 삽입)
+                new_item = rumps.MenuItem(line)
+                self._menu_queue_items.append(new_item)
+                # 대기열 헤더 다음 위치에 삽입 시도
+                try:
+                    self.menu.insert_after(
+                        self._menu_queue_header.title,
+                        new_item,
+                    )
+                except Exception:
+                    # insert_after 실패 시 무시 (로그만)
+                    logger.debug(f"대기열 메뉴 아이템 동적 추가 실패: {line}")
+
+        # 사용하지 않는 아이템은 빈 문자열로 숨김
+        for i in range(len(lines), len(self._menu_queue_items)):
+            self._menu_queue_items[i].title = ""
 
     def _on_toggle_recording(self, _sender: Any) -> None:
         """녹음 시작 또는 정지를 토글한다.

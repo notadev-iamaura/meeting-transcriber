@@ -101,51 +101,69 @@ class _AudioFileHandler(FileSystemEventHandler):
 
         디렉토리 이벤트는 무시하고, 오디오 파일만 처리한다.
         watchdog 스레드에서 호출되므로 asyncio 루프에 작업을 위임한다.
+        (STAB: Observer 스레드 예외 격리 — 예외 전파 시 Observer 전체가 중단되는 것을 방지)
 
         Args:
             event: watchdog 파일 시스템 이벤트
         """
-        if event.is_directory:
-            return
+        try:
+            if event.is_directory:
+                return
 
-        file_path = Path(event.src_path)
+            file_path = Path(event.src_path)
 
-        if not self._is_audio_file(file_path):
-            logger.debug(f"비오디오 파일 무시: {file_path.name}")
-            return
+            if not self._is_audio_file(file_path):
+                logger.debug(f"비오디오 파일 무시: {file_path.name}")
+                return
 
-        logger.info(f"새 오디오 파일 감지: {file_path.name}")
-        asyncio.run_coroutine_threadsafe(
-            self._on_new_file(file_path),
-            self._loop,
-        )
+            logger.info(f"새 오디오 파일 감지: {file_path.name}")
+            asyncio.run_coroutine_threadsafe(
+                self._on_new_file(file_path),
+                self._loop,
+            )
+        except Exception as e:
+            # Observer 스레드에서 예외가 전파되면 감시가 중단되므로
+            # 여기서 반드시 잡아서 로깅만 한다
+            logger.error(
+                f"on_created 이벤트 처리 중 예외 (Observer 보호): "
+                f"{type(e).__name__}: {e}"
+            )
 
     def on_moved(self, event: FileSystemEvent) -> None:
         """파일 이동 이벤트를 처리한다.
 
         감시 폴더로 파일이 이동된 경우를 처리한다.
         (예: Finder에서 드래그 앤 드롭)
+        (STAB: Observer 스레드 예외 격리)
 
         Args:
             event: watchdog 파일 시스템 이벤트
         """
-        if event.is_directory:
-            return
+        try:
+            if event.is_directory:
+                return
 
-        # dest_path가 있는 이동 이벤트만 처리
-        dest_path = Path(getattr(event, "dest_path", ""))
-        if not dest_path.name:
-            return
+            # dest_path가 있는 이동 이벤트만 처리
+            dest_path = Path(getattr(event, "dest_path", ""))
+            if not dest_path.name:
+                return
 
-        if not self._is_audio_file(dest_path):
-            logger.debug(f"비오디오 파일 이동 무시: {dest_path.name}")
-            return
+            if not self._is_audio_file(dest_path):
+                logger.debug(f"비오디오 파일 이동 무시: {dest_path.name}")
+                return
 
-        logger.info(f"오디오 파일 이동 감지: {dest_path.name}")
-        asyncio.run_coroutine_threadsafe(
-            self._on_new_file(dest_path),
-            self._loop,
-        )
+            logger.info(f"오디오 파일 이동 감지: {dest_path.name}")
+            asyncio.run_coroutine_threadsafe(
+                self._on_new_file(dest_path),
+                self._loop,
+            )
+        except Exception as e:
+            # Observer 스레드에서 예외가 전파되면 감시가 중단되므로
+            # 여기서 반드시 잡아서 로깅만 한다
+            logger.error(
+                f"on_moved 이벤트 처리 중 예외 (Observer 보호): "
+                f"{type(e).__name__}: {e}"
+            )
 
 
 class FolderWatcher:

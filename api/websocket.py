@@ -84,12 +84,17 @@ class WebSocketEvent:
         """JSON 문자열로 직렬화한다.
 
         한국어 텍스트를 위해 ensure_ascii=False를 사용한다.
+        PERF: asdict() 대신 수동 딕셔너리로 변환하여 재귀 복사 오버헤드를 제거한다.
 
         Returns:
             JSON 문자열
         """
         return json.dumps(
-            asdict(self),
+            {
+                "event_type": self.event_type,
+                "data": self.data,
+                "timestamp": self.timestamp,
+            },
             ensure_ascii=False,
         )
 
@@ -344,17 +349,38 @@ class ConnectionManager:
             raise
 
     async def close_all(self) -> None:
-        """모든 연결을 닫고 하트비트를 중지한다."""
+        """모든 연결을 닫고 하트비트를 중지한다.
+
+        개별 연결 종료 실패 시에도 다른 연결 정리를 계속하며,
+        실패한 연결을 로그에 남긴다 (STAB: 예외 무시 방지).
+        """
         await self.stop_heartbeat()
 
+        close_errors = 0
         for ws in list(self._connections):
             try:
                 await ws.close(code=1001, reason="서버 종료")
-            except Exception:
-                pass
+            except (ConnectionResetError, RuntimeError) as e:
+                # 이미 끊어진 연결 또는 런타임 에러 — 일반적인 경우
+                logger.debug(f"WebSocket 연결 종료 중 무시 가능한 에러: {e}")
+                close_errors += 1
+            except Exception as e:
+                # 예상치 못한 에러 — 경고 로깅
+                logger.warning(
+                    f"WebSocket 연결 종료 중 예외: "
+                    f"{type(e).__name__}: {e}"
+                )
+                close_errors += 1
 
         self._connections.clear()
-        logger.info("모든 WebSocket 연결 종료 완료")
+
+        if close_errors > 0:
+            logger.info(
+                f"모든 WebSocket 연결 종료 완료 "
+                f"(종료 에러 {close_errors}건)"
+            )
+        else:
+            logger.info("모든 WebSocket 연결 종료 완료")
 
 
 # === WebSocket 엔드포인트 ===

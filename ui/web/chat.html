@@ -23,11 +23,11 @@
         </div>
     </header>
 
-    <!-- === 에러 배너 === -->
-    <div class="error-banner" id="errorBanner">
-        <span>&#x26A0;</span>
+    <!-- === 에러 배너 (접근성: role="alert") === -->
+    <div class="error-banner" id="errorBanner" role="alert" aria-live="assertive">
+        <span aria-hidden="true">&#x26A0;</span>
         <span id="errorMessage"></span>
-        <button class="error-banner-close" id="errorClose">&#x2715;</button>
+        <button class="error-banner-close" id="errorClose" aria-label="에러 알림 닫기">&#x2715;</button>
     </div>
 
     <!-- === 채팅 레이아웃 === -->
@@ -82,7 +82,7 @@
                         rows="1"
                     ></textarea>
                 </div>
-                <button class="send-btn" id="sendBtn" disabled>전송</button>
+                <button class="send-btn" id="sendBtn" disabled aria-label="메시지 전송">전송</button>
             </div>
             <div class="input-hint">Enter로 전송, Shift+Enter로 줄바꿈</div>
         </div>
@@ -128,8 +128,20 @@
             sendBtn: document.getElementById("sendBtn"),
         };
 
-        // === 에러 배너 초기화 ===
+        // === 에러 배너 초기화 (자동 숨김 타이머 포함) ===
         var errorBanner = App.initErrorBanner("errorBanner", "errorMessage", "errorClose");
+        // 원본 show 함수를 래핑하여 자동 숨김 타이머 추가
+        var _origShow = errorBanner.show;
+        var _chatAutoHideTimer = null;
+        var CHAT_AUTO_HIDE_DELAY = 8000; // 8초 후 자동 숨김
+        errorBanner.show = function (text) {
+            if (_chatAutoHideTimer) { clearTimeout(_chatAutoHideTimer); _chatAutoHideTimer = null; }
+            _origShow(text);
+            _chatAutoHideTimer = setTimeout(function () {
+                errorBanner.hide();
+                _chatAutoHideTimer = null;
+            }, CHAT_AUTO_HIDE_DELAY);
+        };
 
         // === 상태 ===
         var isSending = false; // 전송 중 여부
@@ -311,8 +323,16 @@
             this.style.height = Math.min(this.scrollHeight, 120) + "px";
         });
 
-        /** 키보드 이벤트: Enter 전송, Shift+Enter 줄바꿈 */
+        /**
+         * 키보드 이벤트: Enter 전송, Shift+Enter 줄바꿈.
+         * 한국어 IME 조합 중(isComposing)에는 전송하지 않는다.
+         * compositionend 이후 Enter가 중복 발생하는 것을 방지하기 위해
+         * isComposing 상태를 확인한다.
+         */
         els.chatInput.addEventListener("keydown", function (e) {
+            // IME 조합 중이면 무시 (한국어 입력 시 Enter가 조합 확정에 사용됨)
+            if (e.isComposing || e.keyCode === 229) return;
+
             if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 if (!isSending && els.chatInput.value.trim()) {

@@ -260,26 +260,29 @@ def _store_chunks_fts(
             f"DELETE FROM {_FTS_TABLE_NAME} WHERE meeting_id = ?",
             (meeting_id,),
         )
-        # 새 데이터 삽입
-        for chunk in chunks:
-            conn.execute(
-                f"""
-                INSERT INTO {_FTS_TABLE_NAME}
-                    (chunk_id, text, meeting_id, date, speakers,
-                     start_time, end_time, chunk_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    chunk.chunk_id,
-                    chunk.text,
-                    chunk.meeting_id,
-                    chunk.date,
-                    ",".join(chunk.speakers),
-                    chunk.start_time,
-                    chunk.end_time,
-                    chunk.chunk_index,
-                ),
+        # PERF: executemany 배치 삽입 (개별 execute 루프 대비 대폭 성능 향상)
+        insert_data = [
+            (
+                chunk.chunk_id,
+                chunk.text,
+                chunk.meeting_id,
+                chunk.date,
+                ",".join(chunk.speakers),
+                chunk.start_time,
+                chunk.end_time,
+                chunk.chunk_index,
             )
+            for chunk in chunks
+        ]
+        conn.executemany(
+            f"""
+            INSERT INTO {_FTS_TABLE_NAME}
+                (chunk_id, text, meeting_id, date, speakers,
+                 start_time, end_time, chunk_index)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            insert_data,
+        )
         conn.commit()
         logger.info(
             f"FTS5 저장 완료: meeting_id={meeting_id}, "
@@ -315,6 +318,9 @@ def _store_chunks_chroma(
     """
     import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
 
+    # ChromaDB PersistentClient는 내부적으로 파일 핸들/스레드를 보유하므로
+    # 사용 후 반드시 리소스를 정리해야 한다 (STAB: 리소스 정리)
+    client = None
     try:
         chroma_dir.mkdir(parents=True, exist_ok=True)
         client = chromadb.PersistentClient(path=str(chroma_dir))
@@ -363,6 +369,22 @@ def _store_chunks_chroma(
         )
     except Exception as e:
         raise StorageError(f"ChromaDB 저장 실패: {e}") from e
+    finally:
+        # PersistentClient 리소스 정리 (파일 핸들, 내부 스레드 해제)
+        if client is not None:
+            try:
+                # chromadb >= 0.4.x에서 _identifier_to_system 딕셔너리 정리
+                if hasattr(client, "_identifier_to_system"):
+                    for system in client._identifier_to_system.values():
+                        if hasattr(system, "stop"):
+                            system.stop()
+                elif hasattr(client, "clear_system_cache"):
+                    client.clear_system_cache()
+                logger.debug("ChromaDB PersistentClient 리소스 정리 완료")
+            except Exception as cleanup_err:
+                logger.warning(
+                    f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}"
+                )
 
 
 # === 메인 클래스 ===

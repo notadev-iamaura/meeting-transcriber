@@ -569,20 +569,41 @@ class JobQueue:
         """재시도 가능한 모든 실패 작업을 재시도한다.
 
         max_retries를 초과하지 않은 failed 작업만 재시도한다.
+        PERF: 단일 SQL 배치 UPDATE로 N+1 쿼리 패턴을 제거한다.
 
         Returns:
             재시도된 작업 ID 리스트
         """
-        failed_jobs = self.get_jobs_by_status(JobStatus.FAILED)
-        retried_ids: list[int] = []
+        conn = self._ensure_connection()
+        now = self._now_iso()
 
-        for job in failed_jobs:
-            if job.retry_count < job.max_retries:
-                try:
-                    self.retry_job(job.id)
-                    retried_ids.append(job.id)
-                except (MaxRetriesExceededError, InvalidTransitionError) as e:
-                    logger.warning(f"재시도 건너뜀: {e}")
+        # PERF: 단일 쿼리로 재시도 가능한 작업 조회 + 일괄 UPDATE
+        with self._write_lock:
+            # 재시도 가능한 작업 ID를 한 번에 조회
+            rows = conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE status = ? AND retry_count < max_retries
+                """,
+                (JobStatus.FAILED.value,),
+            ).fetchall()
+
+            retried_ids = [row["id"] for row in rows]
+
+            if retried_ids:
+                # 단일 UPDATE로 일괄 상태 변경
+                conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status = ?,
+                        retry_count = retry_count + 1,
+                        error_message = '',
+                        updated_at = ?
+                    WHERE status = ? AND retry_count < max_retries
+                    """,
+                    (JobStatus.QUEUED.value, now, JobStatus.FAILED.value),
+                )
+                conn.commit()
 
         if retried_ids:
             logger.info(

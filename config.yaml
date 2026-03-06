@@ -32,7 +32,7 @@ llm:
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
   max_context_tokens: 8192                   # 컨텍스트 윈도우
   temperature: 0.3                           # 생성 온도
-  correction_batch_size: 10                  # 보정 시 배치 크기 (발화 수)
+  correction_batch_size: 15                  # 보정 시 배치 크기 (발화 수, PERF: 8192 컨텍스트 윈도우 활용도 개선)
   request_timeout_seconds: 120               # 요청 타임아웃
 
 # === 임베딩 모델 설정 ===

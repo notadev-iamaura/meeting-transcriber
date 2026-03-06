@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,6 +27,74 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+# === PERF: JSON 파일 캐시 (mtime 기반 무효화) ===
+
+
+class _JsonFileCache:
+    """JSON 파일을 mtime 기반으로 캐싱하는 스레드 안전 캐시.
+
+    파일이 변경(mtime 갱신)되면 자동으로 다시 파싱한다.
+    동일 파일의 반복 요청에서 JSON 파싱 오버헤드를 제거한다.
+
+    Args:
+        max_size: 최대 캐시 항목 수 (기본값: 64)
+    """
+
+    def __init__(self, max_size: int = 64) -> None:
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def get(self, file_path: Path) -> Any:
+        """캐시된 JSON 데이터를 반환한다. 변경 시 자동 갱신.
+
+        Args:
+            file_path: JSON 파일 경로
+
+        Returns:
+            파싱된 JSON 데이터
+
+        Raises:
+            FileNotFoundError: 파일이 없을 때
+            json.JSONDecodeError: JSON 파싱 실패 시
+        """
+        key = str(file_path)
+        current_mtime = file_path.stat().st_mtime
+
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached_mtime, cached_data = cached
+                if cached_mtime == current_mtime:
+                    return cached_data
+
+        # 캐시 미스 또는 mtime 변경 → 다시 파싱
+        with open(file_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        with self._lock:
+            # LRU 간이 구현: 최대 크기 초과 시 가장 오래된 항목 제거
+            if len(self._cache) >= self._max_size and key not in self._cache:
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[key] = (current_mtime, data)
+
+        return data
+
+    def invalidate(self, file_path: Path) -> None:
+        """특정 파일의 캐시를 무효화한다.
+
+        Args:
+            file_path: 무효화할 JSON 파일 경로
+        """
+        with self._lock:
+            self._cache.pop(str(file_path), None)
+
+
+# 모듈 수준 JSON 파일 캐시 싱글턴
+_json_cache = _JsonFileCache()
 
 # === API 라우터 ===
 
@@ -560,11 +631,8 @@ async def get_transcript(
     try:
         import asyncio
 
-        def _read_corrected() -> dict:
-            with open(corrected_path, encoding="utf-8") as f:
-                return json.load(f)
-
-        data = await asyncio.to_thread(_read_corrected)
+        # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
+        data = await asyncio.to_thread(_json_cache.get, corrected_path)
 
         utterances = [
             TranscriptUtteranceItem(
@@ -650,12 +718,11 @@ async def get_summary(
                 return summary_md_path.read_text(encoding="utf-8")
             markdown = await asyncio.to_thread(_read_md)
 
-        # 메타데이터 JSON 읽기
+        # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
         if summary_json_path.is_file():
-            def _read_json() -> dict:
-                with open(summary_json_path, encoding="utf-8") as f:
-                    return json.load(f)
-            meta = await asyncio.to_thread(_read_json)
+            meta = await asyncio.to_thread(
+                _json_cache.get, summary_json_path
+            )
 
             # JSON에 마크다운이 포함되어 있고 파일이 없는 경우 대체
             if not markdown and meta.get("markdown"):

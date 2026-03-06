@@ -660,10 +660,58 @@ class AudioRecorder:
                 logger.error(f"비동기 콜백 실행 실패: {e}")
 
     async def cleanup(self) -> None:
-        """녹음 중이면 정지하고 리소스를 정리한다."""
+        """녹음 중이면 정지하고 리소스를 정리한다.
+
+        ffmpeg 프로세스가 고아로 남는 것을 방지하기 위해
+        모든 상태에서 프로세스 종료를 확인한다 (STAB: 고아 프로세스 방지).
+        """
         if self._state == RecordingState.RECORDING:
             logger.info("AudioRecorder 정리: 녹음 정지 중...")
-            await self.stop_recording()
+            try:
+                await self.stop_recording()
+            except Exception as e:
+                logger.error(f"녹음 정지 중 에러 발생: {e}")
+
+        # 어떤 상태든 ffmpeg 프로세스가 남아있으면 강제 종료
+        await self._kill_orphan_process()
+
+    async def _kill_orphan_process(self) -> None:
+        """고아 ffmpeg 프로세스가 남아있으면 강제 종료한다.
+
+        cleanup() 또는 비정상 종료 후 호출되어
+        ffmpeg 프로세스가 백그라운드에서 계속 실행되는 것을 방지한다.
+        (STAB: ffmpeg 고아 프로세스 방지)
+        """
+        if self._process is None:
+            return
+
+        # 이미 종료된 프로세스인지 확인
+        if self._process.returncode is not None:
+            logger.debug("ffmpeg 프로세스 이미 종료됨")
+            self._process = None
+            return
+
+        pid = self._process.pid
+        logger.warning(f"고아 ffmpeg 프로세스 감지: PID={pid}, 강제 종료 시도")
+
+        try:
+            self._process.terminate()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                logger.info(f"고아 ffmpeg 프로세스 SIGTERM 종료: PID={pid}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"고아 ffmpeg SIGTERM 타임아웃, SIGKILL 전송: PID={pid}"
+                )
+                self._process.kill()
+                await self._process.wait()
+                logger.info(f"고아 ffmpeg 프로세스 SIGKILL 종료: PID={pid}")
+        except ProcessLookupError:
+            logger.debug(f"ffmpeg 프로세스가 이미 사라짐: PID={pid}")
+        except OSError as e:
+            logger.error(f"고아 ffmpeg 프로세스 종료 실패: PID={pid}, 에러={e}")
+        finally:
+            self._process = None
 
     def get_status(self) -> dict[str, Any]:
         """현재 녹음 상태를 딕셔너리로 반환한다.

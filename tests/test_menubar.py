@@ -474,7 +474,8 @@ class TestMeetingTranscriberApp:
         app._current_status = AppStatus.DISCONNECTED
         app.title = get_status_title(AppStatus.DISCONNECTED)
         app._menu_status = MagicMock()
-        app._menu_queue_info = MagicMock()
+        app._menu_queue_header = MagicMock()
+        app._menu_queue_items = [MagicMock()]
         app._menu_recording = MagicMock()
         app._is_recording = False
 
@@ -500,7 +501,8 @@ class TestMeetingTranscriberApp:
         original_title = get_status_title(AppStatus.IDLE)
         app.title = original_title
         app._menu_status = MagicMock()
-        app._menu_queue_info = MagicMock()
+        app._menu_queue_header = MagicMock()
+        app._menu_queue_items = [MagicMock()]
         app._menu_recording = MagicMock()
         app._is_recording = False
 
@@ -524,7 +526,8 @@ class TestMeetingTranscriberApp:
         app._current_status = AppStatus.IDLE  # 이전 상태를 다르게 설정
         app.title = ""
         app._menu_status = MagicMock()
-        app._menu_queue_info = MagicMock()
+        app._menu_queue_header = MagicMock()
+        app._menu_queue_items = [MagicMock()]
         app._menu_recording = MagicMock()
         app._is_recording = False
 

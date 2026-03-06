@@ -30,11 +30,11 @@
             <span>&#x2190;</span> 회의 목록으로 돌아가기
         </a>
 
-        <!-- 에러 배너 -->
-        <div class="error-banner" id="errorBanner">
-            <span>&#x26A0;</span>
+        <!-- 에러 배너 (접근성: role="alert") -->
+        <div class="error-banner" id="errorBanner" role="alert" aria-live="assertive">
+            <span aria-hidden="true">&#x26A0;</span>
             <span id="errorMessage"></span>
-            <button class="error-banner-close" id="errorClose">&#x2715;</button>
+            <button class="error-banner-close" id="errorClose" aria-label="에러 알림 닫기">&#x2715;</button>
         </div>
 
         <!-- 회의 정보 -->
@@ -52,14 +52,21 @@
             <div class="speaker-legend" id="speakerLegend"></div>
         </div>
 
-        <!-- 탭 네비게이션 -->
-        <div class="tabs" id="tabNav" style="display:none;">
-            <button class="tab-btn active" data-tab="transcript">전사문</button>
-            <button class="tab-btn" data-tab="summary">회의록 (AI 요약)</button>
+        <!-- 탭 네비게이션 (접근성: ARIA 탭 패턴 적용) -->
+        <div class="tabs" id="tabNav" style="display:none;" role="tablist" aria-label="회의 내용 탭">
+            <button class="tab-btn active" data-tab="transcript"
+                    role="tab" id="tabTranscript"
+                    aria-selected="true"
+                    aria-controls="panelTranscript">전사문</button>
+            <button class="tab-btn" data-tab="summary"
+                    role="tab" id="tabSummary"
+                    aria-selected="false"
+                    aria-controls="panelSummary">회의록 (AI 요약)</button>
         </div>
 
-        <!-- 전사문 탭 -->
-        <div class="tab-panel active" id="panelTranscript">
+        <!-- 전사문 탭 (접근성: role="tabpanel") -->
+        <div class="tab-panel active" id="panelTranscript"
+             role="tabpanel" aria-labelledby="tabTranscript">
             <!-- 인라인 검색 -->
             <div class="search-bar" id="searchBar" style="display:none;">
                 <input
@@ -75,8 +82,8 @@
 
             <div class="timeline" id="timeline"></div>
 
-            <div class="loading-overlay" id="transcriptLoading">
-                <span class="loading-spinner"></span>
+            <div class="loading-overlay" id="transcriptLoading" role="status" aria-live="polite">
+                <span class="loading-spinner" aria-hidden="true"></span>
                 <span>전사문 불러오는 중...</span>
             </div>
 
@@ -87,12 +94,13 @@
             </div>
         </div>
 
-        <!-- 회의록 탭 -->
-        <div class="tab-panel" id="panelSummary">
+        <!-- 회의록 탭 (접근성: role="tabpanel") -->
+        <div class="tab-panel" id="panelSummary"
+             role="tabpanel" aria-labelledby="tabSummary">
             <div class="summary-content" id="summaryContent"></div>
 
-            <div class="loading-overlay" id="summaryLoading">
-                <span class="loading-spinner"></span>
+            <div class="loading-overlay" id="summaryLoading" role="status" aria-live="polite">
+                <span class="loading-spinner" aria-hidden="true"></span>
                 <span>회의록 불러오는 중...</span>
             </div>
 
@@ -124,6 +132,7 @@
         var params = new URLSearchParams(window.location.search);
         var meetingId = params.get("meeting_id");
         var initialQuery = params.get("q") || ""; // 외부에서 전달된 검색어
+        var initialTimestamp = parseFloat(params.get("t") || ""); // 외부에서 전달된 타임스탬프 (초)
 
         if (!meetingId) {
             window.location.href = "/static/index.html";
@@ -153,8 +162,19 @@
             searchClear: document.getElementById("searchClear"),
         };
 
-        // === 에러 배너 초기화 ===
+        // === 에러 배너 초기화 (자동 숨김 타이머 포함) ===
         var errorBanner = App.initErrorBanner("errorBanner", "errorMessage", "errorClose");
+        var _viewerOrigShow = errorBanner.show;
+        var _viewerAutoHideTimer = null;
+        var VIEWER_AUTO_HIDE_DELAY = 8000; // 8초 후 자동 숨김
+        errorBanner.show = function (text) {
+            if (_viewerAutoHideTimer) { clearTimeout(_viewerAutoHideTimer); _viewerAutoHideTimer = null; }
+            _viewerOrigShow(text);
+            _viewerAutoHideTimer = setTimeout(function () {
+                errorBanner.hide();
+                _viewerAutoHideTimer = null;
+            }, VIEWER_AUTO_HIDE_DELAY);
+        };
 
         // === 상태 ===
         var speakerColorMap = {}; // 화자 → 색상 매핑
@@ -263,26 +283,74 @@
             }
         }
 
+        // === 타임스탬프 기반 스크롤 ===
+
+        /**
+         * 지정 타임스탬프에 가장 가까운 발화로 스크롤한다.
+         * @param {number} targetTime - 타겟 시간 (초)
+         */
+        function scrollToTimestamp(targetTime) {
+            var utteranceEls = elements.timeline.querySelectorAll(".utterance");
+            var closestEl = null;
+            var closestDiff = Infinity;
+
+            allUtterances.forEach(function (u, idx) {
+                var diff = Math.abs((u.start || 0) - targetTime);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    closestEl = utteranceEls[idx] || null;
+                }
+            });
+
+            if (closestEl) {
+                closestEl.classList.add("highlighted");
+                closestEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+        }
+
         // === 탭 전환 ===
 
         document.querySelectorAll(".tab-btn").forEach(function (btn) {
             btn.addEventListener("click", function () {
-                // 활성 탭 버튼 변경
+                // ARIA 탭 패턴: 모든 탭 비활성화
                 document.querySelectorAll(".tab-btn").forEach(function (b) {
                     b.classList.remove("active");
+                    b.setAttribute("aria-selected", "false");
                 });
+                // 현재 탭 활성화
                 btn.classList.add("active");
+                btn.setAttribute("aria-selected", "true");
 
-                // 활성 패널 변경
-                var tabName = btn.getAttribute("data-tab");
+                // 모든 패널 비활성화
                 document.querySelectorAll(".tab-panel").forEach(function (panel) {
                     panel.classList.remove("active");
                 });
 
+                // 해당 패널만 활성화
+                var tabName = btn.getAttribute("data-tab");
                 if (tabName === "transcript") {
                     document.getElementById("panelTranscript").classList.add("active");
                 } else if (tabName === "summary") {
                     document.getElementById("panelSummary").classList.add("active");
+                }
+            });
+
+            // 키보드 탐색: 좌우 화살표로 탭 이동 (ARIA 탭 패턴)
+            btn.addEventListener("keydown", function (e) {
+                var tabs = Array.from(document.querySelectorAll(".tab-btn"));
+                var idx = tabs.indexOf(btn);
+                var nextIdx = -1;
+
+                if (e.key === "ArrowRight") {
+                    nextIdx = (idx + 1) % tabs.length;
+                } else if (e.key === "ArrowLeft") {
+                    nextIdx = (idx - 1 + tabs.length) % tabs.length;
+                }
+
+                if (nextIdx >= 0) {
+                    e.preventDefault();
+                    tabs[nextIdx].focus();
+                    tabs[nextIdx].click();
                 }
             });
         });
@@ -370,6 +438,11 @@
 
                 // 타임라인 렌더링
                 renderTimeline(allUtterances, currentQuery);
+
+                // URL 타임스탬프 파라미터로 해당 발화 위치로 스크롤
+                if (!isNaN(initialTimestamp) && initialTimestamp >= 0) {
+                    scrollToTimestamp(initialTimestamp);
+                }
 
             } catch (e) {
                 if (e.status === 404) {
