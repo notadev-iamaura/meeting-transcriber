@@ -35,6 +35,7 @@ dependencies = [
     "pydantic>=2.5.0",
     # macOS UI
     "rumps>=0.4.0",
+    "pywebview>=4.0",
     # 파일 감시
     "watchdog>=3.0.0",
     # 설정 관리

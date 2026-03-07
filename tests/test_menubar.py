@@ -12,12 +12,14 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import AppConfig, PathsConfig, ServerConfig
+from config import AppConfig, PathsConfig, ServerConfig, WindowConfig
 from ui.menubar import (
     AppStatus,
     MeetingTranscriberApp,
@@ -535,24 +537,30 @@ class TestMeetingTranscriberApp:
 
         assert "서버 연결 안됨" in app._menu_status.title
 
+    @patch("ui.menubar.launch_native_window")
+    @patch("ui.menubar.build_window_config")
     @patch("ui.menubar.webbrowser.open")
     @patch("ui.menubar.rumps.App.__init__", return_value=None)
     def test_웹_UI_열기(
         self,
         mock_init: MagicMock,
         mock_open: MagicMock,
+        mock_build: MagicMock,
+        mock_launch: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """_on_open_web_ui가 webbrowser.open을 호출하는지 확인한다."""
+        """_on_open_web_ui가 네이티브 창 또는 브라우저를 호출하는지 확인한다."""
         config = _make_test_config(tmp_path)
 
         app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
         app.config = config
         app._web_url = build_api_url(config, "/static/index.html")
 
+        mock_build.return_value = MagicMock()
         app._on_open_web_ui(None)
 
-        mock_open.assert_called_once_with(app._web_url)
+        # 기본 config는 use_native=True이므로 네이티브 창 시도
+        mock_launch.assert_called_once()
 
     @patch("ui.menubar.subprocess.Popen")
     @patch("ui.menubar.rumps.App.__init__", return_value=None)
@@ -616,6 +624,279 @@ class TestFormatRecordingTime:
     def test_소수점_버림(self) -> None:
         """소수점 이하 초는 버려지는지 확인한다."""
         assert format_recording_time(59.9) == "00:59"
+
+
+class TestNativeWindowIntegration:
+    """네이티브 창 통합 테스트.
+
+    _on_open_web_ui 메서드가 네이티브 창을 우선 시도하고,
+    실패 시 브라우저로 폴백하는 동작을 검증한다.
+    """
+
+    def test_네이티브_창_호출(self, tmp_path: Path) -> None:
+        """use_native=True일 때 launch_native_window가 호출되는지 확인한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            server=ServerConfig(host="127.0.0.1", port=8765),
+            window=WindowConfig(use_native=True),
+        )
+        app = MeetingTranscriberApp(config)
+
+        with (
+            patch("ui.menubar.launch_native_window") as mock_launch,
+            patch("ui.menubar.build_window_config") as mock_build,
+            patch("ui.menubar.webbrowser") as mock_browser,
+        ):
+            mock_build.return_value = MagicMock()
+            app._on_open_web_ui(None)
+
+            mock_build.assert_called_once()
+            mock_launch.assert_called_once_with(mock_build.return_value)
+            mock_browser.open.assert_not_called()
+
+    def test_네이티브_실패시_브라우저_폴백(self, tmp_path: Path) -> None:
+        """launch_native_window 예외 시 webbrowser.open으로 폴백하는지 확인한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            server=ServerConfig(host="127.0.0.1", port=8765),
+            window=WindowConfig(use_native=True),
+        )
+        app = MeetingTranscriberApp(config)
+
+        with (
+            patch("ui.menubar.launch_native_window", side_effect=OSError("실패")),
+            patch("ui.menubar.build_window_config") as mock_build,
+            patch("ui.menubar.webbrowser") as mock_browser,
+        ):
+            mock_build.return_value = MagicMock()
+            app._on_open_web_ui(None)
+
+            mock_browser.open.assert_called_once_with(app._web_url)
+
+    def test_use_native_false_브라우저(self, tmp_path: Path) -> None:
+        """use_native=False일 때 브라우저가 직접 호출되는지 확인한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            server=ServerConfig(host="127.0.0.1", port=8765),
+            window=WindowConfig(use_native=False),
+        )
+        app = MeetingTranscriberApp(config)
+
+        with (
+            patch("ui.menubar.launch_native_window") as mock_launch,
+            patch("ui.menubar.webbrowser") as mock_browser,
+        ):
+            app._on_open_web_ui(None)
+
+            mock_launch.assert_not_called()
+            mock_browser.open.assert_called_once_with(app._web_url)
+
+    def test_window_config_없을때_브라우저(self, tmp_path: Path) -> None:
+        """window 속성이 기본값(use_native=True)이어도 정상 동작하는지 확인한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            server=ServerConfig(host="127.0.0.1", port=8765),
+        )
+        app = MeetingTranscriberApp(config)
+
+        with (
+            patch("ui.menubar.launch_native_window") as mock_launch,
+            patch("ui.menubar.build_window_config") as mock_build,
+            patch("ui.menubar.webbrowser"),
+        ):
+            mock_build.return_value = MagicMock()
+            app._on_open_web_ui(None)
+
+            # 기본 WindowConfig는 use_native=True이므로 네이티브 창 시도
+            mock_launch.assert_called_once()
+
+
+# === TestToggleRecording ===
+
+
+class TestToggleRecording:
+    """_on_toggle_recording 메서드 테스트.
+
+    녹음 시작/정지 토글 동작, 에러 처리를 검증한다.
+    """
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_녹음_시작_호출(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """녹음 중이 아닐 때 /api/recording/start로 POST 호출하는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._is_recording = False
+
+        # urlopen 모킹 (정상 응답)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"status":"ok"}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            with patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req:
+                app._on_toggle_recording(None)
+
+                # Request가 POST 메서드로 호출되었는지 확인
+                mock_req.assert_called_once()
+                call_kwargs = mock_req.call_args
+                created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
+                assert created_url.endswith("/api/recording/start")
+                assert call_kwargs[1].get("method") == "POST" or (
+                    len(call_kwargs[0]) > 0 and mock_req.call_args[1].get("method") == "POST"
+                )
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_녹음_정지_호출(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """녹음 중일 때 /api/recording/stop으로 호출하는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._is_recording = True
+
+        # urlopen 모킹 (정상 응답)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"status":"ok"}'
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp):
+            with patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req:
+                app._on_toggle_recording(None)
+
+                # URL이 /api/recording/stop으로 끝나는지 확인
+                mock_req.assert_called_once()
+                call_kwargs = mock_req.call_args
+                created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
+                assert created_url.endswith("/api/recording/stop")
+
+    @patch("ui.menubar.rumps.alert")
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_녹음_제어_URLError(
+        self,
+        mock_init: MagicMock,
+        mock_alert: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """URLError 발생 시 rumps.alert 다이얼로그가 표시되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._is_recording = False
+
+        with patch(
+            "ui.menubar.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            app._on_toggle_recording(None)
+
+        # 에러 다이얼로그 표시 확인
+        mock_alert.assert_called_once()
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_녹음_제어_예외(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """RuntimeError 등 예상치 못한 예외 시 크래시 없이 로거에 기록되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._is_recording = False
+
+        with patch(
+            "ui.menubar.urllib.request.urlopen",
+            side_effect=RuntimeError("unexpected"),
+        ):
+            with patch("ui.menubar.logger") as mock_logger:
+                # 크래시 없이 정상 종료되어야 함
+                app._on_toggle_recording(None)
+
+                # logger.error가 호출되었는지 확인
+                mock_logger.error.assert_called_once()
+
+
+# === TestPollStatus ===
+
+
+class TestPollStatus:
+    """_poll_status 메서드 테스트.
+
+    주기적 상태 폴링의 정상/비정상 케이스를 검증한다.
+    """
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_poll_정상_상태(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """fetch_status가 정상 StatusInfo를 반환하면 _update_ui에 전달되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._status_url = build_api_url(config, "/api/status")
+
+        expected_info = StatusInfo(status=AppStatus.IDLE)
+
+        with patch("ui.menubar.fetch_status", return_value=expected_info):
+            with patch.object(app, "_update_ui") as mock_update:
+                app._poll_status(None)
+
+                # _update_ui가 정상 StatusInfo로 호출되었는지 확인
+                mock_update.assert_called_once_with(expected_info)
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_poll_None_응답(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """fetch_status가 None을 반환하면 DISCONNECTED 상태로 _update_ui 호출되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._status_url = build_api_url(config, "/api/status")
+
+        with patch("ui.menubar.fetch_status", return_value=None):
+            with patch.object(app, "_update_ui") as mock_update:
+                app._poll_status(None)
+
+                # DISCONNECTED StatusInfo로 호출되었는지 확인
+                mock_update.assert_called_once()
+                actual_info = mock_update.call_args[0][0]
+                assert actual_info.status == AppStatus.DISCONNECTED
+
+    @patch("ui.menubar.rumps.App.__init__", return_value=None)
+    def test_poll_예외(
+        self,
+        mock_init: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """fetch_status에서 예외 발생 시 ERROR 상태로 _update_ui 호출되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = config
+        app._status_url = build_api_url(config, "/api/status")
+
+        with patch("ui.menubar.fetch_status", side_effect=Exception("network error")):
+            with patch.object(app, "_update_ui") as mock_update:
+                app._poll_status(None)
+
+                # ERROR StatusInfo로 호출되었는지 확인
+                mock_update.assert_called_once()
+                actual_info = mock_update.call_args[0][0]
+                assert actual_info.status == AppStatus.ERROR
 
 
 class TestAppStatusEnum:

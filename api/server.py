@@ -25,9 +25,9 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig, get_config
@@ -253,6 +253,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # 정적 파일 서빙 (ui/web/ 디렉토리가 존재할 때만)
     _setup_static_files(app)
 
+    # SPA 라우팅 (/app 및 /app/{path} → index.html)
+    _setup_spa_routes(app)
+
     logger.info(f"FastAPI 앱 생성 완료 — host={config.server.host}, port={config.server.port}")
 
     return app
@@ -323,7 +326,6 @@ def _setup_exception_handlers(app: FastAPI) -> None:
             status_code=500,
             content={
                 "error": "서버 내부 오류가 발생했습니다.",
-                "detail": str(exc),
             },
         )
 
@@ -417,6 +419,34 @@ def _setup_static_files(app: FastAPI) -> None:
             f"정적 파일 디렉토리가 존재하지 않습니다: {_STATIC_DIR}. "
             f"정적 파일 서빙이 비활성화됩니다."
         )
+
+
+# === SPA 라우팅 ===
+
+
+def _setup_spa_routes(app: FastAPI) -> None:
+    """SPA 라우트를 설정한다.
+
+    /app 및 /app/{path} 요청에 index.html을 반환하여
+    클라이언트 사이드 라우팅을 지원한다.
+
+    Args:
+        app: FastAPI 인스턴스
+    """
+    index_path = _STATIC_DIR / "index.html"
+
+    @app.get("/app", response_class=FileResponse)
+    @app.get("/app/{path:path}", response_class=FileResponse)
+    async def spa_handler(path: str = "") -> FileResponse:
+        """SPA 엔트리포인트. 모든 /app 하위 경로에 index.html을 반환한다."""
+        if not index_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="index.html을 찾을 수 없습니다",
+            )
+        return FileResponse(index_path, media_type="text/html")
+
+    logger.info("SPA 라우팅 설정 완료 — /app/*")
 
 
 # === uvicorn 실행 헬퍼 ===

@@ -97,7 +97,7 @@ chmod 700 ~/.meeting-transcriber
 ### 셋업 검증
 
 ```bash
-# 단위 테스트 (1165개)
+# 단위 테스트 (1231개)
 pytest tests/ -x -q
 
 # 실행 테스트
@@ -118,7 +118,8 @@ python main.py --no-menubar  # Ctrl+C로 종료
 | 키워드검색 | SQLite FTS5 (unicode61) | — | |
 | 웹서버 | FastAPI + uvicorn | — | 단일 프로세스, 데몬 스레드 |
 | macOS UI | rumps | — | 메인 스레드 점유 |
-| 프론트엔드 | 순수 HTML/CSS/JS | — | 프레임워크 없음 |
+| 네이티브 창 | pywebview 4.x | — | 서브프로세스로 실행 (rumps와 메인스레드 충돌 방지) |
+| 프론트엔드 | 순수 HTML/CSS/JS (SPA) | — | 프레임워크 없음, History API 라우팅 |
 
 ### LLM 백엔드 선택 가이드
 
@@ -270,13 +271,15 @@ meeting-transcriber/
 │   └── websocket.py         # WebSocket 실시간 진행 통신
 │
 ├── ui/                      # 사용자 인터페이스
-│   ├── menubar.py           # macOS 메뉴바 (rumps)
-│   └── web/                 # 웹 UI (순수 HTML/CSS/JS)
-│       ├── index.html       # 대시보드
-│       ├── viewer.html      # 회의록 뷰어
-│       ├── chat.html        # AI 채팅
-│       ├── style.css        # 스타일
-│       └── app.js           # 프론트엔드 로직
+│   ├── menubar.py           # macOS 메뉴바 (rumps) — 네이티브 창 통합
+│   ├── native_window.py     # PyWebView 네이티브 창 (서브프로세스 실행)
+│   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
+│       ├── index.html       # SPA 셸 (사이드바 + 콘텐츠 영역)
+│       ├── viewer.html      # SPA 리다이렉트 스텁 → /app/viewer/{id}
+│       ├── chat.html        # SPA 리다이렉트 스텁 → /app/chat
+│       ├── style.css        # macOS 디자인 언어 (light/dark 자동 전환)
+│       ├── app.js           # 공용 유틸리티 (API, WebSocket, escapeHtml 등)
+│       └── spa.js           # SPA 라우터 + 뷰 컨트롤러 (Home/Viewer/Chat)
 │
 ├── security/                # 보안
 │   ├── secure_dir.py        # 디렉토리 권한 설정 (chmod 700)
@@ -287,10 +290,67 @@ meeting-transcriber/
 │   ├── install.sh           # 통합 설치 스크립트
 │   └── setup_launchagent.sh # macOS 로그인 시 자동 시작
 │
-├── tests/                   # 테스트 (1165개)
+├── tests/                   # 테스트 (1231개)
 ├── pyproject.toml           # PEP 621 패키지 설정
 ├── config.yaml              # 애플리케이션 설정
 └── CLAUDE.md                # 이 파일 (AI 에이전트용 가이드)
+```
+
+### 웹 UI 아키텍처 (SPA + 네이티브 창)
+
+#### SPA 구조
+
+웹 UI는 **SPA(Single Page Application)** 로 동작한다. 3개 HTML 페이지가 아닌 `index.html` 하나로 모든 뷰를 처리한다.
+
+```
+/app              → HomeView (회의 목록 대시보드)
+/app/viewer/{id}  → ViewerView (회의록 뷰어)
+/app/chat         → ChatView (AI 채팅)
+```
+
+- **서버 라우팅**: `api/server.py`의 `_setup_spa_routes()`가 `/app` 및 `/app/{path:path}` catch-all 라우트로 `index.html` 반환
+- **클라이언트 라우팅**: `spa.js`의 `Router`가 History API(`pushState`/`popstate`)로 뷰 전환
+- **레이아웃**: 왼쪽 250px 사이드바(회의 목록 항상 표시) + 오른쪽 콘텐츠 영역
+- **WebSocket**: 뷰 전환 시에도 연결 유지 (app.js가 관리)
+- **하위 호환**: `viewer.html`, `chat.html`은 SPA 경로로 리다이렉트하는 스텁
+
+#### 파일 역할 분리
+
+| 파일 | 역할 | 로드 순서 |
+|------|------|----------|
+| `app.js` | 공용 유틸리티 (API, WebSocket, escapeHtml, 마크다운 파서) | 1번째 |
+| `spa.js` | SPA 라우터, Sidebar, HomeView, ViewerView, ChatView | 2번째 (app.js 의존) |
+| `style.css` | macOS 디자인 언어 CSS (light/dark 자동 전환) | — |
+
+#### 네이티브 창
+
+메뉴바 "웹 UI 열기" 클릭 시 PyWebView 네이티브 창으로 열린다. 실패 시 브라우저 폴백.
+
+```
+rumps (메인 스레드)
+  → _on_open_web_ui()
+    → launch_native_window()  # subprocess.Popen으로 별도 프로세스 실행
+      → python -m ui.native_window --url http://127.0.0.1:8765/app
+        → webview.create_window() + webview.start()
+    → 실패 시: webbrowser.open() 폴백
+```
+
+- `ui/native_window.py`: `NativeWindowConfig`(dataclass) + `build_window_config()` + `launch_native_window()` + `run_webview_window()`
+- `config.py`: `WindowConfig`(Pydantic) — `use_native`, `width`, `height`, `title` 등 설정
+- **서브프로세스 필수**: rumps와 pywebview 모두 NSApplication 메인 스레드를 요구하므로 같은 프로세스 불가
+
+#### CSS 디자인 시스템
+
+macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전환.
+
+```css
+/* 핵심 디자인 토큰 (style.css :root) */
+--bg-primary, --bg-secondary, --bg-sidebar
+--text-primary, --text-secondary
+--accent (#007aff / #0a84ff)
+--border, --shadow, --radius
+
+/* @media (prefers-color-scheme: dark) 에서 자동 전환 */
 ```
 
 ---
@@ -343,7 +403,7 @@ python main.py
 # 헤드리스 모드 (서버만)
 python main.py --no-menubar
 
-# 테스트 실행 (1165개)
+# 테스트 실행 (1231개)
 pytest tests/ -v
 
 # 빠른 테스트
@@ -393,3 +453,5 @@ python -m py_compile main.py
 | MLX 메모리 부족 | RAM 부족 (8GB 이하에서 MLX 사용) | `llm.backend: "ollama"`로 변경 |
 | MPS 관련 크래시 | pyannote MPS 버그 | config.yaml에서 `diarization.device: "cpu"` 확인 |
 | ChromaDB ValueError | datetime 메타데이터 | `str()` 변환 확인 |
+| 네이티브 창 미열림 | pywebview 미설치 | `pip install pywebview` (브라우저 폴백 자동 작동) |
+| SPA 라우팅 404 | 서버에 `/app` 라우트 미등록 | `_setup_spa_routes(app)` 호출 확인 (server.py) |

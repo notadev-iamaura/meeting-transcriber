@@ -353,6 +353,75 @@ class TestLifespan:
             assert db_path.exists()
 
 
+# === TestLifespanPartialFailure ===
+
+
+class TestLifespanPartialFailure:
+    """lifespan 부분 초기화 실패 테스트.
+
+    검색/Chat 엔진 초기화가 실패해도 서버가 정상 시작되는지 확인한다.
+    """
+
+    def test_search_engine_초기화_실패(self, tmp_path: Path) -> None:
+        """HybridSearchEngine 초기화 실패 시 서버가 정상 시작되고 search_engine이 None인지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        with patch(
+            "search.hybrid_search.HybridSearchEngine",
+            side_effect=RuntimeError("검색 엔진 초기화 실패"),
+        ):
+            with TestClient(app) as client:
+                # 서버가 정상 작동하는지 헬스체크로 확인
+                response = client.get("/api/health")
+                assert response.status_code == 200
+
+                # search_engine이 None으로 설정되어야 함
+                assert app.state.search_engine is None
+
+    def test_chat_engine_초기화_실패(self, tmp_path: Path) -> None:
+        """ChatEngine 초기화 실패 시 서버가 정상 시작되고 chat_engine이 None인지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        with patch(
+            "search.chat.ChatEngine",
+            side_effect=RuntimeError("Chat 엔진 초기화 실패"),
+        ):
+            with TestClient(app) as client:
+                # 서버가 정상 작동하는지 헬스체크로 확인
+                response = client.get("/api/health")
+                assert response.status_code == 200
+
+                # chat_engine이 None으로 설정되어야 함
+                assert app.state.chat_engine is None
+
+    def test_search_engine과_chat_engine_동시_실패(self, tmp_path: Path) -> None:
+        """검색/Chat 엔진 모두 초기화 실패해도 서버가 정상 시작되는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        with patch(
+            "search.hybrid_search.HybridSearchEngine",
+            side_effect=RuntimeError("검색 엔진 실패"),
+        ), patch(
+            "search.chat.ChatEngine",
+            side_effect=RuntimeError("Chat 엔진 실패"),
+        ):
+            with TestClient(app) as client:
+                response = client.get("/api/health")
+                assert response.status_code == 200
+
+                assert app.state.search_engine is None
+                assert app.state.chat_engine is None
+
+
 # === TestExceptionHandler ===
 
 
@@ -378,7 +447,29 @@ class TestExceptionHandler:
         assert response.status_code == 500
         data = response.json()
         assert "error" in data
-        assert "테스트 에러" in data["detail"]
+        assert data["error"] == "서버 내부 오류가 발생했습니다."
+
+    def test_500_응답에_detail_미포함(self, tmp_path: Path) -> None:
+        """500 에러 응답에 예외 상세 정보가 노출되지 않아야 한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        @app.get("/api/test-error-detail")
+        async def raise_error() -> None:
+            """테스트용 예외 발생 엔드포인트."""
+            raise RuntimeError("내부 비밀 정보가 담긴 에러")
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/test-error-detail")
+
+        assert response.status_code == 500
+        data = response.json()
+        # 응답에 detail 필드가 없어야 함 (내부 에러 정보 비노출)
+        assert "detail" not in data
+        # 예외 메시지 원문이 응답에 포함되지 않아야 함
+        assert "내부 비밀 정보가 담긴 에러" not in str(data)
 
     def test_예외_응답_json_형식(self, tmp_path: Path) -> None:
         """예외 응답의 Content-Type이 JSON인지 확인한다."""
@@ -447,5 +538,145 @@ class TestNotFoundRoute:
 
         with TestClient(app) as client:
             response = client.get("/api/nonexistent")
+
+        assert response.status_code == 404
+
+
+# === TestSPARouting ===
+
+
+class TestSPARouting:
+    """SPA 라우팅 테스트.
+
+    /app 및 /app/{path} 요청에 index.html을 반환하는지 확인한다.
+    """
+
+    def test_app_루트_200(self, tmp_path: Path) -> None:
+        """GET /app이 200 OK를 반환하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text(
+            "<html><body>SPA</body></html>",
+            encoding="utf-8",
+        )
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app")
+
+        assert response.status_code == 200
+
+    def test_app_viewer_경로_200(self, tmp_path: Path) -> None:
+        """GET /app/viewer/123이 200 OK를 반환하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app/viewer/meeting-123")
+
+        assert response.status_code == 200
+
+    def test_app_chat_경로_200(self, tmp_path: Path) -> None:
+        """GET /app/chat이 200 OK를 반환하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app/chat")
+
+        assert response.status_code == 200
+
+    def test_app_깊은_경로_200(self, tmp_path: Path) -> None:
+        """GET /app/a/b/c가 200 OK를 반환하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app/a/b/c")
+
+        assert response.status_code == 200
+
+    def test_app_content_type_html(self, tmp_path: Path) -> None:
+        """SPA 응답의 Content-Type이 HTML인지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app")
+
+        assert "text/html" in response.headers["content-type"]
+
+    def test_api_경로_영향_없음(self, tmp_path: Path) -> None:
+        """SPA 라우팅이 기존 API 경로에 영향을 주지 않는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        test_static = tmp_path / "web"
+        test_static.mkdir()
+        (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/api/health")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_index_html_없을때_404(self, tmp_path: Path) -> None:
+        """index.html이 존재하지 않으면 404를 반환하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+
+        # 디렉토리는 존재하지만 index.html이 없는 경우
+        test_static = tmp_path / "web_empty"
+        test_static.mkdir()
+
+        with patch("api.server._STATIC_DIR", test_static):
+            app = create_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/app")
 
         assert response.status_code == 404

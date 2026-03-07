@@ -245,6 +245,21 @@ class ServerConfig(BaseModel):
     log_level: str = "info"
 
 
+class WindowConfig(BaseModel):
+    """네이티브 창 설정.
+
+    PyWebView를 통한 네이티브 macOS 창의 크기, 제목, 사용 여부를 관리한다.
+    use_native=False이면 기본 브라우저로 폴백한다.
+    """
+
+    title: str = "회의 전사 시스템"
+    width: int = Field(default=1200, ge=400)
+    height: int = Field(default=800, ge=300)
+    min_width: int = Field(default=800, ge=400)
+    min_height: int = Field(default=600, ge=300)
+    use_native: bool = True
+
+
 class ZoomConfig(BaseModel):
     """Zoom 프로세스 감지 설정"""
 
@@ -331,6 +346,7 @@ class AppConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
+    window: WindowConfig = Field(default_factory=WindowConfig)
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:

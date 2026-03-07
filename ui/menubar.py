@@ -27,6 +27,7 @@ from typing import Any
 import rumps
 
 from config import AppConfig, get_config
+from ui.native_window import build_window_config, launch_native_window
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ class MeetingTranscriberApp(rumps.App):
 
         # API/웹 URL 구성
         self._status_url = build_api_url(self.config, "/api/status")
-        self._web_url = build_api_url(self.config, "/static/index.html")
+        self._web_url = build_api_url(self.config, "/app")
 
         # 초기 타이틀 설정
         initial_title = get_status_title(self._current_status)
@@ -503,11 +504,29 @@ class MeetingTranscriberApp(rumps.App):
             logger.error(f"녹음 제어 중 예상치 못한 오류: {e}")
 
     def _on_open_web_ui(self, _sender: Any) -> None:
-        """웹 UI를 기본 브라우저로 연다.
+        """네이티브 창으로 웹 UI를 연다. 실패 시 브라우저 폴백.
 
         Args:
             _sender: 메뉴 아이템 콜백 발신자 (사용 안함)
         """
+        window_cfg = self.config.window
+        if window_cfg.use_native:
+            try:
+                wc = build_window_config(
+                    host=self.config.server.host,
+                    port=self.config.server.port,
+                    title=window_cfg.title,
+                    width=window_cfg.width,
+                    height=window_cfg.height,
+                    min_width=window_cfg.min_width,
+                    min_height=window_cfg.min_height,
+                )
+                launch_native_window(wc)
+                logger.info("네이티브 창 실행 완료")
+                return
+            except Exception:  # noqa: BLE001
+                logger.warning("네이티브 창 실패, 브라우저 폴백")
+
         logger.info(f"웹 UI 열기: {self._web_url}")
         webbrowser.open(self._web_url)
 

@@ -1,1945 +1,2269 @@
 /* =================================================================
- * 회의 전사 시스템 — 공통 스타일시트 (style.css)
+ * 회의 전사 시스템 — macOS Finder/Notes 스타일 시트 (style.css)
  *
- * 목적: 모든 웹 UI 페이지(index, viewer, chat)에서 공유하는
- *       다크 모드 기반 디자인 시스템을 정의한다.
- * 구성: CSS 변수 → 리셋 → 공통 컴포넌트 → 페이지별 스타일 → 반응형
+ * 목적: macOS 네이티브 앱(Finder, Notes)의 디자인 언어를 웹 UI에 적용.
+ *       라이트 모드 기본, 다크 모드는 시스템 설정에 따라 자동 전환.
+ * 구성: CSS 변수 → 리셋 → 레이아웃 → 사이드바 → 컨텐츠 → 컴포넌트
+ *       → 홈뷰 → 뷰어 → 채팅 → 유틸리티 → 접근성 → 반응형
  * ================================================================= */
 
-/* === 1. CSS 변수 (다크 모드 기본) === */
+
+/* ──────────────────────────────────────────
+   1. CSS 변수 — 라이트 모드 (기본)
+   ────────────────────────────────────────── */
 :root {
-    /* 배경색 */
-    --bg-primary: #0f0f1a;
-    --bg-secondary: #1a1a2e;
-    --bg-card: #16213e;
-    --bg-input: #1a1a2e;
-    --bg-hover: #1f2b47;
+  /* 배경색 */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-sidebar: rgba(246, 246, 246, 0.8);
+  --bg-card: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.04);
 
-    /* 테두리 */
-    --border-color: #2a2a4a;
-    --border-focus: #4361ee;
+  /* 텍스트 */
+  --text-primary: #1d1d1f;
+  --text-secondary: #86868b;
+  --text-muted: #aeaeb2;
 
-    /* 텍스트 (WCAG AA 대비비 4.5:1 이상 보장) */
-    --text-primary: #ededf5;
-    --text-secondary: #b0b0c8;
-    --text-muted: #8888a6;
+  /* 강조색 */
+  --accent: #007aff;
+  --accent-hover: #0056b3;
 
-    /* 강조색 */
-    --accent: #4361ee;
-    --accent-hover: #5a7cff;
+  /* 테두리 */
+  --border: rgba(0, 0, 0, 0.1);
+  --border-focus: #007aff;
 
-    /* 상태색 */
-    --success: #2ecc71;
-    --warning: #f39c12;
-    --error: #e74c3c;
-    --info: #4cc9f0;
-    --recording: #e74c3c;
-    --processing: #f39c12;
-    --completed: #2ecc71;
+  /* 그림자 */
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.1);
 
-    /* 그림자 및 레이아웃 */
-    --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    --radius: 8px;
-    --radius-lg: 12px;
-    --transition: 0.2s ease;
-    --max-width: 1200px;
+  /* 레이아웃 토큰 */
+  --radius: 8px;
+  --radius-lg: 12px;
+  --transition: 0.15s ease;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", sans-serif;
 
-    /* 화자별 색상 (최대 10명) */
-    --speaker-0: #4cc9f0;
-    --speaker-1: #f72585;
-    --speaker-2: #7209b7;
-    --speaker-3: #3a86ff;
-    --speaker-4: #fb5607;
-    --speaker-5: #ff006e;
-    --speaker-6: #8338ec;
-    --speaker-7: #06d6a0;
-    --speaker-8: #118ab2;
-    --speaker-9: #ef476f;
+  /* 상태색 */
+  --success: #34c759;
+  --warning: #ff9500;
+  --error: #ff3b30;
+  --info: #5ac8fa;
+  --recording: #ff3b30;
+  --processing: #ff9500;
+  --completed: #34c759;
 
-    /* 하이라이트 (검색어 강조) */
-    --highlight-bg: rgba(243, 156, 18, 0.35);
-    --highlight-border: var(--warning);
+  /* 화자별 색상 (최대 10명) */
+  --speaker-0: #007aff;
+  --speaker-1: #ff2d55;
+  --speaker-2: #af52de;
+  --speaker-3: #5856d6;
+  --speaker-4: #ff9500;
+  --speaker-5: #ff3b30;
+  --speaker-6: #5ac8fa;
+  --speaker-7: #34c759;
+  --speaker-8: #ff6482;
+  --speaker-9: #30b0c7;
 
-    /* 채팅 전용 */
-    --msg-user-bg: #1e3a5f;
-    --msg-assistant-bg: var(--bg-secondary);
-    --ref-bg: rgba(67, 97, 238, 0.08);
-    --ref-border: rgba(67, 97, 238, 0.25);
+  /* 검색어 하이라이트 */
+  --highlight-bg: rgba(255, 149, 0, 0.2);
+  --highlight-border: var(--warning);
+
+  /* 채팅 전용 */
+  --msg-user-bg: #007aff;
+  --msg-user-color: #ffffff;
+  --msg-assistant-bg: var(--bg-secondary);
+  --ref-bg: rgba(0, 122, 255, 0.06);
+  --ref-border: rgba(0, 122, 255, 0.2);
+}
+
+/* ──────────────────────────────────────────
+   2. CSS 변수 — 다크 모드 (시스템 설정 연동)
+   ────────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #1c1c1e;
+    --bg-secondary: #2c2c2e;
+    --bg-sidebar: rgba(44, 44, 46, 0.85);
+    --bg-card: #2c2c2e;
+    --bg-input: #3a3a3c;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --text-primary: #f5f5f7;
+    --text-secondary: #98989d;
+    --text-muted: #636366;
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --border: rgba(255, 255, 255, 0.1);
+    --border-focus: #0a84ff;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --success: #30d158;
+    --warning: #ff9f0a;
+    --error: #ff453a;
+    --info: #64d2ff;
+    --recording: #ff453a;
+    --processing: #ff9f0a;
+    --completed: #30d158;
+    --msg-user-bg: #0a84ff;
+    --msg-assistant-bg: #3a3a3c;
+    --ref-bg: rgba(10, 132, 255, 0.08);
+    --ref-border: rgba(10, 132, 255, 0.25);
+    --highlight-bg: rgba(255, 159, 10, 0.25);
+  }
 }
 
 
-/* === 2. 리셋 및 기본 스타일 === */
+/* ──────────────────────────────────────────
+   3. 리셋 및 기본 스타일
+   ────────────────────────────────────────── */
 
-*, *::before, *::after {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
+/* 모든 요소에 border-box 적용 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* HTML/Body 기본 설정 */
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
-                 "Noto Sans KR", "Malgun Gothic", sans-serif;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    line-height: 1.6;
-    min-height: 100vh;
+  font-family: var(--font);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  overflow: hidden;
 }
 
-
-/* === 3. 헤더 (공통) === */
-
-.header {
-    background-color: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
-    padding: 0 24px;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-}
-
-.header-inner {
-    max-width: var(--max-width);
-    margin: 0 auto;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 56px;
-}
-
-.header-title {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.header-title-icon {
-    font-size: 22px;
-}
-
-.header-nav {
-    display: flex;
-    gap: 4px;
-}
-
-.nav-link {
-    color: var(--text-secondary);
-    text-decoration: none;
-    padding: 8px 16px;
-    border-radius: var(--radius);
-    font-size: 14px;
-    transition: background-color var(--transition), color var(--transition);
-}
-
-.nav-link:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-}
-
-.nav-link.active {
-    background-color: var(--accent);
-    color: #ffffff;
-}
-
-
-/* === 접근성: 포커스 가시성 (UIUX: :focus-visible 스타일) === */
-
-/* 모든 대화형 요소에 :focus-visible 아웃라인 제공 */
-a:focus-visible,
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-[role="button"]:focus-visible,
-[tabindex]:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-}
-
-/* 마우스 클릭 시에는 아웃라인 숨김 (키보드 탐색에만 표시) */
-a:focus:not(:focus-visible),
-button:focus:not(:focus-visible),
-input:focus:not(:focus-visible),
-textarea:focus:not(:focus-visible),
-select:focus:not(:focus-visible),
-[role="button"]:focus:not(:focus-visible),
-[tabindex]:focus:not(:focus-visible) {
-    outline: none;
-}
-
-
-/* === 4. 메인 컨테이너 === */
-
-.container {
-    max-width: var(--max-width);
-    margin: 0 auto;
-    padding: 24px;
-}
-
-
-/* === 5. 에러 배너 (공통) === */
-
-.error-banner {
-    display: none;
-    padding: 12px 16px;
-    background-color: rgba(231, 76, 60, 0.1);
-    border: 1px solid rgba(231, 76, 60, 0.3);
-    border-radius: var(--radius);
-    color: var(--error);
-    font-size: 14px;
-    margin-bottom: 16px;
-}
-
-.error-banner.visible {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.error-banner-close {
-    margin-left: auto;
-    background: none;
-    border: none;
-    color: var(--error);
-    cursor: pointer;
-    font-size: 16px;
-    padding: 0 4px;
-}
-
-/* 에러 배너 자동 숨김 전환 애니메이션 */
-.error-banner.auto-hiding {
-    animation: fadeOutBanner 0.5s ease forwards;
-}
-
-@keyframes fadeOutBanner {
-    from { opacity: 1; }
-    to { opacity: 0; }
-}
-
-/* === WebSocket 연결 끊김 상태 표시 === */
-
-.status-dot.disconnected {
-    background-color: var(--warning);
-    animation: wsPulse 2s infinite;
-}
-
-@keyframes wsPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-}
-
-
-/* === 6. 로딩 스피너 / 오버레이 (공통) === */
-
-.loading-spinner {
-    display: inline-block;
-    width: 20px;
-    height: 20px;
-    border: 2px solid var(--border-color);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}
-
-.loading-overlay {
-    display: none;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    padding: 40px;
-    color: var(--text-secondary);
-    font-size: 14px;
-}
-
-.loading-overlay.visible {
-    display: flex;
-}
-
-
-/* === 7. 빈 상태 (공통) === */
-
-.empty-state {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--text-muted);
-}
-
-.empty-state-icon {
-    font-size: 48px;
-    margin-bottom: 16px;
-}
-
-.empty-state-text {
-    font-size: 15px;
-    margin-bottom: 8px;
-}
-
-.empty-state-sub {
-    font-size: 13px;
-    color: var(--text-muted);
-}
-
-
-/* === 8. 상태 배지 (헤더, 공통) === */
-
-.status-badge {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    color: var(--text-secondary);
-    padding: 4px 12px;
-    border-radius: 20px;
-    background-color: var(--bg-card);
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: var(--text-muted);
-}
-
-.status-dot.connected { background-color: var(--success); }
-.status-dot.error { background-color: var(--error); }
-
-
-/* === 9. 섹션 헤더 === */
-
-.section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-}
-
-.section-title {
-    font-size: 16px;
-    font-weight: 600;
-}
-
-.section-count {
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-
-/* === 10. 뒤로가기 링크 === */
-
-.back-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-secondary);
-    text-decoration: none;
-    font-size: 13px;
-    margin-bottom: 16px;
-    transition: color var(--transition);
-}
-
-.back-link:hover {
-    color: var(--text-primary);
-}
-
-
-/* ================================================================= */
-/* === 페이지별 스타일: index.html (회의 목록 + 검색)              === */
-/* ================================================================= */
-
-/* --- 검색 섹션 --- */
-
-.search-section {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 24px;
-    margin-bottom: 24px;
-}
-
-.search-title {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 16px;
-    color: var(--text-primary);
-}
-
-.search-form {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.search-input-row {
-    display: flex;
-    gap: 12px;
-}
-
-.search-input-wrapper {
-    flex: 1;
-    position: relative;
-}
-
-.search-input {
-    width: 100%;
-    padding: 12px 16px 12px 40px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    font-size: 15px;
-    outline: none;
-    transition: border-color var(--transition);
-}
-
-.search-input:focus {
-    border-color: var(--border-focus);
-}
-
-.search-input::placeholder {
-    color: var(--text-muted);
-}
-
-.search-icon {
-    position: absolute;
-    left: 14px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--text-muted);
-    font-size: 16px;
-    pointer-events: none;
-}
-
-.search-btn {
-    padding: 12px 24px;
-    background-color: var(--accent);
-    color: #ffffff;
-    border: none;
-    border-radius: var(--radius);
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background-color var(--transition);
-    white-space: nowrap;
-}
-
-.search-btn:hover {
-    background-color: var(--accent-hover);
-}
-
-.search-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-/* --- 필터 행 --- */
-
-.filter-row {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
-.filter-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.filter-label {
-    font-size: 13px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-}
-
-.filter-input {
-    padding: 8px 12px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    font-size: 13px;
-    outline: none;
-    transition: border-color var(--transition);
-}
-
-.filter-input:focus {
-    border-color: var(--border-focus);
-}
-
-.filter-input[type="date"] {
-    width: 160px;
-}
-
-.filter-input[type="text"] {
-    width: 140px;
-}
-
-.filter-clear-btn {
-    padding: 8px 12px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 13px;
-    cursor: pointer;
-    transition: all var(--transition);
-}
-
-.filter-clear-btn:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-/* --- 회의 목록 카드 --- */
-
-.meetings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-}
-
-.meeting-card {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 20px;
-    cursor: pointer;
-    transition: transform var(--transition),
-                border-color var(--transition),
-                box-shadow var(--transition);
-}
-
-.meeting-card:hover {
-    transform: translateY(-2px);
-    border-color: var(--accent);
-    box-shadow: var(--shadow);
-}
-
-.meeting-card-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    margin-bottom: 12px;
-}
-
-.meeting-id {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    word-break: break-all;
-}
-
-.meeting-status {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 12px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    margin-left: 8px;
-}
-
-.meeting-status.completed {
-    background-color: rgba(46, 204, 113, 0.15);
-    color: var(--completed);
-}
-
-.meeting-status.recording {
-    background-color: rgba(231, 76, 60, 0.15);
-    color: var(--recording);
-}
-
-.meeting-status.transcribing,
-.meeting-status.diarizing,
-.meeting-status.merging,
-.meeting-status.embedding {
-    background-color: rgba(243, 156, 18, 0.15);
-    color: var(--processing);
-}
-
-.meeting-status.failed {
-    background-color: rgba(231, 76, 60, 0.15);
-    color: var(--error);
-}
-
-.meeting-status.queued {
-    background-color: rgba(76, 201, 240, 0.15);
-    color: var(--info);
-}
-
-.meeting-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.meeting-meta-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-.meeting-meta-icon {
-    width: 16px;
-    text-align: center;
-    flex-shrink: 0;
-}
-
-.meeting-error {
-    margin-top: 8px;
-    padding: 8px 12px;
-    background-color: rgba(231, 76, 60, 0.1);
-    border-radius: var(--radius);
-    font-size: 12px;
-    color: var(--error);
-}
-
-/* --- 검색 결과 --- */
-
-.search-results {
-    display: none;
-    margin-bottom: 24px;
-}
-
-.search-results.visible {
-    display: block;
-}
-
-.search-results-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-}
-
-.search-stats {
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-.search-close-btn {
-    padding: 4px 12px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all var(--transition);
-}
-
-.search-close-btn:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-.result-item {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 20px;
-    margin-bottom: 12px;
-    cursor: pointer;
-    transition: border-color var(--transition);
-}
-
-.result-item:hover {
-    border-color: var(--accent);
-}
-
-.result-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-}
-
-.result-meeting-id {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--accent);
-}
-
-.result-score {
-    font-size: 12px;
-    color: var(--text-muted);
-    background-color: var(--bg-secondary);
-    padding: 2px 8px;
-    border-radius: 10px;
-}
-
-.result-text {
-    font-size: 14px;
-    color: var(--text-primary);
-    line-height: 1.7;
-    margin-bottom: 10px;
-}
-
-.result-meta {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    font-size: 12px;
-    color: var(--text-secondary);
-}
-
-.result-meta-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.result-source-tag {
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-weight: 600;
-}
-
-.result-source-tag.vector {
-    background-color: rgba(67, 97, 238, 0.15);
-    color: var(--accent);
-}
-
-.result-source-tag.fts {
-    background-color: rgba(76, 201, 240, 0.15);
-    color: var(--info);
-}
-
-.result-source-tag.both {
-    background-color: rgba(46, 204, 113, 0.15);
-    color: var(--success);
-}
-
-
-/* === 11. 파이프라인 진행 표시 (회의 카드 내부) === */
-
-.pipeline-progress {
-    margin-top: 8px;
-    padding: 8px 0;
-}
-
-.progress-steps {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
-.step-dot {
-    padding: 2px 6px;
-    border-radius: 10px;
-    transition: all 0.3s ease;
-}
-
-/* 현재 실행 중인 단계 */
-.step-dot.active {
-    background-color: var(--accent);
-    color: #ffffff;
-    font-weight: bold;
-}
-
-/* 이미 완료된 단계 */
-.step-dot.completed {
-    color: var(--success);
-    font-weight: 600;
-}
-
-.progress-bar {
-    height: 4px;
-    background: var(--border-color);
-    border-radius: 2px;
-    overflow: hidden;
-}
-
-.progress-fill {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.5s ease;
-    border-radius: 2px;
-    width: 0%;
-}
-
-
-/* === 12. 녹음 상태 표시 바 === */
-
-.recording-status {
-    display: none;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    background-color: rgba(231, 76, 60, 0.08);
-    border-bottom: 1px solid rgba(231, 76, 60, 0.2);
-    font-size: 13px;
-    color: var(--text-primary);
-}
-
-.recording-status.visible {
-    display: flex;
-}
-
-.recording-dot {
-    width: 10px;
-    height: 10px;
-    background-color: var(--recording);
-    border-radius: 50%;
-    animation: recPulse 1.5s infinite;
-    flex-shrink: 0;
-}
-
-@keyframes recPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-}
-
-.recording-text {
-    font-weight: 600;
-    color: var(--recording);
-}
-
-.recording-duration {
-    color: var(--text-secondary);
-    font-family: "SF Mono", "Fira Code", monospace;
-    font-size: 12px;
-}
-
-
-/* ================================================================= */
-/* === 페이지별 스타일: viewer.html (전사문 뷰어)                  === */
-/* ================================================================= */
-
-/* --- 회의 정보 헤더 --- */
-
-.meeting-info {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 20px 24px;
-    margin-bottom: 20px;
-}
-
-.meeting-info-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 12px;
-}
-
-.meeting-info-title {
-    font-size: 18px;
-    font-weight: 700;
-    word-break: break-all;
-}
-
-.meeting-info-status {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 12px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    margin-left: 12px;
-}
-
-.meeting-info-status.completed {
-    background-color: rgba(46, 204, 113, 0.15);
-    color: var(--success);
-}
-
-.meeting-info-status.recording {
-    background-color: rgba(231, 76, 60, 0.15);
-    color: var(--error);
-}
-
-.meeting-info-status.transcribing,
-.meeting-info-status.diarizing,
-.meeting-info-status.merging,
-.meeting-info-status.embedding {
-    background-color: rgba(243, 156, 18, 0.15);
-    color: var(--warning);
-}
-
-.meeting-info-status.failed {
-    background-color: rgba(231, 76, 60, 0.15);
-    color: var(--error);
-}
-
-.meeting-info-status.queued {
-    background-color: rgba(76, 201, 240, 0.15);
-    color: var(--info);
-}
-
-.meeting-meta-row {
-    display: flex;
-    gap: 24px;
-    flex-wrap: wrap;
-    font-size: 13px;
-    color: var(--text-secondary);
-}
-
-/* --- 화자 범례 --- */
-
-.speaker-legend {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-color);
-}
-
-.speaker-chip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 14px;
-    background-color: var(--bg-card);
-}
-
-.speaker-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    flex-shrink: 0;
-}
-
-/* --- 탭 네비게이션 --- */
-
-.tabs {
-    display: flex;
-    gap: 2px;
-    margin-bottom: 20px;
-    background-color: var(--bg-secondary);
-    border-radius: var(--radius);
-    padding: 4px;
-    border: 1px solid var(--border-color);
-}
-
-.tab-btn {
-    flex: 1;
-    padding: 10px 16px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-secondary);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all var(--transition);
-    text-align: center;
-}
-
-.tab-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-}
-
-.tab-btn.active {
-    background-color: var(--accent);
-    color: #ffffff;
-}
-
-.tab-panel {
-    display: none;
-}
-
-.tab-panel.active {
-    display: block;
-}
-
-/* --- 인라인 검색 바 --- */
-
-.search-bar {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 16px;
-}
-
-.search-bar-input {
-    flex: 1;
-    padding: 10px 14px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    font-size: 14px;
-    outline: none;
-    transition: border-color var(--transition);
-}
-
-.search-bar-input:focus {
-    border-color: var(--border-focus);
-}
-
-.search-bar-input::placeholder {
-    color: var(--text-muted);
-}
-
-.search-bar-info {
-    display: flex;
-    align-items: center;
-    font-size: 13px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    padding: 0 8px;
-}
-
-.search-bar-clear {
-    padding: 10px 14px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 13px;
-    cursor: pointer;
-    transition: all var(--transition);
-    white-space: nowrap;
-}
-
-.search-bar-clear:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-/* --- 전사문 타임라인 --- */
-
-.timeline {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-
-.utterance {
-    display: flex;
-    gap: 12px;
-    padding: 10px 16px;
-    border-radius: var(--radius);
-    transition: background-color var(--transition);
-    border-left: 3px solid transparent;
-}
-
-.utterance:hover {
-    background-color: var(--bg-hover);
-}
-
-.utterance.highlighted {
-    background-color: var(--highlight-bg);
-    border-left-color: var(--highlight-border);
-}
-
-.utterance-time {
-    font-size: 12px;
-    color: var(--text-muted);
-    font-family: "SF Mono", "Fira Code", monospace;
-    white-space: nowrap;
-    min-width: 58px;
-    padding-top: 2px;
-    flex-shrink: 0;
-}
-
-.utterance-speaker {
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
-    min-width: 90px;
-    padding-top: 2px;
-    flex-shrink: 0;
-}
-
-.utterance-text {
-    font-size: 14px;
-    line-height: 1.7;
-    color: var(--text-primary);
-    flex: 1;
-    word-break: break-word;
-}
-
-/* 검색어 하이라이트 <mark> 태그 */
-.utterance-text mark {
-    background-color: var(--highlight-bg);
-    color: var(--text-primary);
-    padding: 1px 3px;
-    border-radius: 3px;
-    border-bottom: 2px solid var(--highlight-border);
-}
-
-/* --- 회의록 마크다운 렌더링 --- */
-
-.summary-content {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 28px 32px;
-    line-height: 1.8;
-}
-
-.summary-content h2 {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text-primary);
-    margin: 28px 0 12px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.summary-content h2:first-child {
-    margin-top: 0;
-}
-
-.summary-content h3 {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 20px 0 8px;
-}
-
-.summary-content p {
-    margin: 8px 0;
-    color: var(--text-primary);
-}
-
-.summary-content ul,
-.summary-content ol {
-    margin: 8px 0;
-    padding-left: 24px;
-}
-
-.summary-content li {
-    margin: 4px 0;
-    color: var(--text-primary);
-}
-
-.summary-content strong {
-    color: var(--accent);
-}
-
-.summary-content em {
-    color: var(--text-secondary);
-    font-style: italic;
-}
-
-.summary-content code {
-    background-color: var(--bg-card);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: "SF Mono", "Fira Code", monospace;
-}
-
-/* 체크박스 리스트 */
-.summary-content .checkbox-item {
-    list-style: none;
-    margin-left: -24px;
-    padding-left: 4px;
-}
-
-.summary-content .checkbox-item input[type="checkbox"] {
-    margin-right: 6px;
-    accent-color: var(--accent);
-}
-
-
-/* ================================================================= */
-/* === 페이지별 스타일: chat.html (AI Chat)                        === */
-/* ================================================================= */
-
-/* 채팅 페이지는 body 스타일을 오버라이드 (전체 높이 고정 레이아웃) */
-body.chat-page {
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-height: auto;
-}
-
-/* 채팅 페이지에서 헤더는 sticky 대신 flex-shrink: 0 */
-body.chat-page .header {
-    position: static;
-    flex-shrink: 0;
-}
-
-/* --- 채팅 레이아웃 --- */
-
-.chat-layout {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    max-width: var(--max-width);
-    margin: 0 auto;
-    width: 100%;
-    overflow: hidden;
-}
-
-/* --- 제어 바 (검색 범위 선택) --- */
-
-.controls-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 24px;
-    border-bottom: 1px solid var(--border-color);
-    background-color: var(--bg-primary);
-    flex-shrink: 0;
-    flex-wrap: wrap;
-}
-
-.controls-label {
-    font-size: 13px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-}
-
-.controls-select {
-    padding: 6px 12px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-primary);
-    font-size: 13px;
-    outline: none;
-    cursor: pointer;
-    max-width: 280px;
-}
-
-.controls-select:focus {
-    border-color: var(--border-focus);
-}
-
-.controls-right {
-    margin-left: auto;
-    display: flex;
-    gap: 8px;
-}
-
-.btn-small {
-    padding: 6px 14px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all var(--transition);
-    white-space: nowrap;
-}
-
-.btn-small:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-/* --- 메시지 영역 --- */
-
-.messages-area {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-/* 빈 상태 안내 (환영 메시지) */
-.welcome-message {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--text-muted);
-}
-
-.welcome-icon { font-size: 48px; margin-bottom: 16px; }
-.welcome-title { font-size: 18px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
-.welcome-desc { font-size: 14px; line-height: 1.8; }
-.welcome-tips { margin-top: 20px; text-align: left; display: inline-block; }
-
-.welcome-tip {
-    font-size: 13px;
-    color: var(--text-muted);
-    padding: 4px 0;
-}
-
-/* --- 메시지 버블 --- */
-
-.message {
-    display: flex;
-    gap: 12px;
-    max-width: 85%;
-}
-
-.message.user {
-    align-self: flex-end;
-    flex-direction: row-reverse;
-}
-
-.message.assistant {
-    align-self: flex-start;
-}
-
-.message-avatar {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    flex-shrink: 0;
-}
-
-.message.user .message-avatar {
-    background-color: var(--accent);
-}
-
-.message.assistant .message-avatar {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-color);
-}
-
-.message-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.message-bubble {
-    padding: 12px 16px;
-    border-radius: var(--radius-lg);
-    font-size: 14px;
-    line-height: 1.7;
-    word-break: break-word;
-}
-
-.message.user .message-bubble {
-    background-color: var(--msg-user-bg);
-    border-bottom-right-radius: 4px;
-}
-
-.message.assistant .message-bubble {
-    background-color: var(--msg-assistant-bg);
-    border: 1px solid var(--border-color);
-    border-bottom-left-radius: 4px;
-}
-
-/* AI 답변 내 마크다운 */
-.message-bubble h2 {
-    font-size: 15px;
-    font-weight: 700;
-    margin: 16px 0 6px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.message-bubble h2:first-child { margin-top: 0; }
-
-.message-bubble h3 {
-    font-size: 14px;
-    font-weight: 600;
-    margin: 12px 0 4px;
-}
-
-.message-bubble p { margin: 6px 0; }
-
-.message-bubble ul, .message-bubble ol {
-    margin: 6px 0;
-    padding-left: 20px;
-}
-
-.message-bubble li { margin: 2px 0; }
-
-.message-bubble strong { color: var(--accent); }
-
-.message-bubble em {
-    color: var(--text-secondary);
-    font-style: italic;
-}
-
-.message-bubble code {
-    background-color: var(--bg-card);
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: "SF Mono", "Fira Code", monospace;
-}
-
-/* LLM 미사용 경고 */
-.llm-fallback-notice {
-    font-size: 12px;
-    color: var(--warning);
-    padding: 6px 10px;
-    background-color: rgba(243, 156, 18, 0.1);
-    border-radius: var(--radius);
-    margin-top: 4px;
-}
-
-/* --- 참조 출처 --- */
-
-.references {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.references-title {
-    font-size: 12px;
-    color: var(--text-muted);
-    font-weight: 600;
-    margin-bottom: 2px;
-}
-
-.ref-card {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 8px 12px;
-    background-color: var(--ref-bg);
-    border: 1px solid var(--ref-border);
-    border-radius: var(--radius);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all var(--transition);
-    text-decoration: none;
-    color: inherit;
-}
-
-.ref-card:hover {
-    background-color: rgba(67, 97, 238, 0.15);
-    border-color: var(--accent);
-}
-
-.ref-card-index {
-    color: var(--accent);
-    font-weight: 700;
-    flex-shrink: 0;
-    min-width: 18px;
-}
-
-.ref-card-body {
-    flex: 1;
-    min-width: 0;
-}
-
-.ref-card-meta {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    color: var(--text-muted);
-    margin-bottom: 3px;
-}
-
-.ref-card-preview {
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.ref-card-score {
-    color: var(--accent);
-    font-weight: 600;
-    flex-shrink: 0;
-}
-
-/* --- 타이핑 인디케이터 --- */
-
-.typing-indicator {
-    display: none;
-    align-self: flex-start;
-    padding: 14px 20px;
-    background-color: var(--msg-assistant-bg);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    border-bottom-left-radius: 4px;
-    gap: 12px;
-    align-items: center;
-}
-
-.typing-indicator.visible { display: flex; }
-
-.typing-dots {
-    display: flex;
-    gap: 4px;
-}
-
-.typing-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: var(--text-muted);
-    animation: typingBounce 1.4s infinite;
-}
-
-.typing-dot:nth-child(2) { animation-delay: 0.2s; }
-.typing-dot:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes typingBounce {
-    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-    30% { transform: translateY(-6px); opacity: 1; }
-}
-
-.typing-text {
-    font-size: 13px;
-    color: var(--text-muted);
-}
-
-/* --- 입력 영역 --- */
-
-.input-area {
-    padding: 16px 24px;
-    border-top: 1px solid var(--border-color);
-    background-color: var(--bg-primary);
-    flex-shrink: 0;
-}
-
-.input-row {
-    display: flex;
-    gap: 10px;
-    align-items: flex-end;
-}
-
-.input-wrapper {
-    flex: 1;
-    position: relative;
-}
-
-.chat-input {
-    width: 100%;
-    padding: 12px 16px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    color: var(--text-primary);
-    font-size: 14px;
-    line-height: 1.5;
-    outline: none;
-    resize: none;
-    min-height: 46px;
-    max-height: 120px;
-    font-family: inherit;
-    transition: border-color var(--transition);
-}
-
-.chat-input:focus {
-    border-color: var(--border-focus);
-}
-
-.chat-input::placeholder {
-    color: var(--text-muted);
-}
-
-.send-btn {
-    padding: 12px 20px;
-    background-color: var(--accent);
-    border: none;
-    border-radius: var(--radius-lg);
-    color: #ffffff;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background-color var(--transition), opacity var(--transition);
-    white-space: nowrap;
-    flex-shrink: 0;
-    height: 46px;
-}
-
-.send-btn:hover:not(:disabled) {
-    background-color: var(--accent-hover);
-}
-
-.send-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.input-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 6px;
-    text-align: right;
-}
-
-/* 채팅 페이지 에러 배너 위치 조정 */
-body.chat-page .error-banner {
-    margin: 12px 24px 0;
-    flex-shrink: 0;
-}
-
-
-/* ================================================================= */
-/* === 반응형 디자인                                                === */
-/* ================================================================= */
-
-@media (max-width: 768px) {
-    /* 공통 헤더 */
-    .header-inner {
-        flex-wrap: wrap;
-        height: auto;
-        padding: 12px 0;
-        gap: 8px;
-    }
-
-    .header-nav {
-        order: 3;
-        width: 100%;
-        justify-content: center;
-    }
-
-    .container {
-        padding: 16px;
-    }
-
-    /* index.html */
-    .search-input-row {
-        flex-direction: column;
-    }
-
-    .filter-row {
-        flex-direction: column;
-    }
-
-    .meetings-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .search-results-header {
-        flex-direction: column;
-        gap: 8px;
-        align-items: flex-start;
-    }
-
-    /* viewer.html */
-    .meeting-info-header {
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .meeting-info-status {
-        margin-left: 0;
-        align-self: flex-start;
-    }
-
-    .meeting-meta-row {
-        gap: 12px;
-    }
-
-    .utterance {
-        flex-direction: column;
-        gap: 4px;
-        padding: 12px;
-    }
-
-    .utterance-time { min-width: auto; }
-    .utterance-speaker { min-width: auto; }
-
-    .search-bar { flex-direction: column; }
-
-    .summary-content { padding: 20px; }
-
-    /* chat.html */
-    .controls-bar {
-        padding: 10px 16px;
-    }
-
-    .messages-area { padding: 16px; }
-
-    .input-area { padding: 12px 16px; }
-
-    .message { max-width: 95%; }
-
-    .controls-select { max-width: 180px; }
-
-    .controls-right { margin-left: 0; width: 100%; }
-}
-
-@media (max-width: 480px) {
-    /* index.html */
-    .meeting-card-header {
-        flex-direction: column;
-        gap: 8px;
-    }
-
-    .meeting-status {
-        margin-left: 0;
-        align-self: flex-start;
-    }
-
-    /* chat.html */
-    .message-avatar { display: none; }
-    .controls-label { display: none; }
-}
-
-
-/* ================================================================= */
-/* === 커스텀 스크롤바 스타일링 (다크 모드)                          === */
-/* ================================================================= */
-
-/* 웹킷 기반 브라우저 (Chrome, Safari, Edge) */
+/* 스크롤바 — macOS 네이티브 스타일 */
 ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-    background: var(--bg-primary);
-    border-radius: 4px;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 4px;
-    transition: background 0.2s;
+  background: var(--text-muted);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: var(--text-muted);
+  background: var(--text-secondary);
+  background-clip: content-box;
 }
 
-/* Firefox 스크롤바 */
-* {
-    scrollbar-width: thin;
-    scrollbar-color: var(--border-color) var(--bg-primary);
+/* 링크 기본 스타일 */
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color var(--transition);
 }
 
+a:hover {
+  color: var(--accent-hover);
+}
 
-/* ================================================================= */
-/* === 모바일 터치 타겟 크기 (WCAG 2.5.5: 44px 최소)               === */
-/* ================================================================= */
+/* 리스트 기본 초기화 */
+ul, ol {
+  list-style: none;
+}
 
-@media (pointer: coarse) {
-    /* 터치 디바이스에서 모든 버튼/링크의 최소 터치 영역 보장 */
-    .nav-link {
-        min-height: 44px;
-        min-width: 44px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .search-btn,
-    .send-btn,
-    .filter-clear-btn,
-    .search-bar-clear,
-    .search-close-btn,
-    .btn-small,
-    .error-banner-close {
-        min-height: 44px;
-        min-width: 44px;
-    }
-
-    .tab-btn {
-        min-height: 44px;
-    }
-
-    /* 회의 카드의 액션 버튼 */
-    .meeting-card-action {
-        min-height: 44px;
-        min-width: 44px;
-    }
-
-    /* 검색 결과 항목 */
-    .result-item {
-        min-height: 44px;
-    }
-
-    /* 체크박스 */
-    input[type="checkbox"] {
-        min-width: 20px;
-        min-height: 20px;
-    }
+/* 버튼 기본 초기화 */
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
 }
 
 
-/* ================================================================= */
-/* === 메시지 복사 버튼 (chat.html)                                 === */
-/* ================================================================= */
+/* ══════════════════════════════════════════
+   4. 레이아웃 — 앱 컨테이너
+   ══════════════════════════════════════════ */
 
-.message-actions {
-    display: flex;
-    gap: 4px;
-    margin-top: 4px;
-    opacity: 0;
-    transition: opacity var(--transition);
-}
-
-.message:hover .message-actions,
-.message-actions:focus-within {
-    opacity: 1;
-}
-
-.btn-copy {
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    color: var(--text-muted);
-    font-size: 11px;
-    cursor: pointer;
-    transition: all var(--transition);
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.btn-copy:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-primary);
-}
-
-.btn-copy.copied {
-    border-color: var(--success);
-    color: var(--success);
+/* 메인 앱 컨테이너: Finder 스타일 사이드바+컨텐츠 분할 */
+#app {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
 }
 
 
-/* ================================================================= */
-/* === 정렬 드롭다운 (index.html 회의 목록 정렬)                    === */
-/* ================================================================= */
+/* ══════════════════════════════════════════
+   5. 사이드바 — macOS Finder 스타일
+   ══════════════════════════════════════════ */
 
-.sort-controls {
+/* 사이드바 전체 컨테이너: 반투명 배경 + 블러 효과 */
+#sidebar {
+  width: 250px;
+  min-width: 250px;
+  max-width: 250px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sidebar);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  z-index: 10;
+}
+
+/* 사이드바 상단 헤더 영역 */
+.sidebar-header {
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* 사이드바 타이틀 텍스트 */
+.sidebar-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin-bottom: 10px;
+}
+
+/* 사이드바 검색 입력 필드 */
+.sidebar-search {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.sidebar-search::placeholder {
+  color: var(--text-muted);
+}
+
+.sidebar-search:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+/* 사이드바 연결 상태 표시 */
+.sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* 상태 점: 연결/끊김/에러 표시 */
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+  transition: background var(--transition);
+}
+
+/* 연결됨 상태: 초록색 */
+.status-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(52, 199, 89, 0.4);
+}
+
+/* 연결 끊김 상태: 주황색 */
+.status-dot.disconnected {
+  background: var(--warning);
+}
+
+/* 에러 상태: 빨간색 */
+.status-dot.error {
+  background: var(--error);
+  box-shadow: 0 0 4px rgba(255, 59, 48, 0.4);
+}
+
+/* 회의 목록 (사이드바 내부) */
+.meeting-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+
+/* 회의 목록 아이템: Finder 사이드바 항목 스타일 */
+.meeting-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition);
+  margin-bottom: 1px;
+}
+
+.meeting-list-item:hover {
+  background: var(--bg-hover);
+}
+
+/* 활성(선택된) 항목: macOS 강조색 배경 */
+.meeting-list-item.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.meeting-list-item.active .meeting-list-title {
+  color: #ffffff;
+}
+
+.meeting-list-item.active .meeting-list-date {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.meeting-list-item.active .meeting-list-status {
+  opacity: 0.85;
+}
+
+/* 회의 상태 배지 (사이드바) */
+.meeting-list-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+
+/* 각 파이프라인 상태별 색상 */
+.meeting-list-status.recording {
+  background: var(--recording);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.meeting-list-status.transcribing {
+  background: var(--processing);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.meeting-list-status.diarizing {
+  background: var(--processing);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.meeting-list-status.merging {
+  background: var(--processing);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.meeting-list-status.embedding {
+  background: var(--info);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.meeting-list-status.completed {
+  background: var(--completed);
+}
+
+.meeting-list-status.failed {
+  background: var(--error);
+}
+
+.meeting-list-status.queued {
+  background: var(--text-muted);
+}
+
+/* 상태 점 펄스 애니메이션 */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 회의 제목 텍스트 */
+.meeting-list-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+/* 회의 날짜 텍스트 */
+.meeting-list-date {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 회의 목록이 비어있을 때 표시 */
+.meeting-list-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+
+/* ══════════════════════════════════════════
+   6. 컨텐츠 영역 — 메인 패널
+   ══════════════════════════════════════════ */
+
+/* 메인 컨텐츠: 사이드바 오른쪽의 남은 영역 전체 */
+#content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-primary);
+  min-width: 0;
+}
+
+
+/* ══════════════════════════════════════════
+   7. 에러 배너 — 플로팅 알림
+   ══════════════════════════════════════════ */
+
+/* 에러 배너: 화면 상단에 플로팅 */
+.error-banner {
+  position: fixed;
+  top: -60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--error);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  transition: top 0.3s ease;
+  max-width: 500px;
+  white-space: nowrap;
+}
+
+/* 에러 배너 표시 상태 */
+.error-banner.visible {
+  top: 16px;
+}
+
+/* 자동 숨김 중인 배너: 투명도 조절 */
+.error-banner.auto-hiding {
+  opacity: 0.85;
+}
+
+/* 에러 배너 닫기 버튼 */
+.error-banner-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--transition);
+  flex-shrink: 0;
+}
+
+.error-banner-close:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+
+/* ══════════════════════════════════════════
+   8. 녹음 상태 — 플로팅 인디케이터
+   ══════════════════════════════════════════ */
+
+/* 녹음 상태 표시: 화면 상단 가운데 플로팅 */
+.recording-status {
+  position: fixed;
+  top: -50px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(255, 59, 48, 0.92);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 20px;
+  box-shadow: var(--shadow-lg);
+  transition: top 0.3s ease;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* 녹음 상태 표시됨 */
+.recording-status.visible {
+  top: 12px;
+}
+
+/* 녹음 중 빨간 점: 깜빡이는 애니메이션 */
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ffffff;
+  animation: blink-recording 1s ease-in-out infinite;
+}
+
+@keyframes blink-recording {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 녹음 상태 텍스트 */
+.recording-text {
+  font-weight: 600;
+}
+
+/* 녹음 경과 시간 */
+.recording-duration {
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* ══════════════════════════════════════════
+   9. 로딩 / 빈 상태
+   ══════════════════════════════════════════ */
+
+/* 로딩 스피너: macOS 스타일 회전 */
+.loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 로딩 오버레이: 전체 화면 덮기 */
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+/* 다크 모드 로딩 오버레이 */
+@media (prefers-color-scheme: dark) {
+  .loading-overlay {
+    background: rgba(28, 28, 30, 0.7);
+  }
+}
+
+/* 오버레이 표시 상태 */
+.loading-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 빈 상태: 데이터 없을 때 안내 화면 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  text-align: center;
+  min-height: 300px;
+}
+
+/* 빈 상태 아이콘 */
+.empty-state-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+/* 빈 상태 메인 텍스트 */
+.empty-state-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+/* 빈 상태 보조 설명 */
+.empty-state-sub {
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 280px;
+  line-height: 1.5;
+}
+
+
+/* ══════════════════════════════════════════
+   10. 홈뷰 — 회의 목록 + 검색
+   ══════════════════════════════════════════ */
+
+/* --- 10-1. 검색 섹션 --- */
+
+/* 검색 영역 컨테이너 */
+.search-section {
+  padding: 20px 24px 0;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 검색 영역 타이틀 */
+.search-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+/* 검색 폼 */
+.search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 검색 입력 줄: 입력+버튼 가로 배치 */
+.search-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+/* 검색 입력 래퍼: 아이콘 포함 */
+.search-input-wrapper {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* 검색 아이콘 (돋보기) */
+.search-icon {
+  position: absolute;
+  left: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* 검색 입력 필드 */
+.search-input {
+  width: 100%;
+  padding: 8px 10px 8px 32px;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.search-input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+/* 검색 버튼 */
+.search-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: #ffffff;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.search-btn:hover {
+  background: var(--accent-hover);
+}
+
+/* 비활성 검색 버튼 */
+.search-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* --- 10-2. 필터 행 --- */
+
+/* 필터 영역: 날짜, 화자 등 필터 옵션 */
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 개별 필터 그룹 */
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 필터 라벨 */
+.filter-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 필터 입력/셀렉트 */
+.filter-input {
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.filter-input:focus {
+  border-color: var(--border-focus);
+}
+
+/* 필터 초기화 버튼 */
+.filter-clear-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.filter-clear-btn:hover {
+  background: var(--bg-hover);
+}
+
+/* 체크박스 아이템 스타일 */
+.checkbox-item {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
 }
 
-.sort-select {
-    padding: 6px 12px;
-    background-color: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
+.checkbox-item:hover {
+    background: var(--bg-secondary);
+}
+
+.checkbox-item input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 16px;
+    height: 16px;
+    margin: 0;
+}
+
+.checkbox-item label {
     color: var(--text-primary);
     font-size: 13px;
-    outline: none;
     cursor: pointer;
+    user-select: none;
+}
+
+/* --- 10-3. 검색 결과 영역 --- */
+
+/* 검색 결과 컨테이너: 기본 숨김 */
+.search-results {
+  display: none;
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+/* 검색 결과 표시 상태 */
+.search-results.visible {
+  display: block;
+}
+
+/* 검색 결과 헤더: 통계 + 닫기 버튼 */
+.search-results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* 검색 통계 텍스트 */
+.search-stats {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 검색 결과 닫기 버튼 */
+.search-close-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.search-close-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* --- 10-4. 섹션 헤더 (회의 목록 상단) --- */
+
+/* 섹션 헤더: 제목 + 정렬 + 개수 가로 배치 */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px 12px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 섹션 제목 */
+.section-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* 정렬 컨트롤 영역 */
+.sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 정렬 셀렉트 박스 */
+.sort-select {
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition);
 }
 
 .sort-select:focus {
-    border-color: var(--border-focus);
+  border-color: var(--border-focus);
 }
 
+/* 섹션 항목 개수 표시 */
+.section-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
 
-/* ================================================================= */
-/* === 회의 카드 액션 버튼 (삭제/재시도)                             === */
-/* ================================================================= */
+/* --- 10-5. 회의 카드 그리드 --- */
 
+/* 회의 카드 그리드 레이아웃 */
+.meetings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  padding: 0 24px 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 개별 회의 카드: macOS 카드 스타일 */
+.meeting-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  cursor: pointer;
+  transition: box-shadow var(--transition), transform var(--transition);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 카드 호버 효과: 살짝 떠오르는 느낌 */
+.meeting-card:hover {
+  box-shadow: var(--shadow-lg);
+  transform: translateY(-1px);
+}
+
+/* 카드 헤더: ID + 상태 배지 */
+.meeting-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 회의 ID */
+.meeting-id {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 회의 상태 배지: 둥근 알약 모양 */
+.meeting-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 10px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 상태별 배지 색상 */
+.meeting-status.completed {
+  color: var(--completed);
+  background: rgba(52, 199, 89, 0.12);
+}
+
+.meeting-status.recording {
+  color: var(--recording);
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.meeting-status.transcribing {
+  color: var(--processing);
+  background: rgba(255, 149, 0, 0.12);
+}
+
+.meeting-status.diarizing {
+  color: var(--processing);
+  background: rgba(255, 149, 0, 0.12);
+}
+
+.meeting-status.merging {
+  color: var(--processing);
+  background: rgba(255, 149, 0, 0.12);
+}
+
+.meeting-status.embedding {
+  color: var(--info);
+  background: rgba(90, 200, 250, 0.12);
+}
+
+.meeting-status.failed {
+  color: var(--error);
+  background: rgba(255, 59, 48, 0.12);
+}
+
+.meeting-status.queued {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
+/* 회의 메타 정보 영역 */
+.meeting-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 메타 정보 가로 행 */
+.meeting-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 개별 메타 항목 (아이콘 + 텍스트) */
+.meeting-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 메타 아이콘 */
+.meeting-meta-icon {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* 오류 메시지 표시 영역 */
+.meeting-error {
+  font-size: 11px;
+  color: var(--error);
+  background: rgba(255, 59, 48, 0.06);
+  padding: 6px 8px;
+  border-radius: 6px;
+  border-left: 2px solid var(--error);
+  line-height: 1.4;
+}
+
+/* --- 10-6. 파이프라인 진행 상태 --- */
+
+/* 파이프라인 진행률 컨테이너 */
+.pipeline-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 진행 단계 점들 */
+.progress-steps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 개별 단계 점: macOS 스타일 작은 원 */
+.step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background var(--transition), transform var(--transition);
+  overflow: hidden;
+  font-size: 0;
+}
+
+/* 현재 활성 단계: 강조색 + 확대 */
+.step-dot.active {
+  background: var(--accent);
+  transform: scale(1.3);
+}
+
+/* 완료된 단계: 초록색 */
+.step-dot.completed {
+  background: var(--completed);
+}
+
+/* 진행 바 */
+.progress-bar {
+  width: 100%;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+/* 진행 바 채워진 부분 */
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* --- 10-7. 카드 액션 버튼들 --- */
+
+/* 카드 하단 액션 영역 */
 .meeting-card-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
+/* 카드 액션 버튼 공통 */
 .meeting-card-action {
-    padding: 6px 12px;
-    background: none;
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all var(--transition);
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  text-align: center;
 }
 
 .meeting-card-action:hover {
-    border-color: var(--text-secondary);
+  background: var(--bg-hover);
 }
 
+/* 재시도 버튼: 주황색 강조 */
 .meeting-card-action.retry {
-    color: var(--accent);
+  color: var(--warning);
+  border-color: rgba(255, 149, 0, 0.3);
 }
 
 .meeting-card-action.retry:hover {
-    background-color: rgba(67, 97, 238, 0.1);
-    border-color: var(--accent);
+  background: rgba(255, 149, 0, 0.08);
 }
 
+/* 삭제 버튼: 빨간색 강조 */
 .meeting-card-action.delete {
-    color: var(--error);
+  color: var(--error);
+  border-color: rgba(255, 59, 48, 0.3);
 }
 
 .meeting-card-action.delete:hover {
-    background-color: rgba(231, 76, 60, 0.1);
-    border-color: var(--error);
+  background: rgba(255, 59, 48, 0.08);
 }
 
+/* --- 10-8. 검색 결과 아이템 --- */
 
-/* ================================================================= */
-/* === 로딩 스켈레톤 (빈 상태 개선)                                  === */
-/* ================================================================= */
+/* 검색 결과 개별 항목 */
+.result-item {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  transition: background var(--transition);
+}
 
+.result-item:hover {
+  background: var(--bg-hover);
+}
+
+/* 결과 항목 헤더 */
+.result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+/* 결과 회의 ID */
+.result-meeting-id {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* 결과 유사도 점수 */
+.result-score {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 결과 본문 텍스트 */
+.result-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin-bottom: 6px;
+}
+
+/* 결과 메타 정보 */
+.result-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 결과 메타 개별 항목 */
+.result-meta-item {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* 검색 소스 태그 (벡터/FTS/둘다) */
+.result-source-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* 벡터 검색 태그: 보라색 계열 */
+.result-source-tag.vector {
+  color: #af52de;
+  background: rgba(175, 82, 222, 0.1);
+}
+
+/* FTS 전문검색 태그: 파란색 계열 */
+.result-source-tag.fts {
+  color: var(--accent);
+  background: rgba(0, 122, 255, 0.1);
+}
+
+/* 혼합 검색 태그: 초록색 계열 */
+.result-source-tag.both {
+  color: var(--completed);
+  background: rgba(52, 199, 89, 0.1);
+}
+
+/* --- 10-9. 스켈레톤 로딩 --- */
+
+/* 스켈레톤 카드 (로딩 플레이스홀더) */
 .skeleton-card {
-    background-color: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: 20px;
-    animation: skeletonPulse 1.5s ease-in-out infinite;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
+/* 스켈레톤 라인 (로딩 애니메이션) */
 .skeleton-line {
-    height: 14px;
-    background: linear-gradient(
-        90deg,
-        var(--border-color) 25%,
-        var(--bg-hover) 50%,
-        var(--border-color) 75%
-    );
-    background-size: 200% 100%;
-    border-radius: 4px;
-    margin-bottom: 10px;
-    animation: skeletonShimmer 1.5s ease-in-out infinite;
+  height: 14px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-secondary) 25%,
+    var(--bg-hover) 50%,
+    var(--bg-secondary) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: 4px;
+  animation: shimmer 1.5s ease-in-out infinite;
 }
 
-.skeleton-line.short { width: 60%; }
-.skeleton-line.medium { width: 80%; }
-.skeleton-line:last-child { margin-bottom: 0; }
-
-@keyframes skeletonPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
+/* 짧은 스켈레톤 라인 */
+.skeleton-line.short {
+  width: 40%;
 }
 
-@keyframes skeletonShimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+/* 중간 길이 스켈레톤 라인 */
+.skeleton-line.medium {
+  width: 70%;
+}
+
+/* 스켈레톤 반짝이 애니메이션 */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
 
 
-/* ================================================================= */
-/* === AI 응답 취소 버튼                                             === */
-/* ================================================================= */
+/* ══════════════════════════════════════════
+   11. 뷰어뷰 — 회의 상세 보기
+   ══════════════════════════════════════════ */
 
+/* 뒤로가기 링크 */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 24px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+
+.back-link:hover {
+  opacity: 0.7;
+}
+
+/* --- 11-1. 회의 정보 헤더 --- */
+
+/* 회의 정보 컨테이너 */
+.meeting-info {
+  padding: 0 24px 16px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 회의 정보 헤더: 제목 + 상태 배지 */
+.meeting-info-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* 회의 정보 제목 */
+.meeting-info-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* 회의 정보 상태 배지 (meeting-status와 동일 스타일 재사용) */
+.meeting-info-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  border-radius: 10px;
+}
+
+/* 회의 정보 상태별 색상 (meeting-status와 동일) */
+.meeting-info-status.completed { color: var(--completed); background: rgba(52, 199, 89, 0.12); }
+.meeting-info-status.recording { color: var(--recording); background: rgba(255, 59, 48, 0.12); }
+.meeting-info-status.transcribing,
+.meeting-info-status.diarizing,
+.meeting-info-status.merging,
+.meeting-info-status.embedding { color: var(--processing); background: rgba(255, 149, 0, 0.12); }
+.meeting-info-status.failed { color: var(--error); background: rgba(255, 59, 48, 0.12); }
+.meeting-info-status.queued { color: var(--info); background: rgba(90, 200, 250, 0.12); }
+
+/* --- 11-2. 화자 범례 --- */
+
+/* 화자 범례 컨테이너 */
+.speaker-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* 개별 화자 칩: 색상 점 + 이름 */
+.speaker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border-radius: 12px;
+}
+
+/* 화자 색상 점 */
+.speaker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* --- 11-3. 탭 네비게이션 --- */
+
+/* 탭 컨테이너 */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 개별 탭 버튼: macOS 세그먼티드 컨트롤 스타일 */
+.tab-btn {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+  position: relative;
+  bottom: -1px;
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+}
+
+/* 활성 탭: 강조색 하단 테두리 */
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* 탭 패널: 기본 숨김 */
+.tab-panel {
+  display: none;
+  padding: 16px 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 활성 탭 패널 표시 */
+.tab-panel.active {
+  display: block;
+}
+
+/* --- 11-4. 뷰어 검색 바 --- */
+
+/* 뷰어 내 검색 바 */
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+
+/* 검색 바 입력 필드 */
+.search-bar-input {
+  flex: 1;
+  padding: 4px 0;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.search-bar-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* 검색 바 결과 정보 텍스트 */
+.search-bar-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 검색 바 초기화 버튼 */
+.search-bar-clear {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.search-bar-clear:hover {
+  background: var(--bg-hover);
+}
+
+/* --- 11-5. 타임라인 (발화 목록) --- */
+
+/* 타임라인 컨테이너 */
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 개별 발화 항목 */
+.utterance {
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  transition: background var(--transition), border-color var(--transition);
+  border-left: 3px solid transparent;
+}
+
+.utterance:hover {
+  background: var(--bg-hover);
+}
+
+/* 검색어 하이라이트 태그 (highlightText에서 생성) */
+mark {
+  background: var(--highlight-bg);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+/* 검색어 하이라이트된 발화 */
+.utterance.highlighted {
+  background: var(--highlight-bg);
+  border-left-color: var(--highlight-border);
+}
+
+/* 발화 시간 표시 */
+.utterance-time {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 48px;
+  padding-top: 2px;
+}
+
+/* 발화 화자 이름 */
+.utterance-speaker {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 64px;
+  padding-top: 1px;
+}
+
+/* 발화 본문 텍스트 */
+.utterance-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.55;
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* --- 11-6. 요약 컨텐츠 --- */
+
+/* 요약 내용 영역 */
+.summary-content {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+
+/* ══════════════════════════════════════════
+   12. 채팅뷰 — AI 대화 인터페이스
+   ══════════════════════════════════════════ */
+
+/* 채팅 전체 레이아웃: 세로 flex로 상단(컨트롤)+중앙(메시지)+하단(입력) */
+.chat-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* --- 12-1. 컨트롤 바 (채팅 상단) --- */
+
+/* 컨트롤 바: 회의 선택 + 기능 버튼 */
+.controls-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+  flex-shrink: 0;
+}
+
+/* 컨트롤 라벨 */
+.controls-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 컨트롤 셀렉트 박스 */
+.controls-select {
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.controls-select:focus {
+  border-color: var(--border-focus);
+}
+
+/* 컨트롤 오른쪽 영역 (기능 버튼 등) */
+.controls-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 작은 버튼 공통 스타일 */
+.btn-small {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.btn-small:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* --- 12-2. 메시지 영역 (채팅 중앙) --- */
+
+/* 메시지 표시 영역: 스크롤 가능 */
+.messages-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* --- 12-3. 환영 메시지 --- */
+
+/* 환영 메시지 컨테이너 */
+.welcome-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px;
+  flex: 1;
+}
+
+/* 환영 아이콘 */
+.welcome-icon {
+  font-size: 40px;
+  margin-bottom: 16px;
+  opacity: 0.6;
+}
+
+/* 환영 타이틀 */
+.welcome-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+
+/* 환영 설명 */
+.welcome-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 340px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+/* 환영 팁 목록 */
+.welcome-tips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+/* 개별 팁 */
+.welcome-tip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  line-height: 1.4;
+}
+
+/* --- 12-4. 타이핑 인디케이터 --- */
+
+/* AI 타이핑(응답 생성) 중 인디케이터 */
+.typing-indicator {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  align-self: flex-start;
+  max-width: 200px;
+}
+
+/* 타이핑 인디케이터 표시 */
+.typing-indicator.visible {
+  display: flex;
+}
+
+/* 타이핑 점 애니메이션 영역 */
+.typing-dots {
+  display: flex;
+  gap: 4px;
+}
+
+/* 개별 타이핑 점 */
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* 타이핑 점 바운스 애니메이션 */
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* 타이핑 상태 텍스트 */
+.typing-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* --- 12-5. 입력 영역 (채팅 하단) --- */
+
+/* 입력 영역 컨테이너 */
+.input-area {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+  flex-shrink: 0;
+}
+
+/* 입력 행: 텍스트 + 전송 버튼 */
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* 입력 래퍼 */
+.input-wrapper {
+  flex: 1;
+  position: relative;
+}
+
+/* 채팅 입력 필드 (textarea) */
+.chat-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  resize: none;
+  min-height: 40px;
+  max-height: 120px;
+  line-height: 1.5;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.chat-input::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1);
+}
+
+/* 전송 버튼 */
+.send-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: #ffffff;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-height: 40px;
+}
+
+.send-btn:hover {
+  background: var(--accent-hover);
+}
+
+.send-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 전송 취소 버튼 */
 .btn-cancel-send {
-    padding: 12px 20px;
-    background-color: var(--error);
-    border: none;
-    border-radius: var(--radius-lg);
-    color: #ffffff;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background-color var(--transition), opacity var(--transition);
-    white-space: nowrap;
-    flex-shrink: 0;
-    height: 46px;
-    display: none;
+  display: none;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: var(--error);
+  background: transparent;
+  border: 1px solid rgba(255, 59, 48, 0.3);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition);
+  flex-shrink: 0;
+  min-height: 40px;
 }
 
 .btn-cancel-send.visible {
-    display: block;
+  display: inline-flex;
+  align-items: center;
 }
 
 .btn-cancel-send:hover {
-    background-color: #c0392b;
+  background: rgba(255, 59, 48, 0.08);
+}
+
+/* 입력 힌트 텍스트 (Shift+Enter 등 안내) */
+.input-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  padding-left: 2px;
+}
+
+/* --- 12-6. 메시지 말풍선 --- */
+
+/* 개별 메시지 컨테이너 */
+.message {
+  display: flex;
+  gap: 10px;
+  max-width: 85%;
+  align-items: flex-start;
+}
+
+/* 사용자 메시지: 오른쪽 정렬 */
+.message.user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+/* AI 어시스턴트 메시지: 왼쪽 정렬 */
+.message.assistant {
+  align-self: flex-start;
+}
+
+/* 메시지 아바타 */
+.message-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+}
+
+/* 메시지 본문 영역 */
+.message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 메시지 말풍선: macOS 메시지 스타일 */
+.message-bubble {
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* 사용자 말풍선: 강조색 배경 + 흰색 텍스트 */
+.message.user .message-bubble {
+  background: var(--msg-user-bg);
+  color: var(--msg-user-color);
+  border-bottom-right-radius: 4px;
+}
+
+/* AI 말풍선: 보조 배경색 */
+.message.assistant .message-bubble {
+  background: var(--msg-assistant-bg);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+/* LLM 폴백 알림 (모델 미사용 시) */
+.llm-fallback-notice {
+  font-size: 11px;
+  color: var(--warning);
+  padding: 4px 8px;
+  background: rgba(255, 149, 0, 0.08);
+  border-radius: 6px;
+  display: inline-block;
+}
+
+/* --- 12-7. 참조 카드 (검색 결과 근거) --- */
+
+/* 참조 영역 컨테이너 */
+.references {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* 참조 타이틀 */
+.references-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+}
+
+/* 개별 참조 카드 */
+.ref-card {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--ref-bg);
+  border: 1px solid var(--ref-border);
+  border-radius: var(--radius);
+  transition: background var(--transition);
+  cursor: default;
+}
+
+.ref-card:hover {
+  background: rgba(0, 122, 255, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .ref-card:hover {
+    background: rgba(10, 132, 255, 0.15);
+  }
+}
+
+/* 참조 번호 */
+.ref-card-index {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+  min-width: 16px;
+}
+
+/* 참조 카드 본문 */
+.ref-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* 참조 메타 정보 */
+.ref-card-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* 참조 미리보기 텍스트 */
+.ref-card-preview {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* 참조 유사도 점수 */
+.ref-card-score {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  align-self: flex-start;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- 12-8. 메시지 액션 (복사 등) --- */
+
+/* 메시지 하단 액션 영역 */
+.message-actions {
+  display: flex;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+/* 복사 버튼 */
+.btn-copy {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.btn-copy:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+/* 복사 완료 상태 */
+.btn-copy.copied {
+  color: var(--success);
+  border-color: rgba(52, 199, 89, 0.3);
+}
+
+
+/* ══════════════════════════════════════════
+   13. 접근성(Accessibility) — 포커스 스타일
+   ══════════════════════════════════════════ */
+
+/* 키보드 탐색 시 포커스 링: 모든 인터랙티브 요소 공통 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 입력 필드는 자체 포커스 스타일 사용 → 기본 outline 제거 */
+.search-input:focus-visible,
+.sidebar-search:focus-visible,
+.filter-input:focus-visible,
+.chat-input:focus-visible,
+.search-bar-input:focus-visible,
+.controls-select:focus-visible,
+.sort-select:focus-visible {
+  outline: none;
+}
+
+/* 스크린 리더 전용 텍스트 (시각적으로 숨김) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 동작 줄이기 선호 시 애니메이션 비활성화 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+
+/* ══════════════════════════════════════════
+   14. 반응형 — 모바일/태블릿 대응
+   ══════════════════════════════════════════ */
+
+/* 태블릿 이하: 사이드바 숨김, 싱글 칼럼 */
+@media (max-width: 768px) {
+  #app {
+    flex-direction: column;
+  }
+
+  #sidebar {
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
+    height: auto;
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #content {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  /* 카드 그리드 단일 열 */
+  .meetings-grid {
+    grid-template-columns: 1fr;
+    padding: 0 16px 16px;
+  }
+
+  /* 섹션 헤더 패딩 축소 */
+  .section-header {
+    padding: 12px 16px 8px;
+  }
+
+  /* 검색 영역 패딩 축소 */
+  .search-section {
+    padding: 16px 16px 0;
+  }
+
+  /* 필터 행 세로 배치 */
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  /* 메시지 최대 너비 확장 */
+  .message {
+    max-width: 92%;
+  }
+
+  /* 탭 패딩 축소 */
+  .tabs {
+    padding: 0 16px;
+  }
+
+  .tab-panel {
+    padding: 12px 16px;
+  }
+
+  /* 뒤로가기 패딩 축소 */
+  .back-link {
+    padding: 8px 16px;
+  }
+
+  /* 회의 정보 패딩 축소 */
+  .meeting-info {
+    padding: 0 16px 12px;
+  }
+}
+
+/* 소형 모바일: 추가 축소 */
+@media (max-width: 480px) {
+  /* 발화 항목 세로 배치 */
+  .utterance {
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+  }
+
+  .utterance-time {
+    min-width: auto;
+  }
+
+  /* 검색 입력 행 세로 배치 */
+  .search-input-row {
+    flex-direction: column;
+  }
+
+  .search-btn {
+    width: 100%;
+  }
+
+  /* 컨트롤 바 세로 배치 */
+  .controls-bar {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+  }
+
+  .controls-select {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .controls-right {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
