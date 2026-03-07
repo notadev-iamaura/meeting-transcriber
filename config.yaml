@@ -22,7 +22,7 @@ stt:
 diarization:
   model_name: "pyannote/speaker-diarization-3.1"
   device: "cpu"                              # MPS 버그로 CPU 강제
-  min_speakers: 2                            # 최소 화자 수
+  min_speakers: 1                            # 최소 화자 수 (1명이어도 정상 처리)
   max_speakers: 10                           # 최대 화자 수
   # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정
 
