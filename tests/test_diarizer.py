@@ -55,7 +55,7 @@ def mock_config():
     config = MagicMock()
     config.diarization.model_name = "pyannote/speaker-diarization-3.1"
     config.diarization.device = "cpu"
-    config.diarization.min_speakers = 2
+    config.diarization.min_speakers = 1
     config.diarization.max_speakers = 10
     config.diarization.huggingface_token = "hf_test_token_12345"
     config.diarization.timeout_seconds = 1800
@@ -313,7 +313,7 @@ class TestDiarizerInit:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
         assert diarizer._model_name == "pyannote/speaker-diarization-3.1"
         assert diarizer._device == "cpu"
-        assert diarizer._min_speakers == 2
+        assert diarizer._min_speakers == 1
         assert diarizer._max_speakers == 10
 
     def test_토큰_설정_확인(self, mock_config, mock_manager):
@@ -598,10 +598,10 @@ class TestDiarize:
 
         await diarizer.diarize(sample_audio)
 
-        # _run_pipeline이 pipeline(str(audio), min_speakers=2, max_speakers=10)로 호출
+        # _run_pipeline이 pipeline(str(audio), min_speakers=1, max_speakers=10)로 호출
         mock_pipeline.assert_called_once()
         call_args = mock_pipeline.call_args
-        assert call_args[1]["min_speakers"] == 2
+        assert call_args[1]["min_speakers"] == 1
         assert call_args[1]["max_speakers"] == 10
 
     async def test_화자분리_타임아웃(self, mock_config, mock_manager, sample_audio):

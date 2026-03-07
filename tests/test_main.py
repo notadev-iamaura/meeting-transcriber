@@ -235,7 +235,7 @@ class TestEnsureDataDirectories:
         # SecureDirManager 초기화 시 예외 발생 시뮬레이션
         with patch(
             "security.secure_dir.SecureDirManager",
-            side_effect=RuntimeError("보안 설정 실패"),
+            side_effect=OSError("보안 설정 실패"),
         ):
             ensure_data_directories(config)
 

@@ -193,7 +193,7 @@ class TestCORS:
         assert response.headers.get("access-control-allow-origin") is None
 
     def test_cors_허용_메서드_제한(self, tmp_path: Path) -> None:
-        """GET, POST만 허용되는지 확인한다."""
+        """GET, POST, DELETE만 허용되는지 확인한다."""
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
@@ -211,6 +211,7 @@ class TestCORS:
         allow_methods = response.headers.get("access-control-allow-methods", "")
         assert "GET" in allow_methods
         assert "POST" in allow_methods
+        assert "DELETE" in allow_methods
 
 
 # === TestStaticFiles ===

@@ -69,7 +69,7 @@ def mock_config(tmp_path: Path) -> MagicMock:
     # diarization 설정
     config.diarization.model_name = "pyannote/speaker-diarization-3.1"
     config.diarization.device = "cpu"
-    config.diarization.min_speakers = 2
+    config.diarization.min_speakers = 1
     config.diarization.max_speakers = 10
     config.diarization.huggingface_token = "test-token"
 

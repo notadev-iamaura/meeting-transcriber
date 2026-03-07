@@ -104,7 +104,7 @@ class DiarizationConfig(BaseModel):
 
     model_name: str = "pyannote/speaker-diarization-3.1"
     device: str = "cpu"  # MPS 버그로 CPU 강제
-    min_speakers: int = Field(default=2, ge=1)
+    min_speakers: int = Field(default=1, ge=1)
     max_speakers: int = Field(default=10, ge=1, le=20)
     huggingface_token: str | None = None
     timeout_seconds: int = Field(default=1800, ge=60, description="화자분리 타임아웃 (초)")
