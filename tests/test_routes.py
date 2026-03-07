@@ -1230,3 +1230,140 @@ class TestRecordingEndpoints:
         data = response.json()
         assert "is_recording" in data
         assert data["is_recording"] is True
+
+
+# === TestRetryMeetingEndpoint ===
+
+
+class TestRetryMeetingEndpoint:
+    """POST /api/meetings/{meeting_id}/retry 엔드포인트 테스트."""
+
+    def test_재시도_성공(self, tmp_path: Path) -> None:
+        """실패한 회의를 재시도하면 200과 업데이트된 정보를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed")
+        mock_retried = MockJob(
+            1, "meeting_001", "/audio/001.m4a", "queued", retry_count=1,
+        )
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.retry_job = MagicMock(
+                return_value=mock_retried,
+            )
+
+            response = client.post("/api/meetings/meeting_001/retry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "queued"
+        assert data["retry_count"] == 1
+
+    def test_재시도_미존재_404(self, tmp_path: Path) -> None:
+        """존재하지 않는 meeting_id 재시도 시 404를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=None,
+            )
+
+            response = client.post("/api/meetings/nonexistent/retry")
+
+        assert response.status_code == 404
+
+    def test_재시도_상태_전이_불가_409(self, tmp_path: Path) -> None:
+        """failed가 아닌 상태에서 재시도 시 409를 반환한다."""
+        from core.job_queue import InvalidTransitionError
+
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "completed")
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.retry_job = MagicMock(
+                side_effect=InvalidTransitionError(1, "completed", "queued"),
+            )
+
+            response = client.post("/api/meetings/meeting_001/retry")
+
+        assert response.status_code == 409
+
+    def test_재시도_최대_횟수_초과_409(self, tmp_path: Path) -> None:
+        """최대 재시도 횟수 초과 시 409를 반환한다."""
+        from core.job_queue import MaxRetriesExceededError
+
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed", retry_count=3)
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.retry_job = MagicMock(
+                side_effect=MaxRetriesExceededError(1, 3, 3),
+            )
+
+            response = client.post("/api/meetings/meeting_001/retry")
+
+        assert response.status_code == 409
+
+
+# === TestDeleteMeetingEndpoint ===
+
+
+class TestDeleteMeetingEndpoint:
+    """DELETE /api/meetings/{meeting_id} 엔드포인트 테스트."""
+
+    def test_삭제_성공(self, tmp_path: Path) -> None:
+        """회의 삭제 성공 시 200과 확인 메시지를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed")
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_001")
+
+        assert response.status_code == 200
+        assert "삭제" in response.json()["message"]
+
+    def test_삭제_미존재_404(self, tmp_path: Path) -> None:
+        """존재하지 않는 meeting_id 삭제 시 404를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=None,
+            )
+
+            response = client.delete("/api/meetings/nonexistent")
+
+        assert response.status_code == 404
+
+    def test_완료된_회의_삭제_성공(self, tmp_path: Path) -> None:
+        """완료된 회의도 삭제할 수 있다."""
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "completed")
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_001")
+
+        assert response.status_code == 200

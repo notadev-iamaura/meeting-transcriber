@@ -612,6 +612,121 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
         ) from e
 
 
+@router.post("/meetings/{meeting_id}/retry")
+async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
+    """실패한 회의를 재시도한다.
+
+    meeting_id로 작업을 찾아 상태를 queued로 되돌리고 파이프라인을 재실행한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 재시도할 회의 고유 식별자
+
+    Returns:
+        MeetingItem: 업데이트된 회의 정보
+
+    Raises:
+        HTTPException: 회의를 찾을 수 없을 때 (404), 재시도 불가 시 (409)
+    """
+    from core.job_queue import InvalidTransitionError, JobNotFoundError, MaxRetriesExceededError
+
+    queue = _get_job_queue(request)
+
+    try:
+        import asyncio
+
+        # meeting_id로 작업 조회
+        job = await asyncio.to_thread(
+            queue.queue.get_job_by_meeting_id,
+            meeting_id,
+        )
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        # 재시도 실행 (job_id 기반)
+        updated_job = await asyncio.to_thread(queue.queue.retry_job, job.id)
+
+        logger.info(f"회의 재시도 요청: {meeting_id} (job_id={job.id})")
+
+        return MeetingItem(
+            id=updated_job.id,
+            meeting_id=updated_job.meeting_id,
+            audio_path=updated_job.audio_path,
+            status=updated_job.status,
+            retry_count=updated_job.retry_count,
+            error_message=updated_job.error_message,
+            created_at=updated_job.created_at,
+            updated_at=updated_job.updated_at,
+        )
+    except HTTPException:
+        raise
+    except (InvalidTransitionError, MaxRetriesExceededError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"회의 재시도 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의 재시도 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.delete("/meetings/{meeting_id}")
+async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
+    """회의를 삭제한다.
+
+    meeting_id로 작업을 찾아 DB에서 삭제한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 삭제할 회의 고유 식별자
+
+    Returns:
+        삭제 완료 메시지
+
+    Raises:
+        HTTPException: 회의를 찾을 수 없을 때 (404)
+    """
+    from core.job_queue import JobNotFoundError
+
+    queue = _get_job_queue(request)
+
+    try:
+        import asyncio
+
+        # meeting_id로 작업 조회
+        job = await asyncio.to_thread(
+            queue.queue.get_job_by_meeting_id,
+            meeting_id,
+        )
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        # 삭제 실행 (job_id 기반)
+        await asyncio.to_thread(queue.queue.delete_job, job.id)
+
+        logger.info(f"회의 삭제: {meeting_id} (job_id={job.id})")
+
+        return {"message": f"회의가 삭제되었습니다: {meeting_id}"}
+    except HTTPException:
+        raise
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"회의 삭제 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의 삭제 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
 @router.get(
     "/meetings/{meeting_id}/transcript",
     response_model=TranscriptResponse,
