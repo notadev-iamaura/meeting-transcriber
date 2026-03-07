@@ -19,13 +19,12 @@
 
 import json
 import urllib.error
-from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from core.llm_backend import LLMConnectionError, LLMGenerationError
-from core.ollama_client import OllamaConnectionError, OllamaTimeoutError, clear_connection_cache
+from core.ollama_client import clear_connection_cache
 from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.summarizer import (
     EmptySummaryInputError,
@@ -78,13 +77,39 @@ def _make_corrected_result(
 
 def _make_simple_corrected_result() -> CorrectedResult:
     """간단한 테스트용 CorrectedResult를 생성한다."""
-    return _make_corrected_result([
-        ("안녕하세요, 오늘 회의를 시작하겠습니다.", "안녕하세요, 오늘 회의를 시작하겠습니다.", "SPEAKER_00", 0.0, 3.0),
-        ("네, 준비됐습니다.", "네, 준비됐습니다.", "SPEAKER_01", 3.5, 5.0),
-        ("첫 번째 안건은 프로젝트 일정입니다.", "첫 번째 안건은 프로젝트 일정입니다.", "SPEAKER_00", 5.5, 8.0),
-        ("다음 주 금요일까지 완료해야 합니다.", "다음 주 금요일까지 완료해야 합니다.", "SPEAKER_01", 8.5, 11.0),
-        ("알겠습니다. 그러면 그렇게 결정하겠습니다.", "알겠습니다. 그러면 그렇게 결정하겠습니다.", "SPEAKER_00", 11.5, 14.0),
-    ])
+    return _make_corrected_result(
+        [
+            (
+                "안녕하세요, 오늘 회의를 시작하겠습니다.",
+                "안녕하세요, 오늘 회의를 시작하겠습니다.",
+                "SPEAKER_00",
+                0.0,
+                3.0,
+            ),
+            ("네, 준비됐습니다.", "네, 준비됐습니다.", "SPEAKER_01", 3.5, 5.0),
+            (
+                "첫 번째 안건은 프로젝트 일정입니다.",
+                "첫 번째 안건은 프로젝트 일정입니다.",
+                "SPEAKER_00",
+                5.5,
+                8.0,
+            ),
+            (
+                "다음 주 금요일까지 완료해야 합니다.",
+                "다음 주 금요일까지 완료해야 합니다.",
+                "SPEAKER_01",
+                8.5,
+                11.0,
+            ),
+            (
+                "알겠습니다. 그러면 그렇게 결정하겠습니다.",
+                "알겠습니다. 그러면 그렇게 결정하겠습니다.",
+                "SPEAKER_00",
+                11.5,
+                14.0,
+            ),
+        ]
+    )
 
 
 def _make_ollama_response(content: str) -> bytes:
@@ -273,12 +298,18 @@ class TestBuildFallbackMarkdown:
         """다수 화자의 이름이 모두 포함된다."""
         utterances = [
             CorrectedUtterance(
-                text="첫째", original_text="첫째",
-                speaker="A", start=0.0, end=1.0,
+                text="첫째",
+                original_text="첫째",
+                speaker="A",
+                start=0.0,
+                end=1.0,
             ),
             CorrectedUtterance(
-                text="둘째", original_text="둘째",
-                speaker="B", start=1.0, end=2.0,
+                text="둘째",
+                original_text="둘째",
+                speaker="B",
+                start=1.0,
+                end=2.0,
             ),
         ]
         result = _build_fallback_markdown(utterances, ["A", "B"])
@@ -577,6 +608,7 @@ class TestSummarizer:
             backend = summarizer._create_backend()
 
         from core.llm_backend import OllamaBackend
+
         assert isinstance(backend, OllamaBackend)
 
     def test_create_backend_연결_실패(self) -> None:
@@ -591,12 +623,14 @@ class TestSummarizer:
         summarizer._config.llm.max_context_tokens = 8192
         summarizer._config.llm.request_timeout_seconds = 120
 
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("Connection refused"),
+            ),
+            pytest.raises(LLMConnectionError),
         ):
-            with pytest.raises(LLMConnectionError):
-                summarizer._create_backend()
+            summarizer._create_backend()
 
     def test_call_llm_성공(self) -> None:
         """LLM 백엔드 호출이 성공하면 응답 텍스트를 반환한다."""
@@ -604,9 +638,7 @@ class TestSummarizer:
         backend = MagicMock()
         backend.chat.return_value = "## 회의 개요\n- 테스트"
 
-        result = summarizer._call_llm(
-            backend, "시스템 프롬프트", "사용자 프롬프트"
-        )
+        result = summarizer._call_llm(backend, "시스템 프롬프트", "사용자 프롬프트")
 
         assert "회의 개요" in result
         backend.chat.assert_called_once()
@@ -618,9 +650,7 @@ class TestSummarizer:
         backend.chat.side_effect = LLMGenerationError("timed out")
 
         with pytest.raises(SummaryError):
-            summarizer._call_llm(
-                backend, "시스템", "사용자"
-            )
+            summarizer._call_llm(backend, "시스템", "사용자")
 
     def test_call_llm_연결_실패(self) -> None:
         """LLM 백엔드 연결 실패 시 LLMConnectionError를 전파한다."""
@@ -629,9 +659,7 @@ class TestSummarizer:
         backend.chat.side_effect = LLMConnectionError("Connection refused")
 
         with pytest.raises(LLMConnectionError):
-            summarizer._call_llm(
-                backend, "시스템", "사용자"
-            )
+            summarizer._call_llm(backend, "시스템", "사용자")
 
     def test_call_llm_응답_파싱_실패(self) -> None:
         """LLM 백엔드 응답 파싱 실패 시 SummaryError를 발생한다."""
@@ -639,12 +667,11 @@ class TestSummarizer:
         backend = MagicMock()
         # OllamaResponseError는 LLMGenerationError의 하위 클래스
         from core.ollama_client import OllamaResponseError
+
         backend.chat.side_effect = OllamaResponseError("JSON 파싱 실패")
 
         with pytest.raises(SummaryError, match="JSON 파싱"):
-            summarizer._call_llm(
-                backend, "시스템", "사용자"
-            )
+            summarizer._call_llm(backend, "시스템", "사용자")
 
     def test_call_llm_빈_content(self) -> None:
         """LLM 백엔드가 빈 응답을 반환하면 빈 문자열을 반환한다."""
@@ -652,9 +679,7 @@ class TestSummarizer:
         backend = MagicMock()
         backend.chat.return_value = ""
 
-        result = summarizer._call_llm(
-            backend, "시스템", "사용자"
-        )
+        result = summarizer._call_llm(backend, "시스템", "사용자")
         assert result == ""
 
     def test_call_llm_NFC_정규화(self) -> None:
@@ -664,12 +689,11 @@ class TestSummarizer:
 
         # NFD 형태의 한국어 (ㅎㅏㄴ ㄱㅜㄱ)
         import unicodedata
+
         nfd_text = unicodedata.normalize("NFD", "한국어 회의록")
         backend.chat.return_value = nfd_text
 
-        result = summarizer._call_llm(
-            backend, "시스템", "사용자"
-        )
+        result = summarizer._call_llm(backend, "시스템", "사용자")
 
         # 결과가 NFC로 정규화되어야 함
         assert result == unicodedata.normalize("NFC", nfd_text)
@@ -681,9 +705,7 @@ class TestSummarizer:
         backend.chat.side_effect = LLMGenerationError("timed out")
 
         with pytest.raises(SummaryError):
-            summarizer._call_llm(
-                backend, "시스템", "사용자"
-            )
+            summarizer._call_llm(backend, "시스템", "사용자")
 
 
 # === Summarizer.summarize() 비동기 테스트 ===
@@ -742,7 +764,8 @@ class TestSummarizeSingle:
 
         # SummaryError 발생 (_call_llm 메서드를 직접 모킹)
         with patch.object(
-            summarizer, "_call_llm",
+            summarizer,
+            "_call_llm",
             side_effect=SummaryError("테스트 실패"),
         ):
             result = await summarizer.summarize(corrected)
@@ -757,9 +780,7 @@ class TestSummarizeSingle:
 
         # ModelLoadManager가 LLMConnectionError를 발생
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=LLMConnectionError("연결 실패")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=LLMConnectionError("연결 실패"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
@@ -773,9 +794,7 @@ class TestSummarizeSingle:
 
         # ModelLoadManager가 LLMGenerationError를 발생
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=LLMGenerationError("타임아웃")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=LLMGenerationError("타임아웃"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         summarizer._manager.acquire = MagicMock(return_value=ctx)
 
@@ -796,7 +815,8 @@ class TestSummarizeSingle:
 
         # RuntimeError 발생 (예상치 못한 오류 — _call_llm 메서드를 직접 모킹)
         with patch.object(
-            summarizer, "_call_llm",
+            summarizer,
+            "_call_llm",
             side_effect=RuntimeError("unexpected"),
         ):
             result = await summarizer.summarize(corrected)
@@ -944,14 +964,24 @@ class TestSummarizerChunkedMethod:
         backend = MagicMock()
 
         chunks = [
-            [CorrectedUtterance(
-                text="첫 번째", original_text="첫 번째",
-                speaker="A", start=0.0, end=1.0,
-            )],
-            [CorrectedUtterance(
-                text="두 번째", original_text="두 번째",
-                speaker="B", start=1.0, end=2.0,
-            )],
+            [
+                CorrectedUtterance(
+                    text="첫 번째",
+                    original_text="첫 번째",
+                    speaker="A",
+                    start=0.0,
+                    end=1.0,
+                )
+            ],
+            [
+                CorrectedUtterance(
+                    text="두 번째",
+                    original_text="두 번째",
+                    speaker="B",
+                    start=1.0,
+                    end=2.0,
+                )
+            ],
         ]
 
         call_count = 0
@@ -963,9 +993,7 @@ class TestSummarizerChunkedMethod:
 
         backend.chat.side_effect = mock_chat_side_effect
 
-        result = summarizer._summarize_chunked(
-            backend, chunks, ["A", "B"]
-        )
+        result = summarizer._summarize_chunked(backend, chunks, ["A", "B"])
 
         # 2개 청크 부분 요약 + 1개 통합 = 3회 호출
         assert call_count == 3

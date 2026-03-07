@@ -16,14 +16,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional, Union
+from typing import Any, Union
 
 from config import AppConfig, get_config
 
@@ -135,8 +137,8 @@ class AudioRecorder:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        ws_manager: Optional[Any] = None,
+        config: AppConfig | None = None,
+        ws_manager: Any | None = None,
     ) -> None:
         """AudioRecorder를 초기화한다.
 
@@ -161,13 +163,13 @@ class AudioRecorder:
 
         # 상태
         self._state = RecordingState.IDLE
-        self._process: Optional[asyncio.subprocess.Process] = None
-        self._current_file: Optional[Path] = None
-        self._start_time: Optional[float] = None
-        self._current_device: Optional[AudioDevice] = None
-        self._meeting_id: Optional[str] = None
-        self._max_duration_task: Optional[asyncio.Task[None]] = None
-        self._duration_broadcast_task: Optional[asyncio.Task[None]] = None
+        self._process: asyncio.subprocess.Process | None = None
+        self._current_file: Path | None = None
+        self._start_time: float | None = None
+        self._current_device: AudioDevice | None = None
+        self._meeting_id: str | None = None
+        self._max_duration_task: asyncio.Task[None] | None = None
+        self._duration_broadcast_task: asyncio.Task[None] | None = None
 
         # 콜백
         self._sync_callbacks: list[SyncCallback] = []
@@ -205,7 +207,8 @@ class AudioRecorder:
         return self._current_device.name
 
     def on_recording_complete(
-        self, callback: Union[SyncCallback, AsyncCallback],
+        self,
+        callback: Union[SyncCallback, AsyncCallback],
     ) -> None:
         """녹음 완료 콜백을 등록한다.
 
@@ -231,21 +234,23 @@ class AudioRecorder:
         """
         try:
             process = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-f", "avfoundation",
-                "-list_devices", "true", "-i", "",
+                "ffmpeg",
+                "-f",
+                "avfoundation",
+                "-list_devices",
+                "true",
+                "-i",
+                "",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await process.communicate()
         except FileNotFoundError as e:
             raise AudioDeviceError(
-                "ffmpeg가 설치되어 있지 않습니다. "
-                "'brew install ffmpeg'로 설치하세요."
+                "ffmpeg가 설치되어 있지 않습니다. 'brew install ffmpeg'로 설치하세요."
             ) from e
         except OSError as e:
-            raise AudioDeviceError(
-                f"ffmpeg 실행 실패: {e}"
-            ) from e
+            raise AudioDeviceError(f"ffmpeg 실행 실패: {e}") from e
 
         return self._parse_device_list(stderr.decode("utf-8", errors="replace"))
 
@@ -288,20 +293,19 @@ class AudioRecorder:
                         name = name.strip()
 
                         is_blackhole = "blackhole" in name.lower()
-                        devices.append(AudioDevice(
-                            index=idx,
-                            name=name,
-                            is_blackhole=is_blackhole,
-                        ))
+                        devices.append(
+                            AudioDevice(
+                                index=idx,
+                                name=name,
+                                is_blackhole=is_blackhole,
+                            )
+                        )
                 except (ValueError, IndexError):
                     continue
 
         logger.info(f"오디오 장치 감지: {len(devices)}개")
         for dev in devices:
-            logger.info(
-                f"  [{dev.index}] {dev.name}"
-                f"{' (BlackHole)' if dev.is_blackhole else ''}"
-            )
+            logger.info(f"  [{dev.index}] {dev.name}{' (BlackHole)' if dev.is_blackhole else ''}")
 
         return devices
 
@@ -320,29 +324,25 @@ class AudioRecorder:
         devices = await self.detect_audio_devices()
 
         if not devices:
-            raise AudioDeviceError(
-                "사용 가능한 오디오 입력 장치가 없습니다."
-            )
+            raise AudioDeviceError("사용 가능한 오디오 입력 장치가 없습니다.")
 
         # BlackHole 우선 선택 (설정에서 시스템 오디오 우선일 때)
         if self._recording_config.prefer_system_audio:
             for dev in devices:
                 if dev.is_blackhole:
                     logger.info(
-                        f"BlackHole 장치 선택: [{dev.index}] {dev.name} "
-                        f"(시스템 오디오 캡처)"
+                        f"BlackHole 장치 선택: [{dev.index}] {dev.name} (시스템 오디오 캡처)"
                     )
                     return dev
 
         # 기본 마이크 (첫 번째 장치)
         selected = devices[0]
-        logger.info(
-            f"기본 마이크 선택: [{selected.index}] {selected.name}"
-        )
+        logger.info(f"기본 마이크 선택: [{selected.index}] {selected.name}")
         return selected
 
     async def start_recording(
-        self, meeting_id: Optional[str] = None,
+        self,
+        meeting_id: str | None = None,
     ) -> None:
         """녹음을 시작한다.
 
@@ -357,9 +357,7 @@ class AudioRecorder:
             FFmpegRecordError: ffmpeg 프로세스 시작 실패 시
         """
         if self._state != RecordingState.IDLE:
-            raise AlreadyRecordingError(
-                f"이미 녹음 중입니다. 현재 상태: {self._state.value}"
-            )
+            raise AlreadyRecordingError(f"이미 녹음 중입니다. 현재 상태: {self._state.value}")
 
         if not self._recording_config.enabled:
             logger.warning("녹음 기능이 비활성화되어 있습니다 (recording.enabled=false)")
@@ -380,12 +378,18 @@ class AudioRecorder:
 
         # ffmpeg 녹음 명령 구성
         cmd = [
-            "ffmpeg", "-y",
-            "-f", "avfoundation",
-            "-i", f":{device.index}",
-            "-acodec", "pcm_s16le",
-            "-ar", str(self._sample_rate),
-            "-ac", str(self._channels),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "avfoundation",
+            "-i",
+            f":{device.index}",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(self._sample_rate),
+            "-ac",
+            str(self._channels),
             str(output_file),
         ]
 
@@ -404,13 +408,10 @@ class AudioRecorder:
             )
         except FileNotFoundError as e:
             raise FFmpegRecordError(
-                "ffmpeg가 설치되어 있지 않습니다. "
-                "'brew install ffmpeg'로 설치하세요."
+                "ffmpeg가 설치되어 있지 않습니다. 'brew install ffmpeg'로 설치하세요."
             ) from e
         except OSError as e:
-            raise FFmpegRecordError(
-                f"ffmpeg 프로세스 시작 실패: {e}"
-            ) from e
+            raise FFmpegRecordError(f"ffmpeg 프로세스 시작 실패: {e}") from e
 
         self._state = RecordingState.RECORDING
         self._start_time = time.time()
@@ -428,17 +429,22 @@ class AudioRecorder:
         )
 
         # WebSocket 이벤트 브로드캐스트
-        await self._broadcast_event("recording_started", {
-            "meeting_id": meeting_id,
-            "device": device.name,
-            "is_system_audio": device.is_blackhole,
-        })
+        await self._broadcast_event(
+            "recording_started",
+            {
+                "meeting_id": meeting_id,
+                "device": device.name,
+                "is_system_audio": device.is_blackhole,
+            },
+        )
 
         logger.info(f"녹음 시작 완료: PID={self._process.pid}")
 
     async def stop_recording(
-        self, *, _from_guard: bool = False,
-    ) -> Optional[RecordingResult]:
+        self,
+        *,
+        _from_guard: bool = False,
+    ) -> RecordingResult | None:
         """녹음을 정지하고 파일을 audio_input으로 이동한다.
 
         ffmpeg에 'q' 명령을 보내 정상 종료한다.
@@ -462,19 +468,15 @@ class AudioRecorder:
         # 가드 태스크 취소 (_from_guard=True이면 자기 자신이므로 건너뜀)
         if not _from_guard and self._max_duration_task is not None:
             self._max_duration_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._max_duration_task
-            except asyncio.CancelledError:
-                pass
         self._max_duration_task = None
 
         # 브로드캐스트 태스크 취소
         if self._duration_broadcast_task is not None:
             self._duration_broadcast_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._duration_broadcast_task
-            except asyncio.CancelledError:
-                pass
             self._duration_broadcast_task = None
 
         # ffmpeg 정상 종료 시도 (stdin에 'q' 전송)
@@ -487,18 +489,24 @@ class AudioRecorder:
             await self._fire_callbacks(result)
 
             # WebSocket 이벤트 브로드캐스트
-            await self._broadcast_event("recording_stopped", {
-                "meeting_id": self._meeting_id,
-                "duration_seconds": result.duration_seconds,
-                "file_path": str(result.file_path),
-                "audio_device": result.audio_device,
-            })
+            await self._broadcast_event(
+                "recording_stopped",
+                {
+                    "meeting_id": self._meeting_id,
+                    "duration_seconds": result.duration_seconds,
+                    "file_path": str(result.file_path),
+                    "audio_device": result.audio_device,
+                },
+            )
         else:
-            await self._broadcast_event("recording_stopped", {
-                "meeting_id": self._meeting_id,
-                "discarded": True,
-                "reason": "최소 녹음 시간 미달",
-            })
+            await self._broadcast_event(
+                "recording_stopped",
+                {
+                    "meeting_id": self._meeting_id,
+                    "discarded": True,
+                    "reason": "최소 녹음 시간 미달",
+                },
+            )
 
         # 상태 초기화
         self._process = None
@@ -509,7 +517,7 @@ class AudioRecorder:
 
         return result
 
-    async def _terminate_ffmpeg(self) -> Optional[RecordingResult]:
+    async def _terminate_ffmpeg(self) -> RecordingResult | None:
         """ffmpeg 프로세스를 종료하고 녹음 결과를 반환한다.
 
         Returns:
@@ -544,18 +552,18 @@ class AudioRecorder:
                 timeout=self._graceful_timeout,
             )
             logger.info("ffmpeg 정상 종료 완료")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # 3단계: SIGTERM 강제 종료
             logger.warning(
-                f"ffmpeg graceful 종료 타임아웃 "
-                f"({self._graceful_timeout}초). SIGTERM 전송"
+                f"ffmpeg graceful 종료 타임아웃 ({self._graceful_timeout}초). SIGTERM 전송"
             )
             try:
                 self._process.terminate()
                 await asyncio.wait_for(
-                    self._process.wait(), timeout=5,
+                    self._process.wait(),
+                    timeout=5,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error("ffmpeg SIGTERM 타임아웃. SIGKILL 전송")
                 self._process.kill()
                 await self._process.wait()
@@ -572,9 +580,7 @@ class AudioRecorder:
 
         # 파일 유효성 확인
         if not self._current_file.exists():
-            raise FFmpegRecordError(
-                f"녹음 파일이 생성되지 않았습니다: {self._current_file}"
-            )
+            raise FFmpegRecordError(f"녹음 파일이 생성되지 않았습니다: {self._current_file}")
 
         file_size = self._current_file.stat().st_size
         if file_size == 0:
@@ -602,9 +608,7 @@ class AudioRecorder:
         """최대 녹음 시간 초과 시 자동 정지한다."""
         try:
             await asyncio.sleep(self._max_duration)
-            logger.warning(
-                f"최대 녹음 시간 초과 ({self._max_duration}초). 자동 정지"
-            )
+            logger.warning(f"최대 녹음 시간 초과 ({self._max_duration}초). 자동 정지")
             await self.stop_recording(_from_guard=True)
         except asyncio.CancelledError:
             pass
@@ -615,15 +619,20 @@ class AudioRecorder:
             while True:
                 await asyncio.sleep(10)
                 if self._state == RecordingState.RECORDING:
-                    await self._broadcast_event("recording_duration", {
-                        "meeting_id": self._meeting_id,
-                        "duration_seconds": round(self.current_duration, 1),
-                    })
+                    await self._broadcast_event(
+                        "recording_duration",
+                        {
+                            "meeting_id": self._meeting_id,
+                            "duration_seconds": round(self.current_duration, 1),
+                        },
+                    )
         except asyncio.CancelledError:
             pass
 
     async def _broadcast_event(
-        self, event_type: str, data: dict[str, Any],
+        self,
+        event_type: str,
+        data: dict[str, Any],
     ) -> None:
         """WebSocket 이벤트를 브로드캐스트한다.
 
@@ -636,6 +645,7 @@ class AudioRecorder:
 
         try:
             from api.websocket import WebSocketEvent
+
             event = WebSocketEvent(event_type=event_type, data=data)
             await self._ws_manager.broadcast_event(event)
         except Exception as e:
@@ -699,10 +709,8 @@ class AudioRecorder:
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
                 logger.info(f"고아 ffmpeg 프로세스 SIGTERM 종료: PID={pid}")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"고아 ffmpeg SIGTERM 타임아웃, SIGKILL 전송: PID={pid}"
-                )
+            except TimeoutError:
+                logger.warning(f"고아 ffmpeg SIGTERM 타임아웃, SIGKILL 전송: PID={pid}")
                 self._process.kill()
                 await self._process.wait()
                 logger.info(f"고아 ffmpeg 프로세스 SIGKILL 종료: PID={pid}")
@@ -726,7 +734,6 @@ class AudioRecorder:
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
             "is_system_audio": (
-                self._current_device.is_blackhole
-                if self._current_device else False
+                self._current_device.is_blackhole if self._current_device else False
             ),
         }

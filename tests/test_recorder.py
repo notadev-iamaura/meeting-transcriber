@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +37,6 @@ from steps.recorder import (
     RecordingResult,
     RecordingState,
 )
-
 
 # === 테스트 헬퍼 ===
 
@@ -170,9 +170,11 @@ class TestAudioDeviceDetection:
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
 
-        with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
-            with pytest.raises(AudioDeviceError, match="ffmpeg"):
-                await recorder.detect_audio_devices()
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError),
+            pytest.raises(AudioDeviceError, match="ffmpeg"),
+        ):
+            await recorder.detect_audio_devices()
 
     @pytest.mark.asyncio
     async def test_blackhole_우선_선택(self, tmp_path: Path) -> None:
@@ -211,9 +213,11 @@ class TestAudioDeviceDetection:
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
 
-        with patch.object(recorder, "detect_audio_devices", return_value=[]):
-            with pytest.raises(AudioDeviceError, match="오디오 입력 장치"):
-                await recorder._select_audio_device()
+        with (
+            patch.object(recorder, "detect_audio_devices", return_value=[]),
+            pytest.raises(AudioDeviceError, match="오디오 입력 장치"),
+        ):
+            await recorder._select_audio_device()
 
 
 # === TestStartRecording ===
@@ -257,9 +261,11 @@ class TestStartRecording:
         mock_process.stdin = MagicMock()
         mock_process.wait = AsyncMock()
 
-        with patch.object(recorder, "_select_audio_device", return_value=mock_device):
-            with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-                await recorder.start_recording(meeting_id="test_meeting")
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=mock_device),
+            patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        ):
+            await recorder.start_recording(meeting_id="test_meeting")
 
         assert recorder.state == RecordingState.RECORDING
         assert recorder.is_recording is True
@@ -285,9 +291,11 @@ class TestStartRecording:
         mock_process.stdin = MagicMock()
         mock_process.wait = AsyncMock()
 
-        with patch.object(recorder, "_select_audio_device", return_value=mock_device):
-            with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-                await recorder.start_recording()
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=mock_device),
+            patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        ):
+            await recorder.start_recording()
 
         assert recorder._meeting_id is not None
         assert recorder._meeting_id.startswith("meeting_")
@@ -323,6 +331,7 @@ class TestStopRecording:
 
         # 상태 설정 (1초만 녹음)
         import time
+
         recorder._state = RecordingState.RECORDING
         recorder._start_time = time.time() - 1  # 1초 전
         temp_file = tmp_path / "recordings_temp" / "test.wav"
@@ -354,6 +363,7 @@ class TestStopRecording:
 
         # 상태 설정 (10초 녹음)
         import time
+
         recorder._state = RecordingState.RECORDING
         recorder._start_time = time.time() - 10  # 10초 전
         temp_file = tmp_path / "recordings_temp" / "test.wav"
@@ -460,10 +470,8 @@ class TestMaxDurationGuard:
         assert not task.done()
 
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         assert task.done()
 

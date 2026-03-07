@@ -21,9 +21,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
-from config import AppConfig, load_config, reset_config
+from config import AppConfig, reset_config
 from steps.transcriber import (
     EmptyAudioError,
     ModelNotAvailableError,
@@ -148,8 +147,11 @@ class TestTranscriptSegment:
     def test_생성_전체값(self) -> None:
         """모든 필드를 지정하여 세그먼트를 생성한다."""
         seg = TranscriptSegment(
-            text="테스트", start=1.0, end=3.0,
-            avg_logprob=-0.5, no_speech_prob=0.1,
+            text="테스트",
+            start=1.0,
+            end=3.0,
+            avg_logprob=-0.5,
+            no_speech_prob=0.1,
         )
         assert seg.avg_logprob == -0.5
         assert seg.no_speech_prob == 0.1
@@ -157,8 +159,11 @@ class TestTranscriptSegment:
     def test_딕셔너리_변환(self) -> None:
         """to_dict()가 올바른 딕셔너리를 반환한다."""
         seg = TranscriptSegment(
-            text="테스트", start=1.0, end=3.0,
-            avg_logprob=-0.3, no_speech_prob=0.05,
+            text="테스트",
+            start=1.0,
+            end=3.0,
+            avg_logprob=-0.3,
+            no_speech_prob=0.05,
         )
         d = seg.to_dict()
         assert d["text"] == "테스트"
@@ -212,13 +217,17 @@ class TestTranscriptResult:
         segments = [
             TranscriptSegment(
                 text="안녕하세요",
-                start=0.0, end=2.5,
-                avg_logprob=-0.3, no_speech_prob=0.01,
+                start=0.0,
+                end=2.5,
+                avg_logprob=-0.3,
+                no_speech_prob=0.01,
             ),
             TranscriptSegment(
                 text="회의를 시작합니다",
-                start=2.5, end=5.0,
-                avg_logprob=-0.25, no_speech_prob=0.02,
+                start=2.5,
+                end=5.0,
+                avg_logprob=-0.25,
+                no_speech_prob=0.02,
             ),
         ]
         original = TranscriptResult(
@@ -302,25 +311,19 @@ class TestValidateAudio:
         with pytest.raises(FileNotFoundError, match="찾을 수 없습니다"):
             transcriber._validate_audio(Path("/nonexistent/audio.wav"))
 
-    def test_디렉토리_지정(
-        self, transcriber: Transcriber, tmp_path: Path
-    ) -> None:
+    def test_디렉토리_지정(self, transcriber: Transcriber, tmp_path: Path) -> None:
         """디렉토리를 지정하면 FileNotFoundError를 발생시킨다."""
         with pytest.raises(FileNotFoundError, match="파일이 아닙니다"):
             transcriber._validate_audio(tmp_path)
 
-    def test_빈_파일(
-        self, transcriber: Transcriber, tmp_path: Path
-    ) -> None:
+    def test_빈_파일(self, transcriber: Transcriber, tmp_path: Path) -> None:
         """빈 파일에 대해 EmptyAudioError를 발생시킨다."""
         empty_file = tmp_path / "empty.wav"
         empty_file.write_bytes(b"")
         with pytest.raises(EmptyAudioError, match="비어있습니다"):
             transcriber._validate_audio(empty_file)
 
-    def test_유효한_파일(
-        self, transcriber: Transcriber, audio_file: Path
-    ) -> None:
+    def test_유효한_파일(self, transcriber: Transcriber, audio_file: Path) -> None:
         """유효한 파일은 예외 없이 통과한다."""
         transcriber._validate_audio(audio_file)  # 예외 없음
 
@@ -399,9 +402,7 @@ class TestParseSegments:
 
     def test_누락_필드_기본값(self, transcriber: Transcriber) -> None:
         """세그먼트에서 누락된 필드는 기본값(0.0)을 사용한다."""
-        raw = _make_raw_result(
-            segments=[{"text": "테스트", "start": 1.0}]
-        )
+        raw = _make_raw_result(segments=[{"text": "테스트", "start": 1.0}])
         segments = transcriber._parse_segments(raw)
         assert len(segments) == 1
         assert segments[0].end == 0.0
@@ -411,9 +412,7 @@ class TestParseSegments:
         """파싱 시 한국어 텍스트가 NFC 정규화된다."""
         # NFD 형태로 입력
         nfd = "\u1112\u1161\u11ab\u1100\u116e\u11a8"
-        raw = _make_raw_result(
-            segments=[{"text": nfd, "start": 0.0, "end": 1.0}]
-        )
+        raw = _make_raw_result(segments=[{"text": nfd, "start": 0.0, "end": 1.0}])
         segments = transcriber._parse_segments(raw)
         assert segments[0].text == "한국"
 
@@ -426,11 +425,11 @@ class TestLoadWhisperModule:
 
     def test_임포트_실패(self, transcriber: Transcriber) -> None:
         """mlx_whisper가 없으면 ModelNotAvailableError를 발생시킨다."""
-        with patch.dict("sys.modules", {"mlx_whisper": None}):
-            with pytest.raises(
-                ModelNotAvailableError, match="mlx-whisper가 설치되어"
-            ):
-                transcriber._load_whisper_module()
+        with (
+            patch.dict("sys.modules", {"mlx_whisper": None}),
+            pytest.raises(ModelNotAvailableError, match="mlx-whisper가 설치되어"),
+        ):
+            transcriber._load_whisper_module()
 
     def test_임포트_성공(self, transcriber: Transcriber) -> None:
         """mlx_whisper 모듈이 있으면 모듈 객체를 반환한다."""
@@ -497,9 +496,7 @@ class TestTranscribe:
         with pytest.raises(FileNotFoundError):
             await transcriber.transcribe(Path("/nonexistent/audio.wav"))
 
-    async def test_빈_파일_에러(
-        self, transcriber: Transcriber, tmp_path: Path
-    ) -> None:
+    async def test_빈_파일_에러(self, transcriber: Transcriber, tmp_path: Path) -> None:
         """빈 파일에 대해 EmptyAudioError를 발생시킨다."""
         empty = tmp_path / "empty.wav"
         empty.write_bytes(b"")
@@ -515,9 +512,7 @@ class TestTranscribe:
         # 빈 세그먼트 반환하도록 설정
         manager = MagicMock()
         mock_whisper = MagicMock()
-        mock_whisper.transcribe.return_value = _make_raw_result(
-            segments=[], text=""
-        )
+        mock_whisper.transcribe.return_value = _make_raw_result(segments=[], text="")
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=mock_whisper)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -536,9 +531,7 @@ class TestTranscribe:
         """모델 로드 실패 시 ModelNotAvailableError가 전파된다."""
         manager = MagicMock()
         ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=ModelNotAvailableError("mlx-whisper 미설치")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=ModelNotAvailableError("mlx-whisper 미설치"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         manager.acquire.return_value = ctx
 

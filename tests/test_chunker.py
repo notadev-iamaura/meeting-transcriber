@@ -16,14 +16,14 @@ RAG 청크 생성기 테스트 모듈 (Chunker Test Module)
 """
 
 import json
-import pytest
-import pytest_asyncio
 
+import pytest
+
+from config import AppConfig, ChunkingConfig
 from steps.chunker import (
     Chunk,
     ChunkedResult,
     Chunker,
-    ChunkingError,
     EmptyInputError,
     _estimate_tokens,
     _group_by_speaker_and_time,
@@ -31,8 +31,6 @@ from steps.chunker import (
     _UtteranceGroup,
 )
 from steps.corrector import CorrectedResult, CorrectedUtterance
-from config import AppConfig, ChunkingConfig
-
 
 # === 헬퍼 함수 ===
 
@@ -236,8 +234,12 @@ class TestSplitGroupsIntoChunks:
             ),
         ]
         chunks = _split_groups_into_chunks(
-            groups, max_tokens=300, min_tokens=10,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            groups,
+            max_tokens=300,
+            min_tokens=10,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
 
         assert len(chunks) == 1
@@ -260,8 +262,12 @@ class TestSplitGroupsIntoChunks:
         ]
 
         chunks = _split_groups_into_chunks(
-            groups, max_tokens=100, min_tokens=10,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            groups,
+            max_tokens=100,
+            min_tokens=10,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
 
         # 100토큰 max에 ~49토큰/그룹이면 2개씩 묶임 → 2개 청크
@@ -270,8 +276,12 @@ class TestSplitGroupsIntoChunks:
     def test_빈_그룹_목록(self) -> None:
         """빈 그룹 목록은 빈 청크 목록을 반환한다."""
         chunks = _split_groups_into_chunks(
-            [], max_tokens=300, min_tokens=50,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            [],
+            max_tokens=300,
+            min_tokens=50,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
         assert chunks == []
 
@@ -280,12 +290,16 @@ class TestSplitGroupsIntoChunks:
         groups = [
             _UtteranceGroup("SPEAKER_00", ["가" * 300], 0, 10),  # ~200 토큰
             _UtteranceGroup("SPEAKER_01", ["나" * 300], 10, 20),  # ~200 토큰
-            _UtteranceGroup("SPEAKER_00", ["다" * 15], 20, 25),   # ~10 토큰 (min_tokens 미만)
+            _UtteranceGroup("SPEAKER_00", ["다" * 15], 20, 25),  # ~10 토큰 (min_tokens 미만)
         ]
 
         chunks = _split_groups_into_chunks(
-            groups, max_tokens=250, min_tokens=50,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            groups,
+            max_tokens=250,
+            min_tokens=50,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
 
         # 첫 그룹(200) → 청크1, 두번째(200)+세번째(10) → 병합되어 청크2
@@ -302,8 +316,12 @@ class TestSplitGroupsIntoChunks:
         ]
 
         chunks = _split_groups_into_chunks(
-            groups, max_tokens=300, min_tokens=10,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            groups,
+            max_tokens=300,
+            min_tokens=10,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
 
         # 두 그룹이 하나의 청크에 포함되면 양쪽 화자 모두 포함
@@ -321,8 +339,12 @@ class TestSplitGroupsIntoChunks:
         ]
 
         chunks = _split_groups_into_chunks(
-            groups, max_tokens=250, min_tokens=10,
-            overlap_tokens=0, meeting_id="m001", date="2026-03-04",
+            groups,
+            max_tokens=250,
+            min_tokens=10,
+            overlap_tokens=0,
+            meeting_id="m001",
+            date="2026-03-04",
         )
 
         for i, chunk in enumerate(chunks):
@@ -394,8 +416,12 @@ class TestChunkedResult:
     def test_avg_tokens_빈_청크(self) -> None:
         """청크가 없으면 평균 토큰 수는 0이다."""
         result = ChunkedResult(
-            chunks=[], meeting_id="m001", date="2026-03-04",
-            total_utterances=0, num_speakers=0, audio_path="",
+            chunks=[],
+            meeting_id="m001",
+            date="2026-03-04",
+            total_utterances=0,
+            num_speakers=0,
+            audio_path="",
         )
         assert result.avg_tokens_per_chunk == 0.0
 
@@ -450,7 +476,7 @@ class TestChunkedResult:
         assert restored.audio_path == original.audio_path
 
         # 개별 청크 검증
-        for orig, rest in zip(original.chunks, restored.chunks):
+        for orig, rest in zip(original.chunks, restored.chunks, strict=False):
             assert rest.text == orig.text
             assert rest.speakers == orig.speakers
             assert rest.start_time == orig.start_time
@@ -643,7 +669,9 @@ class TestChunker:
         utterances = [
             _make_utterance(
                 f"이것은 긴 문장 번호 {i}번 입니다 추가 내용도 있습니다",
-                "SPEAKER_00", i * 2, i * 2 + 1.5,
+                "SPEAKER_00",
+                i * 2,
+                i * 2 + 1.5,
             )
             for i in range(20)
         ]
@@ -682,7 +710,7 @@ class TestChunker:
         assert restored.meeting_id == result.meeting_id
         assert restored.total_utterances == result.total_utterances
 
-        for orig, rest in zip(result.chunks, restored.chunks):
+        for orig, rest in zip(result.chunks, restored.chunks, strict=False):
             assert rest.text == orig.text
             assert rest.speakers == orig.speakers
 

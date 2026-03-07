@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from config import AppConfig
 
@@ -157,7 +156,7 @@ class LifecycleManager:
     def __init__(
         self,
         config: AppConfig,
-        now: Optional[datetime] = None,
+        now: datetime | None = None,
     ) -> None:
         self._config = config
         self._outputs_dir = config.paths.resolved_outputs_dir
@@ -293,16 +292,18 @@ class LifecycleManager:
             has_wav = any(f.suffix.lower() == ".wav" for f in audio_files)
             has_flac = any(f.suffix.lower() == ".flac" for f in audio_files)
 
-            meetings.append(MeetingInfo(
-                meeting_id=meeting_id,
-                meeting_dir=entry,
-                created_at=created_at,
-                age_days=age_days,
-                tier=tier,
-                has_wav=has_wav,
-                has_flac=has_flac,
-                audio_files=audio_files,
-            ))
+            meetings.append(
+                MeetingInfo(
+                    meeting_id=meeting_id,
+                    meeting_dir=entry,
+                    created_at=created_at,
+                    age_days=age_days,
+                    tier=tier,
+                    has_wav=has_wav,
+                    has_flac=has_flac,
+                    audio_files=audio_files,
+                )
+            )
 
         # 오래된 회의부터 처리 (age_days 내림차순)
         meetings.sort(key=lambda m: m.age_days, reverse=True)
@@ -361,10 +362,14 @@ class LifecycleManager:
         # -compression_level 8: 최대 압축 (시간은 더 걸리지만 용량 절약)
         try:
             cmd = [
-                "ffmpeg", "-y",
-                "-i", str(wav_path),
-                "-c:a", "flac",
-                "-compression_level", "8",
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(wav_path),
+                "-c:a",
+                "flac",
+                "-compression_level",
+                "8",
                 str(flac_path),
             ]
             proc = subprocess.run(
@@ -379,20 +384,18 @@ class LifecycleManager:
                 if flac_path.exists():
                     flac_path.unlink()
                 raise CompressionError(
-                    f"ffmpeg FLAC 변환 실패 (코드 {proc.returncode}): "
-                    f"{proc.stderr.strip()[:200]}"
+                    f"ffmpeg FLAC 변환 실패 (코드 {proc.returncode}): {proc.stderr.strip()[:200]}"
                 )
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             raise CompressionError(
-                "ffmpeg이 설치되어 있지 않습니다. "
-                "brew install ffmpeg으로 설치해주세요."
-            )
-        except subprocess.TimeoutExpired:
+                "ffmpeg이 설치되어 있지 않습니다. brew install ffmpeg으로 설치해주세요."
+            ) from e
+        except subprocess.TimeoutExpired as e:
             # 타임아웃 시 불완전한 파일 정리
             if flac_path.exists():
                 flac_path.unlink()
-            raise CompressionError(f"ffmpeg 변환 타임아웃 (5분 초과): {wav_path}")
+            raise CompressionError(f"ffmpeg 변환 타임아웃 (5분 초과): {wav_path}") from e
 
         # FLAC 파일 생성 확인
         if not flac_path.exists() or flac_path.stat().st_size == 0:
@@ -426,9 +429,7 @@ class LifecycleManager:
         if self._cold_action == ColdAction.DELETE_AUDIO:
             return self._delete_audio_files(meeting_info)
         elif self._cold_action == ColdAction.ARCHIVE:
-            logger.info(
-                f"아카이브 정책은 아직 미구현입니다: {meeting_info.meeting_id}"
-            )
+            logger.info(f"아카이브 정책은 아직 미구현입니다: {meeting_info.meeting_id}")
             return 0
         return 0
 
@@ -466,12 +467,11 @@ class LifecycleManager:
             # WAV → FLAC 압축
             if info.has_wav:
                 wav_files = [
-                    f for f in info.audio_files
-                    if f.suffix.lower() in _COMPRESSIBLE_EXTENSIONS
+                    f for f in info.audio_files if f.suffix.lower() in _COMPRESSIBLE_EXTENSIONS
                 ]
                 for wav_file in wav_files:
                     self.compress_to_flac(wav_file)
-                    wav_size = 0  # 이미 삭제됨
+                    _wav_size = 0  # 이미 삭제됨
                     # 바이트 절약은 compress_to_flac 내부에서 계산
                 result.compressed += 1
             else:
@@ -482,8 +482,7 @@ class LifecycleManager:
             # 먼저 WAV가 남아있으면 FLAC으로 변환
             if info.has_wav:
                 wav_files = [
-                    f for f in info.audio_files
-                    if f.suffix.lower() in _COMPRESSIBLE_EXTENSIONS
+                    f for f in info.audio_files if f.suffix.lower() in _COMPRESSIBLE_EXTENSIONS
                 ]
                 for wav_file in wav_files:
                     self.compress_to_flac(wav_file)
@@ -519,8 +518,7 @@ class LifecycleManager:
                     return datetime.fromisoformat(created_str)
             except (json.JSONDecodeError, ValueError, KeyError) as e:
                 logger.warning(
-                    f"pipeline_state.json 파싱 실패, "
-                    f"디렉토리 mtime 사용: {meeting_dir} - {e}"
+                    f"pipeline_state.json 파싱 실패, 디렉토리 mtime 사용: {meeting_dir} - {e}"
                 )
 
         # 폴백: 디렉토리 수정 시각
@@ -562,9 +560,7 @@ class LifecycleManager:
         audio_files = self._find_audio_files(meeting_info.meeting_dir)
 
         if not audio_files:
-            logger.debug(
-                f"삭제할 오디오 파일 없음: {meeting_info.meeting_id}"
-            )
+            logger.debug(f"삭제할 오디오 파일 없음: {meeting_info.meeting_id}")
             return 0
 
         for audio_file in audio_files:
@@ -577,9 +573,7 @@ class LifecycleManager:
                     f"({file_size:,} bytes) - {meeting_info.meeting_id}"
                 )
             except OSError as e:
-                raise DeletionError(
-                    f"오디오 파일 삭제 실패: {audio_file} - {e}"
-                ) from e
+                raise DeletionError(f"오디오 파일 삭제 실패: {audio_file} - {e}") from e
 
         logger.info(
             f"Cold 정책 적용 완료: {meeting_info.meeting_id}, "
@@ -588,7 +582,7 @@ class LifecycleManager:
         return total_freed
 
 
-def run_lifecycle(config: Optional[AppConfig] = None) -> LifecycleResult:
+def run_lifecycle(config: AppConfig | None = None) -> LifecycleResult:
     """라이프사이클 관리의 편의 함수.
 
     LifecycleManager 인스턴스를 생성하고 run()을 호출한다.
@@ -601,6 +595,7 @@ def run_lifecycle(config: Optional[AppConfig] = None) -> LifecycleResult:
     """
     if config is None:
         from config import get_config
+
         config = get_config()
 
     manager = LifecycleManager(config)

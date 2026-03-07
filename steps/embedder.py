@@ -23,7 +23,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
@@ -284,10 +284,7 @@ def _store_chunks_fts(
             insert_data,
         )
         conn.commit()
-        logger.info(
-            f"FTS5 저장 완료: meeting_id={meeting_id}, "
-            f"{len(chunks)}개 청크"
-        )
+        logger.info(f"FTS5 저장 완료: meeting_id={meeting_id}, {len(chunks)}개 청크")
     except Exception as e:
         conn.rollback()
         raise StorageError(f"FTS5 저장 실패: {e}") from e
@@ -336,8 +333,7 @@ def _store_chunks_chroma(
         if existing["ids"]:
             collection.delete(ids=existing["ids"])
             logger.debug(
-                f"ChromaDB 기존 데이터 삭제: meeting_id={meeting_id}, "
-                f"{len(existing['ids'])}개"
+                f"ChromaDB 기존 데이터 삭제: meeting_id={meeting_id}, {len(existing['ids'])}개"
             )
 
         # 배치 삽입
@@ -363,10 +359,7 @@ def _store_chunks_chroma(
             documents=documents,
             metadatas=metadatas,
         )
-        logger.info(
-            f"ChromaDB 저장 완료: meeting_id={meeting_id}, "
-            f"{len(chunks)}개 청크"
-        )
+        logger.info(f"ChromaDB 저장 완료: meeting_id={meeting_id}, {len(chunks)}개 청크")
     except Exception as e:
         raise StorageError(f"ChromaDB 저장 실패: {e}") from e
     finally:
@@ -382,9 +375,7 @@ def _store_chunks_chroma(
                     client.clear_system_cache()
                 logger.debug("ChromaDB PersistentClient 리소스 정리 완료")
             except Exception as cleanup_err:
-                logger.warning(
-                    f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}"
-                )
+                logger.warning(f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}")
 
 
 # === 메인 클래스 ===
@@ -409,8 +400,8 @@ class Embedder:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """Embedder를 초기화한다.
 
@@ -456,15 +447,10 @@ class Embedder:
                 self._model_name,
                 device=self._device,
             )
-            logger.info(
-                f"임베딩 모델 로드 완료: {self._model_name} "
-                f"(device={self._device})"
-            )
+            logger.info(f"임베딩 모델 로드 완료: {self._model_name} (device={self._device})")
             return model
         except Exception as e:
-            raise ModelLoadError(
-                f"임베딩 모델 로드 실패: {self._model_name} - {e}"
-            ) from e
+            raise ModelLoadError(f"임베딩 모델 로드 실패: {self._model_name} - {e}") from e
 
     def _generate_embeddings(
         self,
@@ -483,14 +469,10 @@ class Embedder:
             384차원 벡터 목록
         """
         # passage: 접두사 추가 (e5 모델 요구사항)
-        prefixed_texts = [
-            f"{self._passage_prefix}{text}" for text in texts
-        ]
+        prefixed_texts = [f"{self._passage_prefix}{text}" for text in texts]
 
         # NFC 정규화 적용
-        prefixed_texts = [
-            unicodedata.normalize("NFC", t) for t in prefixed_texts
-        ]
+        prefixed_texts = [unicodedata.normalize("NFC", t) for t in prefixed_texts]
 
         # 배치 인코딩
         embeddings = model.encode(
@@ -548,41 +530,35 @@ class Embedder:
         # PERF: 청크 수에 따라 배치 크기 자동 조절
         effective_batch_size = self._compute_adaptive_batch_size(len(texts))
 
-        logger.info(
-            f"임베딩 생성 시작: {len(texts)}개 텍스트, "
-            f"배치 크기={effective_batch_size}"
-        )
+        logger.info(f"임베딩 생성 시작: {len(texts)}개 텍스트, 배치 크기={effective_batch_size}")
 
         # 배치 단위로 임베딩 생성
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), effective_batch_size):
-            batch_texts = texts[i:i + effective_batch_size]
+            batch_texts = texts[i : i + effective_batch_size]
             batch_embeddings = self._generate_embeddings(model, batch_texts)
             all_embeddings.extend(batch_embeddings)
-            logger.debug(
-                f"배치 임베딩 완료: {i + len(batch_texts)}/{len(texts)}"
-            )
+            logger.debug(f"배치 임베딩 완료: {i + len(batch_texts)}/{len(texts)}")
 
         # EmbeddedChunk 목록 생성
         embedded_chunks: list[EmbeddedChunk] = []
-        for chunk, embedding in zip(chunks, all_embeddings):
+        for chunk, embedding in zip(chunks, all_embeddings, strict=False):
             chunk_id = f"{chunked_result.meeting_id}_chunk_{chunk.chunk_index:04d}"
-            embedded_chunks.append(EmbeddedChunk(
-                chunk_id=chunk_id,
-                text=chunk.text,
-                embedding=embedding,
-                meeting_id=chunked_result.meeting_id,
-                date=chunked_result.date,
-                speakers=chunk.speakers,
-                start_time=chunk.start_time,
-                end_time=chunk.end_time,
-                chunk_index=chunk.chunk_index,
-            ))
+            embedded_chunks.append(
+                EmbeddedChunk(
+                    chunk_id=chunk_id,
+                    text=chunk.text,
+                    embedding=embedding,
+                    meeting_id=chunked_result.meeting_id,
+                    date=chunked_result.date,
+                    speakers=chunk.speakers,
+                    start_time=chunk.start_time,
+                    end_time=chunk.end_time,
+                    chunk_index=chunk.chunk_index,
+                )
+            )
 
-        logger.info(
-            f"임베딩 생성 완료: {len(embedded_chunks)}개, "
-            f"차원={self._dimension}"
-        )
+        logger.info(f"임베딩 생성 완료: {len(embedded_chunks)}개, 차원={self._dimension}")
         return embedded_chunks
 
     async def embed(
@@ -613,16 +589,13 @@ class Embedder:
 
         meeting_id = chunked_result.meeting_id
         logger.info(
-            f"임베딩 파이프라인 시작: meeting_id={meeting_id}, "
-            f"청크 {len(chunked_result.chunks)}개"
+            f"임베딩 파이프라인 시작: meeting_id={meeting_id}, 청크 {len(chunked_result.chunks)}개"
         )
 
         # 1. 모델 로드 및 임베딩 생성
         async with self._model_manager.acquire("e5", self._load_model) as model:
             # 별도 스레드에서 임베딩 실행 (이벤트 루프 블로킹 방지)
-            embedded_chunks = await asyncio.to_thread(
-                self._process_chunks, model, chunked_result
-            )
+            embedded_chunks = await asyncio.to_thread(self._process_chunks, model, chunked_result)
 
         # 2. 결과 객체 생성
         result = EmbeddedResult(
@@ -647,9 +620,7 @@ class Embedder:
 
         # 4. FTS5 저장
         try:
-            await asyncio.to_thread(
-                _ensure_fts_table, self._meetings_db
-            )
+            await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
             await asyncio.to_thread(
                 _store_chunks_fts,
                 embedded_chunks,

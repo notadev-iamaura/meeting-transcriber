@@ -27,13 +27,14 @@ Phase 3 통합 테스트 + RAG Chat 엔진 단위 테스트
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
 
 from config import AppConfig, ChatConfig, EmbeddingConfig, LLMConfig, SearchConfig
 from core.llm_backend import LLMConnectionError, LLMGenerationError
@@ -52,7 +53,6 @@ from search.chat import (
     _estimate_korean_tokens,
 )
 from search.hybrid_search import SearchResponse, SearchResult
-
 
 # === 테스트 픽스처 ===
 
@@ -324,9 +324,7 @@ class TestChatEngine:
 
         if search_engine is None:
             search_engine = MagicMock()
-            search_engine.search = AsyncMock(
-                return_value=_make_search_response()
-            )
+            search_engine.search = AsyncMock(return_value=_make_search_response())
 
         return ChatEngine(
             config=config,
@@ -387,9 +385,7 @@ class TestChatEngine:
 
         # ModelLoadManager.acquire가 LLMConnectionError를 발생시키도록 설정
         ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=LLMConnectionError("연결 실패")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=LLMConnectionError("연결 실패"))
         ctx.__aexit__ = AsyncMock(return_value=None)
         engine._model_manager.acquire = MagicMock(return_value=ctx)
 
@@ -449,9 +445,7 @@ class TestChatEngine:
     async def test_필터링_파라미터_전달(self) -> None:
         """필터링 파라미터가 검색 엔진에 전달되는지 확인한다."""
         search_engine = MagicMock()
-        search_engine.search = AsyncMock(
-            return_value=_make_search_response(results=[])
-        )
+        search_engine.search = AsyncMock(return_value=_make_search_response(results=[]))
         engine = self._make_engine(search_engine=search_engine)
 
         # LLM 백엔드 목의 chat 반환값 설정
@@ -576,9 +570,7 @@ class TestChatEngineStreaming:
                 return_value=_make_search_response(results=search_results)
             )
         else:
-            search_engine.search = AsyncMock(
-                return_value=_make_search_response()
-            )
+            search_engine.search = AsyncMock(return_value=_make_search_response())
 
         return ChatEngine(
             config=config,
@@ -631,9 +623,7 @@ class TestChatEngineStreaming:
 
         # acquire에서 LLMConnectionError 발생
         ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=LLMConnectionError("스트리밍 연결 실패")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=LLMConnectionError("스트리밍 연결 실패"))
         ctx.__aexit__ = AsyncMock(return_value=None)
         engine._model_manager.acquire = MagicMock(return_value=ctx)
 
@@ -681,6 +671,7 @@ class TestChatEngineBackend:
             backend = engine._create_backend()
 
         from core.llm_backend import OllamaBackend
+
         assert isinstance(backend, OllamaBackend)
 
     def test_백엔드_생성_연결_실패(self) -> None:
@@ -688,12 +679,15 @@ class TestChatEngineBackend:
         engine = self._make_engine()
 
         import urllib.error
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("연결 거부"),
+
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("연결 거부"),
+            ),
+            pytest.raises((OllamaConnectionError, LLMConnectionError)),
         ):
-            with pytest.raises((OllamaConnectionError, LLMConnectionError)):
-                engine._create_backend()
+            engine._create_backend()
 
     def test_llm_chat_빈_응답(self) -> None:
         """LLM 백엔드가 빈 문자열을 반환하면 ChatError가 발생하는지 확인한다."""
@@ -782,7 +776,7 @@ class TestChatEngineEdgeCases:
 # === 통합 테스트 헬퍼 ===
 
 
-def _make_integration_test_app(tmp_path: "Path") -> "FastAPI":
+def _make_integration_test_app(tmp_path: Path) -> FastAPI:
     """Phase 3 통합 테스트용 FastAPI 앱을 생성한다.
 
     ChatEngine과 HybridSearchEngine 초기화를 패치하여
@@ -794,8 +788,8 @@ def _make_integration_test_app(tmp_path: "Path") -> "FastAPI":
     Returns:
         테스트용 FastAPI 앱 인스턴스
     """
-    from config import AppConfig, PathsConfig, ServerConfig
     from api.server import create_app
+    from config import AppConfig, PathsConfig, ServerConfig
 
     config = AppConfig(
         paths=PathsConfig(base_dir=str(tmp_path)),
@@ -895,7 +889,7 @@ class _MockIntegChatResponse:
 class TestPhase3APIChatIntegration:
     """POST /api/chat 엔드포인트와 ChatEngine 연동 통합 테스트."""
 
-    def test_chat_정상_RAG_응답(self, tmp_path: "Path") -> None:
+    def test_chat_정상_RAG_응답(self, tmp_path: Path) -> None:
         """Chat API가 검색 결과 기반 RAG 응답을 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -940,14 +934,16 @@ class TestPhase3APIChatIntegration:
         assert data["references"][0]["meeting_id"] == "meeting_001"
         assert data["references"][0]["score"] == 0.85
 
-    def test_chat_세션별_대화_분리(self, tmp_path: "Path") -> None:
+    def test_chat_세션별_대화_분리(self, tmp_path: Path) -> None:
         """session_id가 ChatEngine에 올바르게 전달되어 세션이 분리되는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
         mock_response = _MockIntegChatResponse(
-            answer="답변", references=[], query="질문",
+            answer="답변",
+            references=[],
+            query="질문",
         )
 
         with TestClient(app) as client:
@@ -971,14 +967,16 @@ class TestPhase3APIChatIntegration:
             call_b = app.state.chat_engine.chat.call_args
             assert call_b.kwargs["session_id"] == "session_b"
 
-    def test_chat_필터_조합_전달(self, tmp_path: "Path") -> None:
+    def test_chat_필터_조합_전달(self, tmp_path: Path) -> None:
         """meeting_id, date, speaker 필터가 모두 ChatEngine에 전달되는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
         mock_response = _MockIntegChatResponse(
-            answer="답변", references=[], query="질문",
+            answer="답변",
+            references=[],
+            query="질문",
         )
 
         with TestClient(app) as client:
@@ -1004,7 +1002,8 @@ class TestPhase3APIChatIntegration:
         assert kwargs["speaker_filter"] == "SPEAKER_02"
 
     def test_chat_LLM_실패시_graceful_degradation(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """LLM 실패 시에도 200 응답과 검색 결과를 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
@@ -1015,9 +1014,14 @@ class TestPhase3APIChatIntegration:
             answer="AI 답변을 생성할 수 없습니다. 관련 회의 내용을 검색 결과로 대신 제공합니다.",
             references=[
                 _MockIntegChatReference(
-                    chunk_id="c1", meeting_id="m1", date="2026-03-04",
-                    speakers=["SPEAKER_00"], start_time=0.0, end_time=10.0,
-                    text_preview="회의 내용...", score=0.7,
+                    chunk_id="c1",
+                    meeting_id="m1",
+                    date="2026-03-04",
+                    speakers=["SPEAKER_00"],
+                    start_time=0.0,
+                    end_time=10.0,
+                    text_preview="회의 내용...",
+                    score=0.7,
                 ),
             ],
             query="질문",
@@ -1044,7 +1048,7 @@ class TestPhase3APIChatIntegration:
         # 검색 결과는 여전히 포함
         assert len(data["references"]) == 1
 
-    def test_chat_빈_질문_거부(self, tmp_path: "Path") -> None:
+    def test_chat_빈_질문_거부(self, tmp_path: Path) -> None:
         """빈 질문은 pydantic 검증에 의해 422를 반환한다."""
         from fastapi.testclient import TestClient
 
@@ -1058,7 +1062,7 @@ class TestPhase3APIChatIntegration:
 
         assert response.status_code == 422
 
-    def test_chat_엔진_미초기화_503(self, tmp_path: "Path") -> None:
+    def test_chat_엔진_미초기화_503(self, tmp_path: Path) -> None:
         """ChatEngine이 초기화되지 않았을 때 503을 반환한다."""
         from fastapi.testclient import TestClient
 
@@ -1084,7 +1088,7 @@ class TestPhase3APIChatIntegration:
 class TestPhase3APISearchIntegration:
     """POST /api/search 엔드포인트 통합 테스트."""
 
-    def test_search_한국어_쿼리_정상_응답(self, tmp_path: "Path") -> None:
+    def test_search_한국어_쿼리_정상_응답(self, tmp_path: Path) -> None:
         """한국어 검색 쿼리가 올바르게 처리되는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1141,14 +1145,16 @@ class TestPhase3APISearchIntegration:
         assert data["results"][0]["source"] == "vector"
         assert data["results"][1]["source"] == "fts"
 
-    def test_search_필터_조합(self, tmp_path: "Path") -> None:
+    def test_search_필터_조합(self, tmp_path: Path) -> None:
         """날짜 + 화자 + 회의ID 필터 조합이 검색 엔진에 전달되는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
         mock_response = _MockIntegSearchResponse(
-            results=[], query="테스트", total_found=0,
+            results=[],
+            query="테스트",
+            total_found=0,
         )
 
         with TestClient(app) as client:
@@ -1182,24 +1188,25 @@ class TestPhase3WebSocketIntegration:
     """WebSocket /ws/events 서버 통합 테스트."""
 
     def test_websocket_서버_연결_환영_메시지(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 앱의 WebSocket 연결 시 환영 메시지를 수신하는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
-        with TestClient(app) as client:
-            with client.websocket_connect("/ws/events") as ws:
-                data = ws.receive_json()
+        with TestClient(app) as client, client.websocket_connect("/ws/events") as ws:
+            data = ws.receive_json()
 
-                assert data["event_type"] == "system_status"
-                assert "WebSocket 연결 성공" in data["data"]["message"]
-                assert data["data"]["active_connections"] >= 1
+            assert data["event_type"] == "system_status"
+            assert "WebSocket 연결 성공" in data["data"]["message"]
+            assert data["data"]["active_connections"] >= 1
 
     @pytest.mark.asyncio
     async def test_websocket_이벤트_브로드캐스트(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """ConnectionManager를 통한 이벤트 브로드캐스트가 동작하는지 검증한다."""
         from api.websocket import ConnectionManager, EventType, WebSocketEvent
@@ -1227,7 +1234,8 @@ class TestPhase3WebSocketIntegration:
         assert sent1["data"]["meeting_id"] == "m001"
 
     def test_websocket_라우트_등록_확인(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 앱에 /ws/events 라우트가 등록되어 있는지 검증한다."""
         app = _make_integration_test_app(tmp_path)
@@ -1247,7 +1255,8 @@ class TestPhase3MultiEndpointFlow:
     """Phase 3 다중 엔드포인트 워크플로우 통합 테스트."""
 
     def test_status_meetings_search_chat_워크플로우(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """status → meetings → search → chat 전체 워크플로우를 검증한다."""
         from fastapi.testclient import TestClient
@@ -1313,9 +1322,12 @@ class TestPhase3MultiEndpointFlow:
                 answer="프로젝트 일정은 다음 주 월요일 마감입니다.",
                 references=[
                     _MockIntegChatReference(
-                        chunk_id="c1", meeting_id="meeting_001",
-                        date="2026-03-04", speakers=["SPEAKER_00"],
-                        start_time=60.0, end_time=120.0,
+                        chunk_id="c1",
+                        meeting_id="meeting_001",
+                        date="2026-03-04",
+                        speakers=["SPEAKER_00"],
+                        start_time=60.0,
+                        end_time=120.0,
                         text_preview="프로젝트 일정 관련 내용",
                         score=0.9,
                     ),
@@ -1337,7 +1349,7 @@ class TestPhase3MultiEndpointFlow:
             assert chat_resp.json()["llm_used"] is True
             assert "마감" in chat_resp.json()["answer"]
 
-    def test_헬스체크_후_API_사용(self, tmp_path: "Path") -> None:
+    def test_헬스체크_후_API_사용(self, tmp_path: Path) -> None:
         """헬스체크가 OK면 API 엔드포인트들이 정상 동작하는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1443,10 +1455,7 @@ class TestPhase3RAGAccuracy:
 
     def test_다중_검색결과_참조번호_순서(self) -> None:
         """여러 검색 결과가 순서대로 번호가 부여되는지 검증한다."""
-        results = [
-            _make_search_result(chunk_id=f"c{i}", text=f"내용{i}")
-            for i in range(5)
-        ]
+        results = [_make_search_result(chunk_id=f"c{i}", text=f"내용{i}") for i in range(5)]
 
         context = _build_context_text(results)
 
@@ -1513,7 +1522,7 @@ class TestPhase3KoreanNLP:
 class TestPhase3Security:
     """Phase 3 보안 관련 통합 테스트."""
 
-    def test_chat_요청_필수_필드_검증(self, tmp_path: "Path") -> None:
+    def test_chat_요청_필수_필드_검증(self, tmp_path: Path) -> None:
         """필수 필드 누락 시 422를 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1525,7 +1534,7 @@ class TestPhase3Security:
 
         assert response.status_code == 422
 
-    def test_search_요청_필수_필드_검증(self, tmp_path: "Path") -> None:
+    def test_search_요청_필수_필드_검증(self, tmp_path: Path) -> None:
         """검색 요청 시 query 필드가 필수인지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1536,7 +1545,7 @@ class TestPhase3Security:
 
         assert response.status_code == 422
 
-    def test_잘못된_HTTP_메서드(self, tmp_path: "Path") -> None:
+    def test_잘못된_HTTP_메서드(self, tmp_path: Path) -> None:
         """지원하지 않는 HTTP 메서드 사용 시 405를 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1548,7 +1557,7 @@ class TestPhase3Security:
 
         assert response.status_code == 405
 
-    def test_CORS_localhost_허용(self, tmp_path: "Path") -> None:
+    def test_CORS_localhost_허용(self, tmp_path: Path) -> None:
         """localhost 오리진만 CORS로 허용되는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1563,9 +1572,12 @@ class TestPhase3Security:
                     "Access-Control-Request-Method": "POST",
                 },
             )
-            assert response.headers.get(
-                "access-control-allow-origin",
-            ) == "http://127.0.0.1:8765"
+            assert (
+                response.headers.get(
+                    "access-control-allow-origin",
+                )
+                == "http://127.0.0.1:8765"
+            )
 
             # 외부 오리진 차단
             response2 = client.options(
@@ -1575,9 +1587,12 @@ class TestPhase3Security:
                     "Access-Control-Request-Method": "POST",
                 },
             )
-            assert response2.headers.get(
-                "access-control-allow-origin",
-            ) is None
+            assert (
+                response2.headers.get(
+                    "access-control-allow-origin",
+                )
+                is None
+            )
 
 
 # === Phase 3 Graceful Degradation 통합 테스트 ===
@@ -1587,7 +1602,8 @@ class TestPhase3GracefulDegradation:
     """컴포넌트 장애 시 시스템 안정성 통합 테스트."""
 
     def test_검색엔진_장애시_chat_에러_처리(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """검색 엔진 장애 시 Chat이 적절한 에러를 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
@@ -1606,7 +1622,7 @@ class TestPhase3GracefulDegradation:
 
         assert response.status_code == 500
 
-    def test_검색엔진_미초기화_503(self, tmp_path: "Path") -> None:
+    def test_검색엔진_미초기화_503(self, tmp_path: Path) -> None:
         """검색 엔진이 초기화되지 않았을 때 503을 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1622,7 +1638,7 @@ class TestPhase3GracefulDegradation:
 
         assert response.status_code == 503
 
-    def test_서버_예외_핸들러_동작(self, tmp_path: "Path") -> None:
+    def test_서버_예외_핸들러_동작(self, tmp_path: Path) -> None:
         """처리되지 않은 예외가 500 JSON 응답으로 변환되는지 검증한다."""
         from fastapi.testclient import TestClient
 
@@ -1648,7 +1664,8 @@ class TestPhase3ServerLifespan:
     """서버 Lifespan에서 Phase 3 컴포넌트 초기화/정리 통합 테스트."""
 
     def test_lifespan_chat_engine_초기화(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 시작 시 chat_engine이 app.state에 설정되는지 검증한다."""
         from fastapi.testclient import TestClient
@@ -1659,7 +1676,8 @@ class TestPhase3ServerLifespan:
             assert hasattr(app.state, "chat_engine")
 
     def test_lifespan_search_engine_초기화(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 시작 시 search_engine이 app.state에 설정되는지 검증한다."""
         from fastapi.testclient import TestClient
@@ -1670,10 +1688,12 @@ class TestPhase3ServerLifespan:
             assert hasattr(app.state, "search_engine")
 
     def test_lifespan_ws_manager_초기화(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 시작 시 ws_manager가 app.state에 설정되는지 검증한다."""
         from fastapi.testclient import TestClient
+
         from api.websocket import ConnectionManager
 
         app = _make_integration_test_app(tmp_path)
@@ -1683,7 +1703,8 @@ class TestPhase3ServerLifespan:
             assert isinstance(app.state.ws_manager, ConnectionManager)
 
     def test_lifespan_job_queue_초기화(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """서버 시작 시 job_queue가 초기화되는지 검증한다."""
         from fastapi.testclient import TestClient
@@ -1695,15 +1716,13 @@ class TestPhase3ServerLifespan:
             assert app.state.job_queue is not None
 
     def test_모든_API_라우트_등록_확인(
-        self, tmp_path: "Path",
+        self,
+        tmp_path: Path,
     ) -> None:
         """Phase 3의 모든 API 엔드포인트가 등록되어 있는지 검증한다."""
         app = _make_integration_test_app(tmp_path)
 
-        route_paths = [
-            getattr(route, "path", "")
-            for route in app.routes
-        ]
+        route_paths = [getattr(route, "path", "") for route in app.routes]
 
         # REST API 엔드포인트
         assert "/api/status" in route_paths

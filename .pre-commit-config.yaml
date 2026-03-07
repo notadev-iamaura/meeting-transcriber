@@ -1,0 +1,12 @@
+# pre-commit 설정 — 코드 품질 게이트
+#
+# 설치: pre-commit install
+# 전체 실행: pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff           # 린팅
+        args: [--fix]
+      - id: ruff-format    # 포맷팅

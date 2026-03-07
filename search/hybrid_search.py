@@ -24,7 +24,7 @@ import threading
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
@@ -163,16 +163,16 @@ class _RankedItem:
     start_time: float
     end_time: float
     chunk_index: int = 0
-    vector_rank: Optional[int] = None
-    fts_rank: Optional[int] = None
+    vector_rank: int | None = None
+    fts_rank: int | None = None
 
 
 # === RRF 결합 함수 ===
 
 
 def _compute_rrf_score(
-    vector_rank: Optional[int],
-    fts_rank: Optional[int],
+    vector_rank: int | None,
+    fts_rank: int | None,
     vector_weight: float,
     fts_weight: float,
     k: int,
@@ -286,18 +286,20 @@ def _combine_rrf(
         else:
             source = "fts"
 
-        scored_results.append(SearchResult(
-            chunk_id=item.chunk_id,
-            text=item.text,
-            score=score,
-            meeting_id=item.meeting_id,
-            date=item.date,
-            speakers=item.speakers,
-            start_time=item.start_time,
-            end_time=item.end_time,
-            chunk_index=item.chunk_index,
-            source=source,
-        ))
+        scored_results.append(
+            SearchResult(
+                chunk_id=item.chunk_id,
+                text=item.text,
+                score=score,
+                meeting_id=item.meeting_id,
+                date=item.date,
+                speakers=item.speakers,
+                start_time=item.start_time,
+                end_time=item.end_time,
+                chunk_index=item.chunk_index,
+                source=source,
+            )
+        )
 
     # 점수 내림차순 정렬 후 상위 top_k개 반환
     scored_results.sort(key=lambda r: r.score, reverse=True)
@@ -311,9 +313,9 @@ def _search_vector(
     query_embedding: list[float],
     collection: Any,
     top_k: int,
-    date_filter: Optional[str] = None,
-    speaker_filter: Optional[str] = None,
-    meeting_id_filter: Optional[str] = None,
+    date_filter: str | None = None,
+    speaker_filter: str | None = None,
+    meeting_id_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """ChromaDB에서 벡터 유사도 검색을 수행한다.
 
@@ -347,16 +349,12 @@ def _search_vector(
         if date_filter:
             where_conditions.append({"date": {"$eq": date_filter}})
         if speaker_filter:
-            where_conditions.append(
-                {"speakers": {"$contains": speaker_filter}}
-            )
+            where_conditions.append({"speakers": {"$contains": speaker_filter}})
         if meeting_id_filter:
-            where_conditions.append(
-                {"meeting_id": {"$eq": meeting_id_filter}}
-            )
+            where_conditions.append({"meeting_id": {"$eq": meeting_id_filter}})
 
         # ChromaDB where절 구성
-        where: Optional[dict[str, Any]] = None
+        where: dict[str, Any] | None = None
         if len(where_conditions) == 1:
             where = where_conditions[0]
         elif len(where_conditions) > 1:
@@ -382,16 +380,18 @@ def _search_vector(
 
             for i, chunk_id in enumerate(ids):
                 meta = metadatas[i] if i < len(metadatas) else {}
-                output.append({
-                    "chunk_id": chunk_id,
-                    "text": documents[i] if i < len(documents) else "",
-                    "meeting_id": meta.get("meeting_id", ""),
-                    "date": meta.get("date", ""),
-                    "speakers": meta.get("speakers", ""),
-                    "start_time": meta.get("start_time", 0.0),
-                    "end_time": meta.get("end_time", 0.0),
-                    "chunk_index": meta.get("chunk_index", 0),
-                })
+                output.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "text": documents[i] if i < len(documents) else "",
+                        "meeting_id": meta.get("meeting_id", ""),
+                        "date": meta.get("date", ""),
+                        "speakers": meta.get("speakers", ""),
+                        "start_time": meta.get("start_time", 0.0),
+                        "end_time": meta.get("end_time", 0.0),
+                        "chunk_index": meta.get("chunk_index", 0),
+                    }
+                )
 
         logger.debug(f"벡터 검색 결과: {len(output)}개")
         return output
@@ -408,10 +408,10 @@ def _search_fts(
     query: str,
     db_path: Path,
     top_k: int,
-    date_filter: Optional[str] = None,
-    speaker_filter: Optional[str] = None,
-    meeting_id_filter: Optional[str] = None,
-    cached_conn: Optional[sqlite3.Connection] = None,
+    date_filter: str | None = None,
+    speaker_filter: str | None = None,
+    meeting_id_filter: str | None = None,
+    cached_conn: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """SQLite FTS5에서 키워드 검색을 수행한다.
 
@@ -432,7 +432,7 @@ def _search_fts(
     """
     try:
         # PERF: 캐시된 연결 사용 시 connect/close 생략
-        conn: Optional[sqlite3.Connection] = cached_conn
+        conn: sqlite3.Connection | None = cached_conn
         should_close = False
 
         if conn is None:
@@ -482,7 +482,7 @@ def _search_fts(
                 params.append(meeting_id_filter)
 
             # bm25 점수 내림차순 (bm25는 음수 → 작을수록 관련도 높음)
-            sql += f" ORDER BY rank_score LIMIT ?"
+            sql += " ORDER BY rank_score LIMIT ?"
             params.append(top_k)
 
             cursor = conn.execute(sql, params)
@@ -491,16 +491,18 @@ def _search_fts(
             # 결과 변환
             output: list[dict[str, Any]] = []
             for row in rows:
-                output.append({
-                    "chunk_id": row["chunk_id"],
-                    "text": row["text"],
-                    "meeting_id": row["meeting_id"],
-                    "date": row["date"],
-                    "speakers": row["speakers"],
-                    "start_time": row["start_time"],
-                    "end_time": row["end_time"],
-                    "chunk_index": row["chunk_index"],
-                })
+                output.append(
+                    {
+                        "chunk_id": row["chunk_id"],
+                        "text": row["text"],
+                        "meeting_id": row["meeting_id"],
+                        "date": row["date"],
+                        "speakers": row["speakers"],
+                        "start_time": row["start_time"],
+                        "end_time": row["end_time"],
+                        "chunk_index": row["chunk_index"],
+                    }
+                )
 
             logger.debug(f"FTS5 검색 결과: {len(output)}개")
             return output
@@ -578,8 +580,8 @@ class HybridSearchEngine:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """HybridSearchEngine을 초기화한다.
 
@@ -615,7 +617,7 @@ class HybridSearchEngine:
         self._chroma_lock = threading.Lock()
 
         # PERF: FTS5 SQLite 연결 캐시 (매 검색마다 connect/close 반복 제거)
-        self._fts_conn: Optional[sqlite3.Connection] = None
+        self._fts_conn: sqlite3.Connection | None = None
         self._fts_conn_lock = threading.Lock()
 
         logger.info(
@@ -651,24 +653,17 @@ class HybridSearchEngine:
             try:
                 import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
 
-                self._chroma_client = chromadb.PersistentClient(
-                    path=str(self._chroma_dir)
-                )
+                self._chroma_client = chromadb.PersistentClient(path=str(self._chroma_dir))
 
                 # 컬렉션 존재 확인
                 self._chroma_collection = self._chroma_client.get_collection(
                     name=_CHROMA_COLLECTION_NAME,
                 )
-                logger.info(
-                    f"ChromaDB 컬렉션 캐시 완료: {_CHROMA_COLLECTION_NAME}"
-                )
+                logger.info(f"ChromaDB 컬렉션 캐시 완료: {_CHROMA_COLLECTION_NAME}")
                 return self._chroma_collection
 
             except Exception:
-                logger.warning(
-                    f"ChromaDB 컬렉션 미존재 또는 접근 실패: "
-                    f"{_CHROMA_COLLECTION_NAME}"
-                )
+                logger.warning(f"ChromaDB 컬렉션 미존재 또는 접근 실패: {_CHROMA_COLLECTION_NAME}")
                 return None
 
     def _get_embed_model(self) -> Any:
@@ -696,7 +691,7 @@ class HybridSearchEngine:
             self._embed_model = self._load_model()
             return self._embed_model
 
-    def _get_fts_connection(self) -> Optional[sqlite3.Connection]:
+    def _get_fts_connection(self) -> sqlite3.Connection | None:
         """캐시된 FTS5 SQLite 연결을 반환한다 (지연 초기화).
 
         첫 호출 시 WAL 모드로 연결을 생성하고 캐시한다.
@@ -753,14 +748,11 @@ class HybridSearchEngine:
                 device=self._device,
             )
             logger.info(
-                f"검색용 임베딩 모델 로드 완료: {self._model_name} "
-                f"(device={self._device})"
+                f"검색용 임베딩 모델 로드 완료: {self._model_name} (device={self._device})"
             )
             return model
         except Exception as e:
-            raise ModelLoadError(
-                f"검색용 임베딩 모델 로드 실패: {self._model_name} - {e}"
-            ) from e
+            raise ModelLoadError(f"검색용 임베딩 모델 로드 실패: {self._model_name} - {e}") from e
 
     def _embed_query(self, model: Any, query: str) -> list[float]:
         """검색 쿼리를 벡터로 변환한다.
@@ -792,10 +784,10 @@ class HybridSearchEngine:
     async def search(
         self,
         query: str,
-        date_filter: Optional[str] = None,
-        speaker_filter: Optional[str] = None,
-        meeting_id_filter: Optional[str] = None,
-        top_k: Optional[int] = None,
+        date_filter: str | None = None,
+        speaker_filter: str | None = None,
+        meeting_id_filter: str | None = None,
+        top_k: int | None = None,
     ) -> SearchResponse:
         """하이브리드 검색을 수행한다.
 
@@ -830,10 +822,7 @@ class HybridSearchEngine:
         # 각 소스에서 더 많은 결과를 가져와 RRF 결합 후 top_k로 절단
         fetch_k = effective_top_k * 3
 
-        logger.info(
-            f"하이브리드 검색 시작: query='{query}', "
-            f"top_k={effective_top_k}"
-        )
+        logger.info(f"하이브리드 검색 시작: query='{query}', top_k={effective_top_k}")
 
         # 필터 정보 기록
         filters_applied: dict[str, Any] = {}
@@ -846,9 +835,7 @@ class HybridSearchEngine:
 
         # 1. 쿼리 임베딩 생성 (PERF-005: 캐시된 모델 사용)
         model = self._get_embed_model()
-        query_embedding = await asyncio.to_thread(
-            self._embed_query, model, query
-        )
+        query_embedding = await asyncio.to_thread(self._embed_query, model, query)
 
         # 2-3. 벡터 검색과 FTS5 검색을 병렬 실행 (PERF-010)
         # 두 검색은 독립적인 I/O 작업이므로 동시에 수행할 수 있다.
@@ -876,9 +863,7 @@ class HybridSearchEngine:
             meeting_id_filter,
             fts_conn,
         )
-        vector_results, fts_results = await asyncio.gather(
-            vector_task, fts_task
-        )
+        vector_results, fts_results = await asyncio.gather(vector_task, fts_task)
 
         # 4. RRF 결합
         combined = _combine_rrf(

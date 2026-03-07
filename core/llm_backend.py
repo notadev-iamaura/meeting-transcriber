@@ -13,7 +13,8 @@ LLM 백엔드 추상화 모듈 (LLM Backend Abstraction Module)
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterator, Optional, Protocol, runtime_checkable
+from collections.abc import Iterator
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,9 @@ class LLMBackend(Protocol):
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> str:
         """LLM에 메시지를 보내고 전체 응답 텍스트를 반환한다.
 
@@ -79,9 +80,9 @@ class LLMBackend(Protocol):
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> Iterator[str]:
         """LLM에 메시지를 보내고 토큰을 스트리밍으로 반환한다.
 
@@ -140,17 +141,15 @@ class OllamaBackend:
         self._num_ctx = config.max_context_tokens
         self._timeout = config.request_timeout_seconds
 
-        logger.info(
-            f"OllamaBackend 초기화: model={self._model}, host={self._host}"
-        )
+        logger.info(f"OllamaBackend 초기화: model={self._model}, host={self._host}")
 
     def chat(
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> str:
         """Ollama /api/chat 엔드포인트를 호출하여 응답을 반환한다.
 
@@ -182,9 +181,9 @@ class OllamaBackend:
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> Iterator[str]:
         """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
 
@@ -240,6 +239,7 @@ def create_backend(config: Any) -> LLMBackend:
 
     if backend_type == "mlx":
         from core.mlx_client import MLXBackend
+
         logger.info("MLX 백엔드 선택됨")
         return MLXBackend(config)
 
@@ -248,6 +248,5 @@ def create_backend(config: Any) -> LLMBackend:
         return OllamaBackend(config)
 
     raise ValueError(
-        f"지원하지 않는 LLM 백엔드입니다: '{backend_type}'. "
-        f"'ollama' 또는 'mlx'를 사용하세요."
+        f"지원하지 않는 LLM 백엔드입니다: '{backend_type}'. 'ollama' 또는 'mlx'를 사용하세요."
     )

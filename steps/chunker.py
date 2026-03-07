@@ -21,7 +21,7 @@ import logging
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from steps.corrector import CorrectedResult, CorrectedUtterance
@@ -248,10 +248,7 @@ def _group_by_speaker_and_time(
         time_gap = utterance.start - current_group.end
 
         # 화자가 다르거나 시간 간격이 임계값 초과 시 새 그룹
-        if (
-            utterance.speaker != current_group.speaker
-            or time_gap > time_gap_threshold
-        ):
+        if utterance.speaker != current_group.speaker or time_gap > time_gap_threshold:
             groups.append(current_group)
             current_group = _UtteranceGroup(
                 speaker=utterance.speaker,
@@ -316,16 +313,18 @@ def _split_groups_into_chunks(
         # 그룹 간 시간 간격이 threshold를 초과하면 현재 청크를 확정 (토픽 분리)
         time_gap = group.start - current_end if current_texts else 0.0
         if current_texts and time_gap > time_gap_threshold:
-            chunks.append(_build_chunk(
-                texts=current_texts,
-                speakers=current_speakers,
-                start=current_start,
-                end=current_end,
-                tokens=current_tokens,
-                meeting_id=meeting_id,
-                date=date,
-                index=len(chunks),
-            ))
+            chunks.append(
+                _build_chunk(
+                    texts=current_texts,
+                    speakers=current_speakers,
+                    start=current_start,
+                    end=current_end,
+                    tokens=current_tokens,
+                    meeting_id=meeting_id,
+                    date=date,
+                    index=len(chunks),
+                )
+            )
             current_texts = []
             current_speakers = set()
             current_tokens = 0
@@ -335,16 +334,18 @@ def _split_groups_into_chunks(
         if group_tokens > max_tokens:
             # 현재 축적된 내용이 있으면 먼저 flush
             if current_texts:
-                chunks.append(_build_chunk(
-                    texts=current_texts,
-                    speakers=current_speakers,
-                    start=current_start,
-                    end=current_end,
-                    tokens=current_tokens,
-                    meeting_id=meeting_id,
-                    date=date,
-                    index=len(chunks),
-                ))
+                chunks.append(
+                    _build_chunk(
+                        texts=current_texts,
+                        speakers=current_speakers,
+                        start=current_start,
+                        end=current_end,
+                        tokens=current_tokens,
+                        meeting_id=meeting_id,
+                        date=date,
+                        index=len(chunks),
+                    )
+                )
                 current_texts = []
                 current_speakers = set()
                 current_tokens = 0
@@ -365,16 +366,18 @@ def _split_groups_into_chunks(
         # 현재 청크에 추가했을 때 max_tokens 초과 여부 확인
         if current_tokens + group_tokens > max_tokens and current_texts:
             # 현재 청크 확정
-            chunks.append(_build_chunk(
-                texts=current_texts,
-                speakers=current_speakers,
-                start=current_start,
-                end=current_end,
-                tokens=current_tokens,
-                meeting_id=meeting_id,
-                date=date,
-                index=len(chunks),
-            ))
+            chunks.append(
+                _build_chunk(
+                    texts=current_texts,
+                    speakers=current_speakers,
+                    start=current_start,
+                    end=current_end,
+                    tokens=current_tokens,
+                    meeting_id=meeting_id,
+                    date=date,
+                    index=len(chunks),
+                )
+            )
             current_texts = []
             current_speakers = set()
             current_tokens = 0
@@ -388,16 +391,18 @@ def _split_groups_into_chunks(
 
     # 남은 내용으로 마지막 청크 생성
     if current_texts:
-        chunks.append(_build_chunk(
-            texts=current_texts,
-            speakers=current_speakers,
-            start=current_start,
-            end=current_end,
-            tokens=current_tokens,
-            meeting_id=meeting_id,
-            date=date,
-            index=len(chunks),
-        ))
+        chunks.append(
+            _build_chunk(
+                texts=current_texts,
+                speakers=current_speakers,
+                start=current_start,
+                end=current_end,
+                tokens=current_tokens,
+                meeting_id=meeting_id,
+                date=date,
+                index=len(chunks),
+            )
+        )
 
     # min_tokens 미만인 마지막 청크를 이전 청크와 병합
     if len(chunks) >= 2:
@@ -502,13 +507,9 @@ def _split_text_by_tokens(
                 break
 
         if split_pos <= 0:
-            # 문장 부호 없으면 공백 기준 분할
+            # 문장 부호 없으면 공백 기준 분할, 없으면 강제 분할
             space_pos = remaining.rfind(" ", 0, max_chars)
-            if space_pos > 0:
-                split_pos = space_pos + 1
-            else:
-                # 공백도 없으면 강제 분할
-                split_pos = max_chars
+            split_pos = space_pos + 1 if space_pos > 0 else max_chars
 
         parts.append(remaining[:split_pos].rstrip())
         remaining = remaining[split_pos:].lstrip()
@@ -553,7 +554,45 @@ def _split_large_group(
             # 먼저 축적된 내용이 있으면 flush
             if current_lines:
                 chunk_text = "\n".join(current_lines)
-                chunks.append(Chunk(
+                chunks.append(
+                    Chunk(
+                        text=chunk_text,
+                        meeting_id=meeting_id,
+                        date=date,
+                        speakers=[group.speaker],
+                        start_time=group.start,
+                        end_time=group.end,
+                        estimated_tokens=_estimate_tokens(chunk_text),
+                        chunk_index=len(chunks),
+                    )
+                )
+                current_lines = []
+                current_tokens = 0
+
+            # 초대형 발화를 문자 수 기준으로 분할
+            sub_parts = _split_text_by_tokens(line, max_chars_per_chunk)
+            for sub_part in sub_parts:
+                chunks.append(
+                    Chunk(
+                        text=sub_part,
+                        meeting_id=meeting_id,
+                        date=date,
+                        speakers=[group.speaker],
+                        start_time=group.start,
+                        end_time=group.end,
+                        estimated_tokens=_estimate_tokens(sub_part),
+                        chunk_index=len(chunks),
+                    )
+                )
+
+            logger.debug(f"초대형 발화({len(text)}자) → {len(sub_parts)}개 청크로 분할")
+            continue
+
+        if current_tokens + line_tokens > max_tokens and current_lines:
+            # 현재까지의 내용으로 청크 생성
+            chunk_text = "\n".join(current_lines)
+            chunks.append(
+                Chunk(
                     text=chunk_text,
                     meeting_id=meeting_id,
                     date=date,
@@ -562,42 +601,8 @@ def _split_large_group(
                     end_time=group.end,
                     estimated_tokens=_estimate_tokens(chunk_text),
                     chunk_index=len(chunks),
-                ))
-                current_lines = []
-                current_tokens = 0
-
-            # 초대형 발화를 문자 수 기준으로 분할
-            sub_parts = _split_text_by_tokens(line, max_chars_per_chunk)
-            for sub_part in sub_parts:
-                chunks.append(Chunk(
-                    text=sub_part,
-                    meeting_id=meeting_id,
-                    date=date,
-                    speakers=[group.speaker],
-                    start_time=group.start,
-                    end_time=group.end,
-                    estimated_tokens=_estimate_tokens(sub_part),
-                    chunk_index=len(chunks),
-                ))
-
-            logger.debug(
-                f"초대형 발화({len(text)}자) → {len(sub_parts)}개 청크로 분할"
+                )
             )
-            continue
-
-        if current_tokens + line_tokens > max_tokens and current_lines:
-            # 현재까지의 내용으로 청크 생성
-            chunk_text = "\n".join(current_lines)
-            chunks.append(Chunk(
-                text=chunk_text,
-                meeting_id=meeting_id,
-                date=date,
-                speakers=[group.speaker],
-                start_time=group.start,
-                end_time=group.end,
-                estimated_tokens=_estimate_tokens(chunk_text),
-                chunk_index=len(chunks),
-            ))
             current_lines = []
             current_tokens = 0
 
@@ -607,16 +612,18 @@ def _split_large_group(
     # 남은 내용으로 마지막 청크
     if current_lines:
         chunk_text = "\n".join(current_lines)
-        chunks.append(Chunk(
-            text=chunk_text,
-            meeting_id=meeting_id,
-            date=date,
-            speakers=[group.speaker],
-            start_time=group.start,
-            end_time=group.end,
-            estimated_tokens=_estimate_tokens(chunk_text),
-            chunk_index=len(chunks),
-        ))
+        chunks.append(
+            Chunk(
+                text=chunk_text,
+                meeting_id=meeting_id,
+                date=date,
+                speakers=[group.speaker],
+                start_time=group.start,
+                end_time=group.end,
+                estimated_tokens=_estimate_tokens(chunk_text),
+                chunk_index=len(chunks),
+            )
+        )
 
 
 # === 메인 클래스 ===
@@ -639,7 +646,7 @@ class Chunker:
             print(f"[청크 {c.chunk_index}] {c.estimated_tokens}토큰, 화자: {c.speakers}")
     """
 
-    def __init__(self, config: Optional[AppConfig] = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """Chunker를 초기화한다.
 
         Args:
@@ -650,9 +657,7 @@ class Chunker:
         # 청킹 설정 캐시
         self._max_tokens = self._config.chunking.max_tokens
         self._min_tokens = self._config.chunking.min_tokens
-        self._time_gap_threshold = (
-            self._config.chunking.time_gap_threshold_seconds
-        )
+        self._time_gap_threshold = self._config.chunking.time_gap_threshold_seconds
         self._overlap_tokens = self._config.chunking.overlap_tokens
 
         logger.info(
@@ -683,13 +688,10 @@ class Chunker:
             생성된 청크 목록
         """
         # 1단계: 화자 + 시간 기준 그룹핑
-        groups = _group_by_speaker_and_time(
-            corrected.utterances, self._time_gap_threshold
-        )
+        groups = _group_by_speaker_and_time(corrected.utterances, self._time_gap_threshold)
 
         logger.debug(
-            f"화자/시간 그룹핑 완료: {len(corrected.utterances)}개 발화 → "
-            f"{len(groups)}개 그룹"
+            f"화자/시간 그룹핑 완료: {len(corrected.utterances)}개 발화 → {len(groups)}개 그룹"
         )
 
         # 2단계: 토큰 수 + 시간 간격 기준 청크 분할
@@ -736,22 +738,15 @@ class Chunker:
         if not corrected.utterances:
             raise EmptyInputError("청크할 발화가 비어있습니다.")
 
-        logger.info(
-            f"청크 분할 시작: 발화 {len(corrected.utterances)}개, "
-            f"meeting_id={meeting_id}"
-        )
+        logger.info(f"청크 분할 시작: 발화 {len(corrected.utterances)}개, meeting_id={meeting_id}")
 
         try:
             # 별도 스레드에서 청크 분할 (큰 데이터에서 이벤트 루프 블로킹 방지)
-            chunks = await asyncio.to_thread(
-                self._create_chunks, corrected, meeting_id, date
-            )
+            chunks = await asyncio.to_thread(self._create_chunks, corrected, meeting_id, date)
         except EmptyInputError:
             raise
         except Exception as e:
-            raise ChunkingError(
-                f"청크 분할 중 오류 발생: {e}"
-            ) from e
+            raise ChunkingError(f"청크 분할 중 오류 발생: {e}") from e
 
         result = ChunkedResult(
             chunks=chunks,

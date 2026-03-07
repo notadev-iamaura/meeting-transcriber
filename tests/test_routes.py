@@ -20,14 +20,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
-
 
 # === 헬퍼 ===
 
@@ -132,7 +130,7 @@ class MockChatResponse:
     query: str
     has_context: bool = True
     llm_used: bool = True
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -263,8 +261,14 @@ class TestMeetingsEndpoint:
 
         jobs = [
             MockJob(
-                1, "m1", "/a.wav", "completed", 0, "",
-                "2026-03-04T10:00:00", "2026-03-04T10:30:00",
+                1,
+                "m1",
+                "/a.wav",
+                "completed",
+                0,
+                "",
+                "2026-03-04T10:00:00",
+                "2026-03-04T10:30:00",
             ),
         ]
 
@@ -326,8 +330,12 @@ class TestMeetingDetailEndpoint:
         app = _make_test_app(tmp_path)
 
         mock_job = MockJob(
-            1, "meeting_001", "/audio/001.m4a", "failed",
-            retry_count=2, error_message="OOM",
+            1,
+            "meeting_001",
+            "/audio/001.m4a",
+            "failed",
+            retry_count=2,
+            error_message="OOM",
         )
 
         with TestClient(app) as client:
@@ -405,7 +413,9 @@ class TestSearchEndpoint:
         app = _make_test_app(tmp_path)
 
         mock_response = MockSearchResponse(
-            results=[], query="테스트", total_found=0,
+            results=[],
+            query="테스트",
+            total_found=0,
         )
 
         with TestClient(app) as client:
@@ -470,15 +480,24 @@ class TestSearchEndpoint:
 
         mock_results = [
             MockSearchResult(
-                chunk_id="c1", text="텍스트", score=0.5,
-                meeting_id="m1", date="2026-03-04",
-                speakers=["S0"], start_time=0.0, end_time=10.0,
-                chunk_index=0, source="vector",
+                chunk_id="c1",
+                text="텍스트",
+                score=0.5,
+                meeting_id="m1",
+                date="2026-03-04",
+                speakers=["S0"],
+                start_time=0.0,
+                end_time=10.0,
+                chunk_index=0,
+                source="vector",
             ),
         ]
         mock_response = MockSearchResponse(
-            results=mock_results, query="q",
-            total_found=1, vector_count=1, fts_count=0,
+            results=mock_results,
+            query="q",
+            total_found=1,
+            vector_count=1,
+            fts_count=0,
             filters_applied={"date": "2026-03-04"},
         )
 
@@ -565,7 +584,9 @@ class TestChatEndpoint:
         app = _make_test_app(tmp_path)
 
         mock_response = MockChatResponse(
-            answer="답변", references=[], query="질문",
+            answer="답변",
+            references=[],
+            query="질문",
         )
 
         with TestClient(app) as client:
@@ -652,9 +673,14 @@ class TestChatEndpoint:
 
         mock_refs = [
             MockChatReference(
-                chunk_id="c1", meeting_id="m1", date="2026-03-04",
-                speakers=["S0"], start_time=0.0, end_time=10.0,
-                text_preview="미리보기...", score=0.7,
+                chunk_id="c1",
+                meeting_id="m1",
+                date="2026-03-04",
+                speakers=["S0"],
+                start_time=0.0,
+                end_time=10.0,
+                text_preview="미리보기...",
+                score=0.7,
             ),
         ]
         mock_response = MockChatResponse(
@@ -835,7 +861,8 @@ def _create_corrected_json(outputs_dir: Path, meeting_id: str) -> Path:
 
 
 def _create_summary_files(
-    outputs_dir: Path, meeting_id: str,
+    outputs_dir: Path,
+    meeting_id: str,
 ) -> tuple[Path, Path]:
     """테스트용 summary.md와 summary.json 파일을 생성한다.
 
@@ -1039,9 +1066,7 @@ class TestSummaryEndpoint:
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            response = client.get(
-                "/api/meetings/..%2F..%2Fetc%2Fpasswd/summary"
-            )
+            response = client.get("/api/meetings/..%2F..%2Fetc%2Fpasswd/summary")
 
         assert response.status_code in (400, 404, 422)
 
@@ -1067,13 +1092,15 @@ class TestRecordingEndpoints:
         mock_recorder.current_duration = 0.0 if not is_recording else 120.5
         mock_recorder.state = MagicMock()
         mock_recorder.state.value = "idle" if not is_recording else "recording"
-        mock_recorder.get_status = MagicMock(return_value={
-            "state": "idle" if not is_recording else "recording",
-            "is_recording": is_recording,
-            "duration_seconds": 0.0 if not is_recording else 120.5,
-            "audio_device": None,
-            "file_path": None,
-        })
+        mock_recorder.get_status = MagicMock(
+            return_value={
+                "state": "idle" if not is_recording else "recording",
+                "is_recording": is_recording,
+                "duration_seconds": 0.0 if not is_recording else 120.5,
+                "audio_device": None,
+                "file_path": None,
+            }
+        )
         mock_recorder.detect_audio_devices = AsyncMock(return_value=[])
         mock_recorder.start_recording = AsyncMock()
         mock_recorder.stop_recording = AsyncMock()

@@ -1,0 +1,60 @@
+# CI 파이프라인 — 푸시 및 PR 시 자동 실행
+#
+# 목적: 코드 품질(린트) + 테스트 자동 검증
+# 린트: ruff check + ruff format --check
+# 테스트: pytest (Python 3.11, 3.12 매트릭스)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 린트
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ruff 설치
+        run: pip install ruff
+
+      - name: 린트 검사
+        run: ruff check .
+
+      - name: 포맷 검사
+        run: ruff format --check .
+
+  test:
+    name: 테스트 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 의존성 설치
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov pydantic pyyaml psutil
+
+      - name: 단위 테스트 실행
+        run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
+        env:
+          # macOS 전용 모듈 import 방지
+          SKIP_MACOS_MODULES: "1"

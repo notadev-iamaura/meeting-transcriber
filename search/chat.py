@@ -17,12 +17,12 @@ RAG 기반 AI Chat 엔진 모듈 (RAG-based AI Chat Engine Module)
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import queue
 import unicodedata
+from collections.abc import AsyncGenerator
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from config import AppConfig, ChatConfig, get_config
 from core.llm_backend import (
@@ -127,7 +127,7 @@ class ChatResponse:
     query: str
     has_context: bool = True
     llm_used: bool = True
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -187,9 +187,7 @@ class ChatSession:
             assistant_answer: AI 답변
         """
         self._history.append(ChatMessage(role="user", content=user_query))
-        self._history.append(
-            ChatMessage(role="assistant", content=assistant_answer)
-        )
+        self._history.append(ChatMessage(role="assistant", content=assistant_answer))
 
         # 슬라이딩 윈도우: 최대 쌍 수 초과 시 가장 오래된 쌍 제거
         max_messages = self._max_pairs * 2
@@ -347,9 +345,9 @@ class ChatEngine:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
-        search_engine: Optional[HybridSearchEngine] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
+        search_engine: HybridSearchEngine | None = None,
     ) -> None:
         """ChatEngine을 초기화한다.
 
@@ -388,7 +386,7 @@ class ChatEngine:
             f"top_k={self._top_k}"
         )
 
-    def get_session(self, session_id: Optional[str] = None) -> ChatSession:
+    def get_session(self, session_id: str | None = None) -> ChatSession:
         """대화 세션을 반환한다.
 
         session_id가 None이면 기본 세션을 반환한다.
@@ -409,7 +407,7 @@ class ChatEngine:
             )
         return self._sessions[session_id]
 
-    def clear_session(self, session_id: Optional[str] = None) -> None:
+    def clear_session(self, session_id: str | None = None) -> None:
         """대화 세션의 이력을 초기화한다.
 
         Args:
@@ -488,8 +486,7 @@ class ChatEngine:
         # 시스템 프롬프트 + 이력 토큰 추정
         system_tokens = _estimate_korean_tokens(system_prompt)
         history_tokens = sum(
-            _estimate_korean_tokens(m.get("content", ""))
-            for m in history_messages
+            _estimate_korean_tokens(m.get("content", "")) for m in history_messages
         )
 
         # 사용자 프롬프트에 할당 가능한 토큰 수
@@ -548,10 +545,10 @@ class ChatEngine:
     async def chat(
         self,
         query: str,
-        session_id: Optional[str] = None,
-        meeting_id_filter: Optional[str] = None,
-        date_filter: Optional[str] = None,
-        speaker_filter: Optional[str] = None,
+        session_id: str | None = None,
+        meeting_id_filter: str | None = None,
+        date_filter: str | None = None,
+        speaker_filter: str | None = None,
     ) -> ChatResponse:
         """RAG 기반 AI Chat을 수행한다.
 
@@ -625,12 +622,8 @@ class ChatEngine:
 
         # 3. LLM 호출
         try:
-            async with self._model_manager.acquire(
-                "exaone", self._create_backend
-            ) as backend:
-                answer = await asyncio.to_thread(
-                    self._call_llm_chat, backend, messages
-                )
+            async with self._model_manager.acquire("exaone", self._create_backend) as backend:
+                answer = await asyncio.to_thread(self._call_llm_chat, backend, messages)
 
             # NFC 정규화 적용
             answer = unicodedata.normalize("NFC", answer.strip())
@@ -656,9 +649,7 @@ class ChatEngine:
             # LLM 실패 시 검색 결과만 반환 (graceful degradation)
             logger.warning(f"LLM 호출 실패, 검색 결과만 반환: {e}")
 
-            fallback_answer = self._build_fallback_answer(
-                search_results, str(e)
-            )
+            fallback_answer = self._build_fallback_answer(search_results, str(e))
 
             return ChatResponse(
                 answer=fallback_answer,
@@ -682,10 +673,10 @@ class ChatEngine:
     async def stream_chat(
         self,
         query: str,
-        session_id: Optional[str] = None,
-        meeting_id_filter: Optional[str] = None,
-        date_filter: Optional[str] = None,
-        speaker_filter: Optional[str] = None,
+        session_id: str | None = None,
+        meeting_id_filter: str | None = None,
+        date_filter: str | None = None,
+        speaker_filter: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """스트리밍 방식으로 RAG Chat 응답을 생성한다.
 
@@ -761,9 +752,7 @@ class ChatEngine:
 
         # 3. LLM 스트리밍 호출 (Queue 브릿지를 통한 실시간 스트리밍)
         try:
-            async with self._model_manager.acquire(
-                "exaone", self._create_backend
-            ) as backend:
+            async with self._model_manager.acquire("exaone", self._create_backend) as backend:
                 # 동기 스트리밍 스레드 ↔ 비동기 제너레이터 브릿지용 큐
                 token_queue: queue.Queue[str | None | Exception] = queue.Queue()
 

@@ -20,7 +20,7 @@ import logging
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
@@ -89,7 +89,7 @@ class TranscriptResult:
 
         Args:
             output_path: 저장할 JSON 파일 경로
-            
+
         Raises:
             IOError: 파일 쓰기 실패 시
         """
@@ -99,7 +99,7 @@ class TranscriptResult:
         logger.info(f"전사 체크포인트 저장: {output_path}")
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: Path) -> "TranscriptResult":
+    def from_checkpoint(cls, checkpoint_path: Path) -> TranscriptResult:
         """체크포인트 JSON 파일에서 전사 결과를 복원한다.
 
         Args:
@@ -115,9 +115,7 @@ class TranscriptResult:
         with open(checkpoint_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        segments = [
-            TranscriptSegment(**seg) for seg in data.get("segments", [])
-        ]
+        segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
 
         return cls(
             segments=segments,
@@ -157,8 +155,8 @@ class Transcriber:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """Transcriber를 초기화한다.
 
@@ -199,8 +197,7 @@ class Transcriber:
             return mlx_whisper
         except ImportError as e:
             raise ModelNotAvailableError(
-                "mlx-whisper가 설치되어 있지 않습니다. "
-                "'pip install mlx-whisper'로 설치하세요."
+                "mlx-whisper가 설치되어 있지 않습니다. 'pip install mlx-whisper'로 설치하세요."
             ) from e
 
     def _validate_audio(self, audio_path: Path) -> None:
@@ -214,19 +211,13 @@ class Transcriber:
             EmptyAudioError: 파일 크기가 0일 때
         """
         if not audio_path.exists():
-            raise FileNotFoundError(
-                f"오디오 파일을 찾을 수 없습니다: {audio_path}"
-            )
+            raise FileNotFoundError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
 
         if not audio_path.is_file():
-            raise FileNotFoundError(
-                f"오디오 경로가 파일이 아닙니다: {audio_path}"
-            )
+            raise FileNotFoundError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
 
         if audio_path.stat().st_size == 0:
-            raise EmptyAudioError(
-                f"오디오 파일이 비어있습니다: {audio_path}"
-            )
+            raise EmptyAudioError(f"오디오 파일이 비어있습니다: {audio_path}")
 
     @staticmethod
     def _normalize_korean_text(text: str) -> str:
@@ -241,15 +232,13 @@ class Transcriber:
 
         Returns:
             NFC 정규화된 텍스트 (앞뒤 공백 제거)
-            
+
         Raises:
             TypeError: 텍스트가 문자열이 아닐 때
         """
         return unicodedata.normalize("NFC", text.strip())
 
-    def _parse_segments(
-        self, raw_result: dict[str, Any]
-    ) -> list[TranscriptSegment]:
+    def _parse_segments(self, raw_result: dict[str, Any]) -> list[TranscriptSegment]:
         """mlx_whisper의 원시 결과를 TranscriptSegment 리스트로 변환한다.
 
         빈 텍스트 세그먼트는 필터링하고, 한국어 텍스트는 NFC 정규화한다.
@@ -259,7 +248,7 @@ class Transcriber:
 
         Returns:
             파싱된 TranscriptSegment 리스트 (빈 세그먼트 제외)
-            
+
         Raises:
             TypeError: raw_result 형식이 잘못되었을 때
         """
@@ -330,30 +319,25 @@ class Transcriber:
                     ),
                     timeout=transcribe_timeout,
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError as e:
             raise TranscriptionError(
                 f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path}"
-            )
+            ) from e
         except ModelNotAvailableError:
             raise
         except Exception as e:
-            raise TranscriptionError(
-                f"전사 처리 중 오류 발생: {audio_path} — {e}"
-            ) from e
+            raise TranscriptionError(f"전사 처리 중 오류 발생: {audio_path} — {e}") from e
 
         # 결과 파싱
         segments = self._parse_segments(raw_result)
 
         if not segments:
             raise EmptyAudioError(
-                f"전사 결과가 비어있습니다. "
-                f"오디오에 음성이 없거나 인식 불가: {audio_path}"
+                f"전사 결과가 비어있습니다. 오디오에 음성이 없거나 인식 불가: {audio_path}"
             )
 
         # 전체 텍스트 NFC 정규화
-        full_text = self._normalize_korean_text(
-            raw_result.get("text", "")
-        )
+        full_text = self._normalize_korean_text(raw_result.get("text", ""))
 
         transcript = TranscriptResult(
             segments=segments,

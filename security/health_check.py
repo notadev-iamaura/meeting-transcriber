@@ -24,7 +24,6 @@ import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from config import AppConfig
 
@@ -159,11 +158,13 @@ class HealthChecker:
             except Exception as e:
                 # 체크 함수 자체에서 예외 발생 시 FAIL로 기록
                 fn_name = getattr(check_fn, "__name__", str(check_fn))
-                report.results.append(CheckResult(
-                    name=fn_name,
-                    status=CheckStatus.FAIL,
-                    message=f"체크 실행 중 예외 발생: {e}",
-                ))
+                report.results.append(
+                    CheckResult(
+                        name=fn_name,
+                        status=CheckStatus.FAIL,
+                        message=f"체크 실행 중 예외 발생: {e}",
+                    )
+                )
                 logger.error(
                     f"헬스체크 '{fn_name}' 실행 중 오류: {e}",
                     exc_info=True,
@@ -206,7 +207,7 @@ class HealthChecker:
                 status=CheckStatus.PASS,
                 message=f"Ollama 서버 정상 ({host})",
             )
-        except urllib.error.URLError as e:
+        except urllib.error.URLError:
             return CheckResult(
                 name="ollama_server",
                 status=CheckStatus.FAIL,
@@ -326,18 +327,22 @@ class HealthChecker:
         for import_name, display_name in _REQUIRED_PACKAGES:
             try:
                 importlib.import_module(import_name)
-                results.append(CheckResult(
-                    name=f"package_{import_name}",
-                    status=CheckStatus.PASS,
-                    message=f"패키지 '{display_name}' 설치 확인",
-                ))
+                results.append(
+                    CheckResult(
+                        name=f"package_{import_name}",
+                        status=CheckStatus.PASS,
+                        message=f"패키지 '{display_name}' 설치 확인",
+                    )
+                )
             except ImportError:
-                results.append(CheckResult(
-                    name=f"package_{import_name}",
-                    status=CheckStatus.FAIL,
-                    message=f"패키지 '{display_name}'이(가) 설치되지 않았습니다",
-                    guide=f"패키지를 설치하세요: pip install {display_name}",
-                ))
+                results.append(
+                    CheckResult(
+                        name=f"package_{import_name}",
+                        status=CheckStatus.FAIL,
+                        message=f"패키지 '{display_name}'이(가) 설치되지 않았습니다",
+                        guide=f"패키지를 설치하세요: pip install {display_name}",
+                    )
+                )
 
         return results
 
@@ -362,7 +367,7 @@ class HealthChecker:
 
         try:
             usage = shutil.disk_usage(str(check_path))
-            free_gb = usage.free / (1024 ** 3)
+            free_gb = usage.free / (1024**3)
 
             if free_gb >= _MIN_DISK_FREE_GB:
                 return CheckResult(
@@ -440,9 +445,7 @@ class HealthChecker:
             report: 헬스체크 결과 보고서
         """
         if report.all_passed:
-            logger.info(
-                f"헬스체크 완료: 모든 항목 통과 ({len(report.results)}개)"
-            )
+            logger.info(f"헬스체크 완료: 모든 항목 통과 ({len(report.results)}개)")
             return
 
         logger.warning(
@@ -463,7 +466,7 @@ class HealthChecker:
                     msg += f"\n         → {result.guide}"
                 logger.warning(msg)
 
-    def get_failure_summary(self, report: HealthReport) -> Optional[str]:
+    def get_failure_summary(self, report: HealthReport) -> str | None:
         """헬스체크 실패 시 알림에 사용할 요약 메시지를 생성한다.
 
         모든 항목이 통과하면 None을 반환한다.
@@ -512,7 +515,7 @@ def _is_writable(dir_path: Path) -> bool:
         return False
 
 
-def run_health_check(config: Optional[AppConfig] = None) -> HealthReport:
+def run_health_check(config: AppConfig | None = None) -> HealthReport:
     """시스템 헬스체크의 편의 함수.
 
     HealthChecker 인스턴스를 생성하고 run()을 호출한다.
@@ -525,6 +528,7 @@ def run_health_check(config: Optional[AppConfig] = None) -> HealthReport:
     """
     if config is None:
         from config import get_config
+
         config = get_config()
 
     checker = HealthChecker(config)

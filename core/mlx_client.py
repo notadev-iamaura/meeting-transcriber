@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import gc
 import logging
-from typing import Any, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any
 
 from core.llm_backend import (
     LLMBackendError,
@@ -71,7 +72,8 @@ class MLXBackend:
         self._temperature = config.temperature
         self._max_tokens = getattr(config, "mlx_max_tokens", 2000)
         self._model_name = getattr(
-            config, "mlx_model_name",
+            config,
+            "mlx_model_name",
             "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
         )
 
@@ -87,13 +89,10 @@ class MLXBackend:
 
         except ImportError as e:
             raise MLXLoadError(
-                "mlx-lm 패키지가 설치되지 않았습니다. "
-                "'pip install mlx-lm' 으로 설치하세요."
+                "mlx-lm 패키지가 설치되지 않았습니다. 'pip install mlx-lm' 으로 설치하세요."
             ) from e
         except Exception as e:
-            raise MLXLoadError(
-                f"MLX 모델 로드 실패: {self._model_name} — {e}"
-            ) from e
+            raise MLXLoadError(f"MLX 모델 로드 실패: {self._model_name} — {e}") from e
 
     def _apply_chat_template(
         self,
@@ -120,9 +119,9 @@ class MLXBackend:
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> str:
         """MLX로 텍스트를 생성하여 전체 응답을 반환한다.
 
@@ -163,17 +162,15 @@ class MLXBackend:
         except MLXGenerationError:
             raise
         except Exception as e:
-            raise MLXGenerationError(
-                f"MLX 텍스트 생성 실패: {e}"
-            ) from e
+            raise MLXGenerationError(f"MLX 텍스트 생성 실패: {e}") from e
 
     def chat_stream(
         self,
         *,
         messages: list[dict[str, str]],
-        temperature: Optional[float] = None,
-        num_ctx: Optional[int] = None,
-        timeout: Optional[int] = None,
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        timeout: int | None = None,
     ) -> Iterator[str]:
         """MLX로 텍스트를 스트리밍 생성한다.
 
@@ -216,9 +213,7 @@ class MLXBackend:
         except MLXGenerationError:
             raise
         except Exception as e:
-            raise MLXGenerationError(
-                f"MLX 스트리밍 생성 실패: {e}"
-            ) from e
+            raise MLXGenerationError(f"MLX 스트리밍 생성 실패: {e}") from e
 
     def cleanup(self) -> None:
         """MLX 모델을 메모리에서 해제하고 Metal GPU 캐시를 정리한다.
@@ -236,6 +231,7 @@ class MLXBackend:
 
         try:
             import mlx.core as mx  # type: ignore[import-untyped]
+
             mx.metal.clear_cache()
             logger.debug("Metal GPU 캐시 정리 완료")
         except ImportError:

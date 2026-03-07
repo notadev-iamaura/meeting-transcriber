@@ -6,7 +6,6 @@ LLM 백엔드 추상화 테스트 모듈 (LLM Backend Abstraction Tests)
 
 from __future__ import annotations
 
-from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,7 +25,6 @@ from core.ollama_client import (
     OllamaResponseError,
     OllamaTimeoutError,
 )
-
 
 # === 에러 계층 테스트 ===
 
@@ -117,7 +115,9 @@ class TestOllamaBackend:
     @patch("core.ollama_client.check_connection")
     @patch("core.ollama_client.chat")
     def test_chat_호출(
-        self, mock_chat: MagicMock, mock_check: MagicMock,
+        self,
+        mock_chat: MagicMock,
+        mock_check: MagicMock,
     ) -> None:
         """chat() 메서드가 ollama_client.chat()을 올바르게 위임하는지 검증."""
         mock_chat.return_value = "응답 텍스트"
@@ -140,7 +140,9 @@ class TestOllamaBackend:
     @patch("core.ollama_client.check_connection")
     @patch("core.ollama_client.chat")
     def test_chat_온도_오버라이드(
-        self, mock_chat: MagicMock, mock_check: MagicMock,
+        self,
+        mock_chat: MagicMock,
+        mock_check: MagicMock,
     ) -> None:
         """chat() 호출 시 temperature 오버라이드 검증."""
         mock_chat.return_value = "응답"
@@ -155,7 +157,9 @@ class TestOllamaBackend:
     @patch("core.ollama_client.check_connection")
     @patch("core.ollama_client.chat_stream")
     def test_chat_stream_호출(
-        self, mock_stream: MagicMock, mock_check: MagicMock,
+        self,
+        mock_stream: MagicMock,
+        mock_check: MagicMock,
     ) -> None:
         """chat_stream() 메서드가 올바르게 토큰을 yield하는지 검증."""
         mock_stream.return_value = iter(["토큰1", "토큰2", "토큰3"])
@@ -212,6 +216,7 @@ class TestMLXBackend:
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
             from core.mlx_client import MLXBackend
+
             config = self._make_config()
             backend = MLXBackend(config)
 
@@ -228,10 +233,13 @@ class TestMLXBackend:
 
         config = self._make_config()
 
-        with patch.dict("sys.modules", {"mlx_lm": None}):
-            with pytest.raises(MLXLoadError, match="mlx-lm"):
-                from core.mlx_client import MLXBackend
-                MLXBackend(config)
+        with (
+            patch.dict("sys.modules", {"mlx_lm": None}),
+            pytest.raises(MLXLoadError, match="mlx-lm"),
+        ):
+            from core.mlx_client import MLXBackend
+
+            MLXBackend(config)
 
     def test_chat_호출(self) -> None:
         """chat() 메서드가 generate()를 올바르게 호출하는지 검증."""
@@ -244,12 +252,11 @@ class TestMLXBackend:
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
             from core.mlx_client import MLXBackend
+
             config = self._make_config()
             backend = MLXBackend(config)
 
-            result = backend.chat(
-                messages=[{"role": "user", "content": "테스트"}]
-            )
+            result = backend.chat(messages=[{"role": "user", "content": "테스트"}])
 
             assert result == "생성된 응답"
             mock_tokenizer.apply_chat_template.assert_called_once()
@@ -262,6 +269,7 @@ class TestMLXBackend:
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
             from core.mlx_client import MLXBackend
+
             config = self._make_config()
             backend = MLXBackend(config)
 
@@ -277,6 +285,7 @@ class TestMLXBackend:
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
             from core.mlx_client import MLXBackend
+
             config = self._make_config()
             backend = MLXBackend(config)
             assert isinstance(backend, LLMBackend)
@@ -315,6 +324,7 @@ class TestCreateBackend:
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
             from core.mlx_client import MLXBackend
+
             backend = create_backend(config)
             assert isinstance(backend, MLXBackend)
 
@@ -328,7 +338,8 @@ class TestCreateBackend:
 
     @patch("core.ollama_client.check_connection")
     def test_backend_필드_없으면_ollama_기본값(
-        self, mock_check: MagicMock,
+        self,
+        mock_check: MagicMock,
     ) -> None:
         """backend 속성이 없으면 기본값 'ollama' 사용."""
         config = MagicMock(spec=[])  # backend 속성 없음

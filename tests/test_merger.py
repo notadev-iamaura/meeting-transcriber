@@ -14,22 +14,19 @@ STT + 화자분리 병합기 테스트 모듈 (Merger Test Module)
 의존성: pytest, pytest-asyncio
 """
 
-import json
-
 import pytest
 
-from steps.transcriber import TranscriptResult, TranscriptSegment
 from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.merger import (
     UNKNOWN_SPEAKER,
     EmptySegmentsError,
     MergedResult,
     MergedUtterance,
-    MergeError,
     Merger,
     _calculate_overlap,
     _find_best_speaker,
 )
+from steps.transcriber import TranscriptResult, TranscriptSegment
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,8 +48,7 @@ def _make_transcript(
         TranscriptResult 인스턴스
     """
     stt_segments = [
-        TranscriptSegment(text=text, start=start, end=end)
-        for text, start, end in segments
+        TranscriptSegment(text=text, start=start, end=end) for text, start, end in segments
     ]
     full_text = " ".join(seg[0] for seg in segments)
     return TranscriptResult(
@@ -208,9 +204,7 @@ class TestMergedUtterance:
 
     def test_생성(self) -> None:
         """기본 생성 및 필드 접근."""
-        u = MergedUtterance(
-            text="안녕하세요", speaker="SPEAKER_00", start=0.0, end=5.0
-        )
+        u = MergedUtterance(text="안녕하세요", speaker="SPEAKER_00", start=0.0, end=5.0)
         assert u.text == "안녕하세요"
         assert u.speaker == "SPEAKER_00"
         assert u.start == 0.0
@@ -218,16 +212,12 @@ class TestMergedUtterance:
 
     def test_duration(self) -> None:
         """duration 프로퍼티 계산."""
-        u = MergedUtterance(
-            text="테스트", speaker="SPEAKER_00", start=3.0, end=8.0
-        )
+        u = MergedUtterance(text="테스트", speaker="SPEAKER_00", start=3.0, end=8.0)
         assert u.duration == pytest.approx(5.0)
 
     def test_to_dict(self) -> None:
         """딕셔너리 변환."""
-        u = MergedUtterance(
-            text="한국어", speaker="SPEAKER_01", start=1.0, end=3.5
-        )
+        u = MergedUtterance(text="한국어", speaker="SPEAKER_01", start=1.0, end=3.5)
         d = u.to_dict()
         assert d == {
             "text": "한국어",
@@ -257,9 +247,7 @@ class TestMergedResult:
 
     def test_total_duration_빈_결과(self) -> None:
         """빈 utterance 리스트에서 total_duration은 0."""
-        result = MergedResult(
-            utterances=[], num_speakers=0, audio_path="/tmp/test.wav"
-        )
+        result = MergedResult(utterances=[], num_speakers=0, audio_path="/tmp/test.wav")
         assert result.total_duration == pytest.approx(0.0)
 
     def test_speakers_UNKNOWN_제외(self) -> None:
@@ -298,16 +286,22 @@ class TestMergedResult:
         original = MergedResult(
             utterances=[
                 MergedUtterance(
-                    text="안녕하세요", speaker="SPEAKER_00",
-                    start=0.0, end=5.0,
+                    text="안녕하세요",
+                    speaker="SPEAKER_00",
+                    start=0.0,
+                    end=5.0,
                 ),
                 MergedUtterance(
-                    text="반갑습니다", speaker="SPEAKER_01",
-                    start=5.0, end=10.0,
+                    text="반갑습니다",
+                    speaker="SPEAKER_01",
+                    start=5.0,
+                    end=10.0,
                 ),
                 MergedUtterance(
-                    text="회의 시작하겠습니다", speaker=UNKNOWN_SPEAKER,
-                    start=10.0, end=15.0,
+                    text="회의 시작하겠습니다",
+                    speaker=UNKNOWN_SPEAKER,
+                    start=10.0,
+                    end=15.0,
                 ),
             ],
             num_speakers=2,
@@ -340,8 +334,10 @@ class TestMergedResult:
         original = MergedResult(
             utterances=[
                 MergedUtterance(
-                    text="한국어 텍스트 테스트", speaker="S0",
-                    start=0.0, end=5.0,
+                    text="한국어 텍스트 테스트",
+                    speaker="S0",
+                    start=0.0,
+                    end=5.0,
                 ),
             ],
             num_speakers=1,
@@ -370,13 +366,17 @@ class TestMerger정상병합:
 
     async def test_완전_포함_병합(self) -> None:
         """STT 세그먼트가 화자 구간에 완전 포함될 때."""
-        transcript = _make_transcript([
-            ("안녕하세요", 0.0, 5.0),
-            ("오늘 회의를 시작하겠습니다", 5.0, 10.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 10.0),
-        ])
+        transcript = _make_transcript(
+            [
+                ("안녕하세요", 0.0, 5.0),
+                ("오늘 회의를 시작하겠습니다", 5.0, 10.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 10.0),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -389,18 +389,22 @@ class TestMerger정상병합:
 
     async def test_두_화자_교대(self) -> None:
         """두 화자가 교대로 발화하는 정상 케이스."""
-        transcript = _make_transcript([
-            ("안녕하세요", 0.0, 5.0),
-            ("네 안녕하세요", 6.0, 10.0),
-            ("오늘 안건은", 11.0, 15.0),
-            ("네 알겠습니다", 16.0, 20.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 5.5),
-            ("SPEAKER_01", 5.5, 10.5),
-            ("SPEAKER_00", 10.5, 15.5),
-            ("SPEAKER_01", 15.5, 20.5),
-        ])
+        transcript = _make_transcript(
+            [
+                ("안녕하세요", 0.0, 5.0),
+                ("네 안녕하세요", 6.0, 10.0),
+                ("오늘 안건은", 11.0, 15.0),
+                ("네 알겠습니다", 16.0, 20.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 5.5),
+                ("SPEAKER_01", 5.5, 10.5),
+                ("SPEAKER_00", 10.5, 15.5),
+                ("SPEAKER_01", 15.5, 20.5),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -417,14 +421,18 @@ class TestMerger정상병합:
 
     async def test_다중_화자_겹침(self) -> None:
         """STT 세그먼트가 여러 화자 구간에 걸칠 때 최대 겹침 화자 선택."""
-        transcript = _make_transcript([
-            # 이 세그먼트는 SPEAKER_00과 3초, SPEAKER_01과 7초 겹침
-            ("테스트 발화", 5.0, 15.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 8.0),    # 3초 겹침 (5~8)
-            ("SPEAKER_01", 8.0, 20.0),   # 7초 겹침 (8~15)
-        ])
+        transcript = _make_transcript(
+            [
+                # 이 세그먼트는 SPEAKER_00과 3초, SPEAKER_01과 7초 겹침
+                ("테스트 발화", 5.0, 15.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 8.0),  # 3초 겹침 (5~8)
+                ("SPEAKER_01", 8.0, 20.0),  # 7초 겹침 (8~15)
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -433,16 +441,20 @@ class TestMerger정상병합:
 
     async def test_세_화자_회의(self) -> None:
         """세 명의 화자가 참여하는 회의."""
-        transcript = _make_transcript([
-            ("첫 번째 발화", 0.0, 5.0),
-            ("두 번째 발화", 6.0, 10.0),
-            ("세 번째 발화", 11.0, 15.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 5.5),
-            ("SPEAKER_01", 5.5, 10.5),
-            ("SPEAKER_02", 10.5, 15.5),
-        ])
+        transcript = _make_transcript(
+            [
+                ("첫 번째 발화", 0.0, 5.0),
+                ("두 번째 발화", 6.0, 10.0),
+                ("세 번째 발화", 11.0, 15.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 5.5),
+                ("SPEAKER_01", 5.5, 10.5),
+                ("SPEAKER_02", 10.5, 15.5),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -458,9 +470,11 @@ class TestMerger정상병합:
             [("테스트", 0.0, 5.0)],
             audio_path="/custom/path/audio.wav",
         )
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 10.0),
-        ])
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 10.0),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -472,10 +486,12 @@ class TestMergerUNKNOWN처리:
 
     async def test_빈_화자_세그먼트(self) -> None:
         """화자분리 세그먼트가 비어있으면 모든 발화에 UNKNOWN 할당."""
-        transcript = _make_transcript([
-            ("안녕하세요", 0.0, 5.0),
-            ("반갑습니다", 5.0, 10.0),
-        ])
+        transcript = _make_transcript(
+            [
+                ("안녕하세요", 0.0, 5.0),
+                ("반갑습니다", 5.0, 10.0),
+            ]
+        )
         diarization = _make_diarization([])
 
         merger = Merger()
@@ -488,13 +504,17 @@ class TestMergerUNKNOWN처리:
 
     async def test_부분_매칭(self) -> None:
         """일부 발화만 화자와 매칭되는 케이스."""
-        transcript = _make_transcript([
-            ("첫 번째", 0.0, 5.0),    # 화자 구간 존재
-            ("두 번째", 50.0, 55.0),   # 화자 구간 없음
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 10.0),
-        ])
+        transcript = _make_transcript(
+            [
+                ("첫 번째", 0.0, 5.0),  # 화자 구간 존재
+                ("두 번째", 50.0, 55.0),  # 화자 구간 없음
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 10.0),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -512,9 +532,11 @@ class TestMerger에러처리:
         transcript = TranscriptResult(
             segments=[], full_text="", language="ko", audio_path="/tmp/t.wav"
         )
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 10.0),
-        ])
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 10.0),
+            ]
+        )
 
         merger = Merger()
         with pytest.raises(EmptySegmentsError):
@@ -537,9 +559,11 @@ class TestMerger시간정렬:
             language="ko",
             audio_path="/tmp/test.wav",
         )
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 20.0),
-        ])
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 20.0),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -563,16 +587,20 @@ class TestMerger한국어텍스트:
             "네, 알겠습니다. 다음 안건으로 넘어가겠습니다",
         ]
 
-        transcript = _make_transcript([
-            (korean_texts[0], 0.0, 5.0),
-            (korean_texts[1], 5.0, 10.0),
-            (korean_texts[2], 10.0, 15.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 5.5),
-            ("SPEAKER_01", 5.5, 10.5),
-            ("SPEAKER_00", 10.5, 15.5),
-        ])
+        transcript = _make_transcript(
+            [
+                (korean_texts[0], 0.0, 5.0),
+                (korean_texts[1], 5.0, 10.0),
+                (korean_texts[2], 10.0, 15.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 5.5),
+                ("SPEAKER_01", 5.5, 10.5),
+                ("SPEAKER_00", 10.5, 15.5),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -582,13 +610,17 @@ class TestMerger한국어텍스트:
 
     async def test_특수문자_포함_텍스트(self) -> None:
         """특수문자가 포함된 텍스트 보존."""
-        transcript = _make_transcript([
-            ("매출이 120% 증가했습니다!", 0.0, 5.0),
-            ("Q4 실적은 어떤가요?", 5.0, 10.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 10.0),
-        ])
+        transcript = _make_transcript(
+            [
+                ("매출이 120% 증가했습니다!", 0.0, 5.0),
+                ("Q4 실적은 어떤가요?", 5.0, 10.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 10.0),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -625,10 +657,7 @@ class TestMerger엣지케이스:
     async def test_긴_회의_시뮬레이션(self) -> None:
         """1시간 회의 시뮬레이션 (200 세그먼트)."""
         # 200개 STT 세그먼트 (각 18초 간격으로 분포)
-        stt_segments = [
-            (f"발화 {i}", i * 18.0, i * 18.0 + 15.0)
-            for i in range(200)
-        ]
+        stt_segments = [(f"발화 {i}", i * 18.0, i * 18.0 + 15.0) for i in range(200)]
         transcript = _make_transcript(stt_segments)
 
         # 50개 화자 세그먼트 (2명이 교대)
@@ -650,15 +679,19 @@ class TestMerger엣지케이스:
 
     async def test_speakers_프로퍼티(self) -> None:
         """speakers 프로퍼티가 UNKNOWN 제외하고 정렬된 리스트를 반환."""
-        transcript = _make_transcript([
-            ("a", 0.0, 5.0),
-            ("b", 5.0, 10.0),
-            ("c", 50.0, 55.0),  # 매칭 안 됨
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_01", 0.0, 5.5),
-            ("SPEAKER_00", 5.5, 10.5),
-        ])
+        transcript = _make_transcript(
+            [
+                ("a", 0.0, 5.0),
+                ("b", 5.0, 10.0),
+                ("c", 50.0, 55.0),  # 매칭 안 됨
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_01", 0.0, 5.5),
+                ("SPEAKER_00", 5.5, 10.5),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -668,14 +701,18 @@ class TestMerger엣지케이스:
 
     async def test_체크포인트_라운드트립_전체(self, tmp_path) -> None:
         """병합 → 체크포인트 저장 → 복원 전체 흐름."""
-        transcript = _make_transcript([
-            ("안녕하세요", 0.0, 5.0),
-            ("반갑습니다", 5.0, 10.0),
-        ])
-        diarization = _make_diarization([
-            ("SPEAKER_00", 0.0, 5.5),
-            ("SPEAKER_01", 5.5, 10.5),
-        ])
+        transcript = _make_transcript(
+            [
+                ("안녕하세요", 0.0, 5.0),
+                ("반갑습니다", 5.0, 10.0),
+            ]
+        )
+        diarization = _make_diarization(
+            [
+                ("SPEAKER_00", 0.0, 5.5),
+                ("SPEAKER_01", 5.5, 10.5),
+            ]
+        )
 
         merger = Merger()
         result = await merger.merge(transcript, diarization)
@@ -691,7 +728,7 @@ class TestMerger엣지케이스:
         assert restored.num_speakers == result.num_speakers
         assert restored.unknown_count == result.unknown_count
 
-        for orig, rest in zip(result.utterances, restored.utterances):
+        for orig, rest in zip(result.utterances, restored.utterances, strict=False):
             assert orig.text == rest.text
             assert orig.speaker == rest.speaker
             assert orig.start == pytest.approx(rest.start)

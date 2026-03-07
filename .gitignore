@@ -25,6 +25,12 @@ chroma_db/
 .DS_Store
 .metadata_never_index
 
+# 코드 품질 도구
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
 # IDE
 .vscode/
 .idea/

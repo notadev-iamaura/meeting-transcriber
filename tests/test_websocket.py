@@ -17,9 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import FastAPI
 
 from api.websocket import (
     ConnectionManager,
@@ -27,7 +28,6 @@ from api.websocket import (
     WebSocketEvent,
     ws_router,
 )
-
 
 # === WebSocketEvent 테스트 ===
 
@@ -261,11 +261,13 @@ class TestConnectionManagerBroadcast:
         ws = AsyncMock()
         await manager.connect(ws)
 
-        count = await manager.broadcast_json({
-            "event_type": "job_completed",
-            "meeting_id": "m002",
-            "status": "completed",
-        })
+        count = await manager.broadcast_json(
+            {
+                "event_type": "job_completed",
+                "meeting_id": "m002",
+                "status": "completed",
+            }
+        )
 
         assert count == 1
         sent = json.loads(ws.send_text.call_args[0][0])
@@ -355,7 +357,7 @@ class TestConnectionManagerHeartbeat:
 class TestWebSocketEndpoint:
     """FastAPI WebSocket 엔드포인트 통합 테스트."""
 
-    def _create_test_app(self) -> "FastAPI":
+    def _create_test_app(self) -> FastAPI:
         """테스트용 최소 FastAPI 앱을 생성한다."""
         from fastapi import FastAPI
 
@@ -427,11 +429,12 @@ class TestWebSocketServerIntegration:
         """create_app()으로 생성된 앱에 ws_manager가 등록된다."""
         from starlette.testclient import TestClient
 
-        with patch("api.server.JobQueue"), \
-             patch("api.server.AsyncJobQueue") as mock_async_queue, \
-             patch("search.hybrid_search.HybridSearchEngine"), \
-             patch("search.chat.ChatEngine"):
-
+        with (
+            patch("api.server.JobQueue"),
+            patch("api.server.AsyncJobQueue") as mock_async_queue,
+            patch("search.hybrid_search.HybridSearchEngine"),
+            patch("search.chat.ChatEngine"),
+        ):
             mock_async_queue_inst = AsyncMock()
             mock_async_queue.return_value = mock_async_queue_inst
 
@@ -439,22 +442,24 @@ class TestWebSocketServerIntegration:
 
             app = create_app()
 
-            with TestClient(app) as client:
+            with TestClient(app) as _client:
                 # ws_manager가 app.state에 존재하는지 확인
                 assert hasattr(app.state, "ws_manager")
                 assert isinstance(
-                    app.state.ws_manager, ConnectionManager,
+                    app.state.ws_manager,
+                    ConnectionManager,
                 )
 
     def test_server_websocket_엔드포인트_동작(self) -> None:
         """create_app()으로 생성된 앱에서 WebSocket이 동작한다."""
         from starlette.testclient import TestClient
 
-        with patch("api.server.JobQueue"), \
-             patch("api.server.AsyncJobQueue") as mock_async_queue, \
-             patch("search.hybrid_search.HybridSearchEngine"), \
-             patch("search.chat.ChatEngine"):
-
+        with (
+            patch("api.server.JobQueue"),
+            patch("api.server.AsyncJobQueue") as mock_async_queue,
+            patch("search.hybrid_search.HybridSearchEngine"),
+            patch("search.chat.ChatEngine"),
+        ):
             mock_async_queue_inst = AsyncMock()
             mock_async_queue.return_value = mock_async_queue_inst
 
@@ -462,11 +467,13 @@ class TestWebSocketServerIntegration:
 
             app = create_app()
 
-            with TestClient(app) as client:
-                with client.websocket_connect("/ws/events") as ws:
-                    data = ws.receive_json()
-                    assert data["event_type"] == "system_status"
-                    assert data["data"]["active_connections"] == 1
+            with (
+                TestClient(app) as client,
+                client.websocket_connect("/ws/events") as ws,
+            ):
+                data = ws.receive_json()
+                assert data["event_type"] == "system_status"
+                assert data["data"]["active_connections"] == 1
 
 
 class TestEventType:
@@ -475,11 +482,17 @@ class TestEventType:
     def test_모든_이벤트_타입_존재(self) -> None:
         """필수 이벤트 타입이 모두 정의되어 있다."""
         expected_types = {
-            "heartbeat", "pipeline_status", "job_added",
-            "job_completed", "job_failed", "system_status",
+            "heartbeat",
+            "pipeline_status",
+            "job_added",
+            "job_completed",
+            "job_failed",
+            "system_status",
             "connection_rejected",
-            "recording_started", "recording_stopped",
-            "recording_error", "recording_duration",
+            "recording_started",
+            "recording_stopped",
+            "recording_error",
+            "recording_duration",
         }
         actual_types = {e.value for e in EventType}
         assert expected_types == actual_types

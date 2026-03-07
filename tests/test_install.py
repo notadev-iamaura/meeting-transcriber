@@ -21,12 +21,8 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 # 스크립트 경로
-_SCRIPT_PATH = (
-    Path(__file__).parent.parent / "scripts" / "install.sh"
-)
+_SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "install.sh"
 
 
 def _create_mock_env(
@@ -68,13 +64,13 @@ def _create_mock_env(
     if create_brew:
         brew_bin = mock_bin / "brew"
         brew_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'if [[ "$1" == "--version" ]]; then\n'
             '  echo "Homebrew 4.2.0"\n'
             'elif [[ "$1" == "install" ]]; then\n'
             '  echo "가짜 brew install: $2"\n'
-            'fi\n'
-            'exit 0\n',
+            "fi\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         brew_bin.chmod(0o755)
@@ -83,21 +79,21 @@ def _create_mock_env(
     if create_python:
         py_bin = mock_bin / "python3.11"
         py_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'if [[ "$1" == "--version" ]]; then\n'
             '  echo "Python 3.11.7"\n'
             'elif [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
-            '  # 가짜 venv 생성\n'
+            "  # 가짜 venv 생성\n"
             '  mkdir -p "$3/bin"\n'
             '  cp "$0" "$3/bin/python"\n'
-            '  cat > "$3/bin/pip" << \'PIPEOF\'\n'
-            '#!/bin/bash\n'
+            "  cat > \"$3/bin/pip\" << 'PIPEOF'\n"
+            "#!/bin/bash\n"
             'echo "가짜 pip: $@"\n'
-            'exit 0\n'
-            'PIPEOF\n'
+            "exit 0\n"
+            "PIPEOF\n"
             '  chmod +x "$3/bin/pip"\n'
-            'fi\n'
-            'exit 0\n',
+            "fi\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         py_bin.chmod(0o755)
@@ -105,20 +101,20 @@ def _create_mock_env(
         # python3도 생성 (check_python_version에서 python3도 확인)
         py3_bin = mock_bin / "python3"
         py3_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'if [[ "$1" == "--version" ]]; then\n'
             '  echo "Python 3.11.7"\n'
             'elif [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
             '  mkdir -p "$3/bin"\n'
             '  cp "$0" "$3/bin/python"\n'
-            '  cat > "$3/bin/pip" << \'PIPEOF\'\n'
-            '#!/bin/bash\n'
+            "  cat > \"$3/bin/pip\" << 'PIPEOF'\n"
+            "#!/bin/bash\n"
             'echo "가짜 pip: $@"\n'
-            'exit 0\n'
-            'PIPEOF\n'
+            "exit 0\n"
+            "PIPEOF\n"
             '  chmod +x "$3/bin/pip"\n'
-            'fi\n'
-            'exit 0\n',
+            "fi\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         py3_bin.chmod(0o755)
@@ -127,11 +123,11 @@ def _create_mock_env(
     if create_ffmpeg:
         ffmpeg_bin = mock_bin / "ffmpeg"
         ffmpeg_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'if [[ "$1" == "-version" ]]; then\n'
             '  echo "ffmpeg version 6.1"\n'
-            'fi\n'
-            'exit 0\n',
+            "fi\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         ffmpeg_bin.chmod(0o755)
@@ -140,15 +136,15 @@ def _create_mock_env(
     if create_ollama:
         ollama_bin = mock_bin / "ollama"
         ollama_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'if [[ "$1" == "--version" ]]; then\n'
             '  echo "ollama version 0.1.29"\n'
             'elif [[ "$1" == "list" ]]; then\n'
             '  echo "exaone3.5:7.8b-instruct-q4_K_M  abc123  4.5 GB"\n'
             'elif [[ "$1" == "pull" ]]; then\n'
             '  echo "가짜 ollama pull: $2"\n'
-            'fi\n'
-            'exit 0\n',
+            "fi\n"
+            "exit 0\n",
             encoding="utf-8",
         )
         ollama_bin.chmod(0o755)
@@ -156,8 +152,7 @@ def _create_mock_env(
     # 가짜 sw_vers (macOS 버전)
     sw_vers_bin = mock_bin / "sw_vers"
     sw_vers_bin.write_text(
-        '#!/bin/bash\n'
-        'echo "15.2"\n',
+        '#!/bin/bash\necho "15.2"\n',
         encoding="utf-8",
     )
     sw_vers_bin.chmod(0o755)
@@ -165,7 +160,7 @@ def _create_mock_env(
     # 가짜 df (디스크 여유 확인)
     df_bin = mock_bin / "df"
     df_bin.write_text(
-        '#!/bin/bash\n'
+        "#!/bin/bash\n"
         'echo "Filesystem   1G-blocks  Used  Available"\n'
         'echo "/dev/disk1s1 500        200   300"\n',
         encoding="utf-8",
@@ -175,9 +170,7 @@ def _create_mock_env(
     # 가짜 curl (Ollama 서버 확인)
     curl_bin = mock_bin / "curl"
     curl_bin.write_text(
-        '#!/bin/bash\n'
-        'echo "{}"\n'
-        'exit 0\n',
+        '#!/bin/bash\necho "{}"\nexit 0\n',
         encoding="utf-8",
     )
     curl_bin.chmod(0o755)
@@ -185,8 +178,7 @@ def _create_mock_env(
     # 가짜 stat (macOS 형식)
     stat_bin = mock_bin / "stat"
     stat_bin.write_text(
-        '#!/bin/bash\n'
-        'echo "700"\n',
+        '#!/bin/bash\necho "700"\n',
         encoding="utf-8",
     )
     stat_bin.chmod(0o755)
@@ -351,7 +343,7 @@ class TestScriptSyntax:
     def test_source_모드_지원(self) -> None:
         """source 시 main이 호출되지 않는 가드가 있는지 확인한다."""
         content = _SCRIPT_PATH.read_text(encoding="utf-8")
-        assert 'BASH_SOURCE[0]' in content
+        assert "BASH_SOURCE[0]" in content
         assert '"${0}"' in content
 
 
@@ -523,11 +515,7 @@ class TestCheckExaoneModel:
         # ollama가 빈 목록을 반환하도록 수정
         ollama_bin = Path(mock_env["mock_bin"]) / "ollama"
         ollama_bin.write_text(
-            '#!/bin/bash\n'
-            'if [[ "$1" == "list" ]]; then\n'
-            '  echo "NAME  ID  SIZE"\n'
-            'fi\n'
-            'exit 0\n',
+            '#!/bin/bash\nif [[ "$1" == "list" ]]; then\n  echo "NAME  ID  SIZE"\nfi\nexit 0\n',
             encoding="utf-8",
         )
         ollama_bin.chmod(0o755)
@@ -718,7 +706,7 @@ class TestCheckDiskSpace:
         # df가 5GB만 반환하도록 수정
         df_bin = Path(mock_env["mock_bin"]) / "df"
         df_bin.write_text(
-            '#!/bin/bash\n'
+            "#!/bin/bash\n"
             'echo "Filesystem   1G-blocks  Used  Available"\n'
             'echo "/dev/disk1s1 500        495   5"\n',
             encoding="utf-8",

@@ -16,7 +16,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from config import AppConfig
 
@@ -33,6 +32,7 @@ class AudioInfo:
         codec: 오디오 코덱명 (예: pcm_s16le, aac)
         duration: 재생 시간 (초)
     """
+
     sample_rate: int
     channels: int
     codec: str
@@ -81,8 +81,7 @@ class AudioConverter:
         for binary in ("ffmpeg", "ffprobe"):
             if shutil.which(binary) is None:
                 raise FFmpegNotFoundError(
-                    f"{binary}가 설치되어 있지 않습니다. "
-                    f"'brew install ffmpeg'으로 설치하세요."
+                    f"{binary}가 설치되어 있지 않습니다. 'brew install ffmpeg'으로 설치하세요."
                 )
 
     def _validate_input(self, input_path: Path) -> None:
@@ -109,7 +108,7 @@ class AudioConverter:
                 f"(지원 포맷: {', '.join(sorted(self._supported_formats))})"
             )
 
-    def probe(self, input_path: Path) -> Optional[AudioInfo]:
+    def probe(self, input_path: Path) -> AudioInfo | None:
         """ffprobe로 오디오 파일의 메타정보를 조회한다.
 
         Args:
@@ -120,10 +119,13 @@ class AudioConverter:
         """
         cmd = [
             "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_streams",
-            "-select_streams", "a:0",
+            "-select_streams",
+            "a:0",
             str(input_path),
         ]
 
@@ -182,7 +184,7 @@ class AudioConverter:
         self,
         input_path: Path,
         output_dir: Path,
-        output_filename: Optional[str] = None,
+        output_filename: str | None = None,
     ) -> Path:
         """오디오 파일을 16kHz 모노 WAV로 변환한다.
 
@@ -234,12 +236,16 @@ class AudioConverter:
         # ffmpeg 변환 명령 구성
         cmd = [
             "ffmpeg",
-            "-y",                          # 덮어쓰기 허용
-            "-i", str(input_path),         # 입력 파일
-            "-vn",                         # 비디오 스트림 제거
-            "-acodec", "pcm_s16le",        # 16비트 PCM 리틀엔디안
-            "-ar", str(self._target_sample_rate),  # 샘플레이트
-            "-ac", str(self._target_channels),     # 채널 수
+            "-y",  # 덮어쓰기 허용
+            "-i",
+            str(input_path),  # 입력 파일
+            "-vn",  # 비디오 스트림 제거
+            "-acodec",
+            "pcm_s16le",  # 16비트 PCM 리틀엔디안
+            "-ar",
+            str(self._target_sample_rate),  # 샘플레이트
+            "-ac",
+            str(self._target_channels),  # 채널 수
             str(output_path),
         ]
 
@@ -260,9 +266,7 @@ class AudioConverter:
                     logger.info(f"타임아웃으로 인한 불완전 출력 파일 삭제: {output_path}")
                 except OSError as cleanup_err:
                     logger.warning(f"불완전 출력 파일 삭제 실패: {cleanup_err}")
-            raise ConversionFailedError(
-                f"오디오 변환 타임아웃 (600초 초과): {input_path}"
-            ) from e
+            raise ConversionFailedError(f"오디오 변환 타임아웃 (600초 초과): {input_path}") from e
 
         if result.returncode != 0:
             # 실패 시 부분 생성된 파일 정리
@@ -282,9 +286,7 @@ class AudioConverter:
         output_size = output_path.stat().st_size
         if output_size == 0:
             output_path.unlink()
-            raise ConversionFailedError(
-                f"변환된 파일 크기가 0입니다: {output_path}"
-            )
+            raise ConversionFailedError(f"변환된 파일 크기가 0입니다: {output_path}")
 
         # 출력 파일이 너무 작으면 (44바이트 = WAV 헤더만 있는 빈 파일) 경고
         if output_size <= 44:
@@ -303,17 +305,14 @@ class AudioConverter:
         except Exception as probe_err:
             logger.debug(f"변환 후 ffprobe 검증 실패 (무시): {probe_err}")
 
-        logger.info(
-            f"오디오 변환 완료: {output_path} "
-            f"({output_size / 1024:.1f}KB)"
-        )
+        logger.info(f"오디오 변환 완료: {output_path} ({output_size / 1024:.1f}KB)")
         return output_path
 
     async def convert_async(
         self,
         input_path: Path,
         output_dir: Path,
-        output_filename: Optional[str] = None,
+        output_filename: str | None = None,
     ) -> Path:
         """오디오 변환의 비동기 래퍼.
 
@@ -328,6 +327,4 @@ class AudioConverter:
         Returns:
             변환된 WAV 파일 경로 (Path)
         """
-        return await asyncio.to_thread(
-            self.convert, input_path, output_dir, output_filename
-        )
+        return await asyncio.to_thread(self.convert, input_path, output_dir, output_filename)

@@ -16,32 +16,27 @@
 의존성: pytest, pytest-asyncio
 """
 
-import json
 import sqlite3
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
-import pytest_asyncio
 
+from config import AppConfig, EmbeddingConfig, PathsConfig
 from steps.chunker import Chunk, ChunkedResult
 from steps.embedder import (
+    _FTS_TABLE_NAME,
     EmbeddedChunk,
     EmbeddedResult,
     Embedder,
-    EmbeddingError,
     EmptyChunksError,
     ModelLoadError,
     StorageError,
-    _CHROMA_COLLECTION_NAME,
-    _FTS_TABLE_NAME,
     _ensure_fts_table,
     _store_chunks_chroma,
     _store_chunks_fts,
 )
-from config import AppConfig, EmbeddingConfig, PathsConfig
-
 
 # === 헬퍼 함수 ===
 
@@ -124,18 +119,14 @@ def _make_embedder(config: AppConfig | None = None) -> Embedder:
 
 def _make_fake_embeddings(count: int, dim: int = 384) -> list[list[float]]:
     """테스트용 가짜 임베딩 벡터를 생성한다."""
-    return [
-        np.random.randn(dim).tolist()
-        for _ in range(count)
-    ]
+    return [np.random.randn(dim).tolist() for _ in range(count)]
 
 
 def _make_fake_model(batch_size: int = 32, dim: int = 384) -> MagicMock:
     """encode() 호출 시 적절한 크기의 벡터를 반환하는 가짜 모델."""
     model = MagicMock()
 
-    def fake_encode(texts, batch_size=32, show_progress_bar=False,
-                    normalize_embeddings=True):
+    def fake_encode(texts, batch_size=32, show_progress_bar=False, normalize_embeddings=True):
         """텍스트 수만큼 랜덤 벡터를 반환한다."""
         return np.random.randn(len(texts), dim).astype(np.float32)
 
@@ -288,15 +279,12 @@ class TestFTS5:
         # 저장 확인
         conn = sqlite3.connect(str(db_path))
         try:
-            cursor = conn.execute(
-                f"SELECT COUNT(*) FROM {_FTS_TABLE_NAME}"
-            )
+            cursor = conn.execute(f"SELECT COUNT(*) FROM {_FTS_TABLE_NAME}")
             assert cursor.fetchone()[0] == 2
 
             # 한국어 FTS5 검색
             cursor = conn.execute(
-                f"SELECT chunk_id FROM {_FTS_TABLE_NAME} "
-                f"WHERE {_FTS_TABLE_NAME} MATCH '프로젝트'"
+                f"SELECT chunk_id FROM {_FTS_TABLE_NAME} WHERE {_FTS_TABLE_NAME} MATCH '프로젝트'"
             )
             results = cursor.fetchall()
             assert len(results) == 1
@@ -337,9 +325,7 @@ class TestFTS5:
         # 1개만 존재해야 함
         conn = sqlite3.connect(str(db_path))
         try:
-            cursor = conn.execute(
-                f"SELECT text FROM {_FTS_TABLE_NAME}"
-            )
+            cursor = conn.execute(f"SELECT text FROM {_FTS_TABLE_NAME}")
             rows = cursor.fetchall()
             assert len(rows) == 1
             assert rows[0][0] == "버전 2 텍스트"
@@ -440,10 +426,7 @@ class TestEmbedderSync:
         embedder = _make_embedder(_make_config(batch_size=5))
         model = _make_fake_model()
 
-        chunks = [
-            _make_chunk(text=f"문장 {i}", chunk_index=i)
-            for i in range(11)
-        ]
+        chunks = [_make_chunk(text=f"문장 {i}", chunk_index=i) for i in range(11)]
         chunked = _make_chunked_result(chunks)
 
         embedded = embedder._process_chunks(model, chunked)
@@ -482,10 +465,11 @@ class TestEmbedderAsync:
         chunks = [_make_chunk(text="회의 내용 테스트")]
         chunked = _make_chunked_result(chunks)
 
-        with patch("steps.embedder._store_chunks_chroma") as mock_chroma, \
-             patch("steps.embedder._ensure_fts_table") as mock_fts_init, \
-             patch("steps.embedder._store_chunks_fts") as mock_fts_store:
-
+        with (
+            patch("steps.embedder._store_chunks_chroma") as _mock_chroma,
+            patch("steps.embedder._ensure_fts_table") as _mock_fts_init,
+            patch("steps.embedder._store_chunks_fts") as _mock_fts_store,
+        ):
             result = await embedder.embed(chunked)
 
         assert result.total_chunks == 1
@@ -510,11 +494,14 @@ class TestEmbedderAsync:
 
         chunked = _make_chunked_result()
 
-        with patch("steps.embedder._store_chunks_chroma",
-                   side_effect=StorageError("ChromaDB 연결 실패")), \
-             patch("steps.embedder._ensure_fts_table"), \
-             patch("steps.embedder._store_chunks_fts"):
-
+        with (
+            patch(
+                "steps.embedder._store_chunks_chroma",
+                side_effect=StorageError("ChromaDB 연결 실패"),
+            ),
+            patch("steps.embedder._ensure_fts_table"),
+            patch("steps.embedder._store_chunks_fts"),
+        ):
             result = await embedder.embed(chunked)
 
         assert result.chroma_stored is False
@@ -533,11 +520,11 @@ class TestEmbedderAsync:
 
         chunked = _make_chunked_result()
 
-        with patch("steps.embedder._store_chunks_chroma"), \
-             patch("steps.embedder._ensure_fts_table"), \
-             patch("steps.embedder._store_chunks_fts",
-                   side_effect=StorageError("FTS5 오류")):
-
+        with (
+            patch("steps.embedder._store_chunks_chroma"),
+            patch("steps.embedder._ensure_fts_table"),
+            patch("steps.embedder._store_chunks_fts", side_effect=StorageError("FTS5 오류")),
+        ):
             result = await embedder.embed(chunked)
 
         assert result.chroma_stored is True
@@ -556,10 +543,11 @@ class TestEmbedderAsync:
 
         chunked = _make_chunked_result()
 
-        with patch("steps.embedder._store_chunks_chroma"), \
-             patch("steps.embedder._ensure_fts_table"), \
-             patch("steps.embedder._store_chunks_fts"):
-
+        with (
+            patch("steps.embedder._store_chunks_chroma"),
+            patch("steps.embedder._ensure_fts_table"),
+            patch("steps.embedder._store_chunks_fts"),
+        ):
             await embedder.embed(chunked)
 
         # acquire가 "e5"로 호출되었는지 확인
@@ -578,16 +566,14 @@ class TestEmbedderAsync:
         ctx.__aexit__ = AsyncMock(return_value=False)
         embedder._model_manager.acquire = MagicMock(return_value=ctx)
 
-        chunks = [
-            _make_chunk(text=f"청크 {i}", chunk_index=i)
-            for i in range(5)
-        ]
+        chunks = [_make_chunk(text=f"청크 {i}", chunk_index=i) for i in range(5)]
         chunked = _make_chunked_result(chunks)
 
-        with patch("steps.embedder._store_chunks_chroma") as mock_chroma, \
-             patch("steps.embedder._ensure_fts_table"), \
-             patch("steps.embedder._store_chunks_fts") as mock_fts:
-
+        with (
+            patch("steps.embedder._store_chunks_chroma") as mock_chroma,
+            patch("steps.embedder._ensure_fts_table"),
+            patch("steps.embedder._store_chunks_fts") as mock_fts,
+        ):
             result = await embedder.embed(chunked)
 
         assert result.total_chunks == 5
@@ -645,9 +631,7 @@ class TestStoreChunksChroma:
         """동일 meeting_id의 기존 데이터가 삭제 후 재삽입된다."""
         mock_chromadb = self._make_mock_chromadb()
         mock_collection = MagicMock()
-        mock_collection.get.return_value = {
-            "ids": ["m1_chunk_0000", "m1_chunk_0001"]
-        }
+        mock_collection.get.return_value = {"ids": ["m1_chunk_0000", "m1_chunk_0001"]}
         mock_client = MagicMock()
         mock_client.get_or_create_collection.return_value = mock_collection
         mock_chromadb.PersistentClient.return_value = mock_client
@@ -669,9 +653,7 @@ class TestStoreChunksChroma:
             _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
 
         # 기존 데이터 삭제 확인
-        mock_collection.delete.assert_called_once_with(
-            ids=["m1_chunk_0000", "m1_chunk_0001"]
-        )
+        mock_collection.delete.assert_called_once_with(ids=["m1_chunk_0000", "m1_chunk_0001"])
         # 새 데이터 삽입 확인
         mock_collection.add.assert_called_once()
 
@@ -700,9 +682,11 @@ class TestStoreChunksChroma:
 
         chunks = [self._make_test_chunk()]
 
-        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-            with pytest.raises(StorageError, match="ChromaDB 저장 실패"):
-                _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
+        with (
+            patch.dict("sys.modules", {"chromadb": mock_chromadb}),
+            pytest.raises(StorageError, match="ChromaDB 저장 실패"),
+        ):
+            _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
 
 
 # === _load_model 테스트 ===
@@ -719,9 +703,11 @@ class TestLoadModel:
         mock_st = MagicMock()
         mock_st.SentenceTransformer.side_effect = Exception("모델 파일 없음")
 
-        with patch.dict("sys.modules", {"sentence_transformers": mock_st}):
-            with pytest.raises(ModelLoadError, match="임베딩 모델 로드 실패"):
-                embedder._load_model()
+        with (
+            patch.dict("sys.modules", {"sentence_transformers": mock_st}),
+            pytest.raises(ModelLoadError, match="임베딩 모델 로드 실패"),
+        ):
+            embedder._load_model()
 
     def test_정상_모델_로드(self) -> None:
         """sentence_transformers가 정상적으로 로드된다."""
@@ -763,5 +749,6 @@ class TestNFCNormalization:
         assert encoded_text.startswith("passage: ")
         # NFC 정규화 확인 (분해된 자모가 아닌 완성형)
         import unicodedata
-        text_without_prefix = encoded_text[len("passage: "):]
+
+        text_without_prefix = encoded_text[len("passage: ") :]
         assert text_without_prefix == unicodedata.normalize("NFC", nfd_text)

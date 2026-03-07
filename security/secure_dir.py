@@ -16,7 +16,6 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from config import AppConfig
 
@@ -159,9 +158,7 @@ class SecureDirManager:
         result["dirs_exist"] = all(d.exists() for d in dirs)
 
         # 권한 검증
-        result["permissions_ok"] = all(
-            self._check_permissions(d) for d in dirs if d.exists()
-        )
+        result["permissions_ok"] = all(self._check_permissions(d) for d in dirs if d.exists())
 
         # Spotlight 제외 검증
         if self._exclude_spotlight:
@@ -204,9 +201,7 @@ class SecureDirManager:
             dir_path.mkdir(parents=True, exist_ok=True)
             logger.debug(f"디렉토리 확인/생성: {dir_path}")
         except OSError as e:
-            raise DirectoryCreationError(
-                f"디렉토리 생성 실패: {dir_path} - {e}"
-            ) from e
+            raise DirectoryCreationError(f"디렉토리 생성 실패: {dir_path} - {e}") from e
 
     def _set_permissions(self, dir_path: Path) -> None:
         """디렉토리 권한을 설정한다. (기본: 0o700 = 소유자만 rwx)
@@ -222,15 +217,12 @@ class SecureDirManager:
             if current_mode != self._permissions:
                 dir_path.chmod(self._permissions)
                 logger.info(
-                    f"권한 변경: {dir_path} "
-                    f"{oct(current_mode)} → {oct(self._permissions)}"
+                    f"권한 변경: {dir_path} {oct(current_mode)} → {oct(self._permissions)}"
                 )
             else:
                 logger.debug(f"권한 이미 설정됨: {dir_path} ({oct(self._permissions)})")
         except OSError as e:
-            raise PermissionChangeError(
-                f"권한 변경 실패: {dir_path} - {e}"
-            ) from e
+            raise PermissionChangeError(f"권한 변경 실패: {dir_path} - {e}") from e
 
     def _check_permissions(self, dir_path: Path) -> bool:
         """디렉토리 권한이 설정값과 일치하는지 확인한다.
@@ -311,7 +303,7 @@ class SecureDirManager:
             logger.warning(f".gitignore 생성 실패: {gitignore_path} - {e}")
 
 
-def ensure_secure_dirs(config: Optional[AppConfig] = None) -> list[Path]:
+def ensure_secure_dirs(config: AppConfig | None = None) -> list[Path]:
     """보안 디렉토리 설정의 편의 함수.
 
     SecureDirManager 인스턴스를 생성하고 ensure_secure_dirs()를 호출한다.
@@ -324,6 +316,7 @@ def ensure_secure_dirs(config: Optional[AppConfig] = None) -> list[Path]:
     """
     if config is None:
         from config import get_config
+
         config = get_config()
 
     manager = SecureDirManager(config)

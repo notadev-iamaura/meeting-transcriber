@@ -48,6 +48,8 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.checkpoint_enabled = True
     config.pipeline.retry_max_count = 2
     config.pipeline.peak_ram_limit_gb = 9.5
+    config.pipeline.min_disk_free_gb = 1.0
+    config.pipeline.min_memory_free_gb = 2.0
 
     # paths 설정
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
@@ -133,8 +135,10 @@ def _make_mock_merged() -> MagicMock:
     result = MagicMock()
     result.utterances = [
         MagicMock(
-            text="안녕하세요", speaker="SPEAKER_00",
-            start=0.0, end=2.0,
+            text="안녕하세요",
+            speaker="SPEAKER_00",
+            start=0.0,
+            end=2.0,
         ),
     ]
     result.num_speakers = 1
@@ -147,8 +151,11 @@ def _make_mock_corrected() -> MagicMock:
     result = MagicMock()
     result.utterances = [
         MagicMock(
-            text="안녕하세요", speaker="SPEAKER_00",
-            start=0.0, end=2.0, was_corrected=False,
+            text="안녕하세요",
+            speaker="SPEAKER_00",
+            start=0.0,
+            end=2.0,
+            was_corrected=False,
         ),
     ]
     result.num_speakers = 1
@@ -192,7 +199,7 @@ class TestPipelineStep:
             PipelineStep.CORRECT,
             PipelineStep.SUMMARIZE,
         ]
-        assert PIPELINE_STEPS == expected
+        assert expected == PIPELINE_STEPS
 
     def test_step_count(self) -> None:
         """파이프라인 단계 수가 6개인지 확인한다."""
@@ -320,7 +327,8 @@ class TestPipelineState:
         assert state_path.exists()
 
     def test_atomic_save_preserves_original_on_write_failure(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """쓰기 실패 시 기존 파일이 보존되는지 확인한다.
 
@@ -338,16 +346,16 @@ class TestPipelineState:
         original_content = state_path.read_text(encoding="utf-8")
 
         # json.dump가 실패하도록 모킹
-        with patch("core.pipeline.json.dump", side_effect=IOError("쓰기 실패")):
-            with pytest.raises(IOError, match="쓰기 실패"):
-                state.save(state_path)
+        with (
+            patch("core.pipeline.json.dump", side_effect=OSError("쓰기 실패")),
+            pytest.raises(IOError, match="쓰기 실패"),
+        ):
+            state.save(state_path)
 
         # 원본 파일이 그대로 보존되어야 함
         assert state_path.exists(), "원본 파일이 삭제되었습니다"
         preserved_content = state_path.read_text(encoding="utf-8")
-        assert preserved_content == original_content, (
-            "원본 파일 내용이 변경되었습니다"
-        )
+        assert preserved_content == original_content, "원본 파일 내용이 변경되었습니다"
 
         # 임시 파일이 남아있지 않아야 함
         tmp_file = state_path.with_suffix(".tmp")
@@ -380,12 +388,8 @@ class TestPipelineState:
             assert mock_replace.called, "os.replace가 호출되지 않았습니다"
             # 인자 확인: (임시 파일 경로, 최종 파일 경로)
             call_args = mock_replace.call_args[0]
-            assert call_args[0].endswith(".tmp"), (
-                "os.replace의 소스가 .tmp 파일이 아닙니다"
-            )
-            assert call_args[1] == str(state_path), (
-                "os.replace의 대상이 올바르지 않습니다"
-            )
+            assert call_args[0].endswith(".tmp"), "os.replace의 소스가 .tmp 파일이 아닙니다"
+            assert call_args[1] == str(state_path), "os.replace의 대상이 올바르지 않습니다"
 
 
 # === PipelineManager 입력 검증 테스트 ===
@@ -395,7 +399,9 @@ class TestPipelineManagerValidation:
     """PipelineManager 입력 검증 테스트."""
 
     async def test_nonexistent_file(
-        self, pipeline: PipelineManager, tmp_path: Path,
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
     ) -> None:
         """존재하지 않는 파일에 대해 InvalidInputError를 발생시키는지 확인한다."""
         fake_path = tmp_path / "nonexistent.wav"
@@ -403,7 +409,9 @@ class TestPipelineManagerValidation:
             await pipeline.run(fake_path)
 
     async def test_empty_file(
-        self, pipeline: PipelineManager, tmp_path: Path,
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
     ) -> None:
         """빈 파일에 대해 InvalidInputError를 발생시키는지 확인한다."""
         empty = tmp_path / "empty.wav"
@@ -412,7 +420,9 @@ class TestPipelineManagerValidation:
             await pipeline.run(empty)
 
     async def test_directory_input(
-        self, pipeline: PipelineManager, tmp_path: Path,
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
     ) -> None:
         """디렉토리를 입력하면 InvalidInputError를 발생시키는지 확인한다."""
         dir_path = tmp_path / "some_dir"
@@ -473,28 +483,40 @@ class TestPipelineManagerRun:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=mock_transcript,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=mock_transcript,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             state = await pipeline.run(audio_file, meeting_id="test_run")
@@ -502,8 +524,12 @@ class TestPipelineManagerRun:
         assert state.status == "completed"
         assert len(state.completed_steps) == 6
         assert state.completed_steps == [
-            "convert", "transcribe", "diarize",
-            "merge", "correct", "summarize",
+            "convert",
+            "transcribe",
+            "diarize",
+            "merge",
+            "correct",
+            "summarize",
         ]
 
     async def test_step_failure_with_retry(
@@ -517,11 +543,14 @@ class TestPipelineManagerRun:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("모델 로드 실패"),
             ),
@@ -557,27 +586,39 @@ class TestPipelineManagerRun:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe", transcribe_mock,
+                pipeline,
+                "_run_step_transcribe",
+                transcribe_mock,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             state = await pipeline.run(audio_file, meeting_id="test_retry")
@@ -593,15 +634,17 @@ class TestPipelineManagerRun:
         """실패 시 파이프라인 상태가 저장되는지 확인한다."""
         with (
             patch.object(
-                pipeline, "_run_step_convert",
+                pipeline,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("변환 실패"),
             ),
+            pytest.raises(PipelineStepError),
         ):
-            with pytest.raises(PipelineStepError):
-                await pipeline.run(
-                    audio_file, meeting_id="test_save_fail",
-                )
+            await pipeline.run(
+                audio_file,
+                meeting_id="test_save_fail",
+            )
 
         state_path = pipeline._get_state_path("test_save_fail")
         assert state_path.exists()
@@ -627,32 +670,45 @@ class TestPipelineManagerRun:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=mock_transcript,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=mock_transcript,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             state = await pipeline.run(
-                audio_file, meeting_id="custom_id_001",
+                audio_file,
+                meeting_id="custom_id_001",
             )
 
         assert state.meeting_id == "custom_id_001"
@@ -688,7 +744,8 @@ class TestPipelineResume:
 
         # 출력 디렉토리 생성
         pipeline._get_output_dir(meeting_id).mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
         mock_transcript = _make_mock_transcript()
@@ -699,28 +756,39 @@ class TestPipelineResume:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
+                pipeline,
+                "_run_step_convert",
                 new_callable=AsyncMock,
             ) as convert_mock,
             patch.object(
-                pipeline, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=mock_transcript,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=mock_transcript,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             result = await pipeline.resume(meeting_id)
@@ -750,8 +818,12 @@ class TestPipelineResume:
             audio_path=str(audio_file),
             status="completed",
             completed_steps=[
-                "convert", "transcribe", "diarize",
-                "merge", "correct", "summarize",
+                "convert",
+                "transcribe",
+                "diarize",
+                "merge",
+                "correct",
+                "summarize",
             ],
             wav_path=str(audio_file),
             output_dir=str(pipeline._get_output_dir(meeting_id)),
@@ -761,7 +833,8 @@ class TestPipelineResume:
 
         # 출력 디렉토리 생성
         pipeline._get_output_dir(meeting_id).mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
         result = await pipeline.resume(meeting_id)
@@ -795,28 +868,40 @@ class TestCheckpointDisabled:
 
         with (
             patch.object(
-                pm, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pm,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pm, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=mock_transcript,
+                pm,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=mock_transcript,
             ),
             patch.object(
-                pm, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pm,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pm, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pm,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pm, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pm,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pm, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pm,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             state = await pm.run(audio_file, meeting_id="no_cp")
@@ -831,7 +916,8 @@ class TestFindResumeStep:
     """_find_resume_step 내부 메서드 테스트."""
 
     def test_empty_completed(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """완료된 단계가 없으면 인덱스 0을 반환하는지 확인한다."""
         state = PipelineState(
@@ -842,7 +928,8 @@ class TestFindResumeStep:
         assert pipeline._find_resume_step(state) == 0
 
     def test_one_step_completed(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """convert만 완료되었으면 인덱스 1(transcribe)을 반환하는지 확인한다."""
         state = PipelineState(
@@ -853,7 +940,8 @@ class TestFindResumeStep:
         assert pipeline._find_resume_step(state) == 1
 
     def test_three_steps_completed(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """3단계 완료 시 인덱스 3(merge)을 반환하는지 확인한다."""
         state = PipelineState(
@@ -864,15 +952,20 @@ class TestFindResumeStep:
         assert pipeline._find_resume_step(state) == 3
 
     def test_all_completed(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """모든 단계 완료 시 None을 반환하는지 확인한다."""
         state = PipelineState(
             meeting_id="test",
             audio_path="/tmp/test.wav",
             completed_steps=[
-                "convert", "transcribe", "diarize",
-                "merge", "correct", "summarize",
+                "convert",
+                "transcribe",
+                "diarize",
+                "merge",
+                "correct",
+                "summarize",
             ],
         )
         assert pipeline._find_resume_step(state) is None
@@ -885,7 +978,8 @@ class TestGetStatus:
     """get_status 메서드 테스트."""
 
     def test_get_existing_status(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """기존 상태 파일이 있을 때 정상 조회되는지 확인한다."""
         meeting_id = "test_status"
@@ -903,7 +997,8 @@ class TestGetStatus:
         assert result.meeting_id == meeting_id
 
     def test_get_nonexistent_status(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """상태 파일이 없으면 None을 반환하는지 확인한다."""
         result = pipeline.get_status("nonexistent")
@@ -954,17 +1049,20 @@ class TestPathGeneration:
     """경로 생성 메서드 테스트."""
 
     def test_checkpoint_path(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """체크포인트 파일 경로가 올바르게 생성되는지 확인한다."""
         path = pipeline._get_checkpoint_path(
-            "meeting_001", PipelineStep.TRANSCRIBE,
+            "meeting_001",
+            PipelineStep.TRANSCRIBE,
         )
         assert "meeting_001" in str(path)
         assert "transcribe.json" in str(path)
 
     def test_state_path(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """상태 파일 경로가 올바르게 생성되는지 확인한다."""
         path = pipeline._get_state_path("meeting_001")
@@ -972,7 +1070,8 @@ class TestPathGeneration:
         assert "pipeline_state.json" in str(path)
 
     def test_output_dir(
-        self, pipeline: PipelineManager,
+        self,
+        pipeline: PipelineManager,
     ) -> None:
         """출력 디렉토리 경로가 올바르게 생성되는지 확인한다."""
         path = pipeline._get_output_dir("meeting_001")
@@ -1004,7 +1103,8 @@ class TestIndividualSteps:
             return_value=mock_converter,
         ):
             result = await pipeline._run_step_convert(
-                audio_file, output_dir,
+                audio_file,
+                output_dir,
             )
 
         assert result == expected_wav
@@ -1021,19 +1121,17 @@ class TestIndividualSteps:
 
         mock_result = _make_mock_transcript()
 
-        with patch(
-            "steps.transcriber.TranscriptResult"
-        ) as MockTranscript:
+        with patch("steps.transcriber.TranscriptResult") as MockTranscript:
             MockTranscript.from_checkpoint.return_value = mock_result
             # 체크포인트 파일 생성
             checkpoint_path.write_text(
-                '{"segments": [], "full_text": "", '
-                '"language": "ko", "audio_path": ""}',
+                '{"segments": [], "full_text": "", "language": "ko", "audio_path": ""}',
                 encoding="utf-8",
             )
 
             result = await pipeline._run_step_transcribe(
-                audio_file, checkpoint_path,
+                audio_file,
+                checkpoint_path,
             )
 
         assert result == mock_result
@@ -1058,7 +1156,9 @@ class TestIndividualSteps:
             return_value=mock_summarizer,
         ):
             result = await pipeline._run_step_summarize(
-                mock_corrected, checkpoint_path, output_dir,
+                mock_corrected,
+                checkpoint_path,
+                output_dir,
             )
 
         assert result == mock_summary
@@ -1099,28 +1199,40 @@ class TestStateTransitions:
         with (
             patch.object(PipelineState, "save", capture_save),
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=mock_transcript,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=mock_transcript,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=mock_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=mock_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=mock_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=mock_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=mock_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=mock_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=mock_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=mock_summary,
             ),
         ):
             await pipeline.run(audio_file, meeting_id="test_transition")
@@ -1136,15 +1248,19 @@ class TestStateTransitions:
         audio_file: Path,
     ) -> None:
         """실패 시 running → failed 전이를 확인한다."""
-        with patch.object(
-            pipeline, "_run_step_convert",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("변환 실패"),
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("변환 실패"),
+            ),
+            pytest.raises(PipelineStepError),
         ):
-            with pytest.raises(PipelineStepError):
-                await pipeline.run(
-                    audio_file, meeting_id="test_to_failed",
-                )
+            await pipeline.run(
+                audio_file,
+                meeting_id="test_to_failed",
+            )
 
         state = pipeline.get_status("test_to_failed")
         assert state is not None
@@ -1169,22 +1285,31 @@ def _make_real_transcript_result(audio_path: str = "/tmp/test.wav"):
     segments = [
         TranscriptSegment(
             text="안녕하세요 오늘 회의를 시작하겠습니다",
-            start=0.0, end=3.5, avg_logprob=-0.3, no_speech_prob=0.01,
+            start=0.0,
+            end=3.5,
+            avg_logprob=-0.3,
+            no_speech_prob=0.01,
         ),
         TranscriptSegment(
             text="네 좋습니다 진행해주세요",
-            start=3.8, end=5.5, avg_logprob=-0.25, no_speech_prob=0.02,
+            start=3.8,
+            end=5.5,
+            avg_logprob=-0.25,
+            no_speech_prob=0.02,
         ),
         TranscriptSegment(
             text="첫 번째 안건은 프로젝트 일정입니다",
-            start=6.0, end=9.0, avg_logprob=-0.2, no_speech_prob=0.01,
+            start=6.0,
+            end=9.0,
+            avg_logprob=-0.2,
+            no_speech_prob=0.01,
         ),
     ]
     return TranscriptResult(
         segments=segments,
         full_text="안녕하세요 오늘 회의를 시작하겠습니다 "
-                  "네 좋습니다 진행해주세요 "
-                  "첫 번째 안건은 프로젝트 일정입니다",
+        "네 좋습니다 진행해주세요 "
+        "첫 번째 안건은 프로젝트 일정입니다",
         language="ko",
         audio_path=audio_path,
     )
@@ -1213,15 +1338,21 @@ def _make_real_merged_result(audio_path: str = "/tmp/test.wav"):
     utterances = [
         MergedUtterance(
             text="안녕하세요 오늘 회의를 시작하겠습니다",
-            speaker="SPEAKER_00", start=0.0, end=3.5,
+            speaker="SPEAKER_00",
+            start=0.0,
+            end=3.5,
         ),
         MergedUtterance(
             text="네 좋습니다 진행해주세요",
-            speaker="SPEAKER_01", start=3.8, end=5.5,
+            speaker="SPEAKER_01",
+            start=3.8,
+            end=5.5,
         ),
         MergedUtterance(
             text="첫 번째 안건은 프로젝트 일정입니다",
-            speaker="SPEAKER_00", start=6.0, end=9.0,
+            speaker="SPEAKER_00",
+            start=6.0,
+            end=9.0,
         ),
     ]
     return MergedResult(
@@ -1240,19 +1371,25 @@ def _make_real_corrected_result(audio_path: str = "/tmp/test.wav"):
         CorrectedUtterance(
             text="안녕하세요, 오늘 회의를 시작하겠습니다.",
             original_text="안녕하세요 오늘 회의를 시작하겠습니다",
-            speaker="SPEAKER_00", start=0.0, end=3.5,
+            speaker="SPEAKER_00",
+            start=0.0,
+            end=3.5,
             was_corrected=True,
         ),
         CorrectedUtterance(
             text="네, 좋습니다. 진행해 주세요.",
             original_text="네 좋습니다 진행해주세요",
-            speaker="SPEAKER_01", start=3.8, end=5.5,
+            speaker="SPEAKER_01",
+            start=3.8,
+            end=5.5,
             was_corrected=True,
         ),
         CorrectedUtterance(
             text="첫 번째 안건은 프로젝트 일정입니다.",
             original_text="첫 번째 안건은 프로젝트 일정입니다",
-            speaker="SPEAKER_00", start=6.0, end=9.0,
+            speaker="SPEAKER_00",
+            start=6.0,
+            end=9.0,
             was_corrected=True,
         ),
     ]
@@ -1317,28 +1454,40 @@ class TestE2EFullPipeline:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
-                new_callable=AsyncMock, return_value=real_transcript,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=real_transcript,
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
-                new_callable=AsyncMock, return_value=real_diarization,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=real_diarization,
             ),
             patch.object(
-                pipeline, "_run_step_merge",
-                new_callable=AsyncMock, return_value=real_merged,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=real_merged,
             ),
             patch.object(
-                pipeline, "_run_step_correct",
-                new_callable=AsyncMock, return_value=real_corrected,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=real_corrected,
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=real_summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=real_summary,
             ),
         ):
             state = await pipeline.run(audio_file, meeting_id="e2e_full")
@@ -1418,45 +1567,59 @@ class TestE2EFullPipeline:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
         ):
             state = await pipeline.run(
-                audio_file, meeting_id="e2e_results",
+                audio_file,
+                meeting_id="e2e_results",
             )
 
         # 6개 단계 모두 결과가 기록되어야 함
         assert len(state.step_results) == 6
-        for i, step_name in enumerate([
-            "convert", "transcribe", "diarize",
-            "merge", "correct", "summarize",
-        ]):
+        for i, step_name in enumerate(
+            [
+                "convert",
+                "transcribe",
+                "diarize",
+                "merge",
+                "correct",
+                "summarize",
+            ]
+        ):
             assert state.step_results[i]["step"] == step_name
             assert state.step_results[i]["success"] is True
             assert state.step_results[i]["elapsed_seconds"] >= 0
@@ -1485,13 +1648,15 @@ class TestE2ECheckpointResume:
         transcript = _make_real_transcript_result(str(wav_path))
         transcript.save_checkpoint(
             pipeline._get_checkpoint_path(
-                meeting_id, PipelineStep.TRANSCRIBE,
+                meeting_id,
+                PipelineStep.TRANSCRIBE,
             ),
         )
         diarization = _make_real_diarization_result(str(wav_path))
         diarization.save_checkpoint(
             pipeline._get_checkpoint_path(
-                meeting_id, PipelineStep.DIARIZE,
+                meeting_id,
+                PipelineStep.DIARIZE,
             ),
         )
 
@@ -1509,29 +1674,35 @@ class TestE2ECheckpointResume:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
+                pipeline,
+                "_run_step_convert",
                 new_callable=AsyncMock,
             ) as convert_mock,
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
             ) as transcribe_mock,
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
             ) as diarize_mock,
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
@@ -1559,17 +1730,20 @@ class TestE2ECheckpointResume:
         # 1단계: convert 성공 → transcribe에서 실패
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("STT 모델 로드 실패"),
             ),
+            pytest.raises(PipelineStepError),
         ):
-            with pytest.raises(PipelineStepError):
-                await pipeline.run(audio_file, meeting_id=meeting_id)
+            await pipeline.run(audio_file, meeting_id=meeting_id)
 
         # 실패 상태 확인
         failed_state = pipeline.get_status(meeting_id)
@@ -1582,31 +1756,37 @@ class TestE2ECheckpointResume:
         # 2단계: 재개하여 나머지 단계 완료
         with (
             patch.object(
-                pipeline, "_run_step_convert",
+                pipeline,
+                "_run_step_convert",
                 new_callable=AsyncMock,
             ) as convert_mock,
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
@@ -1629,31 +1809,38 @@ class TestE2ECheckpointResume:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
@@ -1694,7 +1881,7 @@ class TestE2EKoreanTextPreservation:
         from steps.transcriber import TranscriptResult, TranscriptSegment
 
         # NFD 형식의 한국어 텍스트 (조합형)
-        nfd_text = unicodedata.normalize("NFD", "안녕하세요")
+        _nfd_text = unicodedata.normalize("NFD", "안녕하세요")
         # NFC 형식 (완성형)
         nfc_text = unicodedata.normalize("NFC", "안녕하세요")
 
@@ -1717,8 +1904,10 @@ class TestE2EKoreanTextPreservation:
         merged = MergedResult(
             utterances=[
                 MergedUtterance(
-                    text=nfc_text, speaker="화자_01",
-                    start=0.0, end=2.0,
+                    text=nfc_text,
+                    speaker="화자_01",
+                    start=0.0,
+                    end=2.0,
                 ),
             ],
             num_speakers=1,
@@ -1737,7 +1926,8 @@ class TestE2EKoreanTextPreservation:
                     text=nfc_text + ".",
                     original_text=nfc_text,
                     speaker="화자_01",
-                    start=0.0, end=2.0,
+                    start=0.0,
+                    end=2.0,
                     was_corrected=True,
                 ),
             ],
@@ -1772,36 +1962,45 @@ class TestE2EKoreanTextPreservation:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
-                new_callable=AsyncMock, return_value=summary,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=summary,
             ),
         ):
             state = await pipeline.run(
-                audio_file, meeting_id="e2e_korean_test",
+                audio_file,
+                meeting_id="e2e_korean_test",
             )
 
         assert state.status == "completed"
@@ -1839,17 +2038,14 @@ class TestE2EDataFlowIntegration:
         assert result.utterances[2].speaker == "SPEAKER_00"
 
         # 텍스트 보존 확인
-        assert result.utterances[0].text == \
-            "안녕하세요 오늘 회의를 시작하겠습니다"
-        assert result.utterances[1].text == \
-            "네 좋습니다 진행해주세요"
+        assert result.utterances[0].text == "안녕하세요 오늘 회의를 시작하겠습니다"
+        assert result.utterances[1].text == "네 좋습니다 진행해주세요"
 
     async def test_merger_output_checkpoint_to_corrector_input(
         self,
         tmp_path: Path,
     ) -> None:
         """Merger 출력 → 체크포인트 저장 → 복원 → Corrector 입력 형식 검증."""
-        from steps.corrector import CorrectedUtterance
         from steps.merger import MergedResult
 
         merged = _make_real_merged_result()
@@ -1899,14 +2095,10 @@ class TestE2ESecurityIntegration:
 
         mock_config = MagicMock()
         mock_config.paths.resolved_base_dir = tmp_path / "data"
-        mock_config.paths.resolved_audio_input_dir = \
-            tmp_path / "data" / "audio"
-        mock_config.paths.resolved_outputs_dir = \
-            tmp_path / "data" / "outputs"
-        mock_config.paths.resolved_checkpoints_dir = \
-            tmp_path / "data" / "checkpoints"
-        mock_config.paths.resolved_chroma_db_dir = \
-            tmp_path / "data" / "chroma_db"
+        mock_config.paths.resolved_audio_input_dir = tmp_path / "data" / "audio"
+        mock_config.paths.resolved_outputs_dir = tmp_path / "data" / "outputs"
+        mock_config.paths.resolved_checkpoints_dir = tmp_path / "data" / "checkpoints"
+        mock_config.paths.resolved_chroma_db_dir = tmp_path / "data" / "chroma_db"
         # SecureDirManager.__init__이 접근하는 실제 속성명 사용
         mock_config.security.data_dir_permissions = 0o700
         mock_config.security.exclude_from_spotlight = True
@@ -1940,36 +2132,43 @@ class TestE2ESecurityIntegration:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
         ):
-            state = await pipeline.run(audio_file, meeting_id=meeting_id)
+            _state = await pipeline.run(audio_file, meeting_id=meeting_id)
 
         # 출력/체크포인트 디렉토리 자동 생성 확인
         output_dir = pipeline._get_output_dir(meeting_id)
@@ -1991,13 +2190,15 @@ class TestE2EErrorPropagation:
         from steps.audio_converter import FFmpegNotFoundError
 
         with patch.object(
-            pipeline, "_run_step_convert",
+            pipeline,
+            "_run_step_convert",
             new_callable=AsyncMock,
             side_effect=FFmpegNotFoundError("ffmpeg 없음"),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(
-                    audio_file, meeting_id="e2e_err_convert",
+                    audio_file,
+                    meeting_id="e2e_err_convert",
                 )
             assert exc_info.value.step == "convert"
 
@@ -2014,18 +2215,22 @@ class TestE2EErrorPropagation:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 side_effect=ModelNotAvailableError("whisper 모델 없음"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(
-                    audio_file, meeting_id="e2e_err_transcribe",
+                    audio_file,
+                    meeting_id="e2e_err_transcribe",
                 )
             assert exc_info.value.step == "transcribe"
 
@@ -2042,23 +2247,28 @@ class TestE2EErrorPropagation:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 side_effect=TokenNotConfiguredError("HF 토큰 없음"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(
-                    audio_file, meeting_id="e2e_err_diarize",
+                    audio_file,
+                    meeting_id="e2e_err_diarize",
                 )
             assert exc_info.value.step == "diarize"
 
@@ -2075,33 +2285,40 @@ class TestE2EErrorPropagation:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 side_effect=LLMConnectionError("LLM 연결 불가"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(
-                    audio_file, meeting_id="e2e_err_correct",
+                    audio_file,
+                    meeting_id="e2e_err_correct",
                 )
             assert exc_info.value.step == "correct"
 
@@ -2128,38 +2345,46 @@ class TestE2EErrorPropagation:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 side_effect=LLMGenerationError("요약 타임아웃"),
             ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(
-                    audio_file, meeting_id="e2e_err_summarize",
+                    audio_file,
+                    meeting_id="e2e_err_summarize",
                 )
             assert exc_info.value.step == "summarize"
 
@@ -2188,31 +2413,38 @@ class TestE2EIdempotency:
         # 첫 번째 실행: 모든 단계 완료
         with (
             patch.object(
-                pipeline, "_run_step_convert",
-                new_callable=AsyncMock, return_value=wav_path,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe",
+                pipeline,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=_make_real_transcript_result(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize",
+                pipeline,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_diarization_result(),
             ),
             patch.object(
-                pipeline, "_run_step_merge",
+                pipeline,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=_make_real_merged_result(),
             ),
             patch.object(
-                pipeline, "_run_step_correct",
+                pipeline,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=_make_real_corrected_result(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize",
+                pipeline,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
@@ -2224,7 +2456,8 @@ class TestE2EIdempotency:
         # 두 번째 실행: 모든 단계가 이미 완료 → 즉시 반환
         with (
             patch.object(
-                pipeline, "_run_step_convert",
+                pipeline,
+                "_run_step_convert",
                 new_callable=AsyncMock,
             ) as convert_mock,
         ):
@@ -2245,37 +2478,45 @@ class TestE2EIdempotency:
         for meeting_id in ["e2e_multi_a", "e2e_multi_b"]:
             with (
                 patch.object(
-                    pipeline, "_run_step_convert",
-                    new_callable=AsyncMock, return_value=wav_path,
+                    pipeline,
+                    "_run_step_convert",
+                    new_callable=AsyncMock,
+                    return_value=wav_path,
                 ),
                 patch.object(
-                    pipeline, "_run_step_transcribe",
+                    pipeline,
+                    "_run_step_transcribe",
                     new_callable=AsyncMock,
                     return_value=_make_real_transcript_result(),
                 ),
                 patch.object(
-                    pipeline, "_run_step_diarize",
+                    pipeline,
+                    "_run_step_diarize",
                     new_callable=AsyncMock,
                     return_value=_make_real_diarization_result(),
                 ),
                 patch.object(
-                    pipeline, "_run_step_merge",
+                    pipeline,
+                    "_run_step_merge",
                     new_callable=AsyncMock,
                     return_value=_make_real_merged_result(),
                 ),
                 patch.object(
-                    pipeline, "_run_step_correct",
+                    pipeline,
+                    "_run_step_correct",
                     new_callable=AsyncMock,
                     return_value=_make_real_corrected_result(),
                 ),
                 patch.object(
-                    pipeline, "_run_step_summarize",
+                    pipeline,
+                    "_run_step_summarize",
                     new_callable=AsyncMock,
                     return_value=_make_real_summary_result(),
                 ),
             ):
                 state = await pipeline.run(
-                    audio_file, meeting_id=meeting_id,
+                    audio_file,
+                    meeting_id=meeting_id,
                 )
                 assert state.status == "completed"
 

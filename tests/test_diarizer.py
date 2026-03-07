@@ -13,7 +13,6 @@
 의존성: pytest, pytest-asyncio, unittest.mock
 """
 
-import asyncio
 import json
 import time
 from pathlib import Path
@@ -25,10 +24,10 @@ import pytest
 from config import reset_config
 from core.model_manager import reset_model_manager
 from steps.diarizer import (
-    Diarizer,
     DiarizationError,
     DiarizationResult,
     DiarizationSegment,
+    Diarizer,
     EmptyAudioError,
     ModelNotAvailableError,
     TokenNotConfiguredError,
@@ -120,25 +119,19 @@ class TestDiarizationSegment:
 
     def test_기본_생성(self):
         """필수 필드로 세그먼트를 생성한다."""
-        seg = DiarizationSegment(
-            speaker="SPEAKER_00", start=0.0, end=5.0
-        )
+        seg = DiarizationSegment(speaker="SPEAKER_00", start=0.0, end=5.0)
         assert seg.speaker == "SPEAKER_00"
         assert seg.start == 0.0
         assert seg.end == 5.0
 
     def test_duration_속성(self):
         """발화 구간 길이를 올바르게 계산한다."""
-        seg = DiarizationSegment(
-            speaker="SPEAKER_01", start=2.5, end=7.3
-        )
+        seg = DiarizationSegment(speaker="SPEAKER_01", start=2.5, end=7.3)
         assert abs(seg.duration - 4.8) < 0.001
 
     def test_to_dict_변환(self):
         """딕셔너리로 올바르게 변환한다."""
-        seg = DiarizationSegment(
-            speaker="SPEAKER_00", start=1.0, end=3.5
-        )
+        seg = DiarizationSegment(speaker="SPEAKER_00", start=1.0, end=3.5)
         d = seg.to_dict()
         assert d == {
             "speaker": "SPEAKER_00",
@@ -173,16 +166,12 @@ class TestDiarizationResult:
             DiarizationSegment("SPEAKER_00", 0.0, 5.0),
             DiarizationSegment("SPEAKER_01", 3.0, 12.5),
         ]
-        result = DiarizationResult(
-            segments=segments, num_speakers=2, audio_path=""
-        )
+        result = DiarizationResult(segments=segments, num_speakers=2, audio_path="")
         assert result.total_duration == 12.5
 
     def test_total_duration_빈_세그먼트(self):
         """세그먼트가 없으면 0.0을 반환한다."""
-        result = DiarizationResult(
-            segments=[], num_speakers=0, audio_path=""
-        )
+        result = DiarizationResult(segments=[], num_speakers=0, audio_path="")
         assert result.total_duration == 0.0
 
     def test_speakers_속성(self):
@@ -192,9 +181,7 @@ class TestDiarizationResult:
             DiarizationSegment("SPEAKER_00", 5.0, 10.0),
             DiarizationSegment("SPEAKER_01", 10.0, 15.0),
         ]
-        result = DiarizationResult(
-            segments=segments, num_speakers=2, audio_path=""
-        )
+        result = DiarizationResult(segments=segments, num_speakers=2, audio_path="")
         assert result.speakers == ["SPEAKER_00", "SPEAKER_01"]
 
     def test_to_dict_변환(self):
@@ -202,9 +189,7 @@ class TestDiarizationResult:
         segments = [
             DiarizationSegment("SPEAKER_00", 0.0, 5.0),
         ]
-        result = DiarizationResult(
-            segments=segments, num_speakers=1, audio_path="/test.wav"
-        )
+        result = DiarizationResult(segments=segments, num_speakers=1, audio_path="/test.wav")
         d = result.to_dict()
         assert d["num_speakers"] == 1
         assert d["audio_path"] == "/test.wav"
@@ -223,9 +208,7 @@ class TestCheckpoint:
             DiarizationSegment("SPEAKER_00", 0.0, 5.0),
             DiarizationSegment("SPEAKER_01", 5.0, 10.0),
         ]
-        result = DiarizationResult(
-            segments=segments, num_speakers=2, audio_path="/test.wav"
-        )
+        result = DiarizationResult(segments=segments, num_speakers=2, audio_path="/test.wav")
         output = tmp_path / "checkpoint.json"
         result.save_checkpoint(output)
 
@@ -245,9 +228,7 @@ class TestCheckpoint:
             "audio_path": "/test.wav",
         }
         checkpoint = tmp_path / "checkpoint.json"
-        checkpoint.write_text(
-            json.dumps(data, ensure_ascii=False), encoding="utf-8"
-        )
+        checkpoint.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
         result = DiarizationResult.from_checkpoint(checkpoint)
         assert len(result.segments) == 2
@@ -273,7 +254,7 @@ class TestCheckpoint:
         assert restored.num_speakers == original.num_speakers
         assert restored.audio_path == original.audio_path
         assert len(restored.segments) == len(original.segments)
-        for orig, rest in zip(original.segments, restored.segments):
+        for orig, rest in zip(original.segments, restored.segments, strict=False):
             assert orig.speaker == rest.speaker
             assert orig.start == rest.start
             assert orig.end == rest.end
@@ -420,10 +401,12 @@ class TestParseAnnotation:
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
-            {"speaker": "SPEAKER_01", "start": 5.5, "end": 10.0},
-        ])
+        annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
+                {"speaker": "SPEAKER_01", "start": 5.5, "end": 10.0},
+            ]
+        )
 
         segments = diarizer._parse_annotation(annotation)
         assert len(segments) == 2
@@ -438,11 +421,13 @@ class TestParseAnnotation:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         # 역순으로 제공
-        annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_01", "start": 10.0, "end": 15.0},
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
-            {"speaker": "SPEAKER_01", "start": 5.0, "end": 10.0},
-        ])
+        annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_01", "start": 10.0, "end": 15.0},
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
+                {"speaker": "SPEAKER_01", "start": 5.0, "end": 10.0},
+            ]
+        )
 
         segments = diarizer._parse_annotation(annotation)
         assert segments[0].start == 0.0
@@ -454,11 +439,13 @@ class TestParseAnnotation:
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
-            {"speaker": "SPEAKER_01", "start": 5.0, "end": 5.0},  # 무효
-            {"speaker": "SPEAKER_00", "start": 5.0, "end": 10.0},
-        ])
+        annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
+                {"speaker": "SPEAKER_01", "start": 5.0, "end": 5.0},  # 무효
+                {"speaker": "SPEAKER_00", "start": 5.0, "end": 10.0},
+            ]
+        )
 
         segments = diarizer._parse_annotation(annotation)
         assert len(segments) == 2
@@ -477,9 +464,11 @@ class TestParseAnnotation:
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 1.23456, "end": 5.67891},
-        ])
+        annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 1.23456, "end": 5.67891},
+            ]
+        )
 
         segments = diarizer._parse_annotation(annotation)
         assert segments[0].start == 1.235
@@ -492,19 +481,19 @@ class TestParseAnnotation:
 class TestDiarize:
     """Diarizer.diarize() 비동기 실행 테스트."""
 
-    async def test_정상_화자분리(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_정상_화자분리(self, mock_config, mock_manager, sample_audio):
         """정상적으로 화자분리를 수행한다."""
         manager, mock_pipeline = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         # pyannote 파이프라인 결과 모킹
-        mock_annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
-            {"speaker": "SPEAKER_01", "start": 5.5, "end": 12.0},
-            {"speaker": "SPEAKER_00", "start": 12.5, "end": 18.0},
-        ])
+        mock_annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
+                {"speaker": "SPEAKER_01", "start": 5.5, "end": 12.0},
+                {"speaker": "SPEAKER_00", "start": 12.5, "end": 18.0},
+            ]
+        )
         mock_pipeline.return_value = mock_annotation
 
         result = await diarizer.diarize(sample_audio)
@@ -513,22 +502,16 @@ class TestDiarize:
         assert result.num_speakers == 2
         assert len(result.segments) == 3
         assert result.audio_path == str(sample_audio)
-        manager.acquire.assert_called_once_with(
-            "pyannote", diarizer._load_pipeline
-        )
+        manager.acquire.assert_called_once_with("pyannote", diarizer._load_pipeline)
 
-    async def test_파일_없으면_FileNotFoundError(
-        self, mock_config, mock_manager, tmp_path
-    ):
+    async def test_파일_없으면_FileNotFoundError(self, mock_config, mock_manager, tmp_path):
         """오디오 파일이 없으면 FileNotFoundError를 발생시킨다."""
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
         with pytest.raises(FileNotFoundError):
             await diarizer.diarize(tmp_path / "no_file.wav")
 
-    async def test_빈_결과시_EmptyAudioError(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_빈_결과시_EmptyAudioError(self, mock_config, mock_manager, sample_audio):
         """화자분리 결과가 없으면 EmptyAudioError를 발생시킨다."""
         manager, mock_pipeline = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
@@ -551,18 +534,14 @@ class TestDiarize:
         with pytest.raises(DiarizationError, match="화자분리 처리 중 오류"):
             await diarizer.diarize(sample_audio)
 
-    async def test_ModelNotAvailableError_직접_전파(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_ModelNotAvailableError_직접_전파(self, mock_config, mock_manager, sample_audio):
         """ModelNotAvailableError는 래핑 없이 직접 전파한다."""
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         # acquire()에서 ModelNotAvailableError 발생하도록 설정
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=ModelNotAvailableError("pyannote 미설치")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=ModelNotAvailableError("pyannote 미설치"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         manager.acquire.return_value = ctx
 
@@ -577,28 +556,26 @@ class TestDiarize:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=TokenNotConfiguredError("토큰 없음")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=TokenNotConfiguredError("토큰 없음"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         manager.acquire.return_value = ctx
 
         with pytest.raises(TokenNotConfiguredError, match="토큰 없음"):
             await diarizer.diarize(sample_audio)
 
-    async def test_다중_화자_감지(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_다중_화자_감지(self, mock_config, mock_manager, sample_audio):
         """여러 화자를 올바르게 감지한다."""
         manager, mock_pipeline = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        mock_annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 3.0},
-            {"speaker": "SPEAKER_01", "start": 3.0, "end": 6.0},
-            {"speaker": "SPEAKER_02", "start": 6.0, "end": 9.0},
-            {"speaker": "SPEAKER_00", "start": 9.0, "end": 12.0},
-        ])
+        mock_annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 3.0},
+                {"speaker": "SPEAKER_01", "start": 3.0, "end": 6.0},
+                {"speaker": "SPEAKER_02", "start": 6.0, "end": 9.0},
+                {"speaker": "SPEAKER_00", "start": 9.0, "end": 12.0},
+            ]
+        )
         mock_pipeline.return_value = mock_annotation
 
         result = await diarizer.diarize(sample_audio)
@@ -607,16 +584,16 @@ class TestDiarize:
         assert "SPEAKER_01" in result.speakers
         assert "SPEAKER_02" in result.speakers
 
-    async def test_min_max_speakers_파라미터_전달(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_min_max_speakers_파라미터_전달(self, mock_config, mock_manager, sample_audio):
         """min_speakers, max_speakers 파라미터가 파이프라인에 전달된다."""
         manager, mock_pipeline = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        mock_annotation = _make_mock_annotation([
-            {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
-        ])
+        mock_annotation = _make_mock_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0},
+            ]
+        )
         mock_pipeline.return_value = mock_annotation
 
         await diarizer.diarize(sample_audio)
@@ -627,9 +604,7 @@ class TestDiarize:
         assert call_args[1]["min_speakers"] == 2
         assert call_args[1]["max_speakers"] == 10
 
-    async def test_화자분리_타임아웃(
-        self, mock_config, mock_manager, sample_audio
-    ):
+    async def test_화자분리_타임아웃(self, mock_config, mock_manager, sample_audio):
         """타임아웃 시 DiarizationError가 발생하는지 확인한다."""
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
@@ -637,13 +612,15 @@ class TestDiarize:
         # 매우 짧은 타임아웃 설정
         diarizer._timeout_seconds = 0.01
 
-        with patch.object(
-            diarizer,
-            "_run_pipeline",
-            side_effect=lambda *a: time.sleep(5),
+        with (
+            patch.object(
+                diarizer,
+                "_run_pipeline",
+                side_effect=lambda *a: time.sleep(5),
+            ),
+            pytest.raises(DiarizationError, match="타임아웃"),
         ):
-            with pytest.raises(DiarizationError, match="타임아웃"):
-                await diarizer.diarize(sample_audio)
+            await diarizer.diarize(sample_audio)
 
 
 # === 파이프라인 로더 테스트 ===
@@ -652,9 +629,7 @@ class TestDiarize:
 class TestLoadPipeline:
     """_load_pipeline 메서드 테스트."""
 
-    def test_토큰_없으면_TokenNotConfiguredError(
-        self, mock_config, mock_manager
-    ):
+    def test_토큰_없으면_TokenNotConfiguredError(self, mock_config, mock_manager):
         """토큰이 없으면 파이프라인 로드 전에 에러를 발생시킨다."""
         mock_config.diarization.huggingface_token = None
         manager, _ = mock_manager
@@ -670,34 +645,34 @@ class TestLoadPipeline:
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
-        with patch.dict("sys.modules", {"pyannote.audio": None, "pyannote": None}):
+        with (
+            patch.dict("sys.modules", {"pyannote.audio": None, "pyannote": None}),
             # import 실패를 시뮬레이션
-            import sys
             # pyannote.audio를 None으로 설정하면 import 시 TypeError 발생
             # 대신 ImportError를 직접 모킹
-            with patch(
+            patch(
                 "builtins.__import__",
                 side_effect=_import_error_for("pyannote.audio"),
-            ):
-                with pytest.raises(ModelNotAvailableError, match="pyannote-audio"):
-                    diarizer._load_pipeline()
+            ),
+            pytest.raises(ModelNotAvailableError, match="pyannote-audio"),
+        ):
+            diarizer._load_pipeline()
 
     @patch("steps.diarizer.Diarizer._validate_token", return_value="token")
-    def test_torch_미설치시_ModelNotAvailableError(
-        self, _mock_token, mock_config, mock_manager
-    ):
+    def test_torch_미설치시_ModelNotAvailableError(self, _mock_token, mock_config, mock_manager):
         """PyTorch가 없으면 ModelNotAvailableError를 발생시킨다."""
         manager, _ = mock_manager
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         # pyannote는 정상, torch가 없는 경우
-        mock_pipeline_cls = MagicMock()
-        with patch(
-            "builtins.__import__",
-            side_effect=_import_error_for("torch", allow=["pyannote.audio"]),
+        with (
+            patch(
+                "builtins.__import__",
+                side_effect=_import_error_for("torch", allow=["pyannote.audio"]),
+            ),
+            pytest.raises(ModelNotAvailableError, match="PyTorch"),
         ):
-            with pytest.raises(ModelNotAvailableError, match="PyTorch"):
-                diarizer._load_pipeline()
+            diarizer._load_pipeline()
 
 
 def _import_error_for(

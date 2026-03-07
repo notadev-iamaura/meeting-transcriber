@@ -23,9 +23,7 @@ from pathlib import Path
 import pytest
 
 # 스크립트 경로
-_SCRIPT_PATH = (
-    Path(__file__).parent.parent / "scripts" / "setup_launchagent.sh"
-)
+_SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "setup_launchagent.sh"
 
 
 def _create_mock_env(tmp_path: Path, *, create_venv: bool = True) -> dict[str, str]:
@@ -103,10 +101,10 @@ def _run_with_mock_launchctl(
     # 가짜 launchctl (항상 성공, list는 실패=미등록)
     mock_launchctl = mock_bin / "launchctl"
     mock_launchctl.write_text(
-        '#!/bin/bash\n'
-        '# 가짜 launchctl — 테스트용\n'
+        "#!/bin/bash\n"
+        "# 가짜 launchctl — 테스트용\n"
         'if [[ "$1" == "list" ]]; then exit 1; fi\n'
-        'exit 0\n',
+        "exit 0\n",
         encoding="utf-8",
     )
     mock_launchctl.chmod(0o755)
@@ -114,7 +112,7 @@ def _run_with_mock_launchctl(
     # 가짜 plutil (항상 lint 통과)
     mock_plutil = mock_bin / "plutil"
     mock_plutil.write_text(
-        '#!/bin/bash\nexit 0\n',
+        "#!/bin/bash\nexit 0\n",
         encoding="utf-8",
     )
     mock_plutil.chmod(0o755)

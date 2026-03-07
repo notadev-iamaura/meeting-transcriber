@@ -20,7 +20,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
@@ -45,7 +45,7 @@ class DiarizationSegment:
     @property
     def duration(self) -> float:
         """발화 구간의 길이 (초)
-        
+
         Returns:
             발화 길이 (초)
         """
@@ -77,7 +77,7 @@ class DiarizationResult:
     @property
     def total_duration(self) -> float:
         """전체 오디오 길이 추정치 (마지막 세그먼트 종료 시간).
-        
+
         Returns:
             오디오 전체 길이 (초)
         """
@@ -88,7 +88,7 @@ class DiarizationResult:
     @property
     def speakers(self) -> list[str]:
         """감지된 화자 라벨 목록 (중복 제거, 정렬).
-        
+
         Returns:
             화자 라벨 목록
         """
@@ -111,7 +111,7 @@ class DiarizationResult:
 
         Args:
             output_path: 저장할 JSON 파일 경로
-            
+
         Raises:
             IOError: 파일 쓰기 실패 시
         """
@@ -121,7 +121,7 @@ class DiarizationResult:
         logger.info(f"화자분리 체크포인트 저장: {output_path}")
 
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: Path) -> "DiarizationResult":
+    def from_checkpoint(cls, checkpoint_path: Path) -> DiarizationResult:
         """체크포인트 JSON 파일에서 화자분리 결과를 복원한다.
 
         Args:
@@ -137,9 +137,7 @@ class DiarizationResult:
         with open(checkpoint_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        segments = [
-            DiarizationSegment(**seg) for seg in data.get("segments", [])
-        ]
+        segments = [DiarizationSegment(**seg) for seg in data.get("segments", [])]
 
         return cls(
             segments=segments,
@@ -184,8 +182,8 @@ class Diarizer:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """Diarizer를 초기화한다.
 
@@ -257,14 +255,10 @@ class Diarizer:
             import torch  # type: ignore[import-untyped]
         except ImportError as e:
             raise ModelNotAvailableError(
-                "PyTorch가 설치되어 있지 않습니다. "
-                "'pip install torch'로 설치하세요."
+                "PyTorch가 설치되어 있지 않습니다. 'pip install torch'로 설치하세요."
             ) from e
 
-        logger.info(
-            f"pyannote 파이프라인 로드 시작: {self._model_name} "
-            f"(device={self._device})"
-        )
+        logger.info(f"pyannote 파이프라인 로드 시작: {self._model_name} (device={self._device})")
 
         try:
             # pyannote 4.x: use_auth_token → token으로 변경됨
@@ -280,10 +274,7 @@ class Diarizer:
         # CPU 강제 (MPS 버그 방지)
         pipeline.to(torch.device("cpu"))
 
-        logger.info(
-            f"pyannote 파이프라인 로드 완료: {self._model_name} "
-            f"(device=cpu)"
-        )
+        logger.info(f"pyannote 파이프라인 로드 완료: {self._model_name} (device=cpu)")
         return pipeline
 
     def _validate_audio(self, audio_path: Path) -> None:
@@ -297,19 +288,13 @@ class Diarizer:
             EmptyAudioError: 파일 크기가 0일 때
         """
         if not audio_path.exists():
-            raise FileNotFoundError(
-                f"오디오 파일을 찾을 수 없습니다: {audio_path}"
-            )
+            raise FileNotFoundError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
 
         if not audio_path.is_file():
-            raise FileNotFoundError(
-                f"오디오 경로가 파일이 아닙니다: {audio_path}"
-            )
+            raise FileNotFoundError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
 
         if audio_path.stat().st_size == 0:
-            raise EmptyAudioError(
-                f"오디오 파일이 비어있습니다: {audio_path}"
-            )
+            raise EmptyAudioError(f"오디오 파일이 비어있습니다: {audio_path}")
 
     def _run_pipeline(self, pipeline: Any, audio_path: Path) -> Any:
         """pyannote 파이프라인을 실행한다 (동기, 스레드에서 호출).
@@ -344,15 +329,11 @@ class Diarizer:
         result = pipeline(str(audio_path), **params)
         elapsed = _time.monotonic() - start_time
 
-        logger.info(
-            f"화자분리 파이프라인 실행 완료: {elapsed:.1f}초 소요"
-        )
+        logger.info(f"화자분리 파이프라인 실행 완료: {elapsed:.1f}초 소요")
 
         return result
 
-    def _parse_annotation(
-        self, annotation: Any
-    ) -> list[DiarizationSegment]:
+    def _parse_annotation(self, annotation: Any) -> list[DiarizationSegment]:
         """pyannote Annotation 객체를 DiarizationSegment 리스트로 변환한다.
 
         Args:
@@ -372,8 +353,7 @@ class Diarizer:
             # 유효한 구간만 포함 (duration > 0)
             if turn.end <= turn.start:
                 logger.debug(
-                    f"무효 세그먼트 건너뜀: speaker={speaker}, "
-                    f"start={turn.start}, end={turn.end}"
+                    f"무효 세그먼트 건너뜀: speaker={speaker}, start={turn.start}, end={turn.end}"
                 )
                 continue
 
@@ -415,39 +395,32 @@ class Diarizer:
         logger.info(f"화자분리 시작: {audio_path.name}")
 
         try:
-            async with self._manager.acquire(
-                "pyannote", self._load_pipeline
-            ) as pipeline:
+            async with self._manager.acquire("pyannote", self._load_pipeline) as pipeline:
                 # 화자분리를 별도 스레드에서 실행 (CPU 집약 작업)
                 # 타임아웃으로 무한 대기 방지 (STAB-029)
                 try:
                     annotation = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._run_pipeline, pipeline, audio_path
-                        ),
+                        asyncio.to_thread(self._run_pipeline, pipeline, audio_path),
                         timeout=self._timeout_seconds,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError as e:
                     raise DiarizationError(
                         f"화자분리 타임아웃: {self._timeout_seconds}초 초과. "
                         f"오디오 파일이 너무 크거나 모델이 응답하지 않습니다."
-                    )
+                    ) from e
         except (ModelNotAvailableError, TokenNotConfiguredError):
             raise
         except DiarizationError:
             raise
         except Exception as e:
-            raise DiarizationError(
-                f"화자분리 처리 중 오류 발생: {audio_path} — {e}"
-            ) from e
+            raise DiarizationError(f"화자분리 처리 중 오류 발생: {audio_path} — {e}") from e
 
         # 결과 파싱
         segments = self._parse_annotation(annotation)
 
         if not segments:
             raise EmptyAudioError(
-                f"화자분리 결과가 비어있습니다. "
-                f"오디오에 음성이 없거나 인식 불가: {audio_path}"
+                f"화자분리 결과가 비어있습니다. 오디오에 음성이 없거나 인식 불가: {audio_path}"
             )
 
         # 화자 수 계산

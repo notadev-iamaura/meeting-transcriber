@@ -23,7 +23,10 @@ import sys
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import uvicorn
 
 from config import AppConfig, load_config, reset_config
 
@@ -41,7 +44,7 @@ _LOG_BACKUP_COUNT = 5
 # === CLI 인자 파싱 ===
 
 
-def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """커맨드라인 인자를 파싱한다.
 
     Args:
@@ -108,7 +111,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def setup_logging(
     level: str = "info",
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
 ) -> None:
     """로깅을 설정한다.
 
@@ -129,9 +132,7 @@ def setup_logging(
     # 콘솔 핸들러
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(numeric_level)
-    console_handler.setFormatter(
-        logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
-    )
+    console_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
     root_logger.addHandler(console_handler)
 
     # 파일 핸들러 (선택적)
@@ -144,9 +145,7 @@ def setup_logging(
             encoding="utf-8",
         )
         file_handler.setLevel(numeric_level)
-        file_handler.setFormatter(
-            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
-        )
+        file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
         root_logger.addHandler(file_handler)
 
     # uvicorn 로거 레벨 동기화
@@ -159,10 +158,10 @@ def setup_logging(
 
 
 def load_config_with_overrides(
-    config_path: Optional[Path] = None,
-    host: Optional[str] = None,
-    port: Optional[int] = None,
-    log_level: Optional[str] = None,
+    config_path: Path | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    log_level: str | None = None,
 ) -> AppConfig:
     """설정 파일을 로드하고 CLI 인자로 오버라이드한다.
 
@@ -208,10 +207,8 @@ def ensure_data_directories(config: AppConfig) -> None:
         manager = SecureDirManager(config)
         dirs = manager.ensure_secure_dirs()
         logger.info(f"데이터 디렉토리 초기화 완료: {len(dirs)}개")
-    except Exception as e:
-        logger.warning(
-            f"데이터 디렉토리 보안 설정 실패 (기본 생성으로 대체): {e}"
-        )
+    except (OSError, PermissionError, ImportError) as e:
+        logger.warning(f"데이터 디렉토리 보안 설정 실패 (기본 생성으로 대체): {e}")
         # 보안 설정 실패 시 최소한 디렉토리만 생성
         _ensure_minimal_dirs(config)
 
@@ -249,16 +246,16 @@ class _ServerThread(threading.Thread):
     exception 속성에 저장한다.
     """
 
-    def __init__(self, server: "uvicorn.Server") -> None:
+    def __init__(self, server: uvicorn.Server) -> None:
         super().__init__(name="fastapi-server", daemon=True)
         self._server = server
-        self.exception: Optional[Exception] = None
+        self.exception: Exception | None = None
 
     def run(self) -> None:
         """서버를 실행하고 예외 발생 시 저장한다."""
         try:
             self._server.run()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 스레드 최상위 catch-all
             self.exception = e
             logger.error(f"FastAPI 서버 실행 중 오류: {e}", exc_info=True)
 
@@ -292,10 +289,7 @@ def start_server_thread(config: AppConfig) -> _ServerThread:
     thread = _ServerThread(server)
     thread.start()
 
-    logger.info(
-        f"FastAPI 서버 스레드 시작 — "
-        f"http://{config.server.host}:{config.server.port}"
-    )
+    logger.info(f"FastAPI 서버 스레드 시작 — http://{config.server.host}:{config.server.port}")
 
     return thread
 
@@ -317,7 +311,7 @@ def _setup_signal_handlers() -> None:
             import rumps
 
             rumps.quit_application()
-        except Exception:
+        except (ImportError, RuntimeError):
             sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -326,7 +320,7 @@ def _setup_signal_handlers() -> None:
 # === 메인 함수 ===
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     """애플리케이션 메인 함수.
 
     실행 흐름:
@@ -357,7 +351,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             port=args.port,
             log_level=args.log_level,
         )
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.critical(f"설정 로드 실패: {e}", exc_info=True)
         sys.exit(1)
 
@@ -395,9 +389,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         # 서버 스레드가 즉시 실패했는지 짧은 대기 후 확인
         server_thread.join(timeout=1.0)
         if not server_thread.is_alive() and server_thread.exception is not None:
-            logger.critical(
-                f"FastAPI 서버 시작 실패: {server_thread.exception}"
-            )
+            logger.critical(f"FastAPI 서버 시작 실패: {server_thread.exception}")
             sys.exit(1)
 
         logger.info("메뉴바 모드 — rumps 앱 시작")

@@ -12,25 +12,22 @@ Phase 2 통합 테스트 모듈 (Phase 2 Integration Tests)
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from config import AppConfig, ChunkingConfig, SearchConfig
+from config import AppConfig, ChunkingConfig
 from core.job_queue import (
     AsyncJobQueue,
     InvalidTransitionError,
-    Job,
     JobNotFoundError,
     JobQueue,
     JobQueueError,
     JobStatus,
     MaxRetriesExceededError,
-    VALID_TRANSITIONS,
 )
 from search.hybrid_search import (
     EmptyQueryError,
@@ -51,7 +48,7 @@ from steps.chunker import (
     _group_by_speaker_and_time,
 )
 from steps.corrector import CorrectedResult, CorrectedUtterance
-from steps.embedder import _CHROMA_COLLECTION_NAME, _FTS_TABLE_NAME
+from steps.embedder import _FTS_TABLE_NAME
 
 pytestmark = pytest.mark.asyncio
 
@@ -252,7 +249,8 @@ class TestSearchAccuracy:
     """FTS5 키워드 검색과 RRF 결합의 정확도를 통합 검증한다."""
 
     def test_fts_korean_keyword_search(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """한국어 키워드로 FTS5 검색 시 관련 청크가 반환되는지 확인한다."""
         results = _search_fts(
@@ -267,7 +265,8 @@ class TestSearchAccuracy:
             assert "프로젝트" in r["text"] or "일정" in r["text"]
 
     def test_fts_single_keyword_search(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """단일 키워드 검색이 정확히 동작하는지 확인한다."""
         results = _search_fts(
@@ -279,7 +278,8 @@ class TestSearchAccuracy:
         assert any("배포" in r["text"] for r in results)
 
     def test_fts_date_filter(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """날짜 필터가 정확히 적용되는지 확인한다."""
         results = _search_fts(
@@ -293,7 +293,8 @@ class TestSearchAccuracy:
             assert r["date"] == "2026-03-04"
 
     def test_fts_speaker_filter(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """화자 필터가 정확히 적용되는지 확인한다."""
         results = _search_fts(
@@ -307,7 +308,8 @@ class TestSearchAccuracy:
             assert "SPEAKER_02" in r["speakers"]
 
     def test_fts_meeting_id_filter(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """회의 ID 필터가 정확히 적용되는지 확인한다."""
         results = _search_fts(
@@ -320,7 +322,8 @@ class TestSearchAccuracy:
             assert r["meeting_id"] == "meeting_002"
 
     def test_fts_empty_query_returns_empty(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """빈 쿼리가 빈 결과를 반환하는지 확인한다."""
         results = _search_fts(
@@ -331,7 +334,8 @@ class TestSearchAccuracy:
         assert results == []
 
     def test_fts_no_match_returns_empty(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """매칭 결과가 없으면 빈 리스트를 반환하는지 확인한다."""
         results = _search_fts(
@@ -342,7 +346,8 @@ class TestSearchAccuracy:
         assert results == []
 
     def test_fts_nonexistent_db_returns_empty(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """존재하지 않는 DB 경로에서 빈 결과를 반환하는지 확인한다."""
         results = _search_fts(
@@ -353,7 +358,8 @@ class TestSearchAccuracy:
         assert results == []
 
     def test_fts_special_chars_safe(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """FTS5 특수문자가 포함된 쿼리가 안전하게 처리되는지 확인한다."""
         # FTS5 연산자 문자가 포함된 쿼리
@@ -366,7 +372,8 @@ class TestSearchAccuracy:
         assert isinstance(results, list)
 
     def test_fts_bm25_ordering(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """BM25 점수 기반으로 관련도 높은 결과가 상위에 오는지 확인한다."""
         results = _search_fts(
@@ -376,7 +383,7 @@ class TestSearchAccuracy:
         )
         if len(results) >= 2:
             # 두 키워드 모두 포함된 결과가 하나만 포함된 결과보다 상위여야 함
-            for i, r in enumerate(results):
+            for _i, r in enumerate(results):
                 both = "프로젝트" in r["text"] and "일정" in r["text"]
                 if both:
                     # 이 결과의 인덱스가 낮을수록(상위) BM25 정렬이 올바름
@@ -384,7 +391,8 @@ class TestSearchAccuracy:
                     break
 
     def test_fts_top_k_limit(
-        self, fts_db_with_data: Path,
+        self,
+        fts_db_with_data: Path,
     ) -> None:
         """top_k 제한이 정확히 적용되는지 확인한다."""
         results = _search_fts(
@@ -402,20 +410,48 @@ class TestRRFAccuracy:
         """양쪽 소스 모두에 나타나는 결과가 더 높은 점수를 받는지 확인한다."""
         # chunk_0002는 벡터+FTS 양쪽 모두 존재
         vector_results = [
-            {"chunk_id": "c1", "text": "벡터만", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 0.0,
-             "end_time": 10.0, "chunk_index": 0},
-            {"chunk_id": "c_both", "text": "양쪽 모두", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 10.0,
-             "end_time": 20.0, "chunk_index": 1},
+            {
+                "chunk_id": "c1",
+                "text": "벡터만",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 0,
+            },
+            {
+                "chunk_id": "c_both",
+                "text": "양쪽 모두",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 10.0,
+                "end_time": 20.0,
+                "chunk_index": 1,
+            },
         ]
         fts_results = [
-            {"chunk_id": "c_both", "text": "양쪽 모두", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 10.0,
-             "end_time": 20.0, "chunk_index": 1},
-            {"chunk_id": "c2", "text": "FTS만", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S1", "start_time": 20.0,
-             "end_time": 30.0, "chunk_index": 2},
+            {
+                "chunk_id": "c_both",
+                "text": "양쪽 모두",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 10.0,
+                "end_time": 20.0,
+                "chunk_index": 1,
+            },
+            {
+                "chunk_id": "c2",
+                "text": "FTS만",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S1",
+                "start_time": 20.0,
+                "end_time": 30.0,
+                "chunk_index": 2,
+            },
         ]
 
         combined = _combine_rrf(
@@ -434,14 +470,28 @@ class TestRRFAccuracy:
     def test_rrf_vector_only_vs_fts_only(self) -> None:
         """벡터만/FTS만 결과의 점수 차이가 가중치에 비례하는지 확인한다."""
         vector_results = [
-            {"chunk_id": "cv", "text": "벡터 전용", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 0.0,
-             "end_time": 10.0, "chunk_index": 0},
+            {
+                "chunk_id": "cv",
+                "text": "벡터 전용",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 0,
+            },
         ]
         fts_results = [
-            {"chunk_id": "cf", "text": "FTS 전용", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S1", "start_time": 10.0,
-             "end_time": 20.0, "chunk_index": 1},
+            {
+                "chunk_id": "cf",
+                "text": "FTS 전용",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S1",
+                "start_time": 10.0,
+                "end_time": 20.0,
+                "chunk_index": 1,
+            },
         ]
 
         combined = _combine_rrf(
@@ -468,9 +518,16 @@ class TestRRFAccuracy:
     def test_rrf_top_k_truncation(self) -> None:
         """top_k 개수만큼만 결과가 반환되는지 확인한다."""
         vector_results = [
-            {"chunk_id": f"c{i}", "text": f"텍스트 {i}", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 0.0,
-             "end_time": 10.0, "chunk_index": i}
+            {
+                "chunk_id": f"c{i}",
+                "text": f"텍스트 {i}",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": i,
+            }
             for i in range(10)
         ]
 
@@ -488,8 +545,11 @@ class TestRRFAccuracy:
         """RRF 점수 계산 공식이 정확한지 확인한다."""
         # vector_rank=1, fts_rank=1, k=60
         score = _compute_rrf_score(
-            vector_rank=1, fts_rank=1,
-            vector_weight=0.6, fts_weight=0.4, k=60,
+            vector_rank=1,
+            fts_rank=1,
+            vector_weight=0.6,
+            fts_weight=0.4,
+            k=60,
         )
         expected = 0.6 * (1.0 / 61) + 0.4 * (1.0 / 61)
         assert abs(score - expected) < 1e-10
@@ -498,16 +558,22 @@ class TestRRFAccuracy:
         """한쪽 순위가 None일 때 해당 항의 기여가 0인지 확인한다."""
         # 벡터만 (fts_rank=None)
         score_vector_only = _compute_rrf_score(
-            vector_rank=1, fts_rank=None,
-            vector_weight=0.6, fts_weight=0.4, k=60,
+            vector_rank=1,
+            fts_rank=None,
+            vector_weight=0.6,
+            fts_weight=0.4,
+            k=60,
         )
         expected = 0.6 * (1.0 / 61)
         assert abs(score_vector_only - expected) < 1e-10
 
         # FTS만 (vector_rank=None)
         score_fts_only = _compute_rrf_score(
-            vector_rank=None, fts_rank=1,
-            vector_weight=0.6, fts_weight=0.4, k=60,
+            vector_rank=None,
+            fts_rank=1,
+            vector_weight=0.6,
+            fts_weight=0.4,
+            k=60,
         )
         expected = 0.4 * (1.0 / 61)
         assert abs(score_fts_only - expected) < 1e-10
@@ -515,9 +581,16 @@ class TestRRFAccuracy:
     def test_rrf_speakers_string_parsing(self) -> None:
         """화자 목록이 문자열로 전달될 때 리스트로 파싱되는지 확인한다."""
         vector_results = [
-            {"chunk_id": "c1", "text": "텍스트", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "SPEAKER_00, SPEAKER_01",
-             "start_time": 0.0, "end_time": 10.0, "chunk_index": 0},
+            {
+                "chunk_id": "c1",
+                "text": "텍스트",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "SPEAKER_00, SPEAKER_01",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 0,
+            },
         ]
 
         combined = _combine_rrf(
@@ -533,15 +606,29 @@ class TestRRFAccuracy:
     def test_rrf_descending_score_order(self) -> None:
         """결과가 점수 내림차순으로 정렬되는지 확인한다."""
         vector_results = [
-            {"chunk_id": f"c{i}", "text": f"텍스트 {i}", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 0.0,
-             "end_time": 10.0, "chunk_index": i}
+            {
+                "chunk_id": f"c{i}",
+                "text": f"텍스트 {i}",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": i,
+            }
             for i in range(5)
         ]
         fts_results = [
-            {"chunk_id": "c2", "text": "텍스트 2", "meeting_id": "m1",
-             "date": "2026-03-04", "speakers": "S0", "start_time": 0.0,
-             "end_time": 10.0, "chunk_index": 2},
+            {
+                "chunk_id": "c2",
+                "text": "텍스트 2",
+                "meeting_id": "m1",
+                "date": "2026-03-04",
+                "speakers": "S0",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 2,
+            },
         ]
 
         combined = _combine_rrf(
@@ -618,7 +705,9 @@ class TestSearchGracefulDegradation:
             await engine.search("")
 
     async def test_search_with_no_chroma_returns_fts_only(
-        self, fts_db_with_data: Path, tmp_path: Path,
+        self,
+        fts_db_with_data: Path,
+        tmp_path: Path,
     ) -> None:
         """ChromaDB 없이도 FTS5 결과만으로 검색이 동작하는지 확인한다."""
         config = MagicMock()
@@ -675,9 +764,14 @@ class TestSearchGracefulDegradation:
         response = SearchResponse(
             results=[
                 SearchResult(
-                    chunk_id="c1", text="텍스트", score=0.5,
-                    meeting_id="m1", date="2026-03-04",
-                    speakers=["S0"], start_time=0.0, end_time=10.0,
+                    chunk_id="c1",
+                    text="텍스트",
+                    score=0.5,
+                    meeting_id="m1",
+                    date="2026-03-04",
+                    speakers=["S0"],
+                    start_time=0.0,
+                    end_time=10.0,
                 ),
             ],
             query="테스트",
@@ -700,7 +794,8 @@ class TestJobQueueRetry:
     """작업 큐의 재시도 로직과 상태 전이를 통합 검증한다."""
 
     def test_full_lifecycle_queued_to_completed(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """작업이 queued → recording → ... → completed 전체 사이클을 완료하는지 확인한다."""
         job_id = queue.add_job("meeting_001", "/audio/test.m4a")
@@ -723,7 +818,8 @@ class TestJobQueueRetry:
         assert job.status == "completed"
 
     def test_fail_and_retry_cycle(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """failed → retry → queued 사이클이 올바르게 동작하는지 확인한다."""
         job_id = queue.add_job("meeting_fail", "/audio/fail.m4a")
@@ -732,7 +828,8 @@ class TestJobQueueRetry:
 
         # 전사 중 실패
         queue.update_status(
-            job_id, JobStatus.FAILED,
+            job_id,
+            JobStatus.FAILED,
             error_message="STT 모델 로드 실패",
         )
         job = queue.get_job(job_id)
@@ -747,7 +844,8 @@ class TestJobQueueRetry:
         assert job.error_message == ""
 
     def test_retry_count_increments(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """재시도 시 retry_count가 정확히 증가하는지 확인한다."""
         job_id = queue.add_job("meeting_retry", "/audio/retry.m4a")
@@ -756,7 +854,8 @@ class TestJobQueueRetry:
             # queued → recording → failed
             queue.update_status(job_id, JobStatus.RECORDING)
             queue.update_status(
-                job_id, JobStatus.FAILED,
+                job_id,
+                JobStatus.FAILED,
                 error_message=f"에러 #{attempt + 1}",
             )
             job = queue.get_job(job_id)
@@ -768,7 +867,8 @@ class TestJobQueueRetry:
                 assert job.retry_count == attempt + 1
 
     def test_max_retries_exceeded(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """최대 재시도 횟수 초과 시 MaxRetriesExceededError가 발생하는지 확인한다."""
         job_id = queue.add_job("meeting_max", "/audio/max.m4a")
@@ -787,7 +887,8 @@ class TestJobQueueRetry:
             queue.retry_job(job_id)
 
     def test_invalid_transition_rejected(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """유효하지 않은 상태 전이가 거부되는지 확인한다."""
         job_id = queue.add_job("meeting_invalid", "/audio/inv.m4a")
@@ -801,16 +902,20 @@ class TestJobQueueRetry:
             queue.update_status(job_id, JobStatus.MERGING)
 
     def test_completed_no_further_transition(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """completed 상태에서 추가 전이가 불가능한지 확인한다."""
         job_id = queue.add_job("meeting_done", "/audio/done.m4a")
 
         # 전체 사이클 완료
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             queue.update_status(job_id, status)
 
@@ -819,7 +924,8 @@ class TestJobQueueRetry:
             queue.update_status(job_id, JobStatus.FAILED)
 
     def test_retry_all_failed(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """retry_all_failed가 재시도 가능한 실패 작업만 재시도하는지 확인한다."""
         # 2개 작업 등록 후 실패
@@ -841,7 +947,8 @@ class TestJobQueueRetry:
             assert job.retry_count == 1
 
     def test_duplicate_meeting_id_rejected(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """동일 meeting_id 중복 등록이 거부되는지 확인한다."""
         queue.add_job("meeting_dup", "/audio/dup.m4a")
@@ -850,14 +957,16 @@ class TestJobQueueRetry:
             queue.add_job("meeting_dup", "/audio/dup2.m4a")
 
     def test_get_nonexistent_job_raises(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """존재하지 않는 작업 조회 시 JobNotFoundError가 발생하는지 확인한다."""
         with pytest.raises(JobNotFoundError):
             queue.get_job(99999)
 
     def test_count_by_status(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """상태별 작업 수 집계가 정확한지 확인한다."""
         queue.add_job("m_count_1", "/audio/c1.m4a")
@@ -870,7 +979,8 @@ class TestJobQueueRetry:
         assert counts.get("recording", 0) == 1
 
     def test_multiple_jobs_independent_states(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """여러 작업이 독립적으로 상태를 관리하는지 확인한다."""
         id1 = queue.add_job("m_ind_1", "/audio/i1.m4a")
@@ -891,34 +1001,43 @@ class TestAsyncJobQueue:
     """AsyncJobQueue 비동기 래퍼를 통합 검증한다."""
 
     async def test_async_full_cycle(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기 래퍼로 전체 작업 사이클이 동작하는지 확인한다."""
         job_id = await async_queue.add_job(
-            "meeting_async", "/audio/async.m4a",
+            "meeting_async",
+            "/audio/async.m4a",
         )
         job = await async_queue.get_job(job_id)
         assert job.status == "queued"
 
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             job = await async_queue.update_status(job_id, status)
 
         assert job.status == "completed"
 
     async def test_async_retry(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기 래퍼로 재시도가 동작하는지 확인한다."""
         job_id = await async_queue.add_job(
-            "meeting_async_retry", "/audio/ar.m4a",
+            "meeting_async_retry",
+            "/audio/ar.m4a",
         )
         await async_queue.update_status(job_id, JobStatus.RECORDING)
         await async_queue.update_status(
-            job_id, JobStatus.FAILED, "비동기 에러",
+            job_id,
+            JobStatus.FAILED,
+            "비동기 에러",
         )
 
         job = await async_queue.retry_job(job_id)
@@ -1079,7 +1198,9 @@ class TestChunkQuality:
         utterances = [
             _make_utterance(
                 "첫 번째 긴 발화입니다 여러 내용이 포함되어 있습니다 상세한 설명을 담고 있습니다",
-                "SPEAKER_00", 0.0, 10.0,
+                "SPEAKER_00",
+                0.0,
+                10.0,
             ),
             _make_utterance("짧은 발화", "SPEAKER_00", 10.0, 12.0),
         ]
@@ -1216,7 +1337,8 @@ class TestEndToEnd:
     """청크 생성부터 FTS5 저장, 검색까지의 전체 파이프라인을 검증한다."""
 
     async def test_chunk_to_fts_to_search(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """청크 생성 → FTS5 저장 → 키워드 검색 파이프라인을 검증한다."""
         # 1단계: 청크 생성
@@ -1233,15 +1355,21 @@ class TestEndToEnd:
         utterances = [
             _make_utterance(
                 "프로젝트 일정 회의를 시작하겠습니다",
-                "SPEAKER_00", 0.0, 10.0,
+                "SPEAKER_00",
+                0.0,
+                10.0,
             ),
             _make_utterance(
                 "네 개발 일정은 다음 주 금요일 마감입니다",
-                "SPEAKER_01", 10.0, 20.0,
+                "SPEAKER_01",
+                10.0,
+                20.0,
             ),
             _make_utterance(
                 "서버 배포는 수요일에 진행합니다",
-                "SPEAKER_00", 20.0, 30.0,
+                "SPEAKER_00",
+                20.0,
+                30.0,
             ),
         ]
         corrected = _make_corrected_result(utterances, num_speakers=2)
@@ -1255,16 +1383,18 @@ class TestEndToEnd:
 
         fts_data = []
         for chunk in chunked.chunks:
-            fts_data.append({
-                "chunk_id": f"meeting_e2e_chunk_{chunk.chunk_index:04d}",
-                "text": chunk.text,
-                "meeting_id": chunk.meeting_id,
-                "date": chunk.date,
-                "speakers": ",".join(chunk.speakers),
-                "start_time": chunk.start_time,
-                "end_time": chunk.end_time,
-                "chunk_index": chunk.chunk_index,
-            })
+            fts_data.append(
+                {
+                    "chunk_id": f"meeting_e2e_chunk_{chunk.chunk_index:04d}",
+                    "text": chunk.text,
+                    "meeting_id": chunk.meeting_id,
+                    "date": chunk.date,
+                    "speakers": ",".join(chunk.speakers),
+                    "start_time": chunk.start_time,
+                    "end_time": chunk.end_time,
+                    "chunk_index": chunk.chunk_index,
+                }
+            )
         _insert_fts_chunks(db_path, fts_data)
 
         # 3단계: FTS5 검색
@@ -1279,7 +1409,8 @@ class TestEndToEnd:
         assert any("프로젝트" in t or "일정" in t for t in found_texts)
 
     async def test_chunk_to_fts_with_filter(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """청크 → FTS5 → 필터링 검색 파이프라인을 검증한다."""
         # 두 개의 다른 회의 청크 생성
@@ -1314,16 +1445,18 @@ class TestEndToEnd:
         all_chunks = []
         for chunked in [chunked1, chunked2]:
             for chunk in chunked.chunks:
-                all_chunks.append({
-                    "chunk_id": f"{chunk.meeting_id}_chunk_{chunk.chunk_index:04d}",
-                    "text": chunk.text,
-                    "meeting_id": chunk.meeting_id,
-                    "date": chunk.date,
-                    "speakers": ",".join(chunk.speakers),
-                    "start_time": chunk.start_time,
-                    "end_time": chunk.end_time,
-                    "chunk_index": chunk.chunk_index,
-                })
+                all_chunks.append(
+                    {
+                        "chunk_id": f"{chunk.meeting_id}_chunk_{chunk.chunk_index:04d}",
+                        "text": chunk.text,
+                        "meeting_id": chunk.meeting_id,
+                        "date": chunk.date,
+                        "speakers": ",".join(chunk.speakers),
+                        "start_time": chunk.start_time,
+                        "end_time": chunk.end_time,
+                        "chunk_index": chunk.chunk_index,
+                    }
+                )
         _insert_fts_chunks(db_path, all_chunks)
 
         # 필터 없이 검색 → 양쪽 모두 결과
@@ -1332,20 +1465,25 @@ class TestEndToEnd:
 
         # meeting_id 필터 → 특정 회의만
         results_a = _search_fts(
-            "인공지능", db_path, top_k=10,
+            "인공지능",
+            db_path,
+            top_k=10,
             meeting_id_filter="meeting_a",
         )
         assert all(r["meeting_id"] == "meeting_a" for r in results_a)
 
         # 날짜 필터 → 특정 날짜만
         results_date = _search_fts(
-            "인공지능", db_path, top_k=10,
+            "인공지능",
+            db_path,
+            top_k=10,
             date_filter="2026-03-05",
         )
         assert all(r["date"] == "2026-03-05" for r in results_date)
 
     async def test_rrf_with_real_fts_data(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """실제 FTS5 데이터와 모의 벡터 결과를 RRF로 결합하는 테스트."""
         # FTS5 DB 준비
@@ -1446,11 +1584,15 @@ class TestEndToEnd:
         utterances = [
             _make_utterance(
                 "이것은 충분히 긴 발화입니다 여러 내용을 담고 있습니다 토큰 수가 많아야 합니다",
-                "SPEAKER_00", 0.0, 15.0,
+                "SPEAKER_00",
+                0.0,
+                15.0,
             ),
             _make_utterance(
                 "두 번째 발화도 충분히 길어야 합니다 다양한 내용을 포함합니다",
-                "SPEAKER_01", 15.0, 30.0,
+                "SPEAKER_01",
+                15.0,
+                30.0,
             ),
         ]
         corrected = _make_corrected_result(utterances, num_speakers=2)

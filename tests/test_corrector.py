@@ -16,7 +16,6 @@ EXAONE 전사문 보정기 테스트 모듈 (Corrector Test Module)
 """
 
 import json
-from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -136,9 +135,7 @@ class Test프롬프트생성:
     def test_단일_발화(self) -> None:
         """발화 1개로 프롬프트를 생성한다."""
         utterances = [
-            MergedUtterance(
-                text="안녕하세요", speaker="S0", start=0.0, end=5.0
-            ),
+            MergedUtterance(text="안녕하세요", speaker="S0", start=0.0, end=5.0),
         ]
         prompt = _build_correction_prompt(utterances)
         assert prompt == "[1] 안녕하세요"
@@ -224,16 +221,22 @@ class TestCorrectedUtterance:
     def test_duration(self) -> None:
         """duration 프로퍼티 계산."""
         u = CorrectedUtterance(
-            text="t", original_text="t",
-            speaker="S0", start=3.0, end=8.0,
+            text="t",
+            original_text="t",
+            speaker="S0",
+            start=3.0,
+            end=8.0,
         )
         assert u.duration == pytest.approx(5.0)
 
     def test_to_dict(self) -> None:
         """딕셔너리 변환."""
         u = CorrectedUtterance(
-            text="보정", original_text="원본",
-            speaker="S0", start=0.0, end=3.0,
+            text="보정",
+            original_text="원본",
+            speaker="S0",
+            start=0.0,
+            end=3.0,
             was_corrected=True,
         )
         d = u.to_dict()
@@ -253,12 +256,18 @@ class TestCorrectedResult:
         result = CorrectedResult(
             utterances=[
                 CorrectedUtterance(
-                    text="a", original_text="a",
-                    speaker="S0", start=0.0, end=5.0,
+                    text="a",
+                    original_text="a",
+                    speaker="S0",
+                    start=0.0,
+                    end=5.0,
                 ),
                 CorrectedUtterance(
-                    text="b", original_text="b",
-                    speaker="S1", start=5.0, end=12.0,
+                    text="b",
+                    original_text="b",
+                    speaker="S1",
+                    start=5.0,
+                    end=12.0,
                 ),
             ],
             num_speakers=2,
@@ -269,7 +278,9 @@ class TestCorrectedResult:
     def test_total_duration_빈결과(self) -> None:
         """빈 utterance 리스트에서 total_duration은 0."""
         result = CorrectedResult(
-            utterances=[], num_speakers=0, audio_path="/tmp/t.wav",
+            utterances=[],
+            num_speakers=0,
+            audio_path="/tmp/t.wav",
         )
         assert result.total_duration == pytest.approx(0.0)
 
@@ -278,16 +289,25 @@ class TestCorrectedResult:
         result = CorrectedResult(
             utterances=[
                 CorrectedUtterance(
-                    text="a", original_text="a",
-                    speaker="S1", start=0, end=5,
+                    text="a",
+                    original_text="a",
+                    speaker="S1",
+                    start=0,
+                    end=5,
                 ),
                 CorrectedUtterance(
-                    text="b", original_text="b",
-                    speaker="S0", start=5, end=10,
+                    text="b",
+                    original_text="b",
+                    speaker="S0",
+                    start=5,
+                    end=10,
                 ),
                 CorrectedUtterance(
-                    text="c", original_text="c",
-                    speaker="S1", start=10, end=15,
+                    text="c",
+                    original_text="c",
+                    speaker="S1",
+                    start=10,
+                    end=15,
                 ),
             ],
             num_speakers=2,
@@ -300,10 +320,14 @@ class TestCorrectedResult:
         result = CorrectedResult(
             utterances=[
                 CorrectedUtterance(
-                    text="a", original_text="a",
-                    speaker="S0", start=0, end=5,
+                    text="a",
+                    original_text="a",
+                    speaker="S0",
+                    start=0,
+                    end=5,
                 ),
-            ] * 4,
+            ]
+            * 4,
             num_speakers=1,
             audio_path="/tmp/t.wav",
             total_corrected=2,
@@ -313,7 +337,9 @@ class TestCorrectedResult:
     def test_correction_rate_빈결과(self) -> None:
         """빈 결과에서 correction_rate는 0."""
         result = CorrectedResult(
-            utterances=[], num_speakers=0, audio_path="/tmp/t.wav",
+            utterances=[],
+            num_speakers=0,
+            audio_path="/tmp/t.wav",
         )
         assert result.correction_rate == pytest.approx(0.0)
 
@@ -322,13 +348,19 @@ class TestCorrectedResult:
         original = CorrectedResult(
             utterances=[
                 CorrectedUtterance(
-                    text="보정된 텍스트", original_text="보정안된 텍스트",
-                    speaker="SPEAKER_00", start=0.0, end=5.0,
+                    text="보정된 텍스트",
+                    original_text="보정안된 텍스트",
+                    speaker="SPEAKER_00",
+                    start=0.0,
+                    end=5.0,
                     was_corrected=True,
                 ),
                 CorrectedUtterance(
-                    text="원본 유지", original_text="원본 유지",
-                    speaker="SPEAKER_01", start=5.0, end=10.0,
+                    text="원본 유지",
+                    original_text="원본 유지",
+                    speaker="SPEAKER_01",
+                    start=5.0,
+                    end=10.0,
                     was_corrected=False,
                 ),
             ],
@@ -360,8 +392,11 @@ class TestCorrectedResult:
         original = CorrectedResult(
             utterances=[
                 CorrectedUtterance(
-                    text="한국어 보정 테스트", original_text="한국어 보정 테스트",
-                    speaker="S0", start=0.0, end=5.0,
+                    text="한국어 보정 테스트",
+                    original_text="한국어 보정 테스트",
+                    speaker="S0",
+                    start=0.0,
+                    end=5.0,
                 ),
             ],
             num_speakers=1,
@@ -389,9 +424,11 @@ class TestCorrector정상보정:
 
     async def test_단일_발화_보정(self) -> None:
         """발화 1개를 보정한다."""
-        merged = _make_merged_result([
-            ("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         # acquire()가 반환하는 backend Mock의 chat 동작 설정
@@ -414,18 +451,18 @@ class TestCorrector정상보정:
 
     async def test_다중_발화_보정(self) -> None:
         """여러 발화를 보정한다."""
-        merged = _make_merged_result([
-            ("화의 안건을 말슴드리겠습니다", "SPEAKER_00", 0.0, 5.0),
-            ("네 알겠슴니다", "SPEAKER_01", 5.0, 10.0),
-            ("다음 안건으로 넘어가죠", "SPEAKER_00", 10.0, 15.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("화의 안건을 말슴드리겠습니다", "SPEAKER_00", 0.0, 5.0),
+                ("네 알겠슴니다", "SPEAKER_01", 5.0, 10.0),
+                ("다음 안건으로 넘어가죠", "SPEAKER_00", 10.0, 15.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
         backend.chat.return_value = (
-            "[1] 회의 안건을 말씀드리겠습니다\n"
-            "[2] 네 알겠습니다\n"
-            "[3] 다음 안건으로 넘어가죠"
+            "[1] 회의 안건을 말씀드리겠습니다\n[2] 네 알겠습니다\n[3] 다음 안건으로 넘어가죠"
         )
 
         corrector = Corrector.__new__(Corrector)
@@ -445,9 +482,11 @@ class TestCorrector정상보정:
 
     async def test_보정_불필요_시_원본_유지(self) -> None:
         """보정이 필요 없는 텍스트는 원본 그대로 유지한다."""
-        merged = _make_merged_result([
-            ("정확한 문장입니다", "SPEAKER_00", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("정확한 문장입니다", "SPEAKER_00", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -471,10 +510,7 @@ class TestCorrector배치처리:
 
     async def test_배치_크기_미만(self) -> None:
         """발화가 배치 크기(10)보다 적을 때 단일 배치로 처리."""
-        utterances = [
-            (f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0)
-            for i in range(3)
-        ]
+        utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(3)]
         merged = _make_merged_result(utterances)
 
         manager = _make_mock_manager()
@@ -491,15 +527,12 @@ class TestCorrector배치처리:
 
     async def test_배치_크기_초과_분할(self) -> None:
         """발화가 배치 크기를 초과하면 여러 배치로 분할한다."""
-        utterances = [
-            (f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0)
-            for i in range(15)
-        ]
+        utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(15)]
         merged = _make_merged_result(utterances)
 
         # 배치1 응답 (10개), 배치2 응답 (5개)
-        batch1_lines = "\n".join(f"[{i+1}] 발화 {i}" for i in range(10))
-        batch2_lines = "\n".join(f"[{i+1}] 발화 {i+10}" for i in range(5))
+        batch1_lines = "\n".join(f"[{i + 1}] 발화 {i}" for i in range(10))
+        batch2_lines = "\n".join(f"[{i + 1}] 발화 {i + 10}" for i in range(5))
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -515,13 +548,10 @@ class TestCorrector배치처리:
 
     async def test_정확히_배치_크기(self) -> None:
         """발화 수가 정확히 배치 크기와 같을 때."""
-        utterances = [
-            (f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0)
-            for i in range(10)
-        ]
+        utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(10)]
         merged = _make_merged_result(utterances)
 
-        lines = "\n".join(f"[{i+1}] 발화 {i}" for i in range(10))
+        lines = "\n".join(f"[{i + 1}] 발화 {i}" for i in range(10))
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -545,7 +575,9 @@ class TestCorrector에러처리:
     async def test_빈_입력(self) -> None:
         """빈 MergedResult로 보정 시 EmptyInputError 발생."""
         merged = MergedResult(
-            utterances=[], num_speakers=0, audio_path="/tmp/t.wav",
+            utterances=[],
+            num_speakers=0,
+            audio_path="/tmp/t.wav",
         )
 
         manager = _make_mock_manager()
@@ -559,16 +591,16 @@ class TestCorrector에러처리:
 
     async def test_LLM_연결_실패(self) -> None:
         """LLM 백엔드 연결 실패 시 LLMConnectionError 발생."""
-        merged = _make_merged_result([
-            ("테스트", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("테스트", "S0", 0.0, 5.0),
+            ]
+        )
 
         # acquire에서 LLMConnectionError 발생하도록 설정
         manager = MagicMock()
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            side_effect=LLMConnectionError("연결 실패")
-        )
+        ctx.__aenter__ = AsyncMock(side_effect=LLMConnectionError("연결 실패"))
         ctx.__aexit__ = AsyncMock(return_value=False)
         manager.acquire.return_value = ctx
 
@@ -581,10 +613,12 @@ class TestCorrector에러처리:
 
     async def test_배치_실패_시_원본_유지(self) -> None:
         """LLM 호출 실패 시 원본 텍스트를 유지한다."""
-        merged = _make_merged_result([
-            ("오타있는 텍스트", "S0", 0.0, 5.0),
-            ("또다른 텍스트", "S1", 5.0, 10.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("오타있는 텍스트", "S0", 0.0, 5.0),
+                ("또다른 텍스트", "S1", 5.0, 10.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -606,9 +640,11 @@ class TestCorrector에러처리:
 
     async def test_LLM_타임아웃(self) -> None:
         """LLM 타임아웃 발생 시 원본 유지 (배치 단위 graceful degradation)."""
-        merged = _make_merged_result([
-            ("텍스트", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("텍스트", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -626,9 +662,11 @@ class TestCorrector에러처리:
 
     async def test_잘못된_응답_포맷(self) -> None:
         """LLM이 잘못된 포맷으로 응답할 때 원본 유지."""
-        merged = _make_merged_result([
-            ("테스트", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("테스트", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -646,9 +684,11 @@ class TestCorrector에러처리:
 
     async def test_빈_content_응답(self) -> None:
         """LLM 응답이 빈 문자열일 때 원본 유지."""
-        merged = _make_merged_result([
-            ("테스트", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("테스트", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -678,9 +718,11 @@ class TestCorrector한국어처리:
         # NFD 형식의 한국어 (자모 분리형)
         nfd_text = unicodedata.normalize("NFD", "한국어")
 
-        merged = _make_merged_result([
-            (nfd_text, "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                (nfd_text, "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -694,15 +736,15 @@ class TestCorrector한국어처리:
         result = await corrector.correct(merged)
 
         # NFC 정규화 확인
-        assert result.utterances[0].text == unicodedata.normalize(
-            "NFC", "한국어 보정"
-        )
+        assert result.utterances[0].text == unicodedata.normalize("NFC", "한국어 보정")
 
     async def test_한국어_조사_보정(self) -> None:
         """한국어 조사 오류 보정 시나리오."""
-        merged = _make_merged_result([
-            ("프로젝트를 진행 상황을 말씀해 주세요", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("프로젝트를 진행 상황을 말씀해 주세요", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -719,9 +761,11 @@ class TestCorrector한국어처리:
 
     async def test_특수문자_포함_보정(self) -> None:
         """특수문자가 포함된 텍스트의 보정."""
-        merged = _make_merged_result([
-            ("매출이 120프로 증가했습니다!", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("매출이 120프로 증가했습니다!", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -767,6 +811,7 @@ class TestCreateBackendFromCorrector:
             backend = corrector._create_backend()
 
         from core.llm_backend import OllamaBackend
+
         assert isinstance(backend, OllamaBackend)
 
     def test_백엔드_생성_연결_실패(self) -> None:
@@ -783,9 +828,7 @@ class TestCreateBackendFromCorrector:
         corrector._config.llm.request_timeout_seconds = 120
 
         with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.URLError(
-                "Connection refused"
-            )
+            mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
             with pytest.raises(LLMConnectionError):
                 corrector._create_backend()
@@ -842,13 +885,12 @@ class TestCallOllama:
 
     def test_타임아웃(self) -> None:
         """타임아웃 시 OllamaTimeoutError 발생."""
-        from core.ollama_client import chat as ollama_chat
         import urllib.error
 
+        from core.ollama_client import chat as ollama_chat
+
         with patch("core.ollama_client.urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.URLError(
-                "urlopen error timed out"
-            )
+            mock_urlopen.side_effect = urllib.error.URLError("urlopen error timed out")
 
             with pytest.raises(OllamaTimeoutError):
                 ollama_chat(
@@ -887,11 +929,13 @@ class TestErrorHierarchy:
     def test_OllamaConnectionError_is_OllamaError(self) -> None:
         """OllamaConnectionError는 OllamaError의 하위 클래스."""
         from core.ollama_client import OllamaError
+
         assert issubclass(OllamaConnectionError, OllamaError)
 
     def test_OllamaTimeoutError_is_OllamaError(self) -> None:
         """OllamaTimeoutError는 OllamaError의 하위 클래스."""
         from core.ollama_client import OllamaError
+
         assert issubclass(OllamaTimeoutError, OllamaError)
 
     def test_EmptyInputError_is_CorrectionError(self) -> None:
@@ -907,9 +951,11 @@ class TestModelManagerIntegration:
 
     async def test_acquire_호출_확인(self) -> None:
         """correct() 실행 시 ModelLoadManager.acquire()가 호출되는지 확인."""
-        merged = _make_merged_result([
-            ("테스트", "S0", 0.0, 5.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("테스트", "S0", 0.0, 5.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -928,10 +974,12 @@ class TestModelManagerIntegration:
 
     async def test_화자_정보_보존(self) -> None:
         """보정 후에도 화자 정보가 유지되는지 확인."""
-        merged = _make_merged_result([
-            ("발화1", "SPEAKER_00", 0.0, 5.0),
-            ("발화2", "SPEAKER_01", 5.0, 10.0),
-        ])
+        merged = _make_merged_result(
+            [
+                ("발화1", "SPEAKER_00", 0.0, 5.0),
+                ("발화2", "SPEAKER_01", 5.0, 10.0),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value
@@ -949,9 +997,11 @@ class TestModelManagerIntegration:
 
     async def test_시간_정보_보존(self) -> None:
         """보정 후에도 시간 정보가 유지되는지 확인."""
-        merged = _make_merged_result([
-            ("텍스트", "S0", 3.5, 8.2),
-        ])
+        merged = _make_merged_result(
+            [
+                ("텍스트", "S0", 3.5, 8.2),
+            ]
+        )
 
         manager = _make_mock_manager()
         backend = manager.acquire.return_value.__aenter__.return_value

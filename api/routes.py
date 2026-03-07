@@ -18,9 +18,8 @@ import json
 import logging
 import re
 import threading
-import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -169,10 +168,10 @@ class SearchRequest(BaseModel):
     """
 
     query: str = Field(..., min_length=1, description="검색 쿼리")
-    date_filter: Optional[str] = None
-    speaker_filter: Optional[str] = None
-    meeting_id_filter: Optional[str] = None
-    top_k: Optional[int] = Field(None, ge=1, le=20)
+    date_filter: str | None = None
+    speaker_filter: str | None = None
+    meeting_id_filter: str | None = None
+    top_k: int | None = Field(None, ge=1, le=20)
 
 
 class SearchResultItem(BaseModel):
@@ -235,10 +234,10 @@ class ChatRequest(BaseModel):
     """
 
     query: str = Field(..., min_length=1, description="사용자 질문")
-    session_id: Optional[str] = None
-    meeting_id_filter: Optional[str] = None
-    date_filter: Optional[str] = None
-    speaker_filter: Optional[str] = None
+    session_id: str | None = None
+    meeting_id_filter: str | None = None
+    date_filter: str | None = None
+    speaker_filter: str | None = None
 
 
 class TranscriptUtteranceItem(BaseModel):
@@ -340,7 +339,7 @@ class ChatResponse(BaseModel):
     query: str
     has_context: bool = True
     llm_used: bool = True
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 # === 헬퍼 함수 ===
@@ -470,13 +469,13 @@ async def get_status(request: Request) -> StatusResponse:
 
         # 진행 중인 상태 목록 (queued, completed, failed 제외)
         active_statuses = {
-            "recording", "transcribing", "diarizing",
-            "merging", "embedding",
+            "recording",
+            "transcribing",
+            "diarizing",
+            "merging",
+            "embedding",
         }
-        active_count = sum(
-            count for status, count in summary.items()
-            if status in active_statuses
-        )
+        active_count = sum(count for status, count in summary.items() if status in active_statuses)
 
         # 녹음 상태 확인
         recorder = getattr(request.app.state, "recorder", None)
@@ -532,7 +531,7 @@ async def get_meetings(
 
         # PERF: 메모리에서 슬라이싱으로 페이지네이션 적용
         # (SQLite 쿼리에 LIMIT/OFFSET 추가 시 JobQueue 인터페이스 변경 필요)
-        paged_jobs = all_jobs[offset:offset + limit]
+        paged_jobs = all_jobs[offset : offset + limit]
 
         meetings = [
             MeetingItem(
@@ -581,8 +580,10 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
     try:
         # meeting_id로 작업 조회 (동기 함수를 비동기로 래핑)
         import asyncio
+
         job = await asyncio.to_thread(
-            queue.queue.get_job_by_meeting_id, meeting_id,
+            queue.queue.get_job_by_meeting_id,
+            meeting_id,
         )
 
         if job is None:
@@ -616,7 +617,8 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
     response_model=TranscriptResponse,
 )
 async def get_transcript(
-    request: Request, meeting_id: str,
+    request: Request,
+    meeting_id: str,
 ) -> TranscriptResponse:
     """특정 회의의 전사문(보정된 발화 목록)을 반환한다.
 
@@ -690,7 +692,8 @@ async def get_transcript(
     response_model=SummaryResponse,
 )
 async def get_summary(
-    request: Request, meeting_id: str,
+    request: Request,
+    meeting_id: str,
 ) -> SummaryResponse:
     """특정 회의의 AI 요약(회의록)을 반환한다.
 
@@ -728,15 +731,15 @@ async def get_summary(
 
         # 마크다운 파일 읽기
         if summary_md_path.is_file():
+
             def _read_md() -> str:
                 return summary_md_path.read_text(encoding="utf-8")
+
             markdown = await asyncio.to_thread(_read_md)
 
         # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
         if summary_json_path.is_file():
-            meta = await asyncio.to_thread(
-                _json_cache.get, summary_json_path
-            )
+            meta = await asyncio.to_thread(_json_cache.get, summary_json_path)
 
             # JSON에 마크다운이 포함되어 있고 파일이 없는 경우 대체
             if not markdown and meta.get("markdown"):
@@ -935,8 +938,8 @@ class RecordingStatusResponse(BaseModel):
     state: str
     is_recording: bool = False
     duration_seconds: float = 0.0
-    meeting_id: Optional[str] = None
-    device: Optional[str] = None
+    meeting_id: str | None = None
+    device: str | None = None
     is_system_audio: bool = False
 
 
@@ -961,7 +964,7 @@ class RecordingStartRequest(BaseModel):
         meeting_id: 회의 식별자 (선택, 없으면 자동 생성)
     """
 
-    meeting_id: Optional[str] = None
+    meeting_id: str | None = None
 
 
 @router.get("/recording/status", response_model=RecordingStatusResponse)
@@ -984,7 +987,7 @@ async def get_recording_status(
 @router.post("/recording/start")
 async def start_recording(
     request: Request,
-    body: Optional[RecordingStartRequest] = None,
+    body: RecordingStartRequest | None = None,
 ) -> dict[str, Any]:
     """수동 녹음을 시작한다.
 

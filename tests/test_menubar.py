@@ -32,7 +32,6 @@ from ui.menubar import (
     parse_status_response,
 )
 
-
 # === 헬퍼 함수 ===
 
 
@@ -103,9 +102,7 @@ class TestBuildApiUrl:
         config = _make_test_config(tmp_path)
 
         assert build_api_url(config, "/api/health").endswith("/api/health")
-        assert build_api_url(config, "/static/index.html").endswith(
-            "/static/index.html"
-        )
+        assert build_api_url(config, "/static/index.html").endswith("/static/index.html")
 
 
 # === TestDetermineStatus ===

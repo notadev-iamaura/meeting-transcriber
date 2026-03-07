@@ -126,35 +126,41 @@ class TestProcessCheck:
             await detector._check_zoom_process()
 
         mock_exec.assert_called_once_with(
-            "pgrep", "-f", "CptHost",
+            "pgrep",
+            "-f",
+            "CptHost",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
 
     async def test_pgrep_미설치_시_에러(self, detector: ZoomDetector) -> None:
         """pgrep 명령이 없을 때 ProcessCheckError가 발생하는지 검증."""
-        with patch(
-            "asyncio.create_subprocess_exec",
-            side_effect=FileNotFoundError("pgrep not found"),
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=FileNotFoundError("pgrep not found"),
+            ),
+            pytest.raises(ProcessCheckError, match="pgrep 명령을 찾을 수 없습니다"),
         ):
-            with pytest.raises(ProcessCheckError, match="pgrep 명령을 찾을 수 없습니다"):
-                await detector._check_zoom_process()
+            await detector._check_zoom_process()
 
     async def test_OS_에러_시_에러(self, detector: ZoomDetector) -> None:
         """OSError 발생 시 ProcessCheckError로 래핑되는지 검증."""
-        with patch(
-            "asyncio.create_subprocess_exec",
-            side_effect=OSError("permission denied"),
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=OSError("permission denied"),
+            ),
+            pytest.raises(ProcessCheckError, match="OS 에러"),
         ):
-            with pytest.raises(ProcessCheckError, match="OS 에러"):
-                await detector._check_zoom_process()
+            await detector._check_zoom_process()
 
     async def test_타임아웃_시_이전_상태_유지(self, detector: ZoomDetector) -> None:
         """pgrep 타임아웃 시 이전 상태를 유지하는지 검증."""
         detector._is_meeting_active = True
 
         mock_proc = AsyncMock()
-        mock_proc.wait = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_proc.wait = AsyncMock(side_effect=TimeoutError())
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await detector._check_zoom_process()
@@ -167,7 +173,7 @@ class TestProcessCheck:
         detector._is_meeting_active = False
 
         mock_proc = AsyncMock()
-        mock_proc.wait = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_proc.wait = AsyncMock(side_effect=TimeoutError())
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await detector._check_zoom_process()
@@ -606,7 +612,9 @@ class TestCustomProcessName:
 
         # 커스텀 프로세스명이 전달되었는지 확인
         mock_exec.assert_called_once_with(
-            "pgrep", "-f", "CustomProcess",
+            "pgrep",
+            "-f",
+            "CustomProcess",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

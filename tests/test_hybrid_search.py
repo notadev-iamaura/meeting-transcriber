@@ -295,16 +295,18 @@ class TestCombineRrf:
 
     def test_speakers_문자열_파싱(self) -> None:
         """speakers가 콤마 문자열이면 리스트로 변환한다."""
-        vector = [{
-            "chunk_id": "c1",
-            "text": "t",
-            "meeting_id": "m1",
-            "date": "d",
-            "speakers": "SPEAKER_00,SPEAKER_01",
-            "start_time": 0.0,
-            "end_time": 10.0,
-            "chunk_index": 0,
-        }]
+        vector = [
+            {
+                "chunk_id": "c1",
+                "text": "t",
+                "meeting_id": "m1",
+                "date": "d",
+                "speakers": "SPEAKER_00,SPEAKER_01",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 0,
+            }
+        ]
 
         results = _combine_rrf(vector, [], 0.6, 0.4, 60, 10)
 
@@ -312,16 +314,18 @@ class TestCombineRrf:
 
     def test_speakers_리스트_유지(self) -> None:
         """speakers가 이미 리스트이면 그대로 유지한다."""
-        vector = [{
-            "chunk_id": "c1",
-            "text": "t",
-            "meeting_id": "m1",
-            "date": "d",
-            "speakers": ["SPEAKER_00"],
-            "start_time": 0.0,
-            "end_time": 10.0,
-            "chunk_index": 0,
-        }]
+        vector = [
+            {
+                "chunk_id": "c1",
+                "text": "t",
+                "meeting_id": "m1",
+                "date": "d",
+                "speakers": ["SPEAKER_00"],
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "chunk_index": 0,
+            }
+        ]
 
         results = _combine_rrf(vector, [], 0.6, 0.4, 60, 10)
 
@@ -399,16 +403,56 @@ class TestSearchFts:
 
         # 테스트 데이터 삽입
         test_data = [
-            ("m1_c0", "프로젝트 일정 논의 내용입니다", "meeting_001",
-             "2026-03-04", "SPEAKER_00,SPEAKER_01", 0.0, 30.0, 0),
-            ("m1_c1", "API 엔드포인트 설계에 대해 논의했습니다", "meeting_001",
-             "2026-03-04", "SPEAKER_00", 30.0, 60.0, 1),
-            ("m1_c2", "데이터베이스 스키마 변경 사항 검토", "meeting_001",
-             "2026-03-04", "SPEAKER_01", 60.0, 90.0, 2),
-            ("m2_c0", "분기 매출 보고서 프로젝트 업데이트", "meeting_002",
-             "2026-03-05", "SPEAKER_02", 0.0, 30.0, 0),
-            ("m2_c1", "채용 일정 및 면접 프로세스", "meeting_002",
-             "2026-03-05", "SPEAKER_02,SPEAKER_03", 30.0, 60.0, 1),
+            (
+                "m1_c0",
+                "프로젝트 일정 논의 내용입니다",
+                "meeting_001",
+                "2026-03-04",
+                "SPEAKER_00,SPEAKER_01",
+                0.0,
+                30.0,
+                0,
+            ),
+            (
+                "m1_c1",
+                "API 엔드포인트 설계에 대해 논의했습니다",
+                "meeting_001",
+                "2026-03-04",
+                "SPEAKER_00",
+                30.0,
+                60.0,
+                1,
+            ),
+            (
+                "m1_c2",
+                "데이터베이스 스키마 변경 사항 검토",
+                "meeting_001",
+                "2026-03-04",
+                "SPEAKER_01",
+                60.0,
+                90.0,
+                2,
+            ),
+            (
+                "m2_c0",
+                "분기 매출 보고서 프로젝트 업데이트",
+                "meeting_002",
+                "2026-03-05",
+                "SPEAKER_02",
+                0.0,
+                30.0,
+                0,
+            ),
+            (
+                "m2_c1",
+                "채용 일정 및 면접 프로세스",
+                "meeting_002",
+                "2026-03-05",
+                "SPEAKER_02,SPEAKER_03",
+                30.0,
+                60.0,
+                1,
+            ),
         ]
 
         for data in test_data:
@@ -449,9 +493,7 @@ class TestSearchFts:
         db_path = tmp_path / "test.db"
         self._setup_fts_db(db_path)
 
-        results = _search_fts(
-            "프로젝트", db_path, top_k=5, date_filter="2026-03-05"
-        )
+        results = _search_fts("프로젝트", db_path, top_k=5, date_filter="2026-03-05")
 
         # 2026-03-05 날짜의 결과만 반환
         for r in results:
@@ -462,9 +504,7 @@ class TestSearchFts:
         db_path = tmp_path / "test.db"
         self._setup_fts_db(db_path)
 
-        results = _search_fts(
-            "프로젝트", db_path, top_k=5, speaker_filter="SPEAKER_02"
-        )
+        results = _search_fts("프로젝트", db_path, top_k=5, speaker_filter="SPEAKER_02")
 
         # SPEAKER_02가 포함된 결과만 반환
         for r in results:
@@ -475,9 +515,7 @@ class TestSearchFts:
         db_path = tmp_path / "test.db"
         self._setup_fts_db(db_path)
 
-        results = _search_fts(
-            "프로젝트", db_path, top_k=5, meeting_id_filter="meeting_001"
-        )
+        results = _search_fts("프로젝트", db_path, top_k=5, meeting_id_filter="meeting_001")
 
         for r in results:
             assert r["meeting_id"] == "meeting_001"
@@ -608,9 +646,7 @@ class TestHybridSearchEngine:
 
         # PERF-005: 임베딩 모델 캐시 (테스트용 mock 모델 미리 설정)
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._embed_model = mock_model
         engine._embed_model_lock = threading.Lock()
 
@@ -639,9 +675,7 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
@@ -649,12 +683,15 @@ class TestHybridSearchEngine:
         vector_results = _make_vector_results(3)
         fts_results = _make_fts_results(3, offset=2)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=vector_results,
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=fts_results,
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=vector_results,
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=fts_results,
+            ),
         ):
             response = await engine.search("프로젝트 일정")
 
@@ -672,21 +709,22 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
         vector_results = _make_vector_results(3)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=vector_results,
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=[],  # FTS 실패 → 빈 결과
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=vector_results,
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=[],  # FTS 실패 → 빈 결과
+            ),
         ):
             response = await engine.search("테스트")
 
@@ -702,21 +740,22 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
         fts_results = _make_fts_results(3)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=[],  # 벡터 실패 → 빈 결과
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=fts_results,
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=[],  # 벡터 실패 → 빈 결과
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=fts_results,
+            ),
         ):
             response = await engine.search("테스트")
 
@@ -731,19 +770,20 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=[],
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=[],
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=[],
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=[],
+            ),
         ):
             response = await engine.search("없는내용")
 
@@ -755,20 +795,21 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=[],
-        ) as mock_vector, patch(
-            "search.hybrid_search._search_fts",
-            return_value=[],
-        ) as mock_fts:
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=[],
+            ) as _mock_vector,
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=[],
+            ) as _mock_fts,
+        ):
             response = await engine.search(
                 "테스트",
                 date_filter="2026-03-04",
@@ -788,21 +829,22 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
         vector_results = _make_vector_results(10)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=vector_results,
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=[],
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=vector_results,
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=[],
+            ),
         ):
             response = await engine.search("테스트", top_k=2)
 
@@ -813,9 +855,7 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._model_manager = _make_model_manager()
         ctx = engine._model_manager.acquire.return_value
         ctx.__aenter__ = AsyncMock(return_value=mock_model)
@@ -823,12 +863,15 @@ class TestHybridSearchEngine:
         # NFD 형태의 한국어 (분해형)
         nfd_query = "\u1112\u1161\u11ab\u1100\u116e\u11a8\u110b\u1165"  # "한국어" NFD
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            return_value=[],
-        ), patch(
-            "search.hybrid_search._search_fts",
-            return_value=[],
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                return_value=[],
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                return_value=[],
+            ),
         ):
             response = await engine.search(nfd_query)
 
@@ -840,9 +883,7 @@ class TestHybridSearchEngine:
         engine = self._create_engine()
 
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
 
         # _embed_query 직접 호출하여 접두사 확인
         engine._embed_query(mock_model, "테스트 쿼리")
@@ -878,9 +919,7 @@ class TestSearchVector:
         mock_collection = MagicMock()
         mock_collection.count.return_value = 0
 
-        results = _search_vector(
-            [0.1] * 384, mock_collection, top_k=5
-        )
+        results = _search_vector([0.1] * 384, mock_collection, top_k=5)
 
         assert results == []
 
@@ -894,30 +933,30 @@ class TestSearchVector:
         mock_collection.query.return_value = {
             "ids": [["c1", "c2"]],
             "documents": [["텍스트1", "텍스트2"]],
-            "metadatas": [[
-                {
-                    "meeting_id": "m1",
-                    "date": "2026-03-04",
-                    "speakers": "S0,S1",
-                    "start_time": 0.0,
-                    "end_time": 30.0,
-                    "chunk_index": 0,
-                },
-                {
-                    "meeting_id": "m1",
-                    "date": "2026-03-04",
-                    "speakers": "S0",
-                    "start_time": 30.0,
-                    "end_time": 60.0,
-                    "chunk_index": 1,
-                },
-            ]],
+            "metadatas": [
+                [
+                    {
+                        "meeting_id": "m1",
+                        "date": "2026-03-04",
+                        "speakers": "S0,S1",
+                        "start_time": 0.0,
+                        "end_time": 30.0,
+                        "chunk_index": 0,
+                    },
+                    {
+                        "meeting_id": "m1",
+                        "date": "2026-03-04",
+                        "speakers": "S0",
+                        "start_time": 30.0,
+                        "end_time": 60.0,
+                        "chunk_index": 1,
+                    },
+                ]
+            ],
             "distances": [[0.1, 0.2]],
         }
 
-        results = _search_vector(
-            [0.1] * 384, mock_collection, top_k=5
-        )
+        results = _search_vector([0.1] * 384, mock_collection, top_k=5)
 
         assert len(results) == 2
         assert results[0]["chunk_id"] == "c1"
@@ -987,9 +1026,7 @@ class TestPerformanceOptimizations:
 
         # mock 모델 로더 설정
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
 
         with patch.object(engine, "_load_model", return_value=mock_model) as mock_loader:
             # 첫 번째 호출: 모델 로드 실행
@@ -1067,16 +1104,13 @@ class TestPerformanceOptimizations:
 
     async def test_PERF010_병렬_검색_실행(self) -> None:
         """PERF-010: 벡터 검색과 FTS5 검색이 병렬로 실행되는지 확인한다."""
-        import asyncio
         import time
 
         engine = self._create_engine_with_caching()
 
         # mock 임베딩 모델 설정
         mock_model = MagicMock()
-        mock_model.encode.return_value = [
-            MagicMock(tolist=MagicMock(return_value=[0.1] * 384))
-        ]
+        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._embed_model = mock_model
 
         # 각 검색에 0.1초 지연을 추가하여 병렬 실행 확인
@@ -1088,12 +1122,15 @@ class TestPerformanceOptimizations:
             time.sleep(0.1)
             return _make_fts_results(2)
 
-        with patch(
-            "search.hybrid_search._search_vector",
-            side_effect=slow_vector_search,
-        ), patch(
-            "search.hybrid_search._search_fts",
-            side_effect=slow_fts_search,
+        with (
+            patch(
+                "search.hybrid_search._search_vector",
+                side_effect=slow_vector_search,
+            ),
+            patch(
+                "search.hybrid_search._search_fts",
+                side_effect=slow_fts_search,
+            ),
         ):
             start = time.monotonic()
             response = await engine.search("테스트 쿼리")

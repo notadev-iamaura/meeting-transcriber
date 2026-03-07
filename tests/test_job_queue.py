@@ -16,23 +16,20 @@ SQLite 작업 큐 테스트 모듈 (Job Queue Test Module)
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 
 from core.job_queue import (
+    VALID_TRANSITIONS,
     AsyncJobQueue,
     InvalidTransitionError,
-    Job,
     JobNotFoundError,
     JobQueue,
     JobQueueError,
     JobStatus,
     MaxRetriesExceededError,
-    VALID_TRANSITIONS,
 )
-
 
 # === 픽스처 ===
 
@@ -102,8 +99,7 @@ class TestJobQueueInitialize:
         """status 인덱스가 생성되었는지 확인한다."""
         conn = queue._ensure_connection()
         indexes = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='index' AND name='idx_jobs_status'"
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_jobs_status'"
         ).fetchone()
         assert indexes is not None
 
@@ -331,9 +327,12 @@ class TestUpdateStatus:
 
         # completed까지 이동
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             queue.update_status(job_id, status)
 
@@ -360,8 +359,10 @@ class TestUpdateStatus:
             if initial_status != JobStatus.QUEUED:
                 transitions_to = []
                 for status in [
-                    JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-                    JobStatus.DIARIZING, JobStatus.MERGING,
+                    JobStatus.RECORDING,
+                    JobStatus.TRANSCRIBING,
+                    JobStatus.DIARIZING,
+                    JobStatus.MERGING,
                     JobStatus.EMBEDDING,
                 ]:
                     transitions_to.append(status)
@@ -370,9 +371,7 @@ class TestUpdateStatus:
                 for status in transitions_to:
                     queue.update_status(job_id, status)
 
-            job = queue.update_status(
-                job_id, JobStatus.FAILED, error_message="테스트 에러"
-            )
+            job = queue.update_status(job_id, JobStatus.FAILED, error_message="테스트 에러")
             assert job.status == JobStatus.FAILED.value
 
     def test_failed_stores_error_message(self, queue: JobQueue) -> None:
@@ -383,7 +382,8 @@ class TestUpdateStatus:
         assert job.error_message == error_msg
 
     def test_update_status_clears_error_on_non_failed(
-        self, queue: JobQueue,
+        self,
+        queue: JobQueue,
     ) -> None:
         """failed가 아닌 전이 시 에러 메시지가 초기화되는지 확인한다."""
         job_id = queue.add_job("m1", "/path/audio.m4a")
@@ -407,6 +407,7 @@ class TestUpdateStatus:
         job_before = queue.get_job(job_id)
 
         import time
+
         time.sleep(0.01)  # 타임스탬프 차이 보장
 
         queue.update_status(job_id, JobStatus.RECORDING)
@@ -466,7 +467,7 @@ class TestRetryJob:
         """retry_all_failed()가 재시도 가능한 작업만 재시도하는지 확인한다."""
         id1 = queue.add_job("m1", "/path/a.m4a")
         id2 = queue.add_job("m2", "/path/b.m4a")
-        id3 = queue.add_job("m3", "/path/c.m4a")
+        _id3 = queue.add_job("m3", "/path/c.m4a")
 
         # m1, m2를 failed로
         queue.update_status(id1, JobStatus.FAILED, error_message="에러1")
@@ -526,9 +527,12 @@ class TestDeleteAndCleanup:
         # 작업 추가 후 완료 처리
         job_id = queue.add_job("m1", "/path/audio.m4a")
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             queue.update_status(job_id, status)
 
@@ -540,9 +544,12 @@ class TestDeleteAndCleanup:
         """최근 완료 작업은 보존되는지 확인한다."""
         job_id = queue.add_job("m1", "/path/audio.m4a")
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             queue.update_status(job_id, status)
 
@@ -572,10 +579,7 @@ class TestStateMachine:
 
     def test_all_non_terminal_can_fail(self) -> None:
         """completed를 제외한 모든 상태에서 failed 전이가 가능한지 확인한다."""
-        non_terminal = [
-            s for s in JobStatus
-            if s not in (JobStatus.COMPLETED, JobStatus.FAILED)
-        ]
+        non_terminal = [s for s in JobStatus if s not in (JobStatus.COMPLETED, JobStatus.FAILED)]
         for status in non_terminal:
             assert JobStatus.FAILED in VALID_TRANSITIONS[status], (
                 f"{status.value}에서 failed 전이 불가"
@@ -618,7 +622,8 @@ class TestAsyncJobQueue:
     pytestmark = pytest.mark.asyncio
 
     async def test_async_add_and_get_job(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 작업 등록 및 조회가 되는지 확인한다."""
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
@@ -627,7 +632,8 @@ class TestAsyncJobQueue:
         assert job.status == JobStatus.QUEUED.value
 
     async def test_async_update_status(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 상태 변경이 되는지 확인한다."""
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
@@ -635,7 +641,8 @@ class TestAsyncJobQueue:
         assert job.status == JobStatus.RECORDING.value
 
     async def test_async_get_pending_jobs(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 대기 작업 조회가 되는지 확인한다."""
         await async_queue.add_job("m1", "/path/a.m4a")
@@ -645,37 +652,34 @@ class TestAsyncJobQueue:
         assert len(pending) == 2
 
     async def test_async_retry_job(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 재시도가 되는지 확인한다."""
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
-        await async_queue.update_status(
-            job_id, JobStatus.FAILED, error_message="에러"
-        )
+        await async_queue.update_status(job_id, JobStatus.FAILED, error_message="에러")
 
         job = await async_queue.retry_job(job_id)
         assert job.status == JobStatus.QUEUED.value
         assert job.retry_count == 1
 
     async def test_async_retry_all_failed(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 일괄 재시도가 되는지 확인한다."""
         id1 = await async_queue.add_job("m1", "/path/a.m4a")
         id2 = await async_queue.add_job("m2", "/path/b.m4a")
 
-        await async_queue.update_status(
-            id1, JobStatus.FAILED, error_message="에러1"
-        )
-        await async_queue.update_status(
-            id2, JobStatus.FAILED, error_message="에러2"
-        )
+        await async_queue.update_status(id1, JobStatus.FAILED, error_message="에러1")
+        await async_queue.update_status(id2, JobStatus.FAILED, error_message="에러2")
 
         retried = await async_queue.retry_all_failed()
         assert set(retried) == {id1, id2}
 
     async def test_async_count_by_status(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 상태별 집계가 되는지 확인한다."""
         id1 = await async_queue.add_job("m1", "/path/a.m4a")
@@ -687,7 +691,8 @@ class TestAsyncJobQueue:
         assert counts.get("recording", 0) == 1
 
     async def test_async_get_all_jobs(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 전체 작업 조회가 되는지 확인한다."""
         await async_queue.add_job("m1", "/path/a.m4a")
@@ -697,7 +702,8 @@ class TestAsyncJobQueue:
         assert len(all_jobs) == 2
 
     async def test_async_delete_job(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 작업 삭제가 되는지 확인한다."""
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
@@ -707,15 +713,19 @@ class TestAsyncJobQueue:
             await async_queue.get_job(job_id)
 
     async def test_async_cleanup_completed(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """비동기로 완료 작업 정리가 되는지 확인한다."""
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
 
         for status in [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]:
             await async_queue.update_status(job_id, status)
 
@@ -723,7 +733,8 @@ class TestAsyncJobQueue:
         assert deleted == 1
 
     async def test_async_queue_property(
-        self, async_queue: AsyncJobQueue,
+        self,
+        async_queue: AsyncJobQueue,
     ) -> None:
         """queue 속성이 내부 JobQueue를 반환하는지 확인한다."""
         assert isinstance(async_queue.queue, JobQueue)
@@ -776,9 +787,12 @@ class TestEdgeCases:
         """빠른 연속 상태 전이가 정상 동작하는지 확인한다."""
         job_id = queue.add_job("m1", "/path/audio.m4a")
         statuses = [
-            JobStatus.RECORDING, JobStatus.TRANSCRIBING,
-            JobStatus.DIARIZING, JobStatus.MERGING,
-            JobStatus.EMBEDDING, JobStatus.COMPLETED,
+            JobStatus.RECORDING,
+            JobStatus.TRANSCRIBING,
+            JobStatus.DIARIZING,
+            JobStatus.MERGING,
+            JobStatus.EMBEDDING,
+            JobStatus.COMPLETED,
         ]
         for s in statuses:
             queue.update_status(job_id, s)

@@ -15,8 +15,10 @@ Zoom 프로세스 감지기 모듈 (Zoom Process Detector Module)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import Any, Callable, Coroutine, Optional
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from config import AppConfig, get_config
 
@@ -33,7 +35,7 @@ class ZoomDetectorError(Exception):
 class ProcessCheckError(ZoomDetectorError):
     """프로세스 확인 중 에러가 발생했을 때."""
 
-    def __init__(self, message: str, original_error: Optional[Exception] = None) -> None:
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
         self.original_error = original_error
         super().__init__(message)
 
@@ -71,7 +73,7 @@ class ZoomDetector:
         await detector.stop()
     """
 
-    def __init__(self, config: Optional[AppConfig] = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """ZoomDetector를 초기화한다.
 
         Args:
@@ -86,7 +88,7 @@ class ZoomDetector:
         # 상태 관리
         self._is_meeting_active: bool = False
         self._is_running: bool = False
-        self._poll_task: Optional[asyncio.Task[None]] = None
+        self._poll_task: asyncio.Task[None] | None = None
 
         # 이벤트 (asyncio.Event)
         self.meeting_started_event: asyncio.Event = asyncio.Event()
@@ -142,14 +144,16 @@ class ZoomDetector:
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", self._process_name,
+                "pgrep",
+                "-f",
+                self._process_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             returncode = await asyncio.wait_for(proc.wait(), timeout=10.0)
             # pgrep: 0 = 매칭 프로세스 존재, 1 = 미존재
             return returncode == 0
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("pgrep 명령 타임아웃 (10초 초과)")
             # 타임아웃된 pgrep 프로세스를 강제 종료하여 고아 프로세스 방지
             try:
@@ -159,15 +163,15 @@ class ZoomDetector:
                 pass  # 이미 종료된 경우 무시
             # 타임아웃 시 이전 상태 유지 (안전한 기본값)
             return self._is_meeting_active
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             raise ProcessCheckError(
                 "pgrep 명령을 찾을 수 없습니다. macOS 환경을 확인하세요."
-            )
+            ) from e
         except OSError as e:
             raise ProcessCheckError(
                 f"프로세스 확인 중 OS 에러 발생: {e}",
                 original_error=e,
-            )
+            ) from e
 
     async def _notify_callbacks(self, meeting_started: bool) -> None:
         """등록된 콜백들에 미팅 상태 변화를 알린다.
@@ -245,9 +249,7 @@ class ZoomDetector:
 
                 # 프로세스 확인 성공 시 에러 카운터 초기화
                 if consecutive_errors > 0:
-                    logger.info(
-                        f"프로세스 확인 복구 (연속 {consecutive_errors}회 에러 후)"
-                    )
+                    logger.info(f"프로세스 확인 복구 (연속 {consecutive_errors}회 에러 후)")
                     consecutive_errors = 0
 
             except ProcessCheckError as e:
@@ -255,9 +257,7 @@ class ZoomDetector:
                 if consecutive_errors <= max_logged_errors:
                     logger.error(f"프로세스 확인 실패 ({consecutive_errors}회 연속): {e}")
                 elif consecutive_errors == max_logged_errors + 1:
-                    logger.error(
-                        f"프로세스 확인 반복 실패. 이후 에러는 DEBUG 레벨로 기록합니다."
-                    )
+                    logger.error("프로세스 확인 반복 실패. 이후 에러는 DEBUG 레벨로 기록합니다.")
                 else:
                     logger.debug(f"프로세스 확인 실패 ({consecutive_errors}회 연속): {e}")
 
@@ -323,10 +323,8 @@ class ZoomDetector:
 
         if self._poll_task is not None:
             self._poll_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
-            except asyncio.CancelledError:
-                pass  # 정상적인 취소 처리
             self._poll_task = None
 
         logger.info("Zoom 감지기 중지")

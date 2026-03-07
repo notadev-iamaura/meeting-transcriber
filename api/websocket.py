@@ -14,12 +14,13 @@ WebSocket 이벤트 시스템 모듈 (WebSocket Event System Module)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -133,7 +134,7 @@ class ConnectionManager:
         self._connections: set[WebSocket] = set()
         self._max_connections = max_connections
         self._heartbeat_interval = heartbeat_interval
-        self._heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
         logger.info(
             f"ConnectionManager 초기화: "
@@ -194,8 +195,7 @@ class ConnectionManager:
         self._connections.add(websocket)
 
         logger.info(
-            f"WebSocket 연결 수락: "
-            f"활성 연결 {len(self._connections)}/{self._max_connections}"
+            f"WebSocket 연결 수락: 활성 연결 {len(self._connections)}/{self._max_connections}"
         )
         return True
 
@@ -207,8 +207,7 @@ class ConnectionManager:
         """
         self._connections.discard(websocket)
         logger.info(
-            f"WebSocket 연결 해제: "
-            f"활성 연결 {len(self._connections)}/{self._max_connections}"
+            f"WebSocket 연결 해제: 활성 연결 {len(self._connections)}/{self._max_connections}"
         )
 
     async def broadcast_event(self, event: WebSocketEvent) -> int:
@@ -249,10 +248,7 @@ class ConnectionManager:
             logger.debug("전송 실패한 WebSocket 연결 제거")
 
         if failed:
-            logger.warning(
-                f"브로드캐스트 부분 실패: "
-                f"성공 {success_count}, 실패 {len(failed)}"
-            )
+            logger.warning(f"브로드캐스트 부분 실패: 성공 {success_count}, 실패 {len(failed)}")
 
         return success_count
 
@@ -308,18 +304,14 @@ class ConnectionManager:
             self._heartbeat_loop(),
             name="ws-heartbeat",
         )
-        logger.info(
-            f"하트비트 태스크 시작: 간격 {self._heartbeat_interval}초"
-        )
+        logger.info(f"하트비트 태스크 시작: 간격 {self._heartbeat_interval}초")
 
     async def stop_heartbeat(self) -> None:
         """하트비트 태스크를 중지한다."""
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
             self._heartbeat_task = None
             logger.info("하트비트 태스크 중지")
 
@@ -340,9 +332,7 @@ class ConnectionManager:
                         },
                     )
                     await self.broadcast_event(heartbeat)
-                    logger.debug(
-                        f"하트비트 전송: 활성 연결 {len(self._connections)}"
-                    )
+                    logger.debug(f"하트비트 전송: 활성 연결 {len(self._connections)}")
 
         except asyncio.CancelledError:
             logger.debug("하트비트 루프 취소됨")
@@ -366,19 +356,13 @@ class ConnectionManager:
                 close_errors += 1
             except Exception as e:
                 # 예상치 못한 에러 — 경고 로깅
-                logger.warning(
-                    f"WebSocket 연결 종료 중 예외: "
-                    f"{type(e).__name__}: {e}"
-                )
+                logger.warning(f"WebSocket 연결 종료 중 예외: {type(e).__name__}: {e}")
                 close_errors += 1
 
         self._connections.clear()
 
         if close_errors > 0:
-            logger.info(
-                f"모든 WebSocket 연결 종료 완료 "
-                f"(종료 에러 {close_errors}건)"
-            )
+            logger.info(f"모든 WebSocket 연결 종료 완료 (종료 에러 {close_errors}건)")
         else:
             logger.info("모든 WebSocket 연결 종료 완료")
 
@@ -398,8 +382,10 @@ async def websocket_events(websocket: WebSocket) -> None:
         websocket: FastAPI WebSocket 인스턴스
     """
     # app.state에서 ConnectionManager 가져오기
-    manager: Optional[ConnectionManager] = getattr(
-        websocket.app.state, "ws_manager", None,
+    manager: ConnectionManager | None = getattr(
+        websocket.app.state,
+        "ws_manager",
+        None,
     )
 
     if manager is None:

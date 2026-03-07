@@ -18,9 +18,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
 
 from config import AppConfig, ThermalConfig
 
@@ -57,7 +57,7 @@ class ThermalStatus:
     """
 
     state: ThermalState = ThermalState.NORMAL
-    cpu_temp_celsius: Optional[float] = None
+    cpu_temp_celsius: float | None = None
     batch_count: int = 0
     batch_limit: int = 2
     cooldown_remaining_seconds: float = 0.0
@@ -99,13 +99,13 @@ class ThermalManager:
 
         # 쿨다운 상태
         self._cooling: bool = False
-        self._cooldown_start_time: Optional[float] = None
+        self._cooldown_start_time: float | None = None
 
         # 콜백 목록
         self._callbacks: list[ThermalCallback] = []
 
         # 온도 읽기 가능 여부 (첫 시도 후 결정)
-        self._temp_reader_available: Optional[bool] = None
+        self._temp_reader_available: bool | None = None
 
         logger.info(
             f"서멀 매니저 초기화 완료. "
@@ -176,7 +176,7 @@ class ThermalManager:
             total_jobs_processed=self._total_jobs_processed,
         )
 
-    def _determine_state(self, cpu_temp: Optional[float]) -> ThermalState:
+    def _determine_state(self, cpu_temp: float | None) -> ThermalState:
         """CPU 온도와 쿨다운 상태로 현재 서멀 상태를 결정한다.
 
         Args:
@@ -196,7 +196,7 @@ class ThermalManager:
 
         return ThermalState.NORMAL
 
-    def _read_cpu_temperature(self) -> Optional[float]:
+    def _read_cpu_temperature(self) -> float | None:
         """CPU 온도를 읽는다 (best-effort).
 
         macOS Apple Silicon에서는 관리자 권한 없이 CPU 온도를 직접 읽을 수 없다.
@@ -234,7 +234,7 @@ class ThermalManager:
 
         return None
 
-    def _try_read_temperature(self) -> Optional[float]:
+    def _try_read_temperature(self) -> float | None:
         """실제 CPU 온도 읽기를 시도한다.
 
         macOS에서 관리자 권한 없이 사용 가능한 방법을 순차적으로 시도한다.
@@ -271,9 +271,7 @@ class ThermalManager:
         # 먼저 온도 기반 대기가 필요한지 확인
         await self._wait_for_safe_temperature()
 
-        logger.debug(
-            f"작업 시작 알림. 배치 카운트: {self._batch_count}/{self._config.batch_size}"
-        )
+        logger.debug(f"작업 시작 알림. 배치 카운트: {self._batch_count}/{self._config.batch_size}")
 
     async def notify_job_completed(self) -> None:
         """작업 완료를 알린다.
@@ -421,9 +419,7 @@ class ThermalManager:
             if cpu_temp is None:
                 remaining = max(0.0, self._config.cooldown_seconds - waited)
                 if remaining > 0:
-                    logger.info(
-                        f"온도 읽기 실패. 기본 쿨다운 {remaining:.0f}초 대기."
-                    )
+                    logger.info(f"온도 읽기 실패. 기본 쿨다운 {remaining:.0f}초 대기.")
                     await asyncio.sleep(remaining)
                 return
 
@@ -434,8 +430,7 @@ class ThermalManager:
 
             if cpu_temp < target_celsius:
                 logger.info(
-                    f"CPU 온도 안정화. {cpu_temp:.1f}°C < {target_celsius}°C. "
-                    f"작업 재개 가능."
+                    f"CPU 온도 안정화. {cpu_temp:.1f}°C < {target_celsius}°C. 작업 재개 가능."
                 )
                 return
 

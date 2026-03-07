@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -125,8 +126,7 @@ class _AudioFileHandler(FileSystemEventHandler):
             # Observer 스레드에서 예외가 전파되면 감시가 중단되므로
             # 여기서 반드시 잡아서 로깅만 한다
             logger.error(
-                f"on_created 이벤트 처리 중 예외 (Observer 보호): "
-                f"{type(e).__name__}: {e}"
+                f"on_created 이벤트 처리 중 예외 (Observer 보호): {type(e).__name__}: {e}"
             )
 
     def on_moved(self, event: FileSystemEvent) -> None:
@@ -160,10 +160,7 @@ class _AudioFileHandler(FileSystemEventHandler):
         except Exception as e:
             # Observer 스레드에서 예외가 전파되면 감시가 중단되므로
             # 여기서 반드시 잡아서 로깅만 한다
-            logger.error(
-                f"on_moved 이벤트 처리 중 예외 (Observer 보호): "
-                f"{type(e).__name__}: {e}"
-            )
+            logger.error(f"on_moved 이벤트 처리 중 예외 (Observer 보호): {type(e).__name__}: {e}")
 
 
 class FolderWatcher:
@@ -187,7 +184,7 @@ class FolderWatcher:
     def __init__(
         self,
         async_job_queue: AsyncJobQueue,
-        config: Optional[AppConfig] = None,
+        config: AppConfig | None = None,
     ) -> None:
         """FolderWatcher를 초기화한다.
 
@@ -210,8 +207,8 @@ class FolderWatcher:
 
         # 상태 관리
         self._is_watching: bool = False
-        self._observer: Optional[Observer] = None
-        self._handler: Optional[_AudioFileHandler] = None
+        self._observer: Observer | None = None
+        self._handler: _AudioFileHandler | None = None
 
         # debounce 중인 파일 추적 (경로 → 마지막 크기 확인 시각)
         self._pending_files: dict[Path, float] = {}
@@ -364,7 +361,8 @@ class FolderWatcher:
 
             # 이미 큐에 등록된 회의인지 확인
             existing = await asyncio.to_thread(
-                self._job_queue.queue.get_job_by_meeting_id, meeting_id,
+                self._job_queue.queue.get_job_by_meeting_id,
+                meeting_id,
             )
             if existing is not None:
                 logger.info(f"이미 등록된 회의: {meeting_id} — 건너뜀")
@@ -416,9 +414,7 @@ class FolderWatcher:
             self._watch_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"감시 디렉토리 확인: {self._watch_dir}")
         except OSError as e:
-            raise WatchDirectoryError(
-                f"감시 디렉토리 생성 실패: {self._watch_dir} — {e}"
-            ) from e
+            raise WatchDirectoryError(f"감시 디렉토리 생성 실패: {self._watch_dir} — {e}") from e
 
         # 현재 이벤트 루프 획득
         loop = asyncio.get_running_loop()
@@ -490,7 +486,8 @@ class FolderWatcher:
 
             # 이미 등록된 회의 건너뜀
             existing = await asyncio.to_thread(
-                self._job_queue.queue.get_job_by_meeting_id, meeting_id,
+                self._job_queue.queue.get_job_by_meeting_id,
+                meeting_id,
             )
             if existing is not None:
                 logger.debug(f"기존 파일 이미 등록됨: {meeting_id}")

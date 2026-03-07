@@ -15,10 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import AppConfig, load_config
+from config import AppConfig
 from steps.audio_converter import (
-    AudioConvertError,
     AudioConverter,
+    AudioConvertError,
     AudioInfo,
     ConversionFailedError,
     FFmpegNotFoundError,
@@ -72,9 +72,7 @@ class TestAudioConverterInit:
 class TestValidateInput:
     """입력 파일 검증 테스트."""
 
-    def test_존재하지_않는_파일은_에러가_발생한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_존재하지_않는_파일은_에러가_발생한다(self, converter: AudioConverter) -> None:
         """존재하지 않는 파일 경로에 대해 FileNotFoundError를 발생시킨다."""
         with pytest.raises(FileNotFoundError, match="입력 파일을 찾을 수 없습니다"):
             converter._validate_input(Path("/nonexistent/audio.mp3"))
@@ -151,14 +149,18 @@ class TestProbe:
         duration: float = 120.5,
     ) -> str:
         """ffprobe JSON 출력을 생성하는 헬퍼 함수."""
-        return json.dumps({
-            "streams": [{
-                "sample_rate": str(sample_rate),
-                "channels": channels,
-                "codec_name": codec,
-                "duration": str(duration),
-            }]
-        })
+        return json.dumps(
+            {
+                "streams": [
+                    {
+                        "sample_rate": str(sample_rate),
+                        "channels": channels,
+                        "codec_name": codec,
+                        "duration": str(duration),
+                    }
+                ]
+            }
+        )
 
     @patch("subprocess.run")
     def test_정상_프로브_결과를_파싱한다(
@@ -209,49 +211,29 @@ class TestProbe:
 class TestIsAlreadyTargetFormat:
     """목표 포맷 확인 로직 테스트."""
 
-    def test_16kHz_모노_PCM이면_True를_반환한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_16kHz_모노_PCM이면_True를_반환한다(self, converter: AudioConverter) -> None:
         """이미 목표 포맷이면 True를 반환하는지 확인한다."""
-        info = AudioInfo(
-            sample_rate=16000, channels=1, codec="pcm_s16le", duration=60.0
-        )
+        info = AudioInfo(sample_rate=16000, channels=1, codec="pcm_s16le", duration=60.0)
         assert converter._is_already_target_format(info) is True
 
-    def test_다른_샘플레이트면_False를_반환한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_다른_샘플레이트면_False를_반환한다(self, converter: AudioConverter) -> None:
         """샘플레이트가 다르면 False를 반환하는지 확인한다."""
-        info = AudioInfo(
-            sample_rate=44100, channels=1, codec="pcm_s16le", duration=60.0
-        )
+        info = AudioInfo(sample_rate=44100, channels=1, codec="pcm_s16le", duration=60.0)
         assert converter._is_already_target_format(info) is False
 
-    def test_스테레오면_False를_반환한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_스테레오면_False를_반환한다(self, converter: AudioConverter) -> None:
         """스테레오이면 False를 반환하는지 확인한다."""
-        info = AudioInfo(
-            sample_rate=16000, channels=2, codec="pcm_s16le", duration=60.0
-        )
+        info = AudioInfo(sample_rate=16000, channels=2, codec="pcm_s16le", duration=60.0)
         assert converter._is_already_target_format(info) is False
 
-    def test_다른_코덱이면_False를_반환한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_다른_코덱이면_False를_반환한다(self, converter: AudioConverter) -> None:
         """PCM이 아닌 코덱이면 False를 반환하는지 확인한다."""
-        info = AudioInfo(
-            sample_rate=16000, channels=1, codec="aac", duration=60.0
-        )
+        info = AudioInfo(sample_rate=16000, channels=1, codec="aac", duration=60.0)
         assert converter._is_already_target_format(info) is False
 
-    def test_빅엔디안_PCM도_True를_반환한다(
-        self, converter: AudioConverter
-    ) -> None:
+    def test_빅엔디안_PCM도_True를_반환한다(self, converter: AudioConverter) -> None:
         """pcm_s16be도 목표 포맷으로 인정하는지 확인한다."""
-        info = AudioInfo(
-            sample_rate=16000, channels=1, codec="pcm_s16be", duration=60.0
-        )
+        info = AudioInfo(sample_rate=16000, channels=1, codec="pcm_s16be", duration=60.0)
         assert converter._is_already_target_format(info) is True
 
 
@@ -276,14 +258,18 @@ class TestConvert:
         # 변환 후 무결성 검증용 ffprobe 호출
         post_probe_result = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "16000",
-                    "channels": 1,
-                    "codec_name": "pcm_s16le",
-                    "duration": "60.0",
-                }]
-            }),
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "codec_name": "pcm_s16le",
+                            "duration": "60.0",
+                        }
+                    ]
+                }
+            ),
         )
 
         mock_run.side_effect = [convert_result, post_probe_result]
@@ -311,14 +297,18 @@ class TestConvert:
         # ffprobe: 이미 목표 포맷
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "16000",
-                    "channels": 1,
-                    "codec_name": "pcm_s16le",
-                    "duration": "60.0",
-                }]
-            }),
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "codec_name": "pcm_s16le",
+                            "duration": "60.0",
+                        }
+                    ]
+                }
+            ),
         )
 
         result = converter.convert(wav_file, tmp_path / "output")
@@ -399,14 +389,18 @@ class TestConvert:
         convert_result = MagicMock(returncode=0, stderr="")
         post_probe_result = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "16000",
-                    "channels": 1,
-                    "codec_name": "pcm_s16le",
-                    "duration": "60.0",
-                }]
-            }),
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "codec_name": "pcm_s16le",
+                            "duration": "60.0",
+                        }
+                    ]
+                }
+            ),
         )
         mock_run.side_effect = [convert_result, post_probe_result]
 
@@ -436,14 +430,18 @@ class TestConvert:
         convert_result = MagicMock(returncode=0, stderr="")
         post_probe_result = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "16000",
-                    "channels": 1,
-                    "codec_name": "pcm_s16le",
-                    "duration": "60.0",
-                }]
-            }),
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "codec_name": "pcm_s16le",
+                            "duration": "60.0",
+                        }
+                    ]
+                }
+            ),
         )
         mock_run.side_effect = [convert_result, post_probe_result]
 
@@ -499,14 +497,18 @@ class TestConvertAsync:
         convert_result = MagicMock(returncode=0, stderr="")
         post_probe_result = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "streams": [{
-                    "sample_rate": "16000",
-                    "channels": 1,
-                    "codec_name": "pcm_s16le",
-                    "duration": "60.0",
-                }]
-            }),
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "codec_name": "pcm_s16le",
+                            "duration": "60.0",
+                        }
+                    ]
+                }
+            ),
         )
         mock_run.side_effect = [convert_result, post_probe_result]
 

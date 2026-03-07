@@ -16,12 +16,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -108,15 +106,15 @@ class InvalidTransitionError(JobQueueError):
     """
 
     def __init__(
-        self, job_id: int, current_status: str, target_status: str,
+        self,
+        job_id: int,
+        current_status: str,
+        target_status: str,
     ) -> None:
         self.job_id = job_id
         self.current_status = current_status
         self.target_status = target_status
-        super().__init__(
-            f"작업 {job_id}: 상태 전이 불가 "
-            f"({current_status} → {target_status})"
-        )
+        super().__init__(f"작업 {job_id}: 상태 전이 불가 ({current_status} → {target_status})")
 
 
 class JobNotFoundError(JobQueueError):
@@ -141,15 +139,15 @@ class MaxRetriesExceededError(JobQueueError):
     """
 
     def __init__(
-        self, job_id: int, retry_count: int, max_retries: int,
+        self,
+        job_id: int,
+        retry_count: int,
+        max_retries: int,
     ) -> None:
         self.job_id = job_id
         self.retry_count = retry_count
         self.max_retries = max_retries
-        super().__init__(
-            f"작업 {job_id}: 최대 재시도 횟수 초과 "
-            f"({retry_count}/{max_retries})"
-        )
+        super().__init__(f"작업 {job_id}: 최대 재시도 횟수 초과 ({retry_count}/{max_retries})")
 
 
 # === 메인 클래스 ===
@@ -205,14 +203,11 @@ class JobQueue:
         """
         self._db_path = db_path
         self._max_retries = max_retries
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         # 쓰기 직렬화 락 — 동시 쓰기로 인한 "database is locked" 방지
         self._write_lock = threading.Lock()
 
-        logger.info(
-            f"JobQueue 초기화: db_path={db_path}, "
-            f"max_retries={max_retries}"
-        )
+        logger.info(f"JobQueue 초기화: db_path={db_path}, max_retries={max_retries}")
 
     @property
     def db_path(self) -> Path:
@@ -256,9 +251,7 @@ class JobQueue:
             logger.info(f"JobQueue DB 초기화 완료: {self._db_path}")
 
         except sqlite3.Error as e:
-            raise JobQueueError(
-                f"DB 초기화 실패: {e}"
-            ) from e
+            raise JobQueueError(f"DB 초기화 실패: {e}") from e
 
     def close(self) -> None:
         """데이터베이스 연결을 종료한다."""
@@ -277,9 +270,7 @@ class JobQueue:
             JobQueueError: 연결이 초기화되지 않았을 때
         """
         if self._conn is None:
-            raise JobQueueError(
-                "DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요."
-            )
+            raise JobQueueError("DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요.")
         return self._conn
 
     @staticmethod
@@ -350,17 +341,11 @@ class JobQueue:
                 conn.commit()
                 job_id = cursor.lastrowid
 
-            logger.info(
-                f"작업 등록: id={job_id}, "
-                f"meeting_id={meeting_id}, "
-                f"audio={audio_path}"
-            )
+            logger.info(f"작업 등록: id={job_id}, meeting_id={meeting_id}, audio={audio_path}")
             return job_id
 
         except sqlite3.IntegrityError as e:
-            raise JobQueueError(
-                f"작업 등록 실패 (중복 meeting_id?): {meeting_id} — {e}"
-            ) from e
+            raise JobQueueError(f"작업 등록 실패 (중복 meeting_id?): {meeting_id} — {e}") from e
 
     def get_job(self, job_id: int) -> Job:
         """작업 ID로 작업을 조회한다.
@@ -375,16 +360,14 @@ class JobQueue:
             JobNotFoundError: 작업이 존재하지 않을 때
         """
         conn = self._ensure_connection()
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE id = ?", (job_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
 
         if row is None:
             raise JobNotFoundError(job_id)
 
         return self._row_to_job(row)
 
-    def get_job_by_meeting_id(self, meeting_id: str) -> Optional[Job]:
+    def get_job_by_meeting_id(self, meeting_id: str) -> Job | None:
         """meeting_id로 작업을 조회한다.
 
         Args:
@@ -394,9 +377,7 @@ class JobQueue:
             Job 인스턴스. 없으면 None.
         """
         conn = self._ensure_connection()
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE meeting_id = ?", (meeting_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM jobs WHERE meeting_id = ?", (meeting_id,)).fetchone()
 
         if row is None:
             return None
@@ -435,9 +416,7 @@ class JobQueue:
             전체 Job 리스트 (created_at 내림차순, 최신순)
         """
         conn = self._ensure_connection()
-        rows = conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
 
         return [self._row_to_job(row) for row in rows]
 
@@ -474,7 +453,9 @@ class JobQueue:
         valid_targets = VALID_TRANSITIONS.get(current_status, set())
         if new_status not in valid_targets:
             raise InvalidTransitionError(
-                job_id, current_status.value, new_status.value,
+                job_id,
+                current_status.value,
+                new_status.value,
             )
 
         now = self._now_iso()
@@ -503,10 +484,7 @@ class JobQueue:
 
             conn.commit()
 
-        logger.info(
-            f"작업 상태 변경: id={job_id}, "
-            f"{current_status.value} → {new_status.value}"
-        )
+        logger.info(f"작업 상태 변경: id={job_id}, {current_status.value} → {new_status.value}")
 
         return self.get_job(job_id)
 
@@ -534,13 +512,17 @@ class JobQueue:
         # failed 상태만 재시도 가능
         if job.status != JobStatus.FAILED.value:
             raise InvalidTransitionError(
-                job_id, job.status, JobStatus.QUEUED.value,
+                job_id,
+                job.status,
+                JobStatus.QUEUED.value,
             )
 
         # 최대 재시도 초과 확인
         if job.retry_count >= job.max_retries:
             raise MaxRetriesExceededError(
-                job_id, job.retry_count, job.max_retries,
+                job_id,
+                job.retry_count,
+                job.max_retries,
             )
 
         now = self._now_iso()
@@ -558,10 +540,7 @@ class JobQueue:
             )
             conn.commit()
 
-        logger.info(
-            f"작업 재시도: id={job_id}, "
-            f"retry_count={new_retry_count}/{job.max_retries}"
-        )
+        logger.info(f"작업 재시도: id={job_id}, retry_count={new_retry_count}/{job.max_retries}")
 
         return self.get_job(job_id)
 
@@ -593,7 +572,7 @@ class JobQueue:
             if retried_ids:
                 # 단일 UPDATE로 일괄 상태 변경
                 conn.execute(
-                    f"""
+                    """
                     UPDATE jobs
                     SET status = ?,
                         retry_count = retry_count + 1,
@@ -606,10 +585,7 @@ class JobQueue:
                 conn.commit()
 
         if retried_ids:
-            logger.info(
-                f"일괄 재시도 완료: {len(retried_ids)}건 — "
-                f"ids={retried_ids}"
-            )
+            logger.info(f"일괄 재시도 완료: {len(retried_ids)}건 — ids={retried_ids}")
 
         return retried_ids
 
@@ -620,9 +596,7 @@ class JobQueue:
             상태 문자열 → 작업 수 딕셔너리
         """
         conn = self._ensure_connection()
-        rows = conn.execute(
-            "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status"
-        ).fetchall()
+        rows = conn.execute("SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status").fetchall()
 
         result: dict[str, int] = {}
         for row in rows:
@@ -678,10 +652,7 @@ class JobQueue:
 
         deleted = cursor.rowcount
         if deleted > 0:
-            logger.info(
-                f"완료 작업 정리: {deleted}건 삭제 "
-                f"(기준: {before_days}일 이전)"
-            )
+            logger.info(f"완료 작업 정리: {deleted}건 삭제 (기준: {before_days}일 이전)")
 
         return deleted
 
@@ -721,11 +692,13 @@ class AsyncJobQueue:
     async def initialize(self) -> None:
         """비동기로 DB를 초기화한다."""
         import asyncio
+
         await asyncio.to_thread(self._queue.initialize)
 
     async def close(self) -> None:
         """비동기로 DB 연결을 종료한다."""
         import asyncio
+
         await asyncio.to_thread(self._queue.close)
 
     async def add_job(
@@ -743,8 +716,11 @@ class AsyncJobQueue:
             생성된 작업 ID
         """
         import asyncio
+
         return await asyncio.to_thread(
-            self._queue.add_job, meeting_id, audio_path,
+            self._queue.add_job,
+            meeting_id,
+            audio_path,
         )
 
     async def get_job(self, job_id: int) -> Job:
@@ -757,6 +733,7 @@ class AsyncJobQueue:
             Job 인스턴스
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.get_job, job_id)
 
     async def get_pending_jobs(self) -> list[Job]:
@@ -766,6 +743,7 @@ class AsyncJobQueue:
             queued 상태의 Job 리스트
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.get_pending_jobs)
 
     async def update_status(
@@ -785,8 +763,12 @@ class AsyncJobQueue:
             업데이트된 Job 인스턴스
         """
         import asyncio
+
         return await asyncio.to_thread(
-            self._queue.update_status, job_id, new_status, error_message,
+            self._queue.update_status,
+            job_id,
+            new_status,
+            error_message,
         )
 
     async def retry_job(self, job_id: int) -> Job:
@@ -799,6 +781,7 @@ class AsyncJobQueue:
             업데이트된 Job 인스턴스
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.retry_job, job_id)
 
     async def retry_all_failed(self) -> list[int]:
@@ -808,6 +791,7 @@ class AsyncJobQueue:
             재시도된 작업 ID 리스트
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.retry_all_failed)
 
     async def count_by_status(self) -> dict[str, int]:
@@ -817,6 +801,7 @@ class AsyncJobQueue:
             상태 문자열 → 작업 수 딕셔너리
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.count_by_status)
 
     async def get_all_jobs(self) -> list[Job]:
@@ -826,6 +811,7 @@ class AsyncJobQueue:
             전체 Job 리스트
         """
         import asyncio
+
         return await asyncio.to_thread(self._queue.get_all_jobs)
 
     async def delete_job(self, job_id: int) -> None:
@@ -835,6 +821,7 @@ class AsyncJobQueue:
             job_id: 삭제할 작업 ID
         """
         import asyncio
+
         await asyncio.to_thread(self._queue.delete_job, job_id)
 
     async def cleanup_completed(self, before_days: int = 30) -> int:
@@ -847,6 +834,8 @@ class AsyncJobQueue:
             삭제된 작업 수
         """
         import asyncio
+
         return await asyncio.to_thread(
-            self._queue.cleanup_completed, before_days,
+            self._queue.cleanup_completed,
+            before_days,
         )

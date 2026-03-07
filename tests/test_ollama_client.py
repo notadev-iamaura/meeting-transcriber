@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.llm_backend import LLMBackendError, LLMConnectionError, LLMGenerationError
 from core.ollama_client import (
     OllamaConnectionError,
     OllamaError,
@@ -26,8 +27,6 @@ from core.ollama_client import (
     check_connection,
     clear_connection_cache,
 )
-from core.llm_backend import LLMBackendError, LLMConnectionError, LLMGenerationError
-
 
 # === 헬퍼 함수 ===
 
@@ -80,16 +79,20 @@ def _make_stream_response(tokens: list[str]) -> MagicMock:
     """
     lines = []
     for token in tokens:
-        chunk = json.dumps({
-            "message": {"content": token},
-            "done": False,
-        })
+        chunk = json.dumps(
+            {
+                "message": {"content": token},
+                "done": False,
+            }
+        )
         lines.append(chunk.encode("utf-8"))
     # 마지막 done 청크
-    done_chunk = json.dumps({
-        "message": {"content": ""},
-        "done": True,
-    })
+    done_chunk = json.dumps(
+        {
+            "message": {"content": ""},
+            "done": True,
+        }
+    )
     lines.append(done_chunk.encode("utf-8"))
 
     mock_response = MagicMock()
@@ -148,12 +151,14 @@ class TestCheckConnection:
 
     def test_연결_실패(self) -> None:
         """서버 연결 실패 시 OllamaConnectionError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("Connection refused"),
+            ),
+            pytest.raises(OllamaConnectionError, match="연결할 수 없습니다"),
         ):
-            with pytest.raises(OllamaConnectionError, match="연결할 수 없습니다"):
-                check_connection("http://127.0.0.1:99999")
+            check_connection("http://127.0.0.1:99999")
 
     def test_비정상_상태코드(self) -> None:
         """200이 아닌 상태코드는 OllamaConnectionError를 발생한다."""
@@ -162,9 +167,11 @@ class TestCheckConnection:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(OllamaConnectionError, match="응답 오류"):
-                check_connection("http://127.0.0.1:11434")
+        with (
+            patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp),
+            pytest.raises(OllamaConnectionError, match="응답 오류"),
+        ):
+            check_connection("http://127.0.0.1:11434")
 
 
 # === chat 테스트 ===
@@ -208,69 +215,81 @@ class TestChat:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(OllamaResponseError, match="JSON 파싱 실패"):
-                chat(
-                    host="http://127.0.0.1:11434",
-                    model="test",
-                    messages=[{"role": "user", "content": "질문"}],
-                )
+        with (
+            patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp),
+            pytest.raises(OllamaResponseError, match="JSON 파싱 실패"),
+        ):
+            chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "질문"}],
+            )
 
     def test_빈_content(self) -> None:
         """응답에 content가 비어있으면 OllamaResponseError를 발생한다."""
-        empty_response = json.dumps({
-            "model": "test",
-            "message": {"role": "assistant", "content": ""},
-            "done": True,
-        }).encode("utf-8")
+        empty_response = json.dumps(
+            {
+                "model": "test",
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+            }
+        ).encode("utf-8")
         mock_resp = _make_mock_urlopen(empty_response)
 
-        with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            with pytest.raises(OllamaResponseError, match="content가 없습니다"):
-                chat(
-                    host="http://127.0.0.1:11434",
-                    model="test",
-                    messages=[{"role": "user", "content": "질문"}],
-                )
+        with (
+            patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp),
+            pytest.raises(OllamaResponseError, match="content가 없습니다"),
+        ):
+            chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "질문"}],
+            )
 
     def test_연결_실패(self) -> None:
         """연결 실패 시 OllamaConnectionError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("Connection refused"),
+            ),
+            pytest.raises(OllamaConnectionError),
         ):
-            with pytest.raises(OllamaConnectionError):
-                chat(
-                    host="http://127.0.0.1:11434",
-                    model="test",
-                    messages=[{"role": "user", "content": "질문"}],
-                )
+            chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "질문"}],
+            )
 
     def test_타임아웃_URLError(self) -> None:
         """URLError(timeout) 시 OllamaTimeoutError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("timed out"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("timed out"),
+            ),
+            pytest.raises(OllamaTimeoutError),
         ):
-            with pytest.raises(OllamaTimeoutError):
-                chat(
-                    host="http://127.0.0.1:11434",
-                    model="test",
-                    messages=[{"role": "user", "content": "질문"}],
-                )
+            chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "질문"}],
+            )
 
     def test_타임아웃_TimeoutError(self) -> None:
         """TimeoutError 발생 시 OllamaTimeoutError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=TimeoutError("timed out"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ),
+            pytest.raises(OllamaTimeoutError),
         ):
-            with pytest.raises(OllamaTimeoutError):
-                chat(
-                    host="http://127.0.0.1:11434",
-                    model="test",
-                    messages=[{"role": "user", "content": "질문"}],
-                )
+            chat(
+                host="http://127.0.0.1:11434",
+                model="test",
+                messages=[{"role": "user", "content": "질문"}],
+            )
 
     def test_옵션_전달(self) -> None:
         """temperature, num_ctx 옵션이 payload에 올바르게 전달된다."""
@@ -313,20 +332,24 @@ class TestChatStream:
         mock_resp = _make_stream_response(tokens)
 
         with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            result = list(chat_stream(
-                host="http://127.0.0.1:11434",
-                model="test",
-                messages=[{"role": "user", "content": "질문"}],
-            ))
+            result = list(
+                chat_stream(
+                    host="http://127.0.0.1:11434",
+                    model="test",
+                    messages=[{"role": "user", "content": "질문"}],
+                )
+            )
 
         assert result == ["안녕", "하세", "요"]
 
     def test_빈_스트리밍(self) -> None:
         """done만 있는 스트리밍 응답은 빈 리스트를 반환한다."""
-        done_chunk = json.dumps({
-            "message": {"content": ""},
-            "done": True,
-        }).encode("utf-8")
+        done_chunk = json.dumps(
+            {
+                "message": {"content": ""},
+                "done": True,
+            }
+        ).encode("utf-8")
 
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -334,52 +357,66 @@ class TestChatStream:
         mock_resp.__iter__ = MagicMock(return_value=iter([done_chunk]))
 
         with patch("core.ollama_client.urllib.request.urlopen", return_value=mock_resp):
-            result = list(chat_stream(
-                host="http://127.0.0.1:11434",
-                model="test",
-                messages=[{"role": "user", "content": "질문"}],
-            ))
+            result = list(
+                chat_stream(
+                    host="http://127.0.0.1:11434",
+                    model="test",
+                    messages=[{"role": "user", "content": "질문"}],
+                )
+            )
 
         assert result == []
 
     def test_연결_실패(self) -> None:
         """스트리밍 연결 실패 시 OllamaConnectionError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("Connection refused"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("Connection refused"),
+            ),
+            pytest.raises(OllamaConnectionError),
         ):
-            with pytest.raises(OllamaConnectionError):
-                list(chat_stream(
+            list(
+                chat_stream(
                     host="http://127.0.0.1:11434",
                     model="test",
                     messages=[{"role": "user", "content": "질문"}],
-                ))
+                )
+            )
 
     def test_타임아웃(self) -> None:
         """스트리밍 타임아웃 시 OllamaTimeoutError를 발생한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=urllib.error.URLError("timed out"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("timed out"),
+            ),
+            pytest.raises(OllamaTimeoutError),
         ):
-            with pytest.raises(OllamaTimeoutError):
-                list(chat_stream(
+            list(
+                chat_stream(
                     host="http://127.0.0.1:11434",
                     model="test",
                     messages=[{"role": "user", "content": "질문"}],
-                ))
+                )
+            )
 
     def test_TimeoutError_직접(self) -> None:
         """TimeoutError 발생 시 OllamaTimeoutError로 변환한다."""
-        with patch(
-            "core.ollama_client.urllib.request.urlopen",
-            side_effect=TimeoutError("timed out"),
+        with (
+            patch(
+                "core.ollama_client.urllib.request.urlopen",
+                side_effect=TimeoutError("timed out"),
+            ),
+            pytest.raises(OllamaTimeoutError),
         ):
-            with pytest.raises(OllamaTimeoutError):
-                list(chat_stream(
+            list(
+                chat_stream(
                     host="http://127.0.0.1:11434",
                     model="test",
                     messages=[{"role": "user", "content": "질문"}],
-                ))
+                )
+            )
 
 
 class TestLLMBackendErrorIntegration:

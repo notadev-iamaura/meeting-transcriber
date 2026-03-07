@@ -21,8 +21,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from steps.transcriber import TranscriptResult, TranscriptSegment
 from steps.diarizer import DiarizationResult, DiarizationSegment
+from steps.transcriber import TranscriptResult, TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +88,7 @@ class MergedResult:
     @property
     def speakers(self) -> list[str]:
         """감지된 화자 라벨 목록 (UNKNOWN 제외, 중복 제거, 정렬)."""
-        return sorted(
-            set(
-                u.speaker for u in self.utterances
-                if u.speaker != UNKNOWN_SPEAKER
-            )
-        )
+        return sorted(set(u.speaker for u in self.utterances if u.speaker != UNKNOWN_SPEAKER))
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화/체크포인트 저장용).
@@ -136,9 +131,7 @@ class MergedResult:
         with open(checkpoint_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        utterances = [
-            MergedUtterance(**u) for u in data.get("utterances", [])
-        ]
+        utterances = [MergedUtterance(**u) for u in data.get("utterances", [])]
 
         return cls(
             utterances=utterances,
@@ -249,15 +242,11 @@ class Merger:
             EmptySegmentsError: STT 세그먼트가 비어있을 때
         """
         if not transcript.segments:
-            raise EmptySegmentsError(
-                "STT 전사 세그먼트가 비어있습니다. "
-                "병합할 텍스트가 없습니다."
-            )
+            raise EmptySegmentsError("STT 전사 세그먼트가 비어있습니다. 병합할 텍스트가 없습니다.")
 
         if not diarization.segments:
             logger.warning(
-                "화자분리 세그먼트가 비어있습니다. "
-                "모든 발화에 UNKNOWN 화자가 할당됩니다."
+                "화자분리 세그먼트가 비어있습니다. 모든 발화에 UNKNOWN 화자가 할당됩니다."
             )
 
     def _check_time_alignment(
@@ -305,14 +294,10 @@ class Merger:
             병합된 발화 목록 (시간순 정렬)
         """
         # 화자 세그먼트를 시간순으로 정렬 (이미 정렬되어 있어야 하지만 안전 장치)
-        sorted_dia_segments = sorted(
-            diarization.segments, key=lambda s: s.start
-        )
+        sorted_dia_segments = sorted(diarization.segments, key=lambda s: s.start)
 
         # STT 세그먼트를 시간순으로 정렬
-        sorted_stt_segments = sorted(
-            transcript.segments, key=lambda s: s.start
-        )
+        sorted_stt_segments = sorted(transcript.segments, key=lambda s: s.start)
 
         utterances: list[MergedUtterance] = []
 
@@ -320,8 +305,7 @@ class Merger:
             # 빈 텍스트 세그먼트 방어: 텍스트가 없거나 공백만 있으면 건너뜀
             if not stt_seg.text or not stt_seg.text.strip():
                 logger.debug(
-                    f"빈 세그먼트 건너뜀: start={stt_seg.start:.1f}, "
-                    f"end={stt_seg.end:.1f}"
+                    f"빈 세그먼트 건너뜀: start={stt_seg.start:.1f}, end={stt_seg.end:.1f}"
                 )
                 continue
 
@@ -379,20 +363,14 @@ class Merger:
 
         try:
             # 별도 스레드에서 병합 실행 (큰 데이터에서 이벤트 루프 블로킹 방지)
-            utterances = await asyncio.to_thread(
-                self._merge_segments, transcript, diarization
-            )
+            utterances = await asyncio.to_thread(self._merge_segments, transcript, diarization)
         except EmptySegmentsError:
             raise
         except Exception as e:
-            raise MergeError(
-                f"병합 처리 중 오류 발생: {e}"
-            ) from e
+            raise MergeError(f"병합 처리 중 오류 발생: {e}") from e
 
         # UNKNOWN 화자 수 집계
-        unknown_count = sum(
-            1 for u in utterances if u.speaker == UNKNOWN_SPEAKER
-        )
+        unknown_count = sum(1 for u in utterances if u.speaker == UNKNOWN_SPEAKER)
 
         if unknown_count > 0:
             logger.warning(
@@ -402,10 +380,7 @@ class Merger:
             )
 
         # 고유 화자 수 (UNKNOWN 제외)
-        unique_speakers = set(
-            u.speaker for u in utterances
-            if u.speaker != UNKNOWN_SPEAKER
-        )
+        unique_speakers = set(u.speaker for u in utterances if u.speaker != UNKNOWN_SPEAKER)
         num_speakers = len(unique_speakers)
 
         result = MergedResult(

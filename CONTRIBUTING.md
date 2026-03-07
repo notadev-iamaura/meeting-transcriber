@@ -15,6 +15,22 @@ source .venv/bin/activate
 
 # 3. 개발 의존성 설치
 pip install -e ".[dev]"
+
+# 4. pre-commit 훅 설치
+pre-commit install
+```
+
+## 편의 명령어
+
+```bash
+make help          # 사용 가능한 명령어 목록
+make lint          # 린트 검사
+make format        # 코드 포맷팅
+make fix           # 린트 자동 수정 + 포맷팅
+make test          # 전체 테스트
+make test-cov      # 커버리지 포함 테스트
+make test-quick    # 빠른 테스트
+make clean         # 캐시 정리
 ```
 
 ## 개발 워크플로우
@@ -26,9 +42,10 @@ pip install -e ".[dev]"
 
 2. 코드를 수정합니다.
 
-3. 테스트를 실행합니다.
+3. 린트 및 테스트를 실행합니다.
    ```bash
-   pytest tests/ -v
+   make fix           # 린트 자동 수정 + 포맷팅
+   make test          # 전체 테스트
    ```
 
 4. 커밋 후 PR을 생성합니다.
@@ -37,6 +54,8 @@ pip install -e ".[dev]"
    git commit -m "기능: 새로운 기능 설명"
    git push origin feature/기능-이름
    ```
+
+> **참고**: pre-commit 훅이 설치되어 있으면, 커밋 시 자동으로 ruff 린트/포맷이 실행됩니다.
 
 ## 코드 스타일
 

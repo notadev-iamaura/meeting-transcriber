@@ -1,5 +1,7 @@
 # Meeting Transcriber
 
+[![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
 **한국어 로컬 AI 회의 전사 시스템** — 100% 오프라인, Apple Silicon 최적화
 
 회의 녹음 파일을 넣으면 자동으로 텍스트 변환, 화자 분리, AI 교정, 요약까지 처리합니다.

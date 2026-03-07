@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 class PathsConfig(BaseModel):
     """파일 시스템 경로 설정"""
+
     base_dir: str = "~/.meeting-transcriber"
     audio_input_dir: str = "audio_input"
     outputs_dir: str = "outputs"
@@ -87,6 +88,7 @@ class PathsConfig(BaseModel):
 
 class STTConfig(BaseModel):
     """STT (Speech-to-Text) 모델 설정"""
+
     model_name: str = "whisper-medium-ko-zeroth"
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
@@ -99,23 +101,22 @@ class STTConfig(BaseModel):
 
 class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
+
     model_name: str = "pyannote/speaker-diarization-3.1"
     device: str = "cpu"  # MPS 버그로 CPU 강제
     min_speakers: int = Field(default=2, ge=1)
     max_speakers: int = Field(default=10, ge=1, le=20)
-    huggingface_token: Optional[str] = None
-    timeout_seconds: int = Field(
-        default=1800, ge=60, description="화자분리 타임아웃 (초)"
-    )
+    huggingface_token: str | None = None
+    timeout_seconds: int = Field(default=1800, ge=60, description="화자분리 타임아웃 (초)")
 
     @field_validator("device")
     @classmethod
     def validate_device(cls, v: str) -> str:
         """MPS 사용 금지 검증. pyannote는 반드시 CPU로 실행한다.
-        
+
         Args:
             v: 장치 문자열
-            
+
         Returns:
             검증된 장치 문자열 (MPS는 CPU로 변환)
         """
@@ -127,6 +128,7 @@ class DiarizationConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     """LLM (EXAONE via Ollama/MLX) 설정"""
+
     # 백엔드 선택: "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
     backend: str = Field(default="ollama")
 
@@ -160,14 +162,13 @@ class LLMConfig(BaseModel):
         """
         allowed = {"ollama", "mlx"}
         if v not in allowed:
-            raise ValueError(
-                f"backend는 {allowed} 중 하나여야 합니다: '{v}'"
-            )
+            raise ValueError(f"backend는 {allowed} 중 하나여야 합니다: '{v}'")
         return v
 
 
 class EmbeddingConfig(BaseModel):
     """임베딩 모델 설정"""
+
     model_name: str = "intfloat/multilingual-e5-small"
     dimension: int = 384
     device: str = "mps"  # Apple Silicon MPS 가속
@@ -178,6 +179,7 @@ class EmbeddingConfig(BaseModel):
 
 class ChunkingConfig(BaseModel):
     """텍스트 청크 분할 설정"""
+
     max_tokens: int = Field(default=300, ge=50, le=1000)
     min_tokens: int = Field(default=50, ge=10, le=200)
     time_gap_threshold_seconds: int = Field(default=30, ge=5)
@@ -186,6 +188,7 @@ class ChunkingConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     """하이브리드 검색 설정"""
+
     vector_weight: float = Field(default=0.6, ge=0.0, le=1.0)
     fts_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     rrf_k: int = Field(default=60, ge=1)
@@ -195,6 +198,7 @@ class SearchConfig(BaseModel):
 
 class ChatConfig(BaseModel):
     """AI Chat 설정"""
+
     max_history_pairs: int = Field(default=3, ge=1, le=10)
     system_prompt: str = (
         "당신은 회의 내용을 기반으로 질문에 답변하는 AI 어시스턴트입니다.\n"
@@ -205,6 +209,7 @@ class ChatConfig(BaseModel):
 
 class AudioConfig(BaseModel):
     """오디오 변환 설정"""
+
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
     channels: int = Field(default=1, ge=1, le=2)
     format: str = "wav"
@@ -215,6 +220,7 @@ class AudioConfig(BaseModel):
 
 class PipelineConfig(BaseModel):
     """파이프라인 실행 설정"""
+
     peak_ram_limit_gb: float = Field(default=9.5, ge=1.0, le=16.0)
     checkpoint_enabled: bool = True
     retry_max_count: int = Field(default=3, ge=0, le=10)
@@ -224,6 +230,7 @@ class PipelineConfig(BaseModel):
 
 class ThermalConfig(BaseModel):
     """서멀 관리 설정 (팬리스 MacBook Air 대응)"""
+
     batch_size: int = Field(default=2, ge=1, le=10)
     cooldown_seconds: int = Field(default=180, ge=30)
     cpu_temp_throttle_celsius: int = Field(default=85, ge=60, le=100)
@@ -232,6 +239,7 @@ class ThermalConfig(BaseModel):
 
 class ServerConfig(BaseModel):
     """FastAPI 서버 설정"""
+
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1024, le=65535)
     log_level: str = "info"
@@ -239,18 +247,21 @@ class ServerConfig(BaseModel):
 
 class ZoomConfig(BaseModel):
     """Zoom 프로세스 감지 설정"""
+
     process_name: str = "CptHost"
     poll_interval_seconds: int = Field(default=5, ge=1, le=60)
 
 
 class WatcherConfig(BaseModel):
     """폴더 감시 설정"""
+
     debounce_seconds: float = Field(default=2.0, ge=0.5, le=30.0)
     check_interval_seconds: float = Field(default=0.5, ge=0.1, le=5.0)
 
 
 class SecurityConfig(BaseModel):
     """보안 설정"""
+
     data_dir_permissions: int = 0o700
     exclude_from_spotlight: bool = True
     exclude_from_timemachine: bool = True
@@ -258,6 +269,7 @@ class SecurityConfig(BaseModel):
 
 class RecordingConfig(BaseModel):
     """오디오 녹음 설정 (Zoom 자동 녹음 포함)"""
+
     enabled: bool = True
     auto_record_on_zoom: bool = True
     prefer_system_audio: bool = True  # BlackHole 설치 시 시스템 오디오 우선
@@ -270,6 +282,7 @@ class RecordingConfig(BaseModel):
 
 class LifecycleConfig(BaseModel):
     """데이터 라이프사이클 관리 설정"""
+
     hot_days: int = Field(default=30, ge=1)
     warm_days: int = Field(default=90, ge=1)
     cold_action: str = "delete_audio"
@@ -278,13 +291,13 @@ class LifecycleConfig(BaseModel):
     @classmethod
     def validate_cold_action(cls, v: str) -> str:
         """cold_action이 허용된 값인지 검증한다.
-        
+
         Args:
             v: cold_action 설정값
-            
+
         Returns:
             검증된 cold_action 문자열
-            
+
         Raises:
             ValueError: 허용되지 않는 값일 때
         """
@@ -300,6 +313,7 @@ class AppConfig(BaseModel):
     config.yaml 파싱 결과를 pydantic 모델로 변환하고,
     환경변수를 통한 개별 설정 오버라이드를 지원한다.
     """
+
     paths: PathsConfig = Field(default_factory=PathsConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
@@ -369,7 +383,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def load_config(config_path: Optional[Path] = None) -> AppConfig:
+def load_config(config_path: Path | None = None) -> AppConfig:
     """설정 파일을 로드하고 AppConfig 인스턴스를 반환한다.
 
     1. YAML 파일이 존재하면 파싱
@@ -405,10 +419,10 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
 
 
 # 모듈 수준 싱글턴 인스턴스
-_config_instance: Optional[AppConfig] = None
+_config_instance: AppConfig | None = None
 
 
-def get_config(config_path: Optional[Path] = None) -> AppConfig:
+def get_config(config_path: Path | None = None) -> AppConfig:
     """싱글턴 패턴으로 AppConfig 인스턴스를 반환한다.
 
     첫 호출 시 설정을 로드하고, 이후에는 캐시된 인스턴스를 반환.

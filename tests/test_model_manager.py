@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import gc
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,10 +31,12 @@ pytestmark = pytest.mark.asyncio
 
 # === 픽스처 ===
 
+
 @pytest.fixture(autouse=True)
 def _reset_singletons(tmp_path: Any) -> Any:
     """각 테스트 전후로 싱글턴 인스턴스를 초기화한다."""
     from core.model_manager import reset_model_manager
+
     reset_config()
     reset_model_manager()
     yield
@@ -63,13 +65,15 @@ pipeline:
 def manager(config_file: Any) -> Any:
     """테스트용 ModelLoadManager 인스턴스를 생성한다."""
     from config import load_config, reset_config
+
     reset_config()
     # config를 임시 파일로 로드
-    from config import _config_instance
     import config as config_module
+
     config_module._config_instance = load_config(config_file)
 
     from core.model_manager import ModelLoadManager
+
     return ModelLoadManager()
 
 
@@ -86,6 +90,7 @@ class FakeModel:
 
 
 # === 기본 로드/언로드 테스트 ===
+
 
 async def test_load_model_basic(manager: Any) -> None:
     """기본 모델 로드가 정상 동작하는지 확인한다."""
@@ -119,6 +124,7 @@ async def test_unload_when_no_model(manager: Any) -> None:
 
 
 # === 모델 교체 테스트 ===
+
 
 async def test_load_different_model_unloads_previous(manager: Any) -> None:
     """다른 모델 로드 시 이전 모델이 자동 언로드되는지 확인한다."""
@@ -154,6 +160,7 @@ async def test_load_same_model_reuses(manager: Any) -> None:
 
 # === 동시 로드 테스트 (뮤텍스) ===
 
+
 async def test_concurrent_load_waits(manager: Any) -> None:
     """동시 로드 시도 시 Lock으로 순차 처리되는지 확인한다."""
     execution_order: list[str] = []
@@ -173,14 +180,10 @@ async def test_concurrent_load_waits(manager: Any) -> None:
         return FakeModel("model_b")
 
     # 두 로드를 동시에 시작
-    task_a = asyncio.create_task(
-        manager.load_model("model_a", slow_loader_a)
-    )
+    task_a = asyncio.create_task(manager.load_model("model_a", slow_loader_a))
     # A가 Lock을 먼저 잡도록 약간 대기
     await asyncio.sleep(0.01)
-    task_b = asyncio.create_task(
-        manager.load_model("model_b", slow_loader_b)
-    )
+    task_b = asyncio.create_task(manager.load_model("model_b", slow_loader_b))
 
     await asyncio.gather(task_a, task_b)
 
@@ -191,6 +194,7 @@ async def test_concurrent_load_waits(manager: Any) -> None:
 
 
 # === 컨텍스트 매니저 테스트 ===
+
 
 async def test_context_manager_normal(manager: Any) -> None:
     """컨텍스트 매니저 패턴으로 로드/언로드가 정상 동작하는지 확인한다."""
@@ -222,8 +226,10 @@ async def test_context_manager_exception_still_unloads(manager: Any) -> None:
 
 # === 로드 실패 테스트 ===
 
+
 async def test_load_failure_releases_lock(manager: Any) -> None:
     """모델 로드 실패 시 Lock이 해제되고, 이후 다른 모델을 로드할 수 있는지 확인한다."""
+
     def failing_loader() -> None:
         raise RuntimeError("모델 파일을 찾을 수 없습니다")
 
@@ -237,6 +243,7 @@ async def test_load_failure_releases_lock(manager: Any) -> None:
 
 
 # === 비동기 로더 지원 테스트 ===
+
 
 async def test_async_loader(manager: Any) -> None:
     """비동기 로더 함수를 지원하는지 확인한다."""
@@ -253,6 +260,7 @@ async def test_async_loader(manager: Any) -> None:
 
 
 # === 메모리 모니터링 테스트 ===
+
 
 async def test_memory_monitoring(manager: Any) -> None:
     """메모리 사용량 모니터링이 정상 동작하는지 확인한다."""
@@ -283,6 +291,7 @@ async def test_status_when_no_model(manager: Any) -> None:
 
 # === gc.collect 호출 확인 ===
 
+
 async def test_gc_collect_called_on_unload(manager: Any) -> None:
     """언로드 시 gc.collect()가 호출되는지 확인한다."""
     fake = FakeModel("whisper")
@@ -294,6 +303,7 @@ async def test_gc_collect_called_on_unload(manager: Any) -> None:
 
 
 # === Metal 캐시 정리 테스트 ===
+
 
 async def test_metal_cache_clear_called(manager: Any) -> None:
     """언로드 시 _clear_gpu_cache 메서드가 호출되는지 확인한다."""
@@ -318,6 +328,7 @@ async def test_metal_cache_clear_graceful_without_mlx(manager: Any) -> None:
 
 # === 메모리 제한 경고 테스트 ===
 
+
 async def test_memory_limit_warning(manager: Any) -> None:
     """메모리 사용량이 제한을 초과하면 경고가 로깅되는지 확인한다."""
     fake = FakeModel("whisper")
@@ -325,30 +336,34 @@ async def test_memory_limit_warning(manager: Any) -> None:
     # psutil이 높은 메모리 사용량을 반환하도록 모킹
     mock_process = MagicMock()
     # 10GB = 10 * 1024 * 1024 * 1024 bytes (limit: 9.5GB)
-    mock_process.memory_info.return_value = MagicMock(
-        rss=10 * 1024 * 1024 * 1024
-    )
+    mock_process.memory_info.return_value = MagicMock(rss=10 * 1024 * 1024 * 1024)
 
-    with patch("core.model_manager.psutil.Process", return_value=mock_process):
-        with patch("core.model_manager.logger") as mock_logger:
-            await manager.load_model("whisper", lambda: fake)
-            # 메모리 경고가 로깅되어야 함
-            warning_calls = [
-                call for call in mock_logger.warning.call_args_list
-                if "메모리 사용량 경고" in str(call)
-            ]
-            assert len(warning_calls) > 0
+    with (
+        patch("core.model_manager.psutil.Process", return_value=mock_process),
+        patch("core.model_manager.logger") as mock_logger,
+    ):
+        await manager.load_model("whisper", lambda: fake)
+        # 메모리 경고가 로깅되어야 함
+        warning_calls = [
+            call
+            for call in mock_logger.warning.call_args_list
+            if "메모리 사용량 경고" in str(call)
+        ]
+        assert len(warning_calls) > 0
 
 
 # === 싱글턴 패턴 테스트 ===
 
+
 def test_get_model_manager_singleton(config_file: Any) -> None:
     """get_model_manager()가 싱글턴 인스턴스를 반환하는지 확인한다."""
     from core.model_manager import get_model_manager, reset_model_manager
+
     reset_model_manager()
 
     import config as config_module
     from config import load_config
+
     config_module._config_instance = load_config(config_file)
 
     manager1 = get_model_manager()
@@ -359,9 +374,10 @@ def test_get_model_manager_singleton(config_file: Any) -> None:
 
 def test_reset_model_manager() -> None:
     """reset_model_manager()가 싱글턴을 초기화하는지 확인한다."""
-    from core.model_manager import _manager_instance, reset_model_manager
+    from core.model_manager import reset_model_manager
 
     reset_model_manager()
 
     from core import model_manager as mm_module
+
     assert mm_module._manager_instance is None

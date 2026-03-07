@@ -21,9 +21,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig, get_config
+from core import __version__
 from core.job_queue import AsyncJobQueue, JobQueue
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 검색 엔진 및 Chat 엔진 초기화 (lazy: 실패해도 서버 시작은 가능)
     try:
         from search.hybrid_search import HybridSearchEngine
+
         app.state.search_engine = HybridSearchEngine(config=config)
         logger.info("HybridSearchEngine 초기화 완료")
     except Exception as e:
@@ -87,6 +89,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     try:
         from search.chat import ChatEngine
+
         app.state.chat_engine = ChatEngine(config=config)
         logger.info("ChatEngine 초기화 완료")
     except Exception as e:
@@ -95,6 +98,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # WebSocket ConnectionManager 초기화
     from api.websocket import ConnectionManager
+
     ws_manager = ConnectionManager()
     app.state.ws_manager = ws_manager
     await ws_manager.start_heartbeat()
@@ -105,6 +109,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if config.recording.enabled:
         try:
             from steps.recorder import AudioRecorder
+
             recorder = AudioRecorder(config=config, ws_manager=ws_manager)
             app.state.recorder = recorder
             logger.info("AudioRecorder 초기화 완료")
@@ -120,9 +125,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if config.recording.enabled and config.recording.auto_record_on_zoom:
         try:
             from steps.zoom_detector import ZoomDetector
+
             zoom_detector = ZoomDetector(config=config)
 
             if recorder is not None:
+
                 async def _on_zoom_meeting_change(is_active: bool) -> None:
                     """Zoom 회의 시작/종료 시 녹음을 제어한다."""
                     if is_active:
@@ -152,10 +159,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 실행 중인 파이프라인 태스크 추적용 세트
     app.state.running_tasks: set[asyncio.Task] = set()
 
-    logger.info(
-        f"FastAPI 서버 리소스 초기화 완료 — "
-        f"DB: {db_path}, 포트: {config.server.port}"
-    )
+    logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
 
     yield  # 앱 실행
 
@@ -165,20 +169,17 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 실행 중인 파이프라인 태스크 정리
     running_tasks = getattr(app.state, "running_tasks", set())
     if running_tasks:
-        logger.info(
-            f"실행 중인 파이프라인 태스크 {len(running_tasks)}개 취소 중..."
-        )
+        logger.info(f"실행 중인 파이프라인 태스크 {len(running_tasks)}개 취소 중...")
         for task in running_tasks:
             task.cancel()
         # 모든 태스크가 취소될 때까지 대기 (최대 30초)
         done, pending = await asyncio.wait(
-            running_tasks, timeout=30, return_when=asyncio.ALL_COMPLETED,
+            running_tasks,
+            timeout=30,
+            return_when=asyncio.ALL_COMPLETED,
         )
         if pending:
-            logger.warning(
-                f"파이프라인 태스크 {len(pending)}개가 "
-                f"30초 내 종료되지 않음"
-            )
+            logger.warning(f"파이프라인 태스크 {len(pending)}개가 30초 내 종료되지 않음")
         logger.info("파이프라인 태스크 정리 완료")
 
     # ZoomDetector 정지
@@ -207,7 +208,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # === 앱 팩토리 ===
 
 
-def create_app(config: Optional[AppConfig] = None) -> FastAPI:
+def create_app(config: AppConfig | None = None) -> FastAPI:
     """FastAPI 애플리케이션을 생성하고 설정한다.
 
     팩토리 패턴으로 테스트와 프로덕션 환경 모두 지원.
@@ -224,7 +225,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     app = FastAPI(
         title="회의 전사 시스템 API",
         description="한국어 로컬 AI 회의 전사 + RAG + AI Chat 시스템",
-        version="1.0.0",
+        version=__version__,
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
@@ -252,10 +253,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     # 정적 파일 서빙 (ui/web/ 디렉토리가 존재할 때만)
     _setup_static_files(app)
 
-    logger.info(
-        f"FastAPI 앱 생성 완료 — "
-        f"host={config.server.host}, port={config.server.port}"
-    )
+    logger.info(f"FastAPI 앱 생성 완료 — host={config.server.host}, port={config.server.port}")
 
     return app
 
@@ -305,7 +303,8 @@ def _setup_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _global_exception_handler(
-        request: Request, exc: Exception,
+        request: Request,
+        exc: Exception,
     ) -> JSONResponse:
         """처리되지 않은 예외를 잡아서 500 응답을 반환한다.
 
@@ -356,7 +355,7 @@ def _setup_health_endpoint(app: FastAPI) -> None:
         return {
             "status": "ok",
             "uptime_seconds": uptime,
-            "version": "1.0.0",
+            "version": __version__,
         }
 
 
@@ -423,7 +422,7 @@ def _setup_static_files(app: FastAPI) -> None:
 # === uvicorn 실행 헬퍼 ===
 
 
-def run_server(config: Optional[AppConfig] = None) -> None:
+def run_server(config: AppConfig | None = None) -> None:
     """uvicorn으로 FastAPI 서버를 실행한다.
 
     단독 실행 시 사용. main.py에서는 데몬 스레드로 별도 실행.

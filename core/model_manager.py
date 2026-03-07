@@ -17,8 +17,9 @@ import gc
 import logging
 import threading
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Optional, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 import psutil
 
@@ -43,6 +44,7 @@ class ModelInfo:
         memory_before_mb: 로드 전 프로세스 메모리 (MB)
         memory_after_mb: 로드 후 프로세스 메모리 (MB)
     """
+
     name: str
     instance: Any
     loaded_at: float = field(default_factory=time.time)
@@ -52,7 +54,7 @@ class ModelInfo:
     @property
     def memory_delta_mb(self) -> float:
         """모델 로드로 인한 메모리 증가량 (MB)
-        
+
         Returns:
             메모리 증가량 (MB)
         """
@@ -82,23 +84,23 @@ class ModelLoadManager:
     def __init__(self) -> None:
         """ModelLoadManager 초기화."""
         self._lock = asyncio.Lock()
-        self._current: Optional[ModelInfo] = None
+        self._current: ModelInfo | None = None
         self._config = get_config()
         logger.info("ModelLoadManager 초기화 완료")
 
     @property
-    def current_model_name(self) -> Optional[str]:
+    def current_model_name(self) -> str | None:
         """현재 로드된 모델의 이름. 없으면 None.
-        
+
         Returns:
             모델명 또는 None
         """
         return self._current.name if self._current else None
 
     @property
-    def current_model(self) -> Optional[Any]:
+    def current_model(self) -> Any | None:
         """현재 로드된 모델 인스턴스. 없으면 None.
-        
+
         Returns:
             모델 인스턴스 또는 None
         """
@@ -107,7 +109,7 @@ class ModelLoadManager:
     @property
     def is_model_loaded(self) -> bool:
         """모델이 로드되어 있는지 여부.
-        
+
         Returns:
             모델 로드 여부
         """
@@ -138,6 +140,7 @@ class ModelLoadManager:
         """
         try:
             import mlx.core as mx  # type: ignore[import-untyped]
+
             mx.metal.clear_cache()
             logger.debug("Metal GPU 캐시 정리 완료")
         except ImportError:
@@ -163,12 +166,11 @@ class ModelLoadManager:
         logger.info(f"모델 언로드 시작: {model_name}")
 
         # 백엔드별 정리 (MLX: 모델 해제 + Metal 캐시, Ollama: no-op)
-        if self._current.instance is not None:
-            if hasattr(self._current.instance, "cleanup"):
-                try:
-                    self._current.instance.cleanup()
-                except Exception as cleanup_err:
-                    logger.warning(f"cleanup() 실행 중 오류 (무시): {cleanup_err}")
+        if self._current.instance is not None and hasattr(self._current.instance, "cleanup"):
+            try:
+                self._current.instance.cleanup()
+            except Exception as cleanup_err:
+                logger.warning(f"cleanup() 실행 중 오류 (무시): {cleanup_err}")
 
         # 모델 참조 제거
         self._current.instance = None
@@ -193,10 +195,7 @@ class ModelLoadManager:
             )
         except Exception as mem_err:
             # 메모리 측정 실패 시에도 언로드 자체는 정상 완료
-            logger.info(
-                f"모델 언로드 완료: {model_name} | "
-                f"메모리 측정 실패: {mem_err}"
-            )
+            logger.info(f"모델 언로드 완료: {model_name} | 메모리 측정 실패: {mem_err}")
 
     def _check_memory_limit(self) -> None:
         """현재 메모리 사용량이 peak_ram_limit_gb를 초과하는지 확인한다.
@@ -207,10 +206,7 @@ class ModelLoadManager:
         limit_gb = self._config.pipeline.peak_ram_limit_gb
 
         if current_gb > limit_gb:
-            logger.warning(
-                f"메모리 사용량 경고: {current_gb:.2f}GB / "
-                f"제한: {limit_gb:.1f}GB"
-            )
+            logger.warning(f"메모리 사용량 경고: {current_gb:.2f}GB / 제한: {limit_gb:.1f}GB")
 
     async def load_model(
         self,
@@ -244,10 +240,7 @@ class ModelLoadManager:
 
             # 새 모델 로드
             mem_before = self._get_memory_usage_mb()
-            logger.info(
-                f"모델 로드 시작: {name} | "
-                f"현재 메모리: {mem_before:.1f}MB"
-            )
+            logger.info(f"모델 로드 시작: {name} | 현재 메모리: {mem_before:.1f}MB")
 
             try:
                 # 로더가 비동기 함수인지 확인
@@ -296,7 +289,7 @@ class ModelLoadManager:
         loader: ModelLoader,
         *,
         keep_loaded: bool = False,
-    ) -> "_ModelContext":
+    ) -> _ModelContext:
         """컨텍스트 매니저로 모델을 로드하고, 블록 종료 시 자동 언로드한다.
 
         사용 예시:
@@ -332,9 +325,7 @@ class ModelLoadManager:
             "peak_ram_limit_gb": self._config.pipeline.peak_ram_limit_gb,
         }
         if self._current is not None:
-            status["model_memory_delta_mb"] = round(
-                self._current.memory_delta_mb, 1
-            )
+            status["model_memory_delta_mb"] = round(self._current.memory_delta_mb, 1)
             status["model_loaded_at"] = self._current.loaded_at
         return status
 
@@ -375,7 +366,7 @@ class _ModelContext:
 
 
 # 모듈 수준 싱글턴 인스턴스 (threading.Lock으로 경합 조건 방지)
-_manager_instance: Optional[ModelLoadManager] = None
+_manager_instance: ModelLoadManager | None = None
 _manager_lock = threading.Lock()
 
 

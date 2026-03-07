@@ -15,21 +15,19 @@ Graceful Degradation 테스트 모듈
 의존성: pytest, pytest-asyncio, unittest.mock
 """
 
+import contextlib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from core.pipeline import (
-    PIPELINE_STEPS,
+    _LLM_STEPS,
     PipelineError,
     PipelineManager,
     PipelineState,
-    PipelineStep,
     ResourceGuard,
     ResourceStatus,
-    ResourceWarningCallback,
-    _LLM_STEPS,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -76,8 +74,10 @@ class TestResourceStatus:
     def test_all_ok_true(self) -> None:
         """디스크와 메모리 모두 충분하면 all_ok=True."""
         status = ResourceStatus(
-            disk_ok=True, disk_free_gb=10.0,
-            memory_ok=True, memory_free_gb=8.0,
+            disk_ok=True,
+            disk_free_gb=10.0,
+            memory_ok=True,
+            memory_free_gb=8.0,
         )
         assert status.all_ok is True
         assert status.llm_available is True
@@ -85,8 +85,10 @@ class TestResourceStatus:
     def test_all_ok_false_disk(self) -> None:
         """디스크 부족이면 all_ok=False."""
         status = ResourceStatus(
-            disk_ok=False, disk_free_gb=1.0,
-            memory_ok=True, memory_free_gb=8.0,
+            disk_ok=False,
+            disk_free_gb=1.0,
+            memory_ok=True,
+            memory_free_gb=8.0,
         )
         assert status.all_ok is False
         assert status.llm_available is True
@@ -94,8 +96,10 @@ class TestResourceStatus:
     def test_all_ok_false_memory(self) -> None:
         """메모리 부족이면 all_ok=False, llm_available=False."""
         status = ResourceStatus(
-            disk_ok=True, disk_free_gb=10.0,
-            memory_ok=False, memory_free_gb=1.0,
+            disk_ok=True,
+            disk_free_gb=10.0,
+            memory_ok=False,
+            memory_free_gb=1.0,
         )
         assert status.all_ok is False
         assert status.llm_available is False
@@ -103,8 +107,10 @@ class TestResourceStatus:
     def test_both_insufficient(self) -> None:
         """디스크+메모리 모두 부족."""
         status = ResourceStatus(
-            disk_ok=False, disk_free_gb=0.5,
-            memory_ok=False, memory_free_gb=0.5,
+            disk_ok=False,
+            disk_free_gb=0.5,
+            memory_ok=False,
+            memory_free_gb=0.5,
         )
         assert status.all_ok is False
         assert status.llm_available is False
@@ -118,7 +124,9 @@ class TestResourceGuardDisk:
 
     @patch("core.pipeline.shutil.disk_usage")
     def test_disk_sufficient(
-        self, mock_usage: MagicMock, mock_config: MagicMock,
+        self,
+        mock_usage: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """디스크 여유 충분 시 (True, free_gb) 반환."""
         # 10GB 여유
@@ -130,7 +138,9 @@ class TestResourceGuardDisk:
 
     @patch("core.pipeline.shutil.disk_usage")
     def test_disk_insufficient(
-        self, mock_usage: MagicMock, mock_config: MagicMock,
+        self,
+        mock_usage: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """디스크 여유 부족 시 (False, free_gb) 반환."""
         # 1GB 여유 (임계값 2GB 미만)
@@ -142,7 +152,9 @@ class TestResourceGuardDisk:
 
     @patch("core.pipeline.shutil.disk_usage")
     def test_disk_check_oserror_returns_ok(
-        self, mock_usage: MagicMock, mock_config: MagicMock,
+        self,
+        mock_usage: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """디스크 체크 OSError 시 안전하게 (True, 0.0) 반환."""
         mock_usage.side_effect = OSError("디스크 접근 불가")
@@ -153,14 +165,14 @@ class TestResourceGuardDisk:
 
     @patch("core.pipeline.shutil.disk_usage")
     def test_disk_nonexistent_base_dir_fallback(
-        self, mock_usage: MagicMock, mock_config: MagicMock,
+        self,
+        mock_usage: MagicMock,
+        mock_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """base_dir가 없으면 상위 디렉토리로 폴백."""
         # 존재하지 않는 경로 설정
-        mock_config.paths.resolved_base_dir = (
-            tmp_path / "nonexistent" / "deep" / "path"
-        )
+        mock_config.paths.resolved_base_dir = tmp_path / "nonexistent" / "deep" / "path"
         mock_usage.return_value = MagicMock(free=5 * 1024**3)
         guard = ResourceGuard(mock_config)
         ok, free = guard.check_disk()
@@ -174,7 +186,9 @@ class TestResourceGuardMemory:
 
     @patch("core.pipeline.psutil.virtual_memory")
     def test_memory_sufficient(
-        self, mock_mem: MagicMock, mock_config: MagicMock,
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """메모리 충분 시 (True, available_gb) 반환."""
         mock_mem.return_value = MagicMock(available=8 * 1024**3)
@@ -185,7 +199,9 @@ class TestResourceGuardMemory:
 
     @patch("core.pipeline.psutil.virtual_memory")
     def test_memory_insufficient(
-        self, mock_mem: MagicMock, mock_config: MagicMock,
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """메모리 부족 시 (False, available_gb) 반환."""
         mock_mem.return_value = MagicMock(available=1 * 1024**3)
@@ -196,10 +212,12 @@ class TestResourceGuardMemory:
 
     @patch("core.pipeline.psutil.virtual_memory")
     def test_memory_check_error_returns_ok(
-        self, mock_mem: MagicMock, mock_config: MagicMock,
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
     ) -> None:
         """메모리 체크 예외 시 안전하게 (True, 0.0) 반환."""
-        mock_mem.side_effect = RuntimeError("psutil 오류")
+        mock_mem.side_effect = OSError("psutil 오류")
         guard = ResourceGuard(mock_config)
         ok, available = guard.check_memory()
         assert ok is True
@@ -212,7 +230,9 @@ class TestResourceGuardCheckAll:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_check_all_ok(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """모든 리소스 충분 시 ResourceStatus.all_ok=True."""
@@ -227,7 +247,9 @@ class TestResourceGuardCheckAll:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_check_all_disk_low(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """디스크만 부족 시 disk_ok=False."""
@@ -241,7 +263,9 @@ class TestResourceGuardCheckAll:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_check_all_memory_low(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """메모리만 부족 시 memory_ok=False."""
@@ -259,7 +283,9 @@ class TestResourceGuardCallback:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_disk_warning_callback(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """디스크 부족 시 콜백이 disk_low 수준으로 호출된다."""
@@ -276,7 +302,9 @@ class TestResourceGuardCallback:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_memory_warning_callback(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """메모리 부족 시 콜백이 memory_low 수준으로 호출된다."""
@@ -293,7 +321,9 @@ class TestResourceGuardCallback:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_both_warning_callbacks(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """디스크+메모리 모두 부족 시 콜백이 2회 호출된다."""
@@ -307,7 +337,9 @@ class TestResourceGuardCallback:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     def test_no_callback_when_ok(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
         mock_config: MagicMock,
     ) -> None:
         """리소스 충분 시 콜백이 호출되지 않는다."""
@@ -408,8 +440,11 @@ class TestPipelineManagerDiskInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_disk_insufficient_raises_pipeline_error(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """디스크 부족 시 PipelineError가 발생한다."""
@@ -418,7 +453,8 @@ class TestPipelineManagerDiskInsufficient:
         mock_mem.return_value = MagicMock(available=8 * 1024**3)
 
         pipeline = PipelineManager(
-            config=mock_config, model_manager=mock_model_manager,
+            config=mock_config,
+            model_manager=mock_model_manager,
         )
         with pytest.raises(PipelineError, match="디스크 여유 공간 부족"):
             await pipeline.run(audio_file)
@@ -426,26 +462,27 @@ class TestPipelineManagerDiskInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_disk_insufficient_state_is_failed(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
-        audio_file: Path, tmp_path: Path,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
     ) -> None:
         """디스크 부족 시 state.status='failed'로 저장된다."""
         mock_disk.return_value = MagicMock(free=1 * 1024**3)
         mock_mem.return_value = MagicMock(available=8 * 1024**3)
 
         pipeline = PipelineManager(
-            config=mock_config, model_manager=mock_model_manager,
+            config=mock_config,
+            model_manager=mock_model_manager,
         )
-        try:
+        with contextlib.suppress(PipelineError):
             await pipeline.run(audio_file, meeting_id="disk_test")
-        except PipelineError:
-            pass
 
         # 상태 파일 확인
-        state_path = (
-            tmp_path / "checkpoints" / "disk_test" / "pipeline_state.json"
-        )
+        state_path = tmp_path / "checkpoints" / "disk_test" / "pipeline_state.json"
         assert state_path.exists()
         state = PipelineState.from_file(state_path)
         assert state.status == "failed"
@@ -455,8 +492,11 @@ class TestPipelineManagerDiskInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_disk_insufficient_callback_called(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """디스크 부족 시 경고 콜백이 호출된다."""
@@ -469,17 +509,13 @@ class TestPipelineManagerDiskInsufficient:
             model_manager=mock_model_manager,
             on_resource_warning=callback,
         )
-        try:
+        with contextlib.suppress(PipelineError):
             await pipeline.run(audio_file)
-        except PipelineError:
-            pass
 
         # disk_low 콜백이 호출되었는지 확인
         assert callback.call_count >= 1
         # 첫 번째 호출의 두 번째 인자가 "disk_low"
-        found_disk_low = any(
-            c[0][1] == "disk_low" for c in callback.call_args_list
-        )
+        found_disk_low = any(c[0][1] == "disk_low" for c in callback.call_args_list)
         assert found_disk_low
 
 
@@ -489,8 +525,11 @@ class TestPipelineManagerMemoryInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_memory_insufficient_skips_correct_and_summarize(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """메모리 부족 시 correct/summarize를 건너뛴다."""
@@ -501,36 +540,43 @@ class TestPipelineManagerMemoryInsufficient:
         # 비-LLM 단계 모킹
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ),
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
             ) as mock_correct,
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
         ):
             pipeline = PipelineManager(
-                config=mock_config, model_manager=mock_model_manager,
+                config=mock_config,
+                model_manager=mock_model_manager,
             )
             state = await pipeline.run(audio_file, meeting_id="mem_test")
 
@@ -548,8 +594,11 @@ class TestPipelineManagerMemoryInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_memory_insufficient_completes_non_llm_steps(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """메모리 부족이라도 비-LLM 단계는 정상 실행된다."""
@@ -558,36 +607,43 @@ class TestPipelineManagerMemoryInsufficient:
 
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ) as mock_convert,
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_transcribe,
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_diarize,
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_merge,
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
             ),
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
             ),
         ):
             pipeline = PipelineManager(
-                config=mock_config, model_manager=mock_model_manager,
+                config=mock_config,
+                model_manager=mock_model_manager,
             )
             state = await pipeline.run(audio_file, meeting_id="mem_ok_test")
 
@@ -603,8 +659,11 @@ class TestPipelineManagerMemoryInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_correct_skip_passes_merged_as_corrected(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """correct 스킵 시 merged_result가 corrected_result로 패스스루된다."""
@@ -615,39 +674,47 @@ class TestPipelineManagerMemoryInsufficient:
 
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ),
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=merged_mock,
             ),
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
             ),
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
             ),
         ):
             pipeline = PipelineManager(
-                config=mock_config, model_manager=mock_model_manager,
+                config=mock_config,
+                model_manager=mock_model_manager,
             )
             state = await pipeline.run(
-                audio_file, meeting_id="passthrough_test",
+                audio_file,
+                meeting_id="passthrough_test",
             )
 
             # correct이 스킵되었는지 확인
@@ -658,8 +725,11 @@ class TestPipelineManagerMemoryInsufficient:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_memory_warning_callback_called(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """메모리 부족 시 경고 콜백이 호출된다."""
@@ -669,31 +739,37 @@ class TestPipelineManagerMemoryInsufficient:
 
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ),
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
             ),
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
             ),
         ):
@@ -705,9 +781,7 @@ class TestPipelineManagerMemoryInsufficient:
             await pipeline.run(audio_file, meeting_id="cb_test")
 
             # memory_low 콜백 호출 확인
-            found_memory_low = any(
-                c[0][1] == "memory_low" for c in callback.call_args_list
-            )
+            found_memory_low = any(c[0][1] == "memory_low" for c in callback.call_args_list)
             assert found_memory_low
 
 
@@ -717,8 +791,11 @@ class TestPipelineManagerNormalResources:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_normal_resources_runs_all_steps(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """리소스 충분 시 모든 단계가 정상 실행된다."""
@@ -727,38 +804,45 @@ class TestPipelineManagerNormalResources:
 
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ) as mock_convert,
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_transcribe,
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_diarize,
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_merge,
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_correct,
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_summarize,
         ):
             pipeline = PipelineManager(
-                config=mock_config, model_manager=mock_model_manager,
+                config=mock_config,
+                model_manager=mock_model_manager,
             )
             state = await pipeline.run(audio_file, meeting_id="normal_test")
 
@@ -779,8 +863,11 @@ class TestPipelineManagerNormalResources:
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
     async def test_normal_resources_no_callback(
-        self, mock_disk: MagicMock, mock_mem: MagicMock,
-        mock_config: MagicMock, mock_model_manager: MagicMock,
+        self,
+        mock_disk: MagicMock,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
         """리소스 충분 시 경고 콜백이 호출되지 않는다."""
@@ -790,32 +877,38 @@ class TestPipelineManagerNormalResources:
 
         with (
             patch.object(
-                PipelineManager, "_run_step_convert",
+                PipelineManager,
+                "_run_step_convert",
                 new_callable=AsyncMock,
                 return_value=audio_file,
             ),
             patch.object(
-                PipelineManager, "_run_step_transcribe",
+                PipelineManager,
+                "_run_step_transcribe",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_diarize",
+                PipelineManager,
+                "_run_step_diarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_merge",
+                PipelineManager,
+                "_run_step_merge",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_correct",
+                PipelineManager,
+                "_run_step_correct",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
             patch.object(
-                PipelineManager, "_run_step_summarize",
+                PipelineManager,
+                "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),

@@ -22,7 +22,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import rumps
 
@@ -252,7 +252,7 @@ def format_recording_time(seconds: float) -> str:
 def fetch_status(
     api_url: str,
     timeout: int = HTTP_TIMEOUT_SECONDS,
-) -> Optional[StatusInfo]:
+) -> StatusInfo | None:
     """FastAPI 서버에서 상태를 가져온다.
 
     Args:
@@ -294,7 +294,7 @@ class MeetingTranscriberApp(rumps.App):
         _menu_queue_items: 대기열 개별 아이템 리스트
     """
 
-    def __init__(self, config: Optional[AppConfig] = None) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
         """메뉴바 앱을 초기화한다.
 
         Args:
@@ -319,11 +319,7 @@ class MeetingTranscriberApp(rumps.App):
         # 메뉴 구성
         self._setup_menu()
 
-        logger.info(
-            f"메뉴바 앱 초기화 — "
-            f"상태 URL: {self._status_url}, "
-            f"웹 URL: {self._web_url}"
-        )
+        logger.info(f"메뉴바 앱 초기화 — 상태 URL: {self._status_url}, 웹 URL: {self._web_url}")
 
     def _setup_menu(self) -> None:
         """메뉴 아이템을 구성한다."""
@@ -356,24 +352,26 @@ class MeetingTranscriberApp(rumps.App):
         # 대기열 개별 아이템 추가
         for item in self._menu_queue_items:
             menu_items.append(item)
-        menu_items.extend([
-            None,  # 구분선
-            rumps.MenuItem(
-                "🌐 웹 UI 열기",
-                callback=self._on_open_web_ui,
-            ),
-            None,  # 구분선
-            rumps.MenuItem(
-                "📁 데이터 폴더 열기",
-                callback=self._on_open_data_dir,
-            ),
-            rumps.MenuItem(
-                "ℹ️ 서버 정보",
-                callback=self._on_show_info,
-            ),
-            None,  # 구분선
-            rumps.MenuItem("종료", callback=self._on_quit),
-        ])
+        menu_items.extend(
+            [
+                None,  # 구분선
+                rumps.MenuItem(
+                    "🌐 웹 UI 열기",
+                    callback=self._on_open_web_ui,
+                ),
+                None,  # 구분선
+                rumps.MenuItem(
+                    "📁 데이터 폴더 열기",
+                    callback=self._on_open_data_dir,
+                ),
+                rumps.MenuItem(
+                    "ℹ️ 서버 정보",
+                    callback=self._on_show_info,
+                ),
+                None,  # 구분선
+                rumps.MenuItem("종료", callback=self._on_quit),
+            ]
+        )
         self.menu = menu_items
 
     @rumps.timer(POLL_INTERVAL_SECONDS)
@@ -417,8 +415,7 @@ class MeetingTranscriberApp(rumps.App):
         else:
             status_text = STATUS_DISPLAY.get(info.status, "알 수 없음")
             self._menu_status.title = (
-                f"상태: {status_text} "
-                f"(작업 {info.active_jobs}/{info.total_jobs})"
+                f"상태: {status_text} (작업 {info.active_jobs}/{info.total_jobs})"
             )
 
         # 녹음 메뉴 업데이트 (녹음 중이면 경과 시간도 표시)
@@ -549,13 +546,8 @@ class MeetingTranscriberApp(rumps.App):
 
         if status_info is not None:
             uptime_str = format_uptime(status_info.uptime_seconds)
-            jobs_str = (
-                f"진행: {status_info.active_jobs}건 / "
-                f"전체: {status_info.total_jobs}건"
-            )
-            status_str = STATUS_DISPLAY.get(
-                status_info.status, "알 수 없음"
-            )
+            jobs_str = f"진행: {status_info.active_jobs}건 / 전체: {status_info.total_jobs}건"
+            status_str = STATUS_DISPLAY.get(status_info.status, "알 수 없음")
         else:
             uptime_str = "-"
             jobs_str = "-"
@@ -587,7 +579,7 @@ class MeetingTranscriberApp(rumps.App):
 # === 진입점 함수 ===
 
 
-def run_menubar(config: Optional[AppConfig] = None) -> None:
+def run_menubar(config: AppConfig | None = None) -> None:
     """메뉴바 앱을 실행한다.
 
     이 함수는 메인 스레드에서 호출되어야 한다.

@@ -16,13 +16,11 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, ServerConfig
-
 
 # === 헬퍼 함수 ===
 
@@ -58,7 +56,7 @@ class TestAppCreation:
         app = create_app(config)
 
         assert app.title == "회의 전사 시스템 API"
-        assert app.version == "1.0.0"
+        assert app.version == "0.1.0"
 
     def test_create_app_config_state에_저장(self, tmp_path: Path) -> None:
         """create_app 후 app.state.config에 설정이 저장되는지 확인한다."""
@@ -101,7 +99,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert data["version"] == "1.0.0"
+        assert data["version"] == "0.1.0"
         assert "uptime_seconds" in data
 
     def test_health_check_uptime_양수(self, tmp_path: Path) -> None:
@@ -154,10 +152,7 @@ class TestCORS:
 
         # CORS preflight 응답에 허용 오리진이 포함되어야 함
         assert response.status_code == 200
-        assert (
-            response.headers.get("access-control-allow-origin")
-            == "http://localhost:8765"
-        )
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:8765"
 
     def test_cors_127_0_0_1_허용(self, tmp_path: Path) -> None:
         """127.0.0.1 오리진에서의 요청이 허용되는지 확인한다."""
@@ -176,10 +171,7 @@ class TestCORS:
             )
 
         assert response.status_code == 200
-        assert (
-            response.headers.get("access-control-allow-origin")
-            == "http://127.0.0.1:8765"
-        )
+        assert response.headers.get("access-control-allow-origin") == "http://127.0.0.1:8765"
 
     def test_cors_외부_오리진_차단(self, tmp_path: Path) -> None:
         """외부 오리진에서의 요청이 차단되는지 확인한다."""
@@ -216,9 +208,7 @@ class TestCORS:
                 },
             )
 
-        allow_methods = response.headers.get(
-            "access-control-allow-methods", ""
-        )
+        allow_methods = response.headers.get("access-control-allow-methods", "")
         assert "GET" in allow_methods
         assert "POST" in allow_methods
 
@@ -230,7 +220,8 @@ class TestStaticFiles:
     """정적 파일 서빙 테스트."""
 
     def test_정적_파일_디렉토리_존재시_마운트(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """ui/web/ 디렉토리가 존재하면 /static에 마운트되는지 확인한다."""
         from api.server import _STATIC_DIR, create_app
@@ -257,14 +248,12 @@ class TestStaticFiles:
             # 실제 ui/web/ 존재 시 마운트 확인
             app = create_app(config)
             # 마운트 확인 (라우트 목록에 /static 존재)
-            route_paths = [
-                route.path for route in app.routes
-                if hasattr(route, "path")
-            ]
+            route_paths = [route.path for route in app.routes if hasattr(route, "path")]
             assert any("/static" in p for p in route_paths)
 
     def test_정적_파일_디렉토리_미존재시_경고(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         """ui/web/ 디렉토리가 없으면 경고 로그만 출력하는지 확인한다."""
         from api.server import create_app
@@ -278,13 +267,8 @@ class TestStaticFiles:
             app = create_app(config)
 
         # /static 라우트가 마운트되지 않아야 함
-        route_paths = [
-            getattr(route, "path", "")
-            for route in app.routes
-        ]
-        assert not any(
-            p.startswith("/static") for p in route_paths
-        )
+        route_paths = [getattr(route, "path", "") for route in app.routes]
+        assert not any(p.startswith("/static") for p in route_paths)
 
     def test_정적_html_파일_서빙(self, tmp_path: Path) -> None:
         """HTML 정적 파일이 올바르게 서빙되는지 확인한다."""
@@ -297,7 +281,8 @@ class TestStaticFiles:
         test_static.mkdir()
         html_content = "<html><body>테스트</body></html>"
         (test_static / "index.html").write_text(
-            html_content, encoding="utf-8",
+            html_content,
+            encoding="utf-8",
         )
 
         with patch("api.server._STATIC_DIR", test_static):
@@ -323,7 +308,7 @@ class TestLifespan:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        with TestClient(app) as client:
+        with TestClient(app) as _client:
             # lifespan startup 완료 후 state 확인
             assert hasattr(app.state, "job_queue")
             assert app.state.job_queue is not None
@@ -337,7 +322,7 @@ class TestLifespan:
 
         before = time.time()
 
-        with TestClient(app) as client:
+        with TestClient(app) as _client:
             assert hasattr(app.state, "start_time")
             assert app.state.start_time >= before
 

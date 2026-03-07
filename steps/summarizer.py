@@ -22,7 +22,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.llm_backend import (
@@ -241,10 +241,7 @@ def _estimate_tokens(text: str) -> int:
     ascii_count = sum(1 for c in text if ord(c) < 128)
     non_ascii_count = len(text) - ascii_count
 
-    tokens = (
-        non_ascii_count / _CHARS_PER_TOKEN_KOREAN
-        + ascii_count / _CHARS_PER_TOKEN_ASCII
-    )
+    tokens = non_ascii_count / _CHARS_PER_TOKEN_KOREAN + ascii_count / _CHARS_PER_TOKEN_ASCII
     return max(1, int(tokens))
 
 
@@ -356,8 +353,8 @@ class Summarizer:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """Summarizer를 초기화한다.
 
@@ -444,13 +441,8 @@ class Summarizer:
         Returns:
             마크다운 회의록 텍스트
         """
-        user_prompt = (
-            f"참석자: {', '.join(speakers)}\n\n"
-            f"=== 전사문 ===\n{transcript}"
-        )
-        return self._call_llm(
-            backend, _SYSTEM_PROMPT, user_prompt
-        )
+        user_prompt = f"참석자: {', '.join(speakers)}\n\n=== 전사문 ===\n{transcript}"
+        return self._call_llm(backend, _SYSTEM_PROMPT, user_prompt)
 
     def _summarize_chunked(
         self,
@@ -475,10 +467,7 @@ class Summarizer:
         # 1단계: 각 청크별 부분 요약
         partial_summaries: list[str] = []
         for i, chunk in enumerate(chunks):
-            logger.info(
-                f"청크 {i + 1}/{len(chunks)} 부분 요약 중 "
-                f"({len(chunk)}개 발화)"
-            )
+            logger.info(f"청크 {i + 1}/{len(chunks)} 부분 요약 중 ({len(chunk)}개 발화)")
             transcript = _format_transcript(chunk)
             user_prompt = (
                 f"파트 {i + 1}/{len(chunks)}\n"
@@ -487,20 +476,14 @@ class Summarizer:
             )
 
             try:
-                partial = self._call_llm(
-                    backend, _CHUNK_SUMMARY_PROMPT, user_prompt
-                )
-                partial_summaries.append(
-                    f"### 파트 {i + 1}\n{partial}"
-                )
+                partial = self._call_llm(backend, _CHUNK_SUMMARY_PROMPT, user_prompt)
+                partial_summaries.append(f"### 파트 {i + 1}\n{partial}")
             except (LLMConnectionError, LLMGenerationError):
                 raise
             except SummaryError as e:
                 logger.warning(f"청크 {i + 1} 요약 실패: {e}")
                 # 실패한 청크는 원본 텍스트로 대체
-                partial_summaries.append(
-                    f"### 파트 {i + 1}\n(요약 실패 — 원본)\n{transcript}"
-                )
+                partial_summaries.append(f"### 파트 {i + 1}\n(요약 실패 — 원본)\n{transcript}")
 
         # 모든 청크가 실패했는지 확인
         all_failed = all("(요약 실패 — 원본)" in s for s in partial_summaries)
@@ -515,15 +498,10 @@ class Summarizer:
         # 2단계: 부분 요약 통합
         logger.info("부분 요약 통합 중")
         merged_summaries = "\n\n".join(partial_summaries)
-        user_prompt = (
-            f"참석자: {', '.join(speakers)}\n\n"
-            f"=== 파트별 요약 ===\n{merged_summaries}"
-        )
+        user_prompt = f"참석자: {', '.join(speakers)}\n\n=== 파트별 요약 ===\n{merged_summaries}"
 
         try:
-            return self._call_llm(
-                backend, _MERGE_SUMMARY_PROMPT, user_prompt
-            )
+            return self._call_llm(backend, _MERGE_SUMMARY_PROMPT, user_prompt)
         except (SummaryError, LLMGenerationError) as e:
             # 통합 단계 실패 시 부분 요약들을 이어붙여 폴백 반환
             logger.warning(f"부분 요약 통합 실패, 파트별 요약 병합으로 대체: {e}")
@@ -563,10 +541,7 @@ class Summarizer:
         speakers = corrected.speakers
         num_utterances = len(corrected.utterances)
 
-        logger.info(
-            f"요약 시작: 발화 {num_utterances}개, "
-            f"화자 {len(speakers)}명"
-        )
+        logger.info(f"요약 시작: 발화 {num_utterances}개, 화자 {len(speakers)}명")
 
         # 전사문 포맷팅 및 토큰 추정
         full_transcript = _format_transcript(corrected.utterances)
@@ -580,20 +555,14 @@ class Summarizer:
         chunk_count = 1
 
         try:
-            async with self._manager.acquire(
-                "exaone", self._create_backend
-            ) as backend:
+            async with self._manager.acquire("exaone", self._create_backend) as backend:
                 if needs_chunking:
                     # 분할 요약
-                    chunks = _split_utterances(
-                        corrected.utterances, self._max_input_tokens
-                    )
+                    chunks = _split_utterances(corrected.utterances, self._max_input_tokens)
                     chunk_count = len(chunks)
                     was_chunked = True
 
-                    logger.info(
-                        f"분할 요약 모드: {chunk_count}개 청크로 분할"
-                    )
+                    logger.info(f"분할 요약 모드: {chunk_count}개 청크로 분할")
 
                     markdown = await asyncio.to_thread(
                         self._summarize_chunked,
@@ -617,15 +586,11 @@ class Summarizer:
         except SummaryError as e:
             # 요약 실패 시 폴백 회의록 생성
             logger.warning(f"요약 실패, 폴백 회의록 생성: {e}")
-            markdown = _build_fallback_markdown(
-                corrected.utterances, speakers
-            )
+            markdown = _build_fallback_markdown(corrected.utterances, speakers)
         except Exception as e:
             # 예상치 못한 오류 시에도 폴백 시도
             logger.error(f"요약 중 예상치 못한 오류, 폴백 회의록 생성: {e}")
-            markdown = _build_fallback_markdown(
-                corrected.utterances, speakers
-            )
+            markdown = _build_fallback_markdown(corrected.utterances, speakers)
 
         result = SummaryResult(
             markdown=markdown,

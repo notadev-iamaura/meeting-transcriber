@@ -21,23 +21,20 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import AppConfig, PathsConfig, LLMConfig, ServerConfig
+from config import AppConfig, LLMConfig, PathsConfig
 from security.health_check import (
-    HealthChecker,
-    HealthReport,
+    _REQUIRED_PACKAGES,
     CheckResult,
     CheckStatus,
-    run_health_check,
+    HealthChecker,
+    HealthReport,
     _is_writable,
-    _REQUIRED_PACKAGES,
-    _MIN_DISK_FREE_GB,
-    _OLLAMA_TIMEOUT_SECONDS,
+    run_health_check,
 )
-
 
 # === 픽스처 (Fixtures) ===
 
@@ -349,9 +346,7 @@ class TestCheckDataDirectories:
         assert result.status == CheckStatus.WARN
         assert "미존재" in result.message
 
-    def test_fail_when_not_writable(
-        self, base_dir: Path, checker: HealthChecker
-    ) -> None:
+    def test_fail_when_not_writable(self, base_dir: Path, checker: HealthChecker) -> None:
         """디렉토리에 쓰기 불가하면 FAIL을 반환한다."""
         (base_dir / "outputs").mkdir()
         (base_dir / "chroma_db").mkdir()
@@ -390,29 +385,35 @@ class TestHealthReport:
 
     def test_all_passed_true(self) -> None:
         """모든 항목이 PASS이면 all_passed가 True이다."""
-        report = HealthReport(results=[
-            CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
-            CheckResult(name="b", status=CheckStatus.PASS, message="ok"),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
+                CheckResult(name="b", status=CheckStatus.PASS, message="ok"),
+            ]
+        )
         assert report.all_passed is True
         assert report.fail_count == 0
         assert report.warn_count == 0
 
     def test_all_passed_false_with_fail(self) -> None:
         """FAIL 항목이 있으면 all_passed가 False이다."""
-        report = HealthReport(results=[
-            CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
-            CheckResult(name="b", status=CheckStatus.FAIL, message="fail"),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
+                CheckResult(name="b", status=CheckStatus.FAIL, message="fail"),
+            ]
+        )
         assert report.all_passed is False
         assert report.fail_count == 1
 
     def test_all_passed_false_with_warn(self) -> None:
         """WARN 항목이 있으면 all_passed가 False이다."""
-        report = HealthReport(results=[
-            CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
-            CheckResult(name="b", status=CheckStatus.WARN, message="warn"),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
+                CheckResult(name="b", status=CheckStatus.WARN, message="warn"),
+            ]
+        )
         assert report.all_passed is False
         assert report.warn_count == 1
 
@@ -425,12 +426,14 @@ class TestHealthReport:
 
     def test_mixed_statuses(self) -> None:
         """혼합된 상태에서 카운트가 정확하다."""
-        report = HealthReport(results=[
-            CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
-            CheckResult(name="b", status=CheckStatus.FAIL, message="fail"),
-            CheckResult(name="c", status=CheckStatus.WARN, message="warn"),
-            CheckResult(name="d", status=CheckStatus.FAIL, message="fail2"),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
+                CheckResult(name="b", status=CheckStatus.FAIL, message="fail"),
+                CheckResult(name="c", status=CheckStatus.WARN, message="warn"),
+                CheckResult(name="d", status=CheckStatus.FAIL, message="fail2"),
+            ]
+        )
         assert report.fail_count == 2
         assert report.warn_count == 1
 
@@ -457,24 +460,58 @@ class TestRun:
     def test_run_collects_all_results(self, checker: HealthChecker) -> None:
         """run()이 모든 체크 결과를 수집한다."""
         with (
-            patch.object(checker, "check_ollama_server", return_value=CheckResult(
-                name="ollama_server", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_exaone_model", return_value=CheckResult(
-                name="exaone_model", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_ffmpeg", return_value=CheckResult(
-                name="ffmpeg", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_python_packages", return_value=[
-                CheckResult(name="pkg_a", status=CheckStatus.PASS, message="ok"),
-            ]),
-            patch.object(checker, "check_disk_space", return_value=CheckResult(
-                name="disk_space", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_data_directories", return_value=CheckResult(
-                name="data_directories", status=CheckStatus.PASS, message="ok",
-            )),
+            patch.object(
+                checker,
+                "check_ollama_server",
+                return_value=CheckResult(
+                    name="ollama_server",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_exaone_model",
+                return_value=CheckResult(
+                    name="exaone_model",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_ffmpeg",
+                return_value=CheckResult(
+                    name="ffmpeg",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_python_packages",
+                return_value=[
+                    CheckResult(name="pkg_a", status=CheckStatus.PASS, message="ok"),
+                ],
+            ),
+            patch.object(
+                checker,
+                "check_disk_space",
+                return_value=CheckResult(
+                    name="disk_space",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_data_directories",
+                return_value=CheckResult(
+                    name="data_directories",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
         ):
             report = checker.run()
 
@@ -482,28 +519,51 @@ class TestRun:
         # ollama + exaone + ffmpeg + 1 pkg + disk + dirs = 6
         assert len(report.results) == 6
 
-    def test_run_continues_after_check_exception(
-        self, checker: HealthChecker
-    ) -> None:
+    def test_run_continues_after_check_exception(self, checker: HealthChecker) -> None:
         """개별 체크에서 예외가 발생해도 나머지 체크는 계속된다."""
         with (
             patch.object(
-                checker, "check_ollama_server",
+                checker,
+                "check_ollama_server",
                 side_effect=RuntimeError("boom"),
             ),
-            patch.object(checker, "check_exaone_model", return_value=CheckResult(
-                name="exaone_model", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_ffmpeg", return_value=CheckResult(
-                name="ffmpeg", status=CheckStatus.PASS, message="ok",
-            )),
+            patch.object(
+                checker,
+                "check_exaone_model",
+                return_value=CheckResult(
+                    name="exaone_model",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_ffmpeg",
+                return_value=CheckResult(
+                    name="ffmpeg",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
             patch.object(checker, "check_python_packages", return_value=[]),
-            patch.object(checker, "check_disk_space", return_value=CheckResult(
-                name="disk_space", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_data_directories", return_value=CheckResult(
-                name="data_directories", status=CheckStatus.PASS, message="ok",
-            )),
+            patch.object(
+                checker,
+                "check_disk_space",
+                return_value=CheckResult(
+                    name="disk_space",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_data_directories",
+                return_value=CheckResult(
+                    name="data_directories",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
         ):
             report = checker.run()
 
@@ -520,22 +580,52 @@ class TestRun:
         ]
 
         with (
-            patch.object(checker, "check_ollama_server", return_value=CheckResult(
-                name="ollama_server", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_exaone_model", return_value=CheckResult(
-                name="exaone_model", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_ffmpeg", return_value=CheckResult(
-                name="ffmpeg", status=CheckStatus.PASS, message="ok",
-            )),
+            patch.object(
+                checker,
+                "check_ollama_server",
+                return_value=CheckResult(
+                    name="ollama_server",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_exaone_model",
+                return_value=CheckResult(
+                    name="exaone_model",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_ffmpeg",
+                return_value=CheckResult(
+                    name="ffmpeg",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
             patch.object(checker, "check_python_packages", return_value=pkg_results),
-            patch.object(checker, "check_disk_space", return_value=CheckResult(
-                name="disk_space", status=CheckStatus.PASS, message="ok",
-            )),
-            patch.object(checker, "check_data_directories", return_value=CheckResult(
-                name="data_directories", status=CheckStatus.PASS, message="ok",
-            )),
+            patch.object(
+                checker,
+                "check_disk_space",
+                return_value=CheckResult(
+                    name="disk_space",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
+            patch.object(
+                checker,
+                "check_data_directories",
+                return_value=CheckResult(
+                    name="data_directories",
+                    status=CheckStatus.PASS,
+                    message="ok",
+                ),
+            ),
         ):
             report = checker.run()
 
@@ -551,14 +641,14 @@ class TestRunAsync:
 
     def test_run_async(self, checker: HealthChecker) -> None:
         """run_async()가 run()과 동일한 결과를 반환한다."""
-        mock_report = HealthReport(results=[
-            CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
-        ])
+        mock_report = HealthReport(
+            results=[
+                CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
+            ]
+        )
 
         with patch.object(checker, "run", return_value=mock_report):
-            result = asyncio.get_event_loop().run_until_complete(
-                checker.run_async()
-            )
+            result = asyncio.get_event_loop().run_until_complete(checker.run_async())
 
         assert result.all_passed is True
         assert len(result.results) == 1
@@ -572,9 +662,11 @@ class TestRunHealthCheck:
 
     def test_with_config(self, config: AppConfig) -> None:
         """config를 전달하면 해당 설정으로 체크한다."""
-        mock_report = HealthReport(results=[
-            CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
-        ])
+        mock_report = HealthReport(
+            results=[
+                CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
+            ]
+        )
 
         with patch.object(HealthChecker, "run", return_value=mock_report):
             report = run_health_check(config)
@@ -583,9 +675,11 @@ class TestRunHealthCheck:
 
     def test_without_config(self) -> None:
         """config가 None이면 싱글턴에서 가져온다."""
-        mock_report = HealthReport(results=[
-            CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
-        ])
+        mock_report = HealthReport(
+            results=[
+                CheckResult(name="test", status=CheckStatus.PASS, message="ok"),
+            ]
+        )
 
         with (
             patch("config.get_config") as mock_get_config,
@@ -606,9 +700,11 @@ class TestLogReport:
 
     def test_log_all_passed(self, checker: HealthChecker) -> None:
         """모든 항목 통과 시 INFO 로그를 남긴다."""
-        report = HealthReport(results=[
-            CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(name="a", status=CheckStatus.PASS, message="ok"),
+            ]
+        )
 
         with patch("security.health_check.logger") as mock_logger:
             checker._log_report(report)
@@ -618,14 +714,16 @@ class TestLogReport:
 
     def test_log_failures(self, checker: HealthChecker) -> None:
         """실패 항목이 있으면 WARNING 로그를 남긴다."""
-        report = HealthReport(results=[
-            CheckResult(
-                name="a",
-                status=CheckStatus.FAIL,
-                message="실패 메시지",
-                guide="해결 가이드",
-            ),
-        ])
+        report = HealthReport(
+            results=[
+                CheckResult(
+                    name="a",
+                    status=CheckStatus.FAIL,
+                    message="실패 메시지",
+                    guide="해결 가이드",
+                ),
+            ]
+        )
 
         with patch("security.health_check.logger") as mock_logger:
             checker._log_report(report)

@@ -17,7 +17,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Iterator
+from collections.abc import Iterator
 
 from core.llm_backend import (
     LLMBackendError,
@@ -87,23 +87,17 @@ def check_connection(host: str, timeout: int = 10) -> None:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
-                raise OllamaConnectionError(
-                    f"Ollama 서버 응답 오류: status={resp.status}"
-                )
+                raise OllamaConnectionError(f"Ollama 서버 응답 오류: status={resp.status}")
     except urllib.error.URLError as e:
         # 연결 실패 시 캐시 무효화
         _connection_cache.pop(host, None)
-        raise OllamaConnectionError(
-            f"Ollama 서버에 연결할 수 없습니다: {host} — {e}"
-        ) from e
+        raise OllamaConnectionError(f"Ollama 서버에 연결할 수 없습니다: {host} — {e}") from e
     except OllamaConnectionError:
         _connection_cache.pop(host, None)
         raise
     except Exception as e:
         _connection_cache.pop(host, None)
-        raise OllamaConnectionError(
-            f"Ollama 서버 연결 확인 실패: {e}"
-        ) from e
+        raise OllamaConnectionError(f"Ollama 서버 연결 확인 실패: {e}") from e
 
     # 성공 시 캐시 갱신
     _connection_cache[host] = now
@@ -164,20 +158,12 @@ def chat(
     except urllib.error.URLError as e:
         cause = str(e).lower()
         if "timed out" in cause or "timeout" in cause:
-            raise OllamaTimeoutError(
-                f"Ollama 요청 타임아웃 ({timeout}초)"
-            ) from e
-        raise OllamaConnectionError(
-            f"Ollama API 호출 실패: {e}"
-        ) from e
+            raise OllamaTimeoutError(f"Ollama 요청 타임아웃 ({timeout}초)") from e
+        raise OllamaConnectionError(f"Ollama API 호출 실패: {e}") from e
     except TimeoutError as e:
-        raise OllamaTimeoutError(
-            f"Ollama 요청 타임아웃 ({timeout}초)"
-        ) from e
+        raise OllamaTimeoutError(f"Ollama 요청 타임아웃 ({timeout}초)") from e
     except json.JSONDecodeError as e:
-        raise OllamaResponseError(
-            f"Ollama 응답 JSON 파싱 실패: {e}"
-        ) from e
+        raise OllamaResponseError(f"Ollama 응답 JSON 파싱 실패: {e}") from e
 
     content = response_data.get("message", {}).get("content", "")
     if not content:
@@ -252,13 +238,7 @@ def chat_stream(
     except urllib.error.URLError as e:
         cause = str(e).lower()
         if "timed out" in cause or "timeout" in cause:
-            raise OllamaTimeoutError(
-                f"Ollama 스트리밍 타임아웃 ({timeout}초)"
-            ) from e
-        raise OllamaConnectionError(
-            f"Ollama 스트리밍 호출 실패: {e}"
-        ) from e
+            raise OllamaTimeoutError(f"Ollama 스트리밍 타임아웃 ({timeout}초)") from e
+        raise OllamaConnectionError(f"Ollama 스트리밍 호출 실패: {e}") from e
     except TimeoutError as e:
-        raise OllamaTimeoutError(
-            f"Ollama 스트리밍 타임아웃 ({timeout}초)"
-        ) from e
+        raise OllamaTimeoutError(f"Ollama 스트리밍 타임아웃 ({timeout}초)") from e

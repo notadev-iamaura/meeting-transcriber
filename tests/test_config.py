@@ -5,15 +5,13 @@
 의존성: pytest, pydantic
 """
 
-import os
+# 프로젝트 루트를 sys.path에 추가
+import sys
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
-import yaml
 
-# 프로젝트 루트를 sys.path에 추가
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import (
@@ -22,10 +20,10 @@ from config import (
     LifecycleConfig,
     PathsConfig,
     RecordingConfig,
-    load_config,
-    get_config,
-    reset_config,
     _apply_env_overrides,
+    get_config,
+    load_config,
+    reset_config,
 )
 
 
@@ -56,14 +54,17 @@ class TestConfigYamlParsing:
     def test_커스텀_yaml_파싱(self, tmp_path: Path) -> None:
         """사용자 지정 YAML 파일을 올바르게 파싱하는지 확인한다."""
         custom_yaml = tmp_path / "custom.yaml"
-        custom_yaml.write_text(dedent("""\
+        custom_yaml.write_text(
+            dedent("""\
             paths:
               base_dir: "/tmp/test-meeting"
             stt:
               beam_size: 3
             server:
               port: 9999
-        """), encoding="utf-8")
+        """),
+            encoding="utf-8",
+        )
 
         config = load_config(custom_yaml)
 
@@ -108,7 +109,9 @@ class TestDefaultValues:
 class TestEnvironmentOverrides:
     """환경변수 오버라이드 테스트"""
 
-    def test_base_dir_환경변수_오버라이드(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_base_dir_환경변수_오버라이드(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """MT_BASE_DIR 환경변수로 base_dir이 오버라이드되는지 확인한다."""
         monkeypatch.setenv("MT_BASE_DIR", "/custom/data")
         empty_yaml = tmp_path / "test.yaml"
@@ -118,7 +121,9 @@ class TestEnvironmentOverrides:
 
         assert config.paths.base_dir == "/custom/data"
 
-    def test_서버_포트_환경변수_오버라이드(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_서버_포트_환경변수_오버라이드(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """MT_SERVER_PORT 환경변수로 서버 포트가 오버라이드되는지 확인한다."""
         monkeypatch.setenv("MT_SERVER_PORT", "3000")
         empty_yaml = tmp_path / "test.yaml"
@@ -128,7 +133,9 @@ class TestEnvironmentOverrides:
 
         assert config.server.port == 3000
 
-    def test_llm_호스트_환경변수_오버라이드(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_llm_호스트_환경변수_오버라이드(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """MT_LLM_HOST 환경변수로 LLM 호스트가 오버라이드되는지 확인한다."""
         monkeypatch.setenv("MT_LLM_HOST", "http://192.168.1.100:11434")
         empty_yaml = tmp_path / "test.yaml"
@@ -138,7 +145,9 @@ class TestEnvironmentOverrides:
 
         assert config.llm.host == "http://192.168.1.100:11434"
 
-    def test_ollama_host_환경변수_폴백(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ollama_host_환경변수_폴백(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """OLLAMA_HOST 환경변수가 MT_LLM_HOST 미설정 시 사용되는지 확인한다."""
         monkeypatch.delenv("MT_LLM_HOST", raising=False)
         monkeypatch.setenv("OLLAMA_HOST", "192.168.1.200:11434")
@@ -149,7 +158,9 @@ class TestEnvironmentOverrides:
 
         assert config.llm.host == "http://192.168.1.200:11434"
 
-    def test_huggingface_token_환경변수(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_huggingface_token_환경변수(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """HUGGINGFACE_TOKEN 환경변수가 diarization 설정에 반영되는지 확인한다."""
         monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_test_token_12345")
         empty_yaml = tmp_path / "test.yaml"
@@ -159,14 +170,19 @@ class TestEnvironmentOverrides:
 
         assert config.diarization.huggingface_token == "hf_test_token_12345"
 
-    def test_yaml_값보다_환경변수_우선(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_yaml_값보다_환경변수_우선(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """환경변수가 YAML에 명시된 값보다 우선하는지 확인한다."""
         monkeypatch.setenv("MT_SERVER_PORT", "5555")
         yaml_file = tmp_path / "test.yaml"
-        yaml_file.write_text(dedent("""\
+        yaml_file.write_text(
+            dedent("""\
             server:
               port: 8888
-        """), encoding="utf-8")
+        """),
+            encoding="utf-8",
+        )
 
         config = load_config(yaml_file)
 
@@ -197,14 +213,18 @@ class TestValidation:
     def test_beam_size_범위_검증(self) -> None:
         """beam_size가 유효 범위를 벗어나면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             from config import STTConfig
+
             STTConfig(beam_size=0)
 
     def test_temperature_범위_검증(self) -> None:
         """temperature가 유효 범위를 벗어나면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         from config import LLMConfig
+
         with pytest.raises(ValidationError):
             LLMConfig(temperature=3.0)
 
@@ -269,8 +289,15 @@ class TestEnvOverrideFunction:
     def test_빈_환경에서_데이터_유지(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """환경변수가 없으면 원본 데이터가 그대로 유지되는지 확인한다."""
         # 관련 환경변수 모두 제거
-        for key in ["MT_BASE_DIR", "MT_SERVER_PORT", "MT_SERVER_HOST",
-                     "MT_LLM_HOST", "MT_LOG_LEVEL", "HUGGINGFACE_TOKEN", "OLLAMA_HOST"]:
+        for key in [
+            "MT_BASE_DIR",
+            "MT_SERVER_PORT",
+            "MT_SERVER_HOST",
+            "MT_LLM_HOST",
+            "MT_LOG_LEVEL",
+            "HUGGINGFACE_TOKEN",
+            "OLLAMA_HOST",
+        ]:
             monkeypatch.delenv(key, raising=False)
 
         data = {"paths": {"base_dir": "/original"}}
@@ -322,12 +349,14 @@ class TestRecordingConfig:
     def test_sample_rate_범위_검증(self) -> None:
         """sample_rate가 유효 범위를 벗어나면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             RecordingConfig(sample_rate=100)
 
     def test_max_duration_최소값_검증(self) -> None:
         """max_duration_seconds가 60 미만이면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         with pytest.raises(ValidationError):
             RecordingConfig(max_duration_seconds=30)
 
@@ -362,38 +391,46 @@ class TestLLMBackendConfig:
     def test_backend_기본값_ollama(self) -> None:
         """backend 기본값이 'ollama'인지 확인한다."""
         from config import LLMConfig
+
         llm = LLMConfig()
         assert llm.backend == "ollama"
 
     def test_backend_mlx_설정(self) -> None:
         """backend를 'mlx'로 설정할 수 있는지 확인한다."""
         from config import LLMConfig
+
         llm = LLMConfig(backend="mlx")
         assert llm.backend == "mlx"
 
     def test_backend_잘못된_값_거부(self) -> None:
         """backend에 허용되지 않은 값이 들어오면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         from config import LLMConfig
+
         with pytest.raises(ValidationError, match="backend"):
             LLMConfig(backend="unknown")
 
     def test_mlx_model_name_기본값(self) -> None:
         """mlx_model_name 기본값이 올바른지 확인한다."""
         from config import LLMConfig
+
         llm = LLMConfig()
         assert llm.mlx_model_name == "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
 
     def test_mlx_max_tokens_기본값(self) -> None:
         """mlx_max_tokens 기본값이 2000인지 확인한다."""
         from config import LLMConfig
+
         llm = LLMConfig()
         assert llm.mlx_max_tokens == 2000
 
     def test_mlx_max_tokens_범위_검증(self) -> None:
         """mlx_max_tokens가 최소값(100) 미만이면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
+
         from config import LLMConfig
+
         with pytest.raises(ValidationError):
             LLMConfig(mlx_max_tokens=50)
 

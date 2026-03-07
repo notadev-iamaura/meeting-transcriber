@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from core.job_queue import AsyncJobQueue, Job, JobQueue, JobQueueError
+from core.job_queue import AsyncJobQueue, JobQueue, JobQueueError
 from core.watcher import (
     AlreadyWatchingError,
     FolderWatcher,
@@ -222,7 +222,10 @@ class TestMeetingIdGeneration:
     async def test_파일명에서_meeting_id_생성(self, watcher: FolderWatcher) -> None:
         """파일명(확장자 제외)이 meeting_id로 사용되는지 확인한다."""
         assert watcher._generate_meeting_id(Path("/tmp/meeting_001.wav")) == "meeting_001"
-        assert watcher._generate_meeting_id(Path("/tmp/2024-03-04_standup.m4a")) == "2024-03-04_standup"
+        assert (
+            watcher._generate_meeting_id(Path("/tmp/2024-03-04_standup.m4a"))
+            == "2024-03-04_standup"
+        )
 
     async def test_한국어_파일명_meeting_id(self, watcher: FolderWatcher) -> None:
         """한국어 파일명이 meeting_id로 올바르게 변환되는지 확인한다."""
@@ -288,7 +291,7 @@ class TestJobRegistration:
         await watcher._handle_new_file(test_file)
 
         # 큐에서 확인
-        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"new_meeting")
+        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "new_meeting")
         assert job is not None
         assert job.meeting_id == "new_meeting"
         assert job.status == "queued"
@@ -342,7 +345,7 @@ class TestJobRegistration:
 
         await watcher._handle_new_file(test_file)
 
-        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"3월_정기회의")
+        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "3월_정기회의")
         assert job is not None
         assert job.meeting_id == "3월_정기회의"
 
@@ -397,6 +400,7 @@ class TestCallbacks:
         tmp_path: Path,
     ) -> None:
         """콜백 에러가 파일 처리를 중단시키지 않는지 확인한다."""
+
         def bad_callback(p: Path) -> None:
             raise ValueError("콜백 에러")
 
@@ -409,7 +413,7 @@ class TestCallbacks:
         await watcher._handle_new_file(test_file)
 
         # 큐에 정상 등록
-        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"error_cb")
+        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "error_cb")
         assert job is not None
 
 
@@ -491,8 +495,8 @@ class TestScanExisting:
         assert len(ids) == 2
 
         # 큐 확인
-        job1 = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"existing1")
-        job2 = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"existing2")
+        job1 = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "existing1")
+        job2 = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "existing2")
         assert job1 is not None
         assert job2 is not None
 
@@ -557,7 +561,8 @@ class TestErrorHandling:
 
         # add_job이 에러를 던지도록 모킹
         with patch.object(
-            watcher._job_queue, "add_job",
+            watcher._job_queue,
+            "add_job",
             new_callable=AsyncMock,
             side_effect=JobQueueError("DB 에러"),
         ):
@@ -606,7 +611,7 @@ class TestIntegration:
         await asyncio.sleep(1.5)
 
         # 큐에 등록 확인
-        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id,"realtime_test")
+        job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "realtime_test")
         assert job is not None
         assert job.status == "queued"
 

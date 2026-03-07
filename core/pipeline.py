@@ -20,11 +20,12 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import psutil
 
@@ -63,7 +64,7 @@ class ResourceStatus:
     @property
     def all_ok(self) -> bool:
         """모든 리소스가 충분한지 반환한다.
-        
+
         Returns:
             모든 리소스 충분 여부
         """
@@ -72,7 +73,7 @@ class ResourceStatus:
     @property
     def llm_available(self) -> bool:
         """LLM 실행에 필요한 메모리가 충분한지 반환한다.
-        
+
         Returns:
             LLM 실행 가능 여부
         """
@@ -99,7 +100,7 @@ class ResourceGuard:
     def __init__(
         self,
         config: AppConfig,
-        on_warning: Optional[ResourceWarningCallback] = None,
+        on_warning: ResourceWarningCallback | None = None,
     ) -> None:
         self._min_disk_gb = config.pipeline.min_disk_free_gb
         self._min_memory_gb = config.pipeline.min_memory_free_gb
@@ -113,7 +114,7 @@ class ResourceGuard:
 
         Returns:
             (충분 여부, 여유 공간 GB) 튜플
-            
+
         Raises:
             OSError: 디스크 정보 조회 실패 시 (내부에서 처리됨)
         """
@@ -125,7 +126,7 @@ class ResourceGuard:
 
         try:
             usage = shutil.disk_usage(str(check_path))
-            free_gb = round(usage.free / (1024 ** 3), 2)
+            free_gb = round(usage.free / (1024**3), 2)
             ok = free_gb >= self._min_disk_gb
             return (ok, free_gb)
         except OSError as e:
@@ -140,16 +141,16 @@ class ResourceGuard:
 
         Returns:
             (충분 여부, 가용 메모리 GB) 튜플
-            
+
         Raises:
             Exception: 메모리 정보 조회 실패 시 (내부에서 처리됨)
         """
         try:
             mem = psutil.virtual_memory()
-            available_gb = round(mem.available / (1024 ** 3), 2)
+            available_gb = round(mem.available / (1024**3), 2)
             ok = available_gb >= self._min_memory_gb
             return (ok, available_gb)
-        except Exception as e:
+        except (OSError, psutil.Error) as e:
             logger.warning(f"메모리 확인 실패: {e}")
             # 확인 실패 시 안전하게 OK로 처리
             return (True, 0.0)
@@ -172,10 +173,7 @@ class ResourceGuard:
 
         # 경고 콜백 호출
         if not disk_ok:
-            msg = (
-                f"디스크 여유 공간 부족: {disk_free:.1f}GB "
-                f"(최소 {self._min_disk_gb}GB 필요)"
-            )
+            msg = f"디스크 여유 공간 부족: {disk_free:.1f}GB (최소 {self._min_disk_gb}GB 필요)"
             logger.warning(msg)
             if self._on_warning:
                 self._on_warning(msg, "disk_low")
@@ -214,12 +212,12 @@ class PipelineStep(str, Enum):
     다음 단계의 입력이 된다.
     """
 
-    CONVERT = "convert"         # 오디오 → 16kHz WAV 변환
-    TRANSCRIBE = "transcribe"   # WAV → STT 세그먼트
-    DIARIZE = "diarize"         # WAV → 화자분리 세그먼트
-    MERGE = "merge"             # STT + 화자분리 → 병합 발화
-    CORRECT = "correct"         # 병합 발화 → LLM 보정
-    SUMMARIZE = "summarize"     # 보정 발화 → 마크다운 회의록
+    CONVERT = "convert"  # 오디오 → 16kHz WAV 변환
+    TRANSCRIBE = "transcribe"  # WAV → STT 세그먼트
+    DIARIZE = "diarize"  # WAV → 화자분리 세그먼트
+    MERGE = "merge"  # STT + 화자분리 → 병합 발화
+    CORRECT = "correct"  # 병합 발화 → LLM 보정
+    SUMMARIZE = "summarize"  # 보정 발화 → 마크다운 회의록
 
 
 # 실행 순서를 보장하는 단계 목록
@@ -327,7 +325,7 @@ class PipelineState:
                 os.fsync(f.fileno())
             # POSIX에서 os.replace()는 원자적 연산
             os.replace(str(tmp_path), str(output_path))
-        except Exception:
+        except OSError:
             # 실패 시 임시 파일 정리
             tmp_path.unlink(missing_ok=True)
             raise
@@ -404,9 +402,9 @@ class PipelineManager:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
-        on_resource_warning: Optional[ResourceWarningCallback] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
+        on_resource_warning: ResourceWarningCallback | None = None,
     ) -> None:
         """PipelineManager를 초기화한다.
 
@@ -428,7 +426,8 @@ class PipelineManager:
 
         # Graceful Degradation: 리소스 가드 초기화
         self._resource_guard = ResourceGuard(
-            self._config, on_warning=on_resource_warning,
+            self._config,
+            on_warning=on_resource_warning,
         )
         self._on_resource_warning = on_resource_warning
 
@@ -454,7 +453,9 @@ class PipelineManager:
         return f"{timestamp}_{stem}"
 
     def _get_checkpoint_path(
-        self, meeting_id: str, step: PipelineStep,
+        self,
+        meeting_id: str,
+        step: PipelineStep,
     ) -> Path:
         """단계별 체크포인트 파일 경로를 반환한다.
 
@@ -499,21 +500,15 @@ class PipelineManager:
             InvalidInputError: 파일이 없거나 유효하지 않을 때
         """
         if not audio_path.exists():
-            raise InvalidInputError(
-                f"오디오 파일을 찾을 수 없습니다: {audio_path}"
-            )
+            raise InvalidInputError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
 
         if not audio_path.is_file():
-            raise InvalidInputError(
-                f"오디오 경로가 파일이 아닙니다: {audio_path}"
-            )
+            raise InvalidInputError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
 
         if audio_path.stat().st_size == 0:
-            raise InvalidInputError(
-                f"오디오 파일이 비어있습니다: {audio_path}"
-            )
+            raise InvalidInputError(f"오디오 파일이 비어있습니다: {audio_path}")
 
-    def _find_resume_step(self, state: PipelineState) -> Optional[int]:
+    def _find_resume_step(self, state: PipelineState) -> int | None:
         """재개할 단계의 인덱스를 찾는다.
 
         완료된 단계 다음 단계부터 재개한다.
@@ -607,7 +602,7 @@ class PipelineManager:
         Returns:
             DiarizationResult 인스턴스
         """
-        from steps.diarizer import Diarizer, DiarizationResult
+        from steps.diarizer import DiarizationResult, Diarizer
 
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
@@ -639,7 +634,7 @@ class PipelineManager:
         Returns:
             MergedResult 인스턴스
         """
-        from steps.merger import Merger, MergedResult
+        from steps.merger import MergedResult, Merger
 
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
@@ -669,7 +664,7 @@ class PipelineManager:
         Returns:
             CorrectedResult 인스턴스
         """
-        from steps.corrector import Corrector, CorrectedResult
+        from steps.corrector import CorrectedResult, Corrector
 
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
@@ -724,7 +719,7 @@ class PipelineManager:
     async def run(
         self,
         audio_path: Path,
-        meeting_id: Optional[str] = None,
+        meeting_id: str | None = None,
     ) -> PipelineState:
         """파이프라인 전체를 실행한다.
 
@@ -760,8 +755,7 @@ class PipelineManager:
         if state_path.exists():
             state = PipelineState.from_file(state_path)
             logger.info(
-                f"기존 파이프라인 상태 복원: {meeting_id} | "
-                f"완료 단계: {state.completed_steps}"
+                f"기존 파이프라인 상태 복원: {meeting_id} | 완료 단계: {state.completed_steps}"
             )
         else:
             state = PipelineState(
@@ -776,8 +770,7 @@ class PipelineManager:
         if not resource_status.disk_ok:
             state.status = "failed"
             state.error_message = (
-                f"디스크 여유 공간 부족으로 파이프라인 중단: "
-                f"{resource_status.disk_free_gb:.1f}GB"
+                f"디스크 여유 공간 부족으로 파이프라인 중단: {resource_status.disk_free_gb:.1f}GB"
             )
             state.warnings.append(state.error_message)
             state.save(state_path)
@@ -812,25 +805,30 @@ class PipelineManager:
             return state
 
         if resume_idx > 0:
-            logger.info(
-                f"단계 {PIPELINE_STEPS[resume_idx].value}부터 재개"
-            )
+            logger.info(f"단계 {PIPELINE_STEPS[resume_idx].value}부터 재개")
 
         # 중간 결과 저장용
-        wav_path: Optional[Path] = None
+        wav_path: Path | None = None
         transcript_result: Any = None
         diarization_result: Any = None
         merged_result: Any = None
         corrected_result: Any = None
-        summary_result: Any = None
+        _summary_result: Any = None
 
         # 이전에 완료된 단계의 결과 복원
         if resume_idx > 0:
-            wav_path, transcript_result, diarization_result, \
-                merged_result, corrected_result = \
-                await self._restore_intermediate_results(
-                    meeting_id, resume_idx, audio_path, state,
-                )
+            (
+                wav_path,
+                transcript_result,
+                diarization_result,
+                merged_result,
+                corrected_result,
+            ) = await self._restore_intermediate_results(
+                meeting_id,
+                resume_idx,
+                audio_path,
+                state,
+            )
 
         # 각 단계 순차 실행
         pipeline_start = time.monotonic()
@@ -845,10 +843,7 @@ class PipelineManager:
                 mem_ok, mem_free = self._resource_guard.check_memory()
                 if degraded or not mem_ok:
                     # LLM 단계 스킵
-                    skip_msg = (
-                        f"메모리 부족으로 {step.value} 단계 건너뜀 "
-                        f"(가용: {mem_free:.1f}GB)"
-                    )
+                    skip_msg = f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
                     logger.warning(skip_msg)
                     state.skipped_steps.append(step.value)
                     state.degraded = True
@@ -875,72 +870,74 @@ class PipelineManager:
             state.save(state_path)
 
             step_start = time.monotonic()
-            last_error: Optional[Exception] = None
+            last_error: Exception | None = None
             success = False
 
             # 재시도 루프
             for attempt in range(1, self._retry_max + 1):
                 try:
-                    logger.info(
-                        f"단계 실행: {step.value} "
-                        f"(시도 {attempt}/{self._retry_max})"
-                    )
+                    logger.info(f"단계 실행: {step.value} (시도 {attempt}/{self._retry_max})")
 
                     if step == PipelineStep.CONVERT:
                         wav_path = await self._run_step_convert(
-                            audio_path, output_dir,
+                            audio_path,
+                            output_dir,
                         )
                         state.wav_path = str(wav_path)
 
                     elif step == PipelineStep.TRANSCRIBE:
                         assert wav_path is not None
                         transcript_result = await self._run_step_transcribe(
-                            wav_path, checkpoint_path,
+                            wav_path,
+                            checkpoint_path,
                         )
 
                     elif step == PipelineStep.DIARIZE:
                         assert wav_path is not None
                         diarization_result = await self._run_step_diarize(
-                            wav_path, checkpoint_path,
+                            wav_path,
+                            checkpoint_path,
                         )
 
                     elif step == PipelineStep.MERGE:
                         assert transcript_result is not None
                         assert diarization_result is not None
                         merged_result = await self._run_step_merge(
-                            transcript_result, diarization_result,
+                            transcript_result,
+                            diarization_result,
                             checkpoint_path,
                         )
 
                     elif step == PipelineStep.CORRECT:
                         assert merged_result is not None
                         corrected_result = await self._run_step_correct(
-                            merged_result, checkpoint_path,
+                            merged_result,
+                            checkpoint_path,
                         )
 
                     elif step == PipelineStep.SUMMARIZE:
                         assert corrected_result is not None
-                        summary_result = await self._run_step_summarize(
-                            corrected_result, checkpoint_path, output_dir,
+                        _summary_result = await self._run_step_summarize(
+                            corrected_result,
+                            checkpoint_path,
+                            output_dir,
                         )
 
                     success = True
                     last_error = None
                     break  # 성공 시 재시도 루프 탈출
 
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — 재시도 루프 catch-all
                     last_error = e
                     logger.warning(
-                        f"단계 {step.value} 실패 "
-                        f"(시도 {attempt}/{self._retry_max}): {e}"
+                        f"단계 {step.value} 실패 (시도 {attempt}/{self._retry_max}): {e}"
                     )
                     if attempt < self._retry_max:
                         # 지수 백오프: 1초 → 2초 → 4초 → ...
                         # (STAB: 지수 백오프로 일시적 장애 복구 확률 향상)
                         backoff_seconds = min(2 ** (attempt - 1), 30)
                         logger.info(
-                            f"재시도 대기: {backoff_seconds}초 "
-                            f"(지수 백오프, 시도 {attempt})"
+                            f"재시도 대기: {backoff_seconds}초 (지수 백오프, 시도 {attempt})"
                         )
                         await asyncio.sleep(backoff_seconds)
 
@@ -959,10 +956,7 @@ class PipelineManager:
             if success:
                 state.completed_steps.append(step.value)
                 state.save(state_path)
-                logger.info(
-                    f"단계 완료: {step.value} "
-                    f"({step_elapsed:.1f}초)"
-                )
+                logger.info(f"단계 완료: {step.value} ({step_elapsed:.1f}초)")
             else:
                 # 실패 시 파이프라인 중단
                 state.status = "failed"
@@ -970,8 +964,7 @@ class PipelineManager:
                 state.save(state_path)
 
                 logger.error(
-                    f"파이프라인 실패: 단계 {step.value}에서 "
-                    f"{self._retry_max}회 재시도 모두 실패"
+                    f"파이프라인 실패: 단계 {step.value}에서 {self._retry_max}회 재시도 모두 실패"
                 )
                 raise PipelineStepError(
                     step.value,
@@ -993,14 +986,10 @@ class PipelineManager:
         timing_summary = ", ".join(step_timing_parts)
 
         completion_msg = (
-            f"파이프라인 완료: meeting_id={meeting_id}, "
-            f"총 소요 시간: {pipeline_elapsed:.1f}초"
+            f"파이프라인 완료: meeting_id={meeting_id}, 총 소요 시간: {pipeline_elapsed:.1f}초"
         )
         if state.degraded:
-            completion_msg += (
-                f", degraded=True, "
-                f"건너뛴 단계: {state.skipped_steps}"
-            )
+            completion_msg += f", degraded=True, 건너뛴 단계: {state.skipped_steps}"
         logger.info(completion_msg)
         logger.info(f"단계별 소요 시간: [{timing_summary}]")
 
@@ -1012,7 +1001,7 @@ class PipelineManager:
         resume_idx: int,
         audio_path: Path,
         state: PipelineState,
-    ) -> tuple[Optional[Path], Any, Any, Any, Any]:
+    ) -> tuple[Path | None, Any, Any, Any, Any]:
         """이전에 완료된 단계의 중간 결과를 체크포인트에서 복원한다.
 
         재개 시 이전 단계의 출력이 필요하므로 체크포인트에서 복원한다.
@@ -1027,7 +1016,7 @@ class PipelineManager:
             (wav_path, transcript_result, diarization_result,
              merged_result, corrected_result) 튜플
         """
-        wav_path: Optional[Path] = None
+        wav_path: Path | None = None
         transcript_result: Any = None
         diarization_result: Any = None
         merged_result: Any = None
@@ -1035,55 +1024,63 @@ class PipelineManager:
 
         # convert 완료 시 wav_path 복원
         if PipelineStep.CONVERT.value in state.completed_steps:
-            if state.wav_path:
-                wav_path = Path(state.wav_path)
-            else:
-                # wav_path가 저장되지 않았으면 원본 경로 사용
-                wav_path = audio_path
+            # wav_path가 저장되지 않았으면 원본 경로 사용
+            wav_path = Path(state.wav_path) if state.wav_path else audio_path
 
         # transcribe 완료 시 복원
         if PipelineStep.TRANSCRIBE.value in state.completed_steps:
             cp = self._get_checkpoint_path(
-                meeting_id, PipelineStep.TRANSCRIBE,
+                meeting_id,
+                PipelineStep.TRANSCRIBE,
             )
             if cp.exists():
                 from steps.transcriber import TranscriptResult
+
                 transcript_result = TranscriptResult.from_checkpoint(cp)
                 logger.info("전사 결과 체크포인트에서 복원")
 
         # diarize 완료 시 복원
         if PipelineStep.DIARIZE.value in state.completed_steps:
             cp = self._get_checkpoint_path(
-                meeting_id, PipelineStep.DIARIZE,
+                meeting_id,
+                PipelineStep.DIARIZE,
             )
             if cp.exists():
                 from steps.diarizer import DiarizationResult
+
                 diarization_result = DiarizationResult.from_checkpoint(cp)
                 logger.info("화자분리 결과 체크포인트에서 복원")
 
         # merge 완료 시 복원
         if PipelineStep.MERGE.value in state.completed_steps:
             cp = self._get_checkpoint_path(
-                meeting_id, PipelineStep.MERGE,
+                meeting_id,
+                PipelineStep.MERGE,
             )
             if cp.exists():
                 from steps.merger import MergedResult
+
                 merged_result = MergedResult.from_checkpoint(cp)
                 logger.info("병합 결과 체크포인트에서 복원")
 
         # correct 완료 시 복원
         if PipelineStep.CORRECT.value in state.completed_steps:
             cp = self._get_checkpoint_path(
-                meeting_id, PipelineStep.CORRECT,
+                meeting_id,
+                PipelineStep.CORRECT,
             )
             if cp.exists():
                 from steps.corrector import CorrectedResult
+
                 corrected_result = CorrectedResult.from_checkpoint(cp)
                 logger.info("보정 결과 체크포인트에서 복원")
 
         return (
-            wav_path, transcript_result, diarization_result,
-            merged_result, corrected_result,
+            wav_path,
+            transcript_result,
+            diarization_result,
+            merged_result,
+            corrected_result,
         )
 
     async def resume(self, meeting_id: str) -> PipelineState:
@@ -1104,26 +1101,21 @@ class PipelineManager:
         state_path = self._get_state_path(meeting_id)
 
         if not state_path.exists():
-            raise PipelineError(
-                f"파이프라인 상태 파일을 찾을 수 없습니다: {meeting_id}"
-            )
+            raise PipelineError(f"파이프라인 상태 파일을 찾을 수 없습니다: {meeting_id}")
 
         state = PipelineState.from_file(state_path)
         audio_path = Path(state.audio_path)
 
         if not audio_path.exists():
-            raise InvalidInputError(
-                f"원본 오디오 파일을 찾을 수 없습니다: {audio_path}"
-            )
+            raise InvalidInputError(f"원본 오디오 파일을 찾을 수 없습니다: {audio_path}")
 
         logger.info(
-            f"파이프라인 재개: meeting_id={meeting_id}, "
-            f"완료 단계: {state.completed_steps}"
+            f"파이프라인 재개: meeting_id={meeting_id}, 완료 단계: {state.completed_steps}"
         )
 
         return await self.run(audio_path, meeting_id=meeting_id)
 
-    def get_status(self, meeting_id: str) -> Optional[PipelineState]:
+    def get_status(self, meeting_id: str) -> PipelineState | None:
         """특정 회의의 파이프라인 상태를 조회한다.
 
         Args:

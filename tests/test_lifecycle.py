@@ -20,25 +20,23 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import AppConfig, PathsConfig, LifecycleConfig
+from config import AppConfig, LifecycleConfig, PathsConfig
 from security.lifecycle import (
+    _MEETING_ID_PATTERN,
+    ColdAction,
+    CompressionError,
+    DataTier,
+    DeletionError,
+    LifecycleError,
     LifecycleManager,
     LifecycleResult,
     MeetingInfo,
-    DataTier,
-    ColdAction,
-    LifecycleError,
-    CompressionError,
-    DeletionError,
     run_lifecycle,
-    _MEETING_ID_PATTERN,
-    _AUDIO_EXTENSIONS,
 )
-
 
 # === 픽스처 (Fixtures) ===
 
@@ -136,12 +134,8 @@ def _create_meeting(
         flac_file.write_bytes(b"\x00" * flac_size)
 
     # 메타데이터 파일 (항상 생성)
-    (meeting_dir / "corrected.json").write_text(
-        '{"utterances": []}', encoding="utf-8"
-    )
-    (meeting_dir / "summary.md").write_text(
-        "# 회의록\n내용", encoding="utf-8"
-    )
+    (meeting_dir / "corrected.json").write_text('{"utterances": []}', encoding="utf-8")
+    (meeting_dir / "summary.md").write_text("# 회의록\n내용", encoding="utf-8")
 
     # 추가 파일
     if extra_files:
@@ -193,9 +187,7 @@ class TestScanMeetings:
         meetings = manager.scan_meetings()
         assert meetings == []
 
-    def test_outputs_dir_not_exists(
-        self, mock_config: AppConfig, now: datetime
-    ) -> None:
+    def test_outputs_dir_not_exists(self, mock_config: AppConfig, now: datetime) -> None:
         """outputs 디렉토리가 없으면 빈 목록을 반환한다."""
         # outputs_dir를 생성하지 않은 config 사용
         config = AppConfig(
@@ -284,9 +276,7 @@ class TestScanMeetings:
         """pipeline_state.json이 잘못된 JSON이면 mtime 폴백한다."""
         meeting_dir = outputs_dir / "bad-json-meeting"
         meeting_dir.mkdir()
-        (meeting_dir / "pipeline_state.json").write_text(
-            "not valid json!", encoding="utf-8"
-        )
+        (meeting_dir / "pipeline_state.json").write_text("not valid json!", encoding="utf-8")
         (meeting_dir / "audio.wav").write_bytes(b"\x00" * 100)
 
         meetings = manager.scan_meetings()
@@ -297,8 +287,11 @@ class TestScanMeetings:
     ) -> None:
         """WAV/FLAC 파일 존재 여부를 정확히 감지한다."""
         _create_meeting(
-            outputs_dir, "both-audio", now - timedelta(days=10),
-            has_wav=True, has_flac=True,
+            outputs_dir,
+            "both-audio",
+            now - timedelta(days=10),
+            has_wav=True,
+            has_flac=True,
         )
 
         meetings = manager.scan_meetings()
@@ -340,9 +333,7 @@ class TestCompressToFlac:
         assert not wav_path.exists()  # 원본 삭제됨
         mock_run.assert_called_once()
 
-    def test_skip_when_flac_exists(
-        self, manager: LifecycleManager, outputs_dir: Path
-    ) -> None:
+    def test_skip_when_flac_exists(self, manager: LifecycleManager, outputs_dir: Path) -> None:
         """FLAC이 이미 존재하면 스킵한다 (멱등성)."""
         meeting_dir = outputs_dir / "already-compressed"
         meeting_dir.mkdir()
@@ -370,9 +361,7 @@ class TestCompressToFlac:
         result = manager.compress_to_flac(wav_path)
         assert result == flac_path
 
-    def test_error_when_wav_not_found(
-        self, manager: LifecycleManager, outputs_dir: Path
-    ) -> None:
+    def test_error_when_wav_not_found(self, manager: LifecycleManager, outputs_dir: Path) -> None:
         """WAV 파일이 없으면 CompressionError가 발생한다."""
         wav_path = outputs_dir / "nonexistent" / "audio.wav"
 
@@ -475,8 +464,12 @@ class TestApplyColdPolicy:
     ) -> None:
         """delete_audio 정책으로 오디오 파일만 삭제한다."""
         meeting_dir = _create_meeting(
-            outputs_dir, "cold-meeting", now - timedelta(days=100),
-            has_wav=False, has_flac=True, flac_size=500,
+            outputs_dir,
+            "cold-meeting",
+            now - timedelta(days=100),
+            has_wav=False,
+            has_flac=True,
+            flac_size=500,
         )
 
         info = MeetingInfo(
@@ -502,8 +495,11 @@ class TestApplyColdPolicy:
     ) -> None:
         """여러 오디오 파일이 있으면 모두 삭제한다."""
         meeting_dir = _create_meeting(
-            outputs_dir, "multi-audio", now - timedelta(days=100),
-            has_wav=True, has_flac=True,
+            outputs_dir,
+            "multi-audio",
+            now - timedelta(days=100),
+            has_wav=True,
+            has_flac=True,
             extra_files=["backup.mp3"],
         )
 
@@ -527,8 +523,11 @@ class TestApplyColdPolicy:
     ) -> None:
         """삭제할 오디오 파일이 없으면 0을 반환한다."""
         meeting_dir = _create_meeting(
-            outputs_dir, "no-audio", now - timedelta(days=100),
-            has_wav=False, has_flac=False,
+            outputs_dir,
+            "no-audio",
+            now - timedelta(days=100),
+            has_wav=False,
+            has_flac=False,
         )
 
         info = MeetingInfo(
@@ -548,9 +547,7 @@ class TestApplyColdPolicy:
         """archive 정책은 현재 미구현이므로 0을 반환한다."""
         config = AppConfig(
             paths=mock_config.paths,
-            lifecycle=LifecycleConfig(
-                hot_days=30, warm_days=90, cold_action="archive"
-            ),
+            lifecycle=LifecycleConfig(hot_days=30, warm_days=90, cold_action="archive"),
         )
         mgr = LifecycleManager(config, now=now)
 
@@ -598,20 +595,22 @@ class TestRun:
 
     @patch("security.lifecycle.subprocess.run")
     def test_warm_meetings_compressed(
-        self, mock_run: MagicMock,
-        manager: LifecycleManager, outputs_dir: Path, now: datetime
+        self, mock_run: MagicMock, manager: LifecycleManager, outputs_dir: Path, now: datetime
     ) -> None:
         """Warm 등급 회의의 WAV는 FLAC으로 압축된다."""
         _create_meeting(
-            outputs_dir, "warm-meeting", now - timedelta(days=45),
-            has_wav=True, wav_size=2000,
+            outputs_dir,
+            "warm-meeting",
+            now - timedelta(days=45),
+            has_wav=True,
+            wav_size=2000,
         )
 
         # ffmpeg 성공 시뮬레이션
         def fake_ffmpeg(*args, **kwargs):
             cmd = args[0] if args else kwargs.get("args", [])
             # ffmpeg 출력 경로에서 FLAC 파일 생성
-            for i, arg in enumerate(cmd):
+            for _i, arg in enumerate(cmd):
                 if arg.endswith(".flac"):
                     Path(arg).write_bytes(b"\x00" * 1000)
                     break
@@ -630,8 +629,11 @@ class TestRun:
     ) -> None:
         """이미 FLAC만 있는 Warm 회의는 스킵된다."""
         _create_meeting(
-            outputs_dir, "already-warm", now - timedelta(days=45),
-            has_wav=False, has_flac=True,
+            outputs_dir,
+            "already-warm",
+            now - timedelta(days=45),
+            has_wav=False,
+            has_flac=True,
         )
 
         result = manager.run()
@@ -641,13 +643,15 @@ class TestRun:
 
     @patch("security.lifecycle.subprocess.run")
     def test_cold_meetings_deleted(
-        self, mock_run: MagicMock,
-        manager: LifecycleManager, outputs_dir: Path, now: datetime
+        self, mock_run: MagicMock, manager: LifecycleManager, outputs_dir: Path, now: datetime
     ) -> None:
         """Cold 등급 회의의 오디오 파일이 삭제된다."""
         _create_meeting(
-            outputs_dir, "cold-meeting", now - timedelta(days=120),
-            has_wav=True, wav_size=3000,
+            outputs_dir,
+            "cold-meeting",
+            now - timedelta(days=120),
+            has_wav=True,
+            wav_size=3000,
         )
 
         # WAV → FLAC 변환 시뮬레이션 (Cold 처리 시 먼저 압축)
@@ -675,18 +679,24 @@ class TestRun:
 
     @patch("security.lifecycle.subprocess.run")
     def test_mixed_tiers(
-        self, mock_run: MagicMock,
-        manager: LifecycleManager, outputs_dir: Path, now: datetime
+        self, mock_run: MagicMock, manager: LifecycleManager, outputs_dir: Path, now: datetime
     ) -> None:
         """Hot/Warm/Cold 혼합 상황에서 각각 적절히 처리된다."""
         _create_meeting(outputs_dir, "hot", now - timedelta(days=5))
         _create_meeting(
-            outputs_dir, "warm", now - timedelta(days=50),
-            has_wav=True, wav_size=2000,
+            outputs_dir,
+            "warm",
+            now - timedelta(days=50),
+            has_wav=True,
+            wav_size=2000,
         )
         _create_meeting(
-            outputs_dir, "cold", now - timedelta(days=120),
-            has_wav=False, has_flac=True, flac_size=1000,
+            outputs_dir,
+            "cold",
+            now - timedelta(days=120),
+            has_wav=False,
+            has_flac=True,
+            flac_size=1000,
         )
 
         # Warm 회의의 ffmpeg 변환
@@ -704,18 +714,19 @@ class TestRun:
 
         result = manager.run()
         assert result.total_scanned == 3
-        assert result.skipped == 1    # hot
+        assert result.skipped == 1  # hot
         assert result.compressed == 1  # warm
-        assert result.deleted == 1     # cold
+        assert result.deleted == 1  # cold
 
     @patch("security.lifecycle.subprocess.run")
     def test_compression_error_counted(
-        self, mock_run: MagicMock,
-        manager: LifecycleManager, outputs_dir: Path, now: datetime
+        self, mock_run: MagicMock, manager: LifecycleManager, outputs_dir: Path, now: datetime
     ) -> None:
         """압축 실패 시 에러가 기록된다."""
         _create_meeting(
-            outputs_dir, "fail-meeting", now - timedelta(days=50),
+            outputs_dir,
+            "fail-meeting",
+            now - timedelta(days=50),
             has_wav=True,
         )
 
@@ -803,23 +814,29 @@ class TestRunLifecycle:
 class TestMeetingIdValidation:
     """meeting_id 정규식 검증을 테스트한다."""
 
-    @pytest.mark.parametrize("valid_id", [
-        "meeting-001",
-        "2026-03-04_zoom",
-        "test.meeting.123",
-        "simple",
-        "with_underscore",
-    ])
+    @pytest.mark.parametrize(
+        "valid_id",
+        [
+            "meeting-001",
+            "2026-03-04_zoom",
+            "test.meeting.123",
+            "simple",
+            "with_underscore",
+        ],
+    )
     def test_valid_meeting_ids(self, valid_id: str) -> None:
         """유효한 meeting_id 패턴을 통과한다."""
         assert _MEETING_ID_PATTERN.match(valid_id) is not None
 
-    @pytest.mark.parametrize("invalid_id", [
-        "../escape",
-        "path/traversal",
-        "space name",
-        "",
-    ])
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [
+            "../escape",
+            "path/traversal",
+            "space name",
+            "",
+        ],
+    )
     def test_invalid_meeting_ids(self, invalid_id: str) -> None:
         """유효하지 않은 meeting_id 패턴을 거부한다."""
         assert _MEETING_ID_PATTERN.match(invalid_id) is None
@@ -854,8 +871,6 @@ class TestEnums:
 class TestProperties:
     """프로퍼티 접근을 검증한다."""
 
-    def test_outputs_dir_property(
-        self, manager: LifecycleManager, outputs_dir: Path
-    ) -> None:
+    def test_outputs_dir_property(self, manager: LifecycleManager, outputs_dir: Path) -> None:
         """outputs_dir 프로퍼티가 올바른 경로를 반환한다."""
         assert manager.outputs_dir == outputs_dir

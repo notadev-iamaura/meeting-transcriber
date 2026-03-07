@@ -8,10 +8,8 @@ main.py 단위 테스트 모듈 (Main Entry Point Unit Tests)
 
 from __future__ import annotations
 
-import argparse
 import logging
 import signal
-import sys
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -29,7 +27,6 @@ from main import (
     setup_logging,
     start_server_thread,
 )
-
 
 # === TestParseArgs ===
 
@@ -53,14 +50,21 @@ class TestParseArgs:
         config_path = tmp_path / "test.yaml"
         log_path = tmp_path / "test.log"
 
-        args = parse_args([
-            "--config", str(config_path),
-            "--host", "0.0.0.0",
-            "--port", "9000",
-            "--log-level", "debug",
-            "--log-file", str(log_path),
-            "--no-menubar",
-        ])
+        args = parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "9000",
+                "--log-level",
+                "debug",
+                "--log-file",
+                str(log_path),
+                "--no-menubar",
+            ]
+        )
 
         assert args.config == config_path
         assert args.host == "0.0.0.0"
@@ -212,7 +216,8 @@ class TestEnsureDataDirectories:
 
         # 소스 모듈의 SecureDirManager를 패칭
         with patch(
-            "security.secure_dir.SecureDirManager", autospec=True,
+            "security.secure_dir.SecureDirManager",
+            autospec=True,
         ) as mock_cls:
             mock_manager = mock_cls.return_value
             mock_manager.ensure_secure_dirs.return_value = [Path("/a"), Path("/b")]
@@ -309,7 +314,9 @@ class TestStartServerThread:
     ) -> None:
         """uvicorn.Config에 올바른 인자가 전달된다."""
         config = load_config_with_overrides(
-            host="0.0.0.0", port=9000, log_level="debug",
+            host="0.0.0.0",
+            port=9000,
+            log_level="debug",
         )
         mock_app = MagicMock()
         mock_create_app.return_value = mock_app

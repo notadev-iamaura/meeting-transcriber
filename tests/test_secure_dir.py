@@ -15,21 +15,17 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
-import stat
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from config import AppConfig, PathsConfig, SecurityConfig
 from security.secure_dir import (
-    SecureDirManager,
-    SecureDirError,
-    PermissionChangeError,
     DirectoryCreationError,
-    _DEFAULT_GITIGNORE_PATTERNS,
+    PermissionChangeError,
+    SecureDirError,
+    SecureDirManager,
     ensure_secure_dirs,
 )
 
@@ -80,9 +76,7 @@ def manager(mock_config: AppConfig) -> SecureDirManager:
 class TestSecureDirManagerInit:
     """SecureDirManager 초기화 동작을 검증한다."""
 
-    def test_init_stores_config(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_init_stores_config(self, manager: SecureDirManager, base_dir: Path) -> None:
         """설정값이 올바르게 저장되는지 확인한다."""
         assert manager.base_dir == base_dir
         assert manager._permissions == 0o700
@@ -112,9 +106,7 @@ class TestDirectoryCreation:
             manager.ensure_secure_dirs()
         assert base_dir.exists()
 
-    def test_creates_subdirectories(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_creates_subdirectories(self, manager: SecureDirManager, base_dir: Path) -> None:
         """하위 디렉토리가 모두 생성되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -123,9 +115,7 @@ class TestDirectoryCreation:
         assert (base_dir / "checkpoints").exists()
         assert (base_dir / "chroma_db").exists()
 
-    def test_idempotent_creation(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_idempotent_creation(self, manager: SecureDirManager, base_dir: Path) -> None:
         """이미 존재하는 디렉토리에 대해 에러 없이 실행되는지 확인한다."""
         base_dir.mkdir(parents=True)
         with patch.object(manager, "_exclude_from_timemachine"):
@@ -134,9 +124,7 @@ class TestDirectoryCreation:
             manager.ensure_secure_dirs()
         assert base_dir.exists()
 
-    def test_returns_secured_dirs(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_returns_secured_dirs(self, manager: SecureDirManager, base_dir: Path) -> None:
         """반환 값이 보안 설정된 디렉토리 목록인지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             dirs = manager.ensure_secure_dirs()
@@ -149,9 +137,11 @@ class TestDirectoryCreation:
 
     def test_creation_failure_raises_error(self, manager: SecureDirManager) -> None:
         """디렉토리 생성 실패 시 DirectoryCreationError가 발생하는지 확인한다."""
-        with patch.object(Path, "mkdir", side_effect=OSError("디스크 공간 부족")):
-            with pytest.raises(DirectoryCreationError, match="디렉토리 생성 실패"):
-                manager.ensure_secure_dirs()
+        with (
+            patch.object(Path, "mkdir", side_effect=OSError("디스크 공간 부족")),
+            pytest.raises(DirectoryCreationError, match="디렉토리 생성 실패"),
+        ):
+            manager.ensure_secure_dirs()
 
 
 # === 권한 설정 테스트 ===
@@ -160,18 +150,14 @@ class TestDirectoryCreation:
 class TestPermissions:
     """디렉토리 권한 설정 기능을 검증한다."""
 
-    def test_sets_permissions_700(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_sets_permissions_700(self, manager: SecureDirManager, base_dir: Path) -> None:
         """디렉토리 권한이 0o700으로 설정되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
         mode = base_dir.stat().st_mode & 0o777
         assert mode == 0o700
 
-    def test_corrects_wrong_permissions(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_corrects_wrong_permissions(self, manager: SecureDirManager, base_dir: Path) -> None:
         """잘못된 권한(0o755)을 0o700으로 교정하는지 확인한다."""
         base_dir.mkdir(parents=True)
         base_dir.chmod(0o755)
@@ -181,19 +167,19 @@ class TestPermissions:
             manager.ensure_secure_dirs()
         assert (base_dir.stat().st_mode & 0o777) == 0o700
 
-    def test_skips_if_already_correct(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_skips_if_already_correct(self, manager: SecureDirManager, base_dir: Path) -> None:
         """이미 올바른 권한이면 변경하지 않는지 확인한다."""
         base_dir.mkdir(parents=True)
         base_dir.chmod(0o700)
 
-        with patch.object(manager, "_exclude_from_timemachine"):
-            with patch.object(Path, "chmod") as mock_chmod:
-                # _set_permissions 내부에서 stat() 확인 후 스킵해야 하므로
-                # 직접 _set_permissions만 테스트
-                manager._set_permissions(base_dir)
-                mock_chmod.assert_not_called()
+        with (
+            patch.object(manager, "_exclude_from_timemachine"),
+            patch.object(Path, "chmod") as mock_chmod,
+        ):
+            # _set_permissions 내부에서 stat() 확인 후 스킵해야 하므로
+            # 직접 _set_permissions만 테스트
+            manager._set_permissions(base_dir)
+            mock_chmod.assert_not_called()
 
     def test_custom_permissions_750(self, base_dir: Path) -> None:
         """커스텀 권한 0o750이 올바르게 적용되는지 확인한다."""
@@ -214,15 +200,13 @@ class TestPermissions:
     ) -> None:
         """권한 변경 실패 시 PermissionChangeError가 발생하는지 확인한다."""
         base_dir.mkdir(parents=True)
-        with patch.object(
-            Path, "chmod", side_effect=OSError("권한 변경 불가")
+        with (
+            patch.object(Path, "chmod", side_effect=OSError("권한 변경 불가")),
+            pytest.raises(PermissionChangeError, match="권한 변경 실패"),
         ):
-            with pytest.raises(PermissionChangeError, match="권한 변경 실패"):
-                manager._set_permissions(base_dir)
+            manager._set_permissions(base_dir)
 
-    def test_subdirectory_permissions(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_subdirectory_permissions(self, manager: SecureDirManager, base_dir: Path) -> None:
         """하위 디렉토리도 모두 0o700 권한이 적용되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -238,17 +222,13 @@ class TestPermissions:
 class TestSpotlightExclusion:
     """macOS Spotlight 인덱싱 제외 기능을 검증한다."""
 
-    def test_creates_metadata_never_index(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_creates_metadata_never_index(self, manager: SecureDirManager, base_dir: Path) -> None:
         """base_dir에 .metadata_never_index 파일이 생성되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
         assert (base_dir / ".metadata_never_index").exists()
 
-    def test_creates_in_all_subdirs(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_creates_in_all_subdirs(self, manager: SecureDirManager, base_dir: Path) -> None:
         """모든 하위 디렉토리에도 .metadata_never_index가 생성되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -256,9 +236,7 @@ class TestSpotlightExclusion:
             marker = base_dir / subdir_name / ".metadata_never_index"
             assert marker.exists(), f"{subdir_name}에 .metadata_never_index 없음"
 
-    def test_idempotent_marker_creation(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_idempotent_marker_creation(self, manager: SecureDirManager, base_dir: Path) -> None:
         """이미 존재하는 .metadata_never_index에 대해 에러 없이 동작하는지 확인한다."""
         base_dir.mkdir(parents=True)
         marker = base_dir / ".metadata_never_index"
@@ -297,9 +275,7 @@ class TestSpotlightExclusion:
 class TestTimeMachineExclusion:
     """macOS Time Machine 백업 제외 기능을 검증한다."""
 
-    def test_calls_tmutil(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_calls_tmutil(self, manager: SecureDirManager, base_dir: Path) -> None:
         """tmutil addexclusion 명령이 호출되는지 확인한다."""
         base_dir.mkdir(parents=True)
         with patch("security.secure_dir.subprocess.run") as mock_run:
@@ -322,6 +298,7 @@ class TestTimeMachineExclusion:
             side_effect=FileNotFoundError("tmutil not found"),
         ):
             import logging
+
             with caplog.at_level(logging.DEBUG):
                 manager._exclude_from_timemachine(base_dir)
             assert "tmutil 미설치" in caplog.text
@@ -334,6 +311,7 @@ class TestTimeMachineExclusion:
         with patch("security.secure_dir.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="Permission denied")
             import logging
+
             with caplog.at_level(logging.WARNING):
                 manager._exclude_from_timemachine(base_dir)
             assert "Time Machine 제외 설정 실패" in caplog.text
@@ -344,11 +322,13 @@ class TestTimeMachineExclusion:
         """tmutil 타임아웃 시 경고 로그를 남기는지 확인한다."""
         base_dir.mkdir(parents=True)
         import subprocess as sp
+
         with patch(
             "security.secure_dir.subprocess.run",
             side_effect=sp.TimeoutExpired(cmd="tmutil", timeout=10),
         ):
             import logging
+
             with caplog.at_level(logging.WARNING):
                 manager._exclude_from_timemachine(base_dir)
             assert "타임아웃" in caplog.text
@@ -374,17 +354,13 @@ class TestTimeMachineExclusion:
 class TestGitignore:
     """.gitignore 생성 기능을 검증한다."""
 
-    def test_creates_gitignore(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_creates_gitignore(self, manager: SecureDirManager, base_dir: Path) -> None:
         """.gitignore 파일이 생성되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
         assert (base_dir / ".gitignore").exists()
 
-    def test_gitignore_contains_patterns(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_gitignore_contains_patterns(self, manager: SecureDirManager, base_dir: Path) -> None:
         """.gitignore에 필수 패턴이 포함되어 있는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -395,9 +371,7 @@ class TestGitignore:
         assert "outputs/" in content
         assert ".DS_Store" in content
 
-    def test_does_not_overwrite_existing(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_does_not_overwrite_existing(self, manager: SecureDirManager, base_dir: Path) -> None:
         """이미 존재하는 .gitignore를 덮어쓰지 않는지 확인한다."""
         base_dir.mkdir(parents=True)
         gitignore = base_dir / ".gitignore"
@@ -409,9 +383,7 @@ class TestGitignore:
         assert "custom_pattern/" in content
         assert "*.wav" not in content  # 기본 패턴이 추가되지 않아야 함
 
-    def test_gitignore_utf8_encoding(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_gitignore_utf8_encoding(self, manager: SecureDirManager, base_dir: Path) -> None:
         """.gitignore가 UTF-8로 인코딩되는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -426,9 +398,7 @@ class TestGitignore:
 class TestVerifySecurity:
     """보안 설정 검증 기능을 검증한다."""
 
-    def test_all_checks_pass(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_all_checks_pass(self, manager: SecureDirManager, base_dir: Path) -> None:
         """모든 보안 설정이 올바를 때 전체 통과하는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -443,9 +413,7 @@ class TestVerifySecurity:
         result = manager.verify_security()
         assert result["dirs_exist"] is False
 
-    def test_wrong_permissions_detected(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_wrong_permissions_detected(self, manager: SecureDirManager, base_dir: Path) -> None:
         """잘못된 권한을 감지하는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -465,9 +433,7 @@ class TestVerifySecurity:
         result = manager.verify_security()
         assert result["spotlight_excluded"] is False
 
-    def test_missing_gitignore_detected(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_missing_gitignore_detected(self, manager: SecureDirManager, base_dir: Path) -> None:
         """.gitignore 누락을 감지하는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
@@ -513,9 +479,7 @@ class TestAsyncWrapper:
 class TestConvenienceFunction:
     """모듈 수준 편의 함수를 검증한다."""
 
-    def test_ensure_secure_dirs_with_config(
-        self, mock_config: AppConfig, base_dir: Path
-    ) -> None:
+    def test_ensure_secure_dirs_with_config(self, mock_config: AppConfig, base_dir: Path) -> None:
         """명시적 config로 편의 함수가 동작하는지 확인한다."""
         with patch("security.secure_dir.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -562,18 +526,14 @@ class TestErrorHierarchy:
 class TestIntegrationScenarios:
     """실제 사용 시나리오를 검증한다."""
 
-    def test_full_setup_and_verify(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_full_setup_and_verify(self, manager: SecureDirManager, base_dir: Path) -> None:
         """전체 설정 → 검증 흐름이 동작하는지 확인한다."""
         with patch.object(manager, "_exclude_from_timemachine"):
             manager.ensure_secure_dirs()
         result = manager.verify_security()
         assert all(result.values()), f"검증 실패: {result}"
 
-    def test_repeated_setup_is_safe(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_repeated_setup_is_safe(self, manager: SecureDirManager, base_dir: Path) -> None:
         """여러 번 실행해도 안전한지 확인한다 (멱등성)."""
         with patch.object(manager, "_exclude_from_timemachine"):
             for _ in range(3):
@@ -583,9 +543,7 @@ class TestIntegrationScenarios:
         result = manager.verify_security()
         assert all(result.values())
 
-    def test_partial_existing_dirs(
-        self, manager: SecureDirManager, base_dir: Path
-    ) -> None:
+    def test_partial_existing_dirs(self, manager: SecureDirManager, base_dir: Path) -> None:
         """일부 디렉토리만 존재할 때 나머지를 생성하는지 확인한다."""
         # base_dir과 outputs만 미리 생성
         base_dir.mkdir(parents=True)

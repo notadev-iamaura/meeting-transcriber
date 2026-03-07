@@ -21,7 +21,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from config import AppConfig, get_config
 from core.llm_backend import (
@@ -165,9 +165,7 @@ class CorrectedResult:
         with open(checkpoint_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        utterances = [
-            CorrectedUtterance(**u) for u in data.get("utterances", [])
-        ]
+        utterances = [CorrectedUtterance(**u) for u in data.get("utterances", [])]
 
         return cls(
             utterances=utterances,
@@ -265,8 +263,8 @@ class Corrector:
 
     def __init__(
         self,
-        config: Optional[AppConfig] = None,
-        model_manager: Optional[ModelLoadManager] = None,
+        config: AppConfig | None = None,
+        model_manager: ModelLoadManager | None = None,
     ) -> None:
         """Corrector를 초기화한다.
 
@@ -281,8 +279,7 @@ class Corrector:
         self._batch_size = self._config.llm.correction_batch_size
 
         logger.info(
-            f"Corrector 초기화: backend={self._config.llm.backend}, "
-            f"batch_size={self._batch_size}"
+            f"Corrector 초기화: backend={self._config.llm.backend}, batch_size={self._batch_size}"
         )
 
     def _create_backend(self) -> LLMBackend:
@@ -322,7 +319,7 @@ class Corrector:
         """
         prompt = _build_correction_prompt(batch)
         corrections: dict[int, str] = {}
-        last_error: Optional[Exception] = None
+        _last_error: Exception | None = None
 
         # 재시도 로직: LLMGenerationError 발생 시 재시도
         for attempt in range(1, self._MAX_BATCH_RETRIES + 2):
@@ -333,9 +330,7 @@ class Corrector:
                         {"role": "user", "content": prompt},
                     ],
                 )
-                corrections = _parse_correction_response(
-                    response_text, len(batch)
-                )
+                corrections = _parse_correction_response(response_text, len(batch))
 
                 # 파싱 결과가 원본 배치의 절반 미만이면 파싱 실패로 간주하고 재시도
                 if len(corrections) < len(batch) // 2 and attempt <= self._MAX_BATCH_RETRIES:
@@ -354,7 +349,7 @@ class Corrector:
                 corrections = {}
                 break
             except (LLMGenerationError, CorrectionError) as e:
-                last_error = e
+                _last_error = e
                 if attempt <= self._MAX_BATCH_RETRIES:
                     logger.warning(
                         f"배치 보정 실패 (시도 {attempt}/{self._MAX_BATCH_RETRIES + 1}): {e}"
@@ -373,12 +368,8 @@ class Corrector:
 
             if corrected_text:
                 # NFC 정규화 적용
-                corrected_text = unicodedata.normalize(
-                    "NFC", corrected_text.strip()
-                )
-                original_normalized = unicodedata.normalize(
-                    "NFC", utterance.text.strip()
-                )
+                corrected_text = unicodedata.normalize("NFC", corrected_text.strip())
+                original_normalized = unicodedata.normalize("NFC", utterance.text.strip())
                 was_corrected = corrected_text != original_normalized
 
                 if was_corrected:
@@ -431,17 +422,12 @@ class Corrector:
         if not merged.utterances:
             raise EmptyInputError("보정할 발화가 비어있습니다.")
 
-        logger.info(
-            f"보정 시작: 발화 {len(merged.utterances)}개, "
-            f"배치 크기 {self._batch_size}"
-        )
+        logger.info(f"보정 시작: 발화 {len(merged.utterances)}개, 배치 크기 {self._batch_size}")
 
         # 배치 분할
         batches: list[list[MergedUtterance]] = []
         for i in range(0, len(merged.utterances), self._batch_size):
-            batches.append(
-                merged.utterances[i:i + self._batch_size]
-            )
+            batches.append(merged.utterances[i : i + self._batch_size])
 
         logger.info(f"배치 수: {len(batches)}")
 
@@ -457,15 +443,12 @@ class Corrector:
             ) as backend:
                 for batch_idx, batch in enumerate(batches):
                     logger.info(
-                        f"배치 {batch_idx + 1}/{len(batches)} 보정 중 "
-                        f"({len(batch)}개 발화)"
+                        f"배치 {batch_idx + 1}/{len(batches)} 보정 중 ({len(batch)}개 발화)"
                     )
 
                     # 별도 스레드에서 실행 (동기 호출이 블로킹이므로)
-                    corrected, batch_corrected, batch_failed = (
-                        await asyncio.to_thread(
-                            self._correct_batch, backend, batch
-                        )
+                    corrected, batch_corrected, batch_failed = await asyncio.to_thread(
+                        self._correct_batch, backend, batch
                     )
 
                     total_corrected += batch_corrected
@@ -477,9 +460,7 @@ class Corrector:
         except CorrectionError:
             raise
         except Exception as e:
-            raise CorrectionError(
-                f"보정 처리 중 오류 발생: {e}"
-            ) from e
+            raise CorrectionError(f"보정 처리 중 오류 발생: {e}") from e
 
         result = CorrectedResult(
             utterances=all_corrected,
