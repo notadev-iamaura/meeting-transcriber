@@ -74,7 +74,7 @@ def check_dependencies() -> None:
     """
     missing: list[str] = []
 
-    for package_name in ["jax", "flax", "torch", "transformers", "mlx", "safetensors"]:
+    for package_name in ["jax", "flax", "safetensors"]:
         try:
             __import__(package_name)
         except ImportError:
@@ -182,7 +182,6 @@ def process_weights(
     Returns:
         MLX 배열로 변환된 state_dict
     """
-    import mlx.core as mx
     import numpy as np
 
     # dtype 매핑
@@ -209,11 +208,10 @@ def process_weights(
             np_value = np_value.swapaxes(1, 2)
             logger.debug(f"Conv1d 축 변환: {key} {original_shape} → {np_value.shape}")
 
-        # dtype 변환
+        # dtype 변환 (numpy 상태로 유지 — safetensors가 numpy 배열을 직접 저장)
         np_value = np_value.astype(np_dtype)
 
-        # MLX 배열로 변환
-        processed[key] = mx.array(np_value)
+        processed[key] = np_value
 
     return processed
 
@@ -222,22 +220,28 @@ def build_mlx_config(hf_config: Any) -> dict[str, Any]:
     """HuggingFace 설정에서 MLX Whisper config.json을 생성한다.
 
     Args:
-        hf_config: HuggingFace WhisperConfig 객체
+        hf_config: HuggingFace WhisperConfig 객체 또는 딕셔너리
 
     Returns:
         MLX 호환 config 딕셔너리 (10개 필수 필드 포함)
     """
+    # 딕셔너리 또는 객체 속성 접근을 통합 처리
+    def _get(key: str) -> Any:
+        if isinstance(hf_config, dict):
+            return hf_config[key]
+        return getattr(hf_config, key)
+
     mlx_config: dict[str, Any] = {
-        "n_mels": hf_config.num_mel_bins,
-        "n_audio_ctx": hf_config.max_source_positions,
-        "n_audio_state": hf_config.d_model,
-        "n_audio_head": hf_config.encoder_attention_heads,
-        "n_audio_layer": hf_config.encoder_layers,
-        "n_vocab": hf_config.vocab_size,
-        "n_text_ctx": hf_config.max_target_positions,
-        "n_text_state": hf_config.d_model,
-        "n_text_head": hf_config.decoder_attention_heads,
-        "n_text_layer": hf_config.decoder_layers,
+        "n_mels": _get("num_mel_bins"),
+        "n_audio_ctx": _get("max_source_positions"),
+        "n_audio_state": _get("d_model"),
+        "n_audio_head": _get("encoder_attention_heads"),
+        "n_audio_layer": _get("encoder_layers"),
+        "n_vocab": _get("vocab_size"),
+        "n_text_ctx": _get("max_target_positions"),
+        "n_text_state": _get("d_model"),
+        "n_text_head": _get("decoder_attention_heads"),
+        "n_text_layer": _get("decoder_layers"),
         "model_type": "whisper",
     }
 
@@ -317,43 +321,130 @@ def validate_output(output_dir: Path) -> bool:
     return True
 
 
-def load_flax_as_pytorch(source: str) -> tuple[dict[str, Any], Any]:
-    """Flax 모델을 PyTorch state_dict로 로드한다.
+def _flatten_flax_dict(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Flax 중첩 딕셔너리를 점(.) 구분 flat 딕셔너리로 변환한다.
+
+    Args:
+        d: Flax 파라미터 딕셔너리 (중첩 구조)
+        prefix: 키 접두사
+
+    Returns:
+        평탄화된 딕셔너리
+    """
+    result: dict[str, Any] = {}
+    for k, v in d.items():
+        new_key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            result.update(_flatten_flax_dict(v, new_key))
+        else:
+            result[new_key] = v
+    return result
+
+
+def _convert_flax_key_to_hf(key: str) -> str:
+    """Flax 파라미터 키를 HuggingFace(PyTorch) 형식으로 변환한다.
+
+    변환 규칙:
+      - kernel → weight (Linear, Conv 레이어)
+      - scale → weight (LayerNorm)
+      - embedding → weight (Embedding)
+      - bias는 그대로 유지
+
+    Args:
+        key: Flax 형식 키 문자열
+
+    Returns:
+        HuggingFace(PyTorch) 형식 키 문자열
+    """
+    key = key.replace(".kernel", ".weight")
+    key = key.replace(".scale", ".weight")
+    key = key.replace(".embedding", ".weight")
+    return key
+
+
+def load_flax_direct(source: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Flax msgpack 파일을 직접 로드하여 HF 형식 state_dict로 변환한다.
+
+    transformers 5.x에서 from_flax 파라미터가 제거되었으므로,
+    flax.serialization을 사용하여 직접 로드한 후 수동으로 변환한다.
+
+    변환 과정:
+    1. HuggingFace Hub에서 flax_model.msgpack + config.json 다운로드
+    2. Flax 파라미터 딕셔너리를 flat 구조로 변환
+    3. Flax 키를 HF(PyTorch) 키로 변환 (kernel→weight 등)
+    4. Flax 텐서를 NumPy 배열로 변환 + 축 전치
 
     Args:
         source: HuggingFace 모델 ID 또는 로컬 경로
 
     Returns:
-        (PyTorch state_dict, HuggingFace 설정 객체) 튜플
+        (HF 형식 state_dict, HF config 딕셔너리) 튜플
 
     Raises:
         RuntimeError: 모델 로드 실패 시
     """
-    from transformers import WhisperForConditionalGeneration
+    import numpy as np
+    from flax import serialization
+    from huggingface_hub import hf_hub_download
 
-    logger.info(f"Flax 모델 로드 중: {source} (from_flax=True)")
+    logger.info(f"Flax 모델 직접 로드 중: {source}")
 
+    # 1. 파일 다운로드
     try:
-        model = WhisperForConditionalGeneration.from_pretrained(
-            source, from_flax=True
-        )
-    except OSError as e:
+        msgpack_path = hf_hub_download(source, "flax_model.msgpack")
+        config_path = hf_hub_download(source, "config.json")
+    except Exception as e:
         raise RuntimeError(
-            f"모델 다운로드/로드 실패: {source}\n"
+            f"모델 다운로드 실패: {source}\n"
             f"원인: {e}\n"
             f"HuggingFace 모델 ID가 올바른지 확인하세요."
         ) from e
 
-    hf_config = model.config
-    state_dict = model.state_dict()
+    logger.info(f"flax_model.msgpack 다운로드 완료: {msgpack_path}")
 
-    logger.info(f"PyTorch state_dict 로드 완료: {len(state_dict)}개 키")
+    # config.json 로드
+    with open(config_path, encoding="utf-8") as f:
+        hf_config = json.load(f)
 
-    # 메모리 해제
-    del model
+    # 2. Flax 파라미터 로드 + flat 변환
+    with open(msgpack_path, "rb") as f:
+        raw_bytes = f.read()
+
+    logger.info(f"msgpack 파일 크기: {len(raw_bytes) / (1024**3):.2f} GB")
+    flax_params = serialization.from_bytes(None, raw_bytes)
+    del raw_bytes
     gc.collect()
 
-    return state_dict, hf_config
+    flat_params = _flatten_flax_dict(flax_params)
+    del flax_params
+    gc.collect()
+
+    logger.info(f"Flax 파라미터 수: {len(flat_params)}")
+
+    # 3. Flax → HF(PyTorch) 형식 변환
+    hf_state_dict: dict[str, Any] = {}
+    for flax_key, value in flat_params.items():
+        hf_key = _convert_flax_key_to_hf(flax_key)
+        np_value = np.array(value)
+
+        # Flax Linear kernel (in, out) → PyTorch weight (out, in): 전치
+        if hf_key.endswith(".weight") and np_value.ndim == 2 and "conv" not in hf_key:
+            # LayerNorm weight는 1D이므로 2D만 전치
+            # Embedding weight는 (vocab, dim)으로 전치 불필요 — HF도 동일
+            if "layer_norm" not in flax_key and "embed" not in flax_key:
+                np_value = np_value.T
+
+        # Flax Conv1d kernel (kernel, in, out) → PyTorch weight (out, in, kernel): 축 변환
+        if "conv" in hf_key and np_value.ndim == 3:
+            np_value = np_value.transpose(2, 1, 0)
+
+        hf_state_dict[hf_key] = np_value
+
+    del flat_params
+    gc.collect()
+
+    logger.info(f"HF 형식 state_dict 변환 완료: {len(hf_state_dict)}개 키")
+    return hf_state_dict, hf_config
 
 
 def save_mlx_model(
@@ -362,12 +453,11 @@ def save_mlx_model(
     """MLX 가중치와 설정을 파일로 저장한다.
 
     Args:
-        weights: MLX 배열 딕셔너리
+        weights: numpy 배열 딕셔너리
         config: MLX config 딕셔너리
         output_dir: 저장할 디렉토리 경로
     """
     from safetensors.numpy import save_file
-    import numpy as np
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -377,16 +467,9 @@ def save_mlx_model(
         json.dump(config, f, indent=2, ensure_ascii=False)
     logger.info(f"config.json 저장 완료: {config_path}")
 
-    # weights.safetensors 저장 (MLX 배열 → numpy 변환)
-    numpy_weights: dict[str, Any] = {}
-    for key, value in weights.items():
-        if hasattr(value, "__array__"):
-            numpy_weights[key] = np.array(value)
-        else:
-            numpy_weights[key] = value
-
+    # weights.safetensors 저장 (numpy 배열 그대로 저장)
     weights_path = output_dir / "weights.safetensors"
-    save_file(numpy_weights, str(weights_path))
+    save_file(weights, str(weights_path))
     logger.info(f"weights.safetensors 저장 완료: {weights_path}")
 
     # 파일 크기 로깅
@@ -425,9 +508,9 @@ def convert(source: str, output_dir: Path, dtype_str: str = "float16") -> Path:
     check_dependencies()
     check_disk_space(output_dir)
 
-    # 1단계: Flax → PyTorch
-    logger.info("[1/4] Flax → PyTorch 변환 중...")
-    state_dict, hf_config = load_flax_as_pytorch(source)
+    # 1단계: Flax → HF 형식 (직접 로드)
+    logger.info("[1/4] Flax 모델 직접 로드 + HF 형식 변환 중...")
+    state_dict, hf_config = load_flax_direct(source)
 
     # 2단계: HF → OpenAI 키 리매핑
     logger.info("[2/4] HF → OpenAI 키 리매핑 중...")
