@@ -13,7 +13,7 @@ paths:
 
 # === STT 모델 설정 ===
 stt:
-  model_name: "mlx-community/whisper-medium-mlx"  # mlx-whisper 모델 (한국어 지원)
+  model_name: "~/.meeting-transcriber/models/whisper-medium-komixv2-mlx"  # 한국어 최적화 모델 (MLX 변환)
   language: "ko"                             # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)

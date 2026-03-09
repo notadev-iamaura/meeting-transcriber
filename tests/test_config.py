@@ -43,7 +43,7 @@ class TestConfigYamlParsing:
         config_path = Path(__file__).parent.parent / "config.yaml"
         config = load_config(config_path)
 
-        assert config.stt.model_name == "mlx-community/whisper-medium-mlx"
+        assert config.stt.model_name == "~/.meeting-transcriber/models/whisper-medium-komixv2-mlx"
         assert config.stt.language == "ko"
         assert config.diarization.device == "auto"
         assert config.llm.host == "http://127.0.0.1:11434"

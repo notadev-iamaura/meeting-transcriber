@@ -168,7 +168,7 @@ class Transcriber:
         self._manager = model_manager or get_model_manager()
 
         # STT 설정 캐시
-        self._model_name = self._config.stt.model_name
+        self._model_name = self._config.stt.resolve_model_path()
         self._language = self._config.stt.language
         self._beam_size = self._config.stt.beam_size
         self._batch_size = self._config.stt.batch_size  # 향후 mlx-whisper batch 지원 대비 캐싱

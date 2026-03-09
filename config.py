@@ -99,6 +99,29 @@ class STTConfig(BaseModel):
         default=1800, ge=60, description="전사 타임아웃 (초, 기본 30분)"
     )
 
+    def resolve_model_path(self) -> str:
+        """모델 경로를 해석한다.
+
+        tilde(~) 확장 및 로컬 경로 존재 확인을 수행한다.
+        로컬 경로가 존재하면 확장된 절대 경로를 반환하고,
+        존재하지 않으면 HuggingFace 모델 ID로 간주하여 원본을 반환한다.
+
+        Returns:
+            해석된 모델 경로 문자열 (절대 경로 또는 HF 모델 ID)
+        """
+        expanded = Path(self.model_name).expanduser()
+        if expanded.exists():
+            resolved = str(expanded.resolve())
+            logger.debug(f"로컬 모델 경로 해석: {self.model_name} → {resolved}")
+            return resolved
+        # tilde가 포함된 경우 로컬 경로로 의도된 것이므로 경고
+        if "~" in self.model_name:
+            logger.warning(
+                f"로컬 모델 경로가 존재하지 않습니다: {self.model_name} "
+                f"(확장: {expanded}). HuggingFace에서 다운로드를 시도합니다."
+            )
+        return self.model_name
+
 
 class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
