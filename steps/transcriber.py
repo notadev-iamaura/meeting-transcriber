@@ -276,6 +276,50 @@ class Transcriber:
 
         return segments
 
+    async def _transcribe_with_fallback(
+        self,
+        whisper_module: Any,
+        audio_path: Path,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """beam search로 전사를 시도하고, 미지원 시 greedy decoding으로 폴백한다.
+
+        Args:
+            whisper_module: mlx_whisper 모듈
+            audio_path: 전사할 오디오 파일 경로
+            timeout: 전사 타임아웃 (초)
+
+        Returns:
+            mlx_whisper.transcribe() 결과 딕셔너리
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    whisper_module.transcribe,
+                    str(audio_path),
+                    path_or_hf_repo=self._model_name,
+                    language=self._language,
+                    word_timestamps=False,
+                    beam_size=self._beam_size,
+                ),
+                timeout=timeout,
+            )
+        except NotImplementedError:
+            logger.warning(
+                f"beam search(beam_size={self._beam_size}) 미지원 → "
+                "greedy decoding으로 폴백"
+            )
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    whisper_module.transcribe,
+                    str(audio_path),
+                    path_or_hf_repo=self._model_name,
+                    language=self._language,
+                    word_timestamps=False,
+                ),
+                timeout=timeout,
+            )
+
     async def transcribe(self, audio_path: Path) -> TranscriptResult:
         """오디오 파일을 한국어로 전사한다.
 
@@ -297,7 +341,7 @@ class Transcriber:
         """
         self._validate_audio(audio_path)
 
-        logger.info(f"전사 시작: {audio_path.name}")
+        logger.info(f"전사 시작: {audio_path.name} (beam_size={self._beam_size})")
 
         # 전사 타임아웃: 오디오 길이에 비례하여 설정
         # 기본 30분 타임아웃 (매우 긴 오디오 고려)
@@ -309,17 +353,8 @@ class Transcriber:
                 "whisper", self._load_whisper_module
             ) as whisper_module:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
-                # beam_size는 decode_options → DecodingOptions로 전달됨
-                raw_result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        whisper_module.transcribe,
-                        str(audio_path),
-                        path_or_hf_repo=self._model_name,
-                        language=self._language,
-                        word_timestamps=False,
-                        beam_size=self._beam_size,  # decode_options로 DecodingOptions에 전달
-                    ),
-                    timeout=transcribe_timeout,
+                raw_result = await self._transcribe_with_fallback(
+                    whisper_module, audio_path, transcribe_timeout
                 )
         except TimeoutError as e:
             raise TranscriptionError(
