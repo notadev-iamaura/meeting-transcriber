@@ -308,6 +308,68 @@ class AudioConverter:
         logger.info(f"오디오 변환 완료: {output_path} ({output_size / 1024:.1f}KB)")
         return output_path
 
+    def merge_tracks(
+        self,
+        track_paths: dict[str, Path],
+        output_dir: Path,
+        output_filename: str,
+    ) -> Path:
+        """멀티트랙 오디오를 하나로 병합한다.
+
+        ffmpeg -filter_complex amerge를 사용하여
+        여러 트랙을 하나의 WAV 파일로 합친다.
+
+        Args:
+            track_paths: {"system": Path, "mic": Path} 트랙 경로들
+            output_dir: 출력 디렉토리
+            output_filename: 출력 파일명
+
+        Returns:
+            병합된 WAV 파일 경로
+
+        Raises:
+            ConversionFailedError: 병합 실패 시
+            FileNotFoundError: 입력 파일이 없을 때
+        """
+        # 입력 파일 존재 확인
+        for name, path in track_paths.items():
+            if not path.exists():
+                raise FileNotFoundError(f"트랙 파일을 찾을 수 없습니다: {name}={path}")
+
+        self._check_ffmpeg_installed()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / output_filename
+
+        # ffmpeg amerge로 병합
+        inputs: list[str] = []
+        for path in track_paths.values():
+            inputs.extend(["-i", str(path)])
+
+        n_tracks = len(track_paths)
+        cmd = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", f"amerge=inputs={n_tracks},pan=mono|c0=0.5*c0+0.5*c1",
+            "-acodec", "pcm_s16le",
+            "-ar", str(self._target_sample_rate),
+            "-ac", "1",
+            str(output_path),
+        ]
+
+        logger.info(f"멀티트랙 병합 시작: {len(track_paths)}개 트랙 → {output_path.name}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            if output_path.exists():
+                output_path.unlink()
+            raise ConversionFailedError(f"트랙 병합 실패 (코드 {result.returncode}): {result.stderr.strip()}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise ConversionFailedError(f"병합 파일이 생성되지 않았습니다: {output_path}")
+
+        logger.info(f"멀티트랙 병합 완료: {output_path} ({output_path.stat().st_size / 1024:.1f}KB)")
+        return output_path
+
     async def convert_async(
         self,
         input_path: Path,

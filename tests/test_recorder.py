@@ -545,3 +545,256 @@ class TestRecordingState:
         """문자열로 비교 가능하다."""
         assert RecordingState.IDLE == "idle"
         assert RecordingState.RECORDING == "recording"
+
+
+# === TestMultiTrackRecording ===
+
+
+def _make_multitrack_config(tmp_path: Path) -> AppConfig:
+    """멀티트랙 테스트용 AppConfig를 생성한다."""
+    return AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        recording=RecordingConfig(
+            enabled=True,
+            auto_record_on_zoom=True,
+            prefer_system_audio=True,
+            sample_rate=16000,
+            channels=1,
+            max_duration_seconds=14400,
+            min_duration_seconds=5,
+            ffmpeg_graceful_timeout_seconds=10,
+            multi_track=True,
+        ),
+    )
+
+
+class TestMultiTrackRecording:
+    """멀티트랙 녹음 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_select_devices_멀티트랙_BlackHole_AND_마이크(
+        self, tmp_path: Path
+    ) -> None:
+        """BlackHole + mic가 동시 반환된다."""
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone", is_blackhole=False),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_devices_multitrack()
+
+        assert "system" in selected
+        assert "mic" in selected
+        assert selected["system"].is_blackhole is True
+        assert selected["mic"].is_blackhole is False
+
+    @pytest.mark.asyncio
+    async def test_select_devices_BlackHole_없으면_마이크만(
+        self, tmp_path: Path
+    ) -> None:
+        """BlackHole이 없으면 마이크만 반환된다."""
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone", is_blackhole=False),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_devices_multitrack()
+
+        assert "mic" in selected
+        assert "system" not in selected
+
+    @pytest.mark.asyncio
+    async def test_start_recording_멀티트랙_두_프로세스(
+        self, tmp_path: Path
+    ) -> None:
+        """멀티트랙 모드에서 2개 ffmpeg 프로세스가 시작된다."""
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = {
+            "system": AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+            "mic": AudioDevice(index=0, name="MacBook Air Microphone", is_blackhole=False),
+        }
+
+        mock_proc1 = AsyncMock()
+        mock_proc1.pid = 1001
+        mock_proc1.stdin = MagicMock()
+        mock_proc1.wait = AsyncMock()
+
+        mock_proc2 = AsyncMock()
+        mock_proc2.pid = 1002
+        mock_proc2.stdin = MagicMock()
+        mock_proc2.wait = AsyncMock()
+
+        call_count = 0
+
+        async def mock_exec(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mock_proc1 if call_count == 1 else mock_proc2
+
+        with (
+            patch.object(recorder, "_select_devices_multitrack", return_value=devices),
+            patch("asyncio.create_subprocess_exec", side_effect=mock_exec),
+        ):
+            await recorder.start_recording(meeting_id="mt_test")
+
+        assert recorder.state == RecordingState.RECORDING
+        assert len(recorder._processes) == 2
+        assert "system" in recorder._processes
+        assert "mic" in recorder._processes
+
+        # 정리
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_파일명_규칙(self, tmp_path: Path) -> None:
+        """멀티트랙 파일명이 {meeting_id}_system.wav, {meeting_id}_mic.wav 형식이다."""
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = {
+            "system": AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+            "mic": AudioDevice(index=0, name="Mic", is_blackhole=False),
+        }
+
+        mock_proc = AsyncMock()
+        mock_proc.pid = 999
+        mock_proc.stdin = MagicMock()
+        mock_proc.wait = AsyncMock()
+
+        with (
+            patch.object(recorder, "_select_devices_multitrack", return_value=devices),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            await recorder.start_recording(meeting_id="test123")
+
+        assert "system" in recorder._current_files
+        assert "mic" in recorder._current_files
+        assert recorder._current_files["system"].name == "test123_system.wav"
+        assert recorder._current_files["mic"].name == "test123_mic.wav"
+
+        # 정리
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_stop_멀티트랙_파일_이동(self, tmp_path: Path) -> None:
+        """멀티트랙 정지 시 두 파일이 audio_input으로 이동된다."""
+        import time as time_mod
+
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        # 상태 수동 설정
+        recorder._state = RecordingState.RECORDING
+        recorder._start_time = time_mod.time() - 10  # 10초 전
+
+        # 임시 파일 생성
+        temp_dir = tmp_path / "recordings_temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        sys_file = temp_dir / "mt_system.wav"
+        mic_file = temp_dir / "mt_mic.wav"
+        sys_file.write_bytes(b"sys" * 100)
+        mic_file.write_bytes(b"mic" * 100)
+
+        recorder._current_files = {"system": sys_file, "mic": mic_file}
+        recorder._current_devices = {
+            "system": AudioDevice(index=1, name="BlackHole", is_blackhole=True),
+            "mic": AudioDevice(index=0, name="Mic", is_blackhole=False),
+        }
+        recorder._meeting_id = "mt"
+
+        # ffmpeg 프로세스 모킹
+        mock_proc = AsyncMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdin.write = MagicMock()
+        mock_proc.stdin.drain = AsyncMock()
+        mock_proc.wait = AsyncMock()
+        recorder._processes = {"system": mock_proc, "mic": mock_proc}
+
+        result = await recorder.stop_recording()
+
+        assert result is not None
+        assert result.is_multitrack is True
+        assert result.file_paths is not None
+        assert "system" in result.file_paths
+        assert "mic" in result.file_paths
+        assert (tmp_path / "audio_input" / "mt_system.wav").exists()
+        assert (tmp_path / "audio_input" / "mt_mic.wav").exists()
+        assert recorder.state == RecordingState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_싱글트랙_기존_동작_유지(self, tmp_path: Path) -> None:
+        """multi_track=False일 때 기존 싱글트랙 동작이 유지된다."""
+        config = _make_test_config(tmp_path)  # multi_track=False (기본값)
+        recorder = AudioRecorder(config=config)
+
+        assert recorder._multi_track is False
+
+        mock_device = AudioDevice(index=0, name="Test Mic", is_blackhole=False)
+        mock_process = AsyncMock()
+        mock_process.pid = 12345
+        mock_process.stdin = MagicMock()
+        mock_process.wait = AsyncMock()
+
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=mock_device),
+            patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        ):
+            await recorder.start_recording(meeting_id="single_test")
+
+        assert recorder.state == RecordingState.RECORDING
+        assert recorder._process is not None
+        assert len(recorder._processes) == 0  # 멀티트랙 아님
+
+        # 정리
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    def test_RecordingResult_멀티트랙_필드(self) -> None:
+        """RecordingResult에 멀티트랙 필드가 있다."""
+        result = RecordingResult(
+            file_path=Path("/tmp/test.wav"),
+            duration_seconds=30.0,
+            audio_device="BlackHole, Mic",
+            started_at="2026-03-09T10:00:00",
+            ended_at="2026-03-09T10:00:30",
+            file_size_bytes=960000,
+            file_paths={
+                "system": Path("/tmp/test_system.wav"),
+                "mic": Path("/tmp/test_mic.wav"),
+            },
+            is_multitrack=True,
+        )
+        assert result.is_multitrack is True
+        assert result.file_paths is not None
+        assert len(result.file_paths) == 2
+
+    def test_RecordingResult_싱글트랙_기본값(self) -> None:
+        """RecordingResult 싱글트랙에서 멀티트랙 필드 기본값이 올바르다."""
+        result = RecordingResult(
+            file_path=Path("/tmp/test.wav"),
+            duration_seconds=30.0,
+            audio_device="Mic",
+            started_at="2026-03-09T10:00:00",
+            ended_at="2026-03-09T10:00:30",
+            file_size_bytes=480000,
+        )
+        assert result.is_multitrack is False
+        assert result.file_paths is None

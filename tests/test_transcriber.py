@@ -487,9 +487,77 @@ class TestTranscribe:
         assert call_kwargs[0][0] == str(audio_file)
         assert call_kwargs[1]["path_or_hf_repo"] == "whisper-medium-ko-zeroth"
         assert call_kwargs[1]["language"] == "ko"
-        # mlx-whisper 0.4.x에서 beam_size는 직접 파라미터로 전달하지 않음
-        assert "beam_size" not in call_kwargs[1]
+        # beam_size는 decode_options → DecodingOptions로 전달됨
+        assert call_kwargs[1]["beam_size"] == 5
         assert call_kwargs[1]["word_timestamps"] is False
+
+    async def test_beam_size_decode_options_전달(
+        self,
+        transcriber: Transcriber,
+        mock_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """beam_size가 transcribe() 호출의 kwargs에 포함되어 전달된다."""
+        ctx = mock_manager.acquire.return_value
+        mock_whisper = ctx.__aenter__.return_value
+
+        await transcriber.transcribe(audio_file)
+
+        call_kwargs = mock_whisper.transcribe.call_args[1]
+        # beam_size가 kwargs에 존재해야 함
+        assert "beam_size" in call_kwargs
+        assert call_kwargs["beam_size"] == 5  # STTConfig 기본값
+
+    async def test_커스텀_beam_size_전달(
+        self,
+        config: AppConfig,
+        mock_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """beam_size=10 설정 시 10이 transcribe()에 전달된다."""
+        custom_config = AppConfig(stt={"beam_size": 10})
+        t = Transcriber(config=custom_config, model_manager=mock_manager)
+
+        ctx = mock_manager.acquire.return_value
+        mock_whisper = ctx.__aenter__.return_value
+
+        await t.transcribe(audio_file)
+
+        call_kwargs = mock_whisper.transcribe.call_args[1]
+        assert call_kwargs["beam_size"] == 10
+
+    def test_batch_size_캐싱(
+        self,
+        config: AppConfig,
+        mock_manager: MagicMock,
+    ) -> None:
+        """Transcriber 초기화 시 _batch_size가 STTConfig 기본값(16)으로 캐싱된다."""
+        t = Transcriber(config=config, model_manager=mock_manager)
+        assert t._batch_size == 16
+
+    def test_커스텀_batch_size_캐싱(
+        self,
+        mock_manager: MagicMock,
+    ) -> None:
+        """batch_size=8 설정 시 _batch_size가 8로 캐싱된다."""
+        custom_config = AppConfig(stt={"batch_size": 8})
+        t = Transcriber(config=custom_config, model_manager=mock_manager)
+        assert t._batch_size == 8
+
+    async def test_batch_size_미전달_확인(
+        self,
+        transcriber: Transcriber,
+        mock_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """batch_size는 mlx-whisper API에 전달되지 않는다 (미지원 파라미터)."""
+        ctx = mock_manager.acquire.return_value
+        mock_whisper = ctx.__aenter__.return_value
+
+        await transcriber.transcribe(audio_file)
+
+        call_kwargs = mock_whisper.transcribe.call_args[1]
+        assert "batch_size" not in call_kwargs
 
     async def test_파일_없음_에러(self, transcriber: Transcriber) -> None:
         """존재하지 않는 파일에 대해 FileNotFoundError를 발생시킨다."""

@@ -87,6 +87,8 @@ class RecordingResult:
     started_at: str
     ended_at: str
     file_size_bytes: int
+    file_paths: dict[str, Path] | None = None  # 멀티트랙: {"system": Path, "mic": Path}
+    is_multitrack: bool = False
 
 
 @dataclass
@@ -156,12 +158,13 @@ class AudioRecorder:
         self._max_duration = self._recording_config.max_duration_seconds
         self._min_duration = self._recording_config.min_duration_seconds
         self._graceful_timeout = self._recording_config.ffmpeg_graceful_timeout_seconds
+        self._multi_track = self._recording_config.multi_track
 
         # 경로 설정
         self._temp_dir = self._config.paths.resolved_recordings_temp_dir
         self._audio_input_dir = self._config.paths.resolved_audio_input_dir
 
-        # 상태
+        # 상태 (싱글트랙)
         self._state = RecordingState.IDLE
         self._process: asyncio.subprocess.Process | None = None
         self._current_file: Path | None = None
@@ -171,6 +174,11 @@ class AudioRecorder:
         self._max_duration_task: asyncio.Task[None] | None = None
         self._duration_broadcast_task: asyncio.Task[None] | None = None
 
+        # 멀티트랙 상태
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._current_files: dict[str, Path] = {}
+        self._current_devices: dict[str, AudioDevice] = {}
+
         # 콜백
         self._sync_callbacks: list[SyncCallback] = []
         self._async_callbacks: list[AsyncCallback] = []
@@ -179,7 +187,8 @@ class AudioRecorder:
             f"AudioRecorder 초기화: "
             f"sample_rate={self._sample_rate}, "
             f"channels={self._channels}, "
-            f"max_duration={self._max_duration}초"
+            f"max_duration={self._max_duration}초, "
+            f"multi_track={self._multi_track}"
         )
 
     @property
@@ -363,38 +372,77 @@ class AudioRecorder:
             logger.warning("녹음 기능이 비활성화되어 있습니다 (recording.enabled=false)")
             return
 
-        # 오디오 장치 선택
-        device = await self._select_audio_device()
-        self._current_device = device
-
         # 녹음 파일 경로 설정
         if meeting_id is None:
             meeting_id = datetime.now().strftime("meeting_%Y%m%d_%H%M%S")
         self._meeting_id = meeting_id
-
         self._temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 멀티트랙 vs 싱글트랙 분기
+        if self._multi_track:
+            await self._start_multitrack_recording(meeting_id)
+        else:
+            await self._start_singletrack_recording(meeting_id)
+
+        self._state = RecordingState.RECORDING
+        self._start_time = time.time()
+
+        # 최대 녹음 시간 가드 시작
+        self._max_duration_task = asyncio.create_task(
+            self._max_duration_guard(),
+            name="recording-max-duration",
+        )
+
+        # 녹음 시간 브로드캐스트 시작
+        self._duration_broadcast_task = asyncio.create_task(
+            self._duration_broadcast_loop(),
+            name="recording-duration-broadcast",
+        )
+
+        # WebSocket 이벤트 브로드캐스트
+        device_name = (
+            self._current_device.name if self._current_device
+            else ", ".join(d.name for d in self._current_devices.values())
+        )
+        await self._broadcast_event(
+            "recording_started",
+            {
+                "meeting_id": meeting_id,
+                "device": device_name,
+                "is_multitrack": bool(self._processes),
+            },
+        )
+
+        pids = (
+            {k: p.pid for k, p in self._processes.items()}
+            if self._processes
+            else {"single": self._process.pid if self._process else None}
+        )
+        logger.info(f"녹음 시작 완료: PIDs={pids}")
+
+    async def _start_singletrack_recording(self, meeting_id: str) -> None:
+        """싱글트랙 녹음을 시작한다 (기존 로직).
+
+        Args:
+            meeting_id: 회의 식별자
+        """
+        device = await self._select_audio_device()
+        self._current_device = device
+
         output_file = self._temp_dir / f"{meeting_id}.wav"
         self._current_file = output_file
 
-        # ffmpeg 녹음 명령 구성
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "avfoundation",
-            "-i",
-            f":{device.index}",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            str(self._sample_rate),
-            "-ac",
-            str(self._channels),
+            "ffmpeg", "-y", "-f", "avfoundation",
+            "-i", f":{device.index}",
+            "-acodec", "pcm_s16le",
+            "-ar", str(self._sample_rate),
+            "-ac", str(self._channels),
             str(output_file),
         ]
 
         logger.info(
-            f"녹음 시작: meeting_id={meeting_id}, "
+            f"싱글트랙 녹음 시작: meeting_id={meeting_id}, "
             f"장치=[{device.index}] {device.name}, "
             f"출력={output_file}"
         )
@@ -413,32 +461,141 @@ class AudioRecorder:
         except OSError as e:
             raise FFmpegRecordError(f"ffmpeg 프로세스 시작 실패: {e}") from e
 
-        self._state = RecordingState.RECORDING
-        self._start_time = time.time()
+    async def _select_devices_multitrack(self) -> dict[str, AudioDevice]:
+        """멀티트랙 녹음용 장치를 선택한다.
 
-        # 최대 녹음 시간 가드 시작
-        self._max_duration_task = asyncio.create_task(
-            self._max_duration_guard(),
-            name="recording-max-duration",
-        )
+        BlackHole(시스템 오디오) + 마이크를 동시에 반환한다.
+        BlackHole이 없으면 마이크만 반환 (싱글트랙 폴백).
 
-        # 녹음 시간 브로드캐스트 시작
-        self._duration_broadcast_task = asyncio.create_task(
-            self._duration_broadcast_loop(),
-            name="recording-duration-broadcast",
-        )
+        Returns:
+            {"system": BlackHole장치, "mic": 마이크장치} 또는 {"mic": 마이크장치}
+        """
+        devices = await self.detect_audio_devices()
+        if not devices:
+            raise AudioDeviceError("사용 가능한 오디오 입력 장치가 없습니다.")
 
-        # WebSocket 이벤트 브로드캐스트
-        await self._broadcast_event(
-            "recording_started",
-            {
-                "meeting_id": meeting_id,
-                "device": device.name,
-                "is_system_audio": device.is_blackhole,
-            },
-        )
+        result: dict[str, AudioDevice] = {}
+        blackhole = None
+        mic = None
 
-        logger.info(f"녹음 시작 완료: PID={self._process.pid}")
+        for dev in devices:
+            if dev.is_blackhole and blackhole is None:
+                blackhole = dev
+            elif not dev.is_blackhole and mic is None:
+                mic = dev
+
+        if blackhole is not None and mic is not None:
+            result["system"] = blackhole
+            result["mic"] = mic
+            logger.info(
+                f"멀티트랙 장치 선택: system=[{blackhole.index}] {blackhole.name}, "
+                f"mic=[{mic.index}] {mic.name}"
+            )
+        elif mic is not None:
+            result["mic"] = mic
+            logger.warning(
+                f"BlackHole 미감지, 마이크만 사용: [{mic.index}] {mic.name}"
+            )
+        elif blackhole is not None:
+            result["system"] = blackhole
+            logger.warning(
+                f"마이크 미감지, BlackHole만 사용: [{blackhole.index}] {blackhole.name}"
+            )
+        else:
+            raise AudioDeviceError("사용 가능한 오디오 입력 장치가 없습니다.")
+
+        return result
+
+    async def _start_multitrack_recording(self, meeting_id: str) -> None:
+        """멀티트랙 녹음을 시작한다 (BlackHole + 마이크 동시).
+
+        Args:
+            meeting_id: 회의 식별자
+
+        Raises:
+            FFmpegRecordError: ffmpeg 프로세스 시작 실패 시
+        """
+        selected = await self._select_devices_multitrack()
+        self._current_devices = selected
+
+        # BlackHole 하나만이면 싱글트랙으로 폴백
+        if len(selected) == 1:
+            track_name = next(iter(selected))
+            device = selected[track_name]
+            logger.info(f"멀티트랙 장치 1개만 감지, 싱글트랙으로 폴백: {track_name}")
+            self._current_device = device
+            output_file = self._temp_dir / f"{meeting_id}.wav"
+            self._current_file = output_file
+            cmd = [
+                "ffmpeg", "-y", "-f", "avfoundation",
+                "-i", f":{device.index}",
+                "-acodec", "pcm_s16le",
+                "-ar", str(self._sample_rate),
+                "-ac", str(self._channels),
+                str(output_file),
+            ]
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as e:
+                raise FFmpegRecordError(
+                    "ffmpeg가 설치되어 있지 않습니다."
+                ) from e
+            except OSError as e:
+                raise FFmpegRecordError(f"ffmpeg 프로세스 시작 실패: {e}") from e
+            return
+
+        # 2개 이상 → 각 트랙별 ffmpeg 프로세스 시작
+        for track_name, device in selected.items():
+            suffix = "_system" if track_name == "system" else "_mic"
+            output_file = self._temp_dir / f"{meeting_id}{suffix}.wav"
+            self._current_files[track_name] = output_file
+
+            cmd = [
+                "ffmpeg", "-y", "-f", "avfoundation",
+                "-i", f":{device.index}",
+                "-acodec", "pcm_s16le",
+                "-ar", str(self._sample_rate),
+                "-ac", str(self._channels),
+                str(output_file),
+            ]
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                self._processes[track_name] = proc
+                logger.info(
+                    f"멀티트랙 녹음 시작: {track_name}=[{device.index}] {device.name}, "
+                    f"PID={proc.pid}, 출력={output_file}"
+                )
+            except (FileNotFoundError, OSError) as e:
+                # 이미 시작된 프로세스 정리
+                await self._cleanup_multitrack_processes()
+                raise FFmpegRecordError(
+                    f"멀티트랙 ffmpeg 프로세스 시작 실패 ({track_name}): {e}"
+                ) from e
+
+    def _build_multitrack_paths(self, meeting_id: str) -> dict[str, Path]:
+        """멀티트랙 녹음 파일 경로를 생성한다.
+
+        Args:
+            meeting_id: 회의 식별자
+
+        Returns:
+            {"system": Path, "mic": Path} 형식의 경로 딕셔너리
+        """
+        return {
+            "system": self._temp_dir / f"{meeting_id}_system.wav",
+            "mic": self._temp_dir / f"{meeting_id}_mic.wav",
+        }
 
     async def stop_recording(
         self,
@@ -479,8 +636,11 @@ class AudioRecorder:
                 await self._duration_broadcast_task
             self._duration_broadcast_task = None
 
-        # ffmpeg 정상 종료 시도 (stdin에 'q' 전송)
-        result = await self._terminate_ffmpeg()
+        # 멀티트랙 vs 싱글트랙 종료 분기
+        if self._processes:
+            result = await self._terminate_multitrack()
+        else:
+            result = await self._terminate_ffmpeg()
 
         self._state = RecordingState.IDLE
 
@@ -496,6 +656,7 @@ class AudioRecorder:
                     "duration_seconds": result.duration_seconds,
                     "file_path": str(result.file_path),
                     "audio_device": result.audio_device,
+                    "is_multitrack": result.is_multitrack,
                 },
             )
         else:
@@ -514,6 +675,9 @@ class AudioRecorder:
         self._start_time = None
         self._current_device = None
         self._meeting_id = None
+        self._processes.clear()
+        self._current_files.clear()
+        self._current_devices.clear()
 
         return result
 
@@ -603,6 +767,126 @@ class AudioRecorder:
             ended_at=ended_at,
             file_size_bytes=file_size,
         )
+
+    async def _terminate_one_ffmpeg(
+        self,
+        proc: asyncio.subprocess.Process,
+        label: str,
+    ) -> None:
+        """하나의 ffmpeg 프로세스를 graceful하게 종료한다.
+
+        Args:
+            proc: 종료할 프로세스
+            label: 로그용 트랙 라벨 (예: "system", "mic")
+        """
+        # stdin 'q' 전송
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(b"q")
+                await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            logger.debug(f"ffmpeg stdin 전송 실패 ({label}, 이미 종료됨)")
+
+        # graceful 타임아웃 대기
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self._graceful_timeout)
+            logger.info(f"ffmpeg 정상 종료 ({label})")
+        except TimeoutError:
+            logger.warning(f"ffmpeg graceful 타임아웃 ({label}). SIGTERM 전송")
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except TimeoutError:
+                logger.error(f"ffmpeg SIGTERM 타임아웃 ({label}). SIGKILL 전송")
+                proc.kill()
+                await proc.wait()
+
+    async def _terminate_multitrack(self) -> RecordingResult | None:
+        """멀티트랙 ffmpeg 프로세스를 모두 종료하고 결과를 반환한다.
+
+        Returns:
+            녹음 결과 또는 최소 시간 미달 시 None
+        """
+        duration = self.current_duration
+        ended_at = datetime.now().isoformat()
+        started_at = ""
+        if self._start_time is not None:
+            started_at = datetime.fromtimestamp(self._start_time).isoformat()
+
+        logger.info(f"멀티트랙 ffmpeg 종료 시도: {len(self._processes)}개 프로세스, 녹음 시간={duration:.1f}초")
+
+        # 모든 프로세스 종료
+        for track_name, proc in self._processes.items():
+            await self._terminate_one_ffmpeg(proc, track_name)
+
+        # 최소 시간 미달 체크
+        if duration < self._min_duration:
+            logger.info(
+                f"녹음 시간 {duration:.1f}초 < 최소 {self._min_duration}초. 멀티트랙 파일 파기"
+            )
+            for file_path in self._current_files.values():
+                if file_path.exists():
+                    file_path.unlink()
+            return None
+
+        # 파일 유효성 확인 및 audio_input으로 이동
+        self._audio_input_dir.mkdir(parents=True, exist_ok=True)
+        moved_files: dict[str, Path] = {}
+        total_size = 0
+
+        for track_name, file_path in self._current_files.items():
+            if not file_path.exists():
+                logger.warning(f"멀티트랙 파일 미생성: {track_name}={file_path}")
+                continue
+
+            file_size = file_path.stat().st_size
+            if file_size == 0:
+                logger.warning(f"멀티트랙 파일 비어있음: {track_name}={file_path}")
+                file_path.unlink()
+                continue
+
+            dest = self._audio_input_dir / file_path.name
+            shutil.move(str(file_path), str(dest))
+            moved_files[track_name] = dest
+            total_size += file_size
+            logger.info(f"멀티트랙 파일 이동: {file_path} → {dest}")
+
+        if not moved_files:
+            logger.warning("유효한 멀티트랙 파일이 없습니다.")
+            return None
+
+        # 첫 번째 파일을 file_path로 (하위 호환)
+        first_file = next(iter(moved_files.values()))
+        device_names = ", ".join(
+            d.name for d in self._current_devices.values()
+        )
+
+        return RecordingResult(
+            file_path=first_file,
+            duration_seconds=round(duration, 1),
+            audio_device=device_names,
+            started_at=started_at,
+            ended_at=ended_at,
+            file_size_bytes=total_size,
+            file_paths=moved_files,
+            is_multitrack=True,
+        )
+
+    async def _cleanup_multitrack_processes(self) -> None:
+        """시작 실패 시 이미 시작된 멀티트랙 프로세스를 정리한다."""
+        for track_name, proc in list(self._processes.items()):
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (TimeoutError, ProcessLookupError, OSError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except (ProcessLookupError, OSError):
+                    pass
+            logger.info(f"멀티트랙 프로세스 정리: {track_name}")
+        self._processes.clear()
+        self._current_files.clear()
 
     async def _max_duration_guard(self) -> None:
         """최대 녹음 시간 초과 시 자동 정지한다."""

@@ -45,7 +45,7 @@ class TestConfigYamlParsing:
 
         assert config.stt.model_name == "mlx-community/whisper-medium-mlx"
         assert config.stt.language == "ko"
-        assert config.diarization.device == "cpu"
+        assert config.diarization.device == "auto"
         assert config.llm.host == "http://127.0.0.1:11434"
         assert config.embedding.dimension == 384
         assert config.search.vector_weight == 0.6
@@ -86,7 +86,7 @@ class TestDefaultValues:
 
         assert config.paths.base_dir == "~/.meeting-transcriber"
         assert config.stt.model_name == "whisper-medium-ko-zeroth"
-        assert config.diarization.device == "cpu"
+        assert config.diarization.device == "auto"
         assert config.llm.model_name == "exaone3.5:7.8b-instruct-q4_K_M"
         assert config.embedding.query_prefix == "query: "
         assert config.embedding.passage_prefix == "passage: "
@@ -192,10 +192,90 @@ class TestEnvironmentOverrides:
 class TestValidation:
     """설정값 검증 테스트"""
 
-    def test_pyannote_mps_사용_금지(self) -> None:
-        """diarization device를 mps로 설정하면 cpu로 강제 변환되는지 확인한다."""
+    def test_device_auto_옵션_허용(self) -> None:
+        """diarization device를 'auto'로 설정하면 그대로 유지되는지 확인한다."""
+        diar = DiarizationConfig(device="auto")
+        assert diar.device == "auto"
+
+    def test_device_mps_옵션_허용(self) -> None:
+        """diarization device를 'mps'로 설정하면 그대로 유지되는지 확인한다."""
         diar = DiarizationConfig(device="mps")
+        assert diar.device == "mps"
+
+    def test_device_cpu_옵션_유지(self) -> None:
+        """diarization device를 'cpu'로 설정하면 그대로 유지되는지 확인한다 (하위 호환)."""
+        diar = DiarizationConfig(device="cpu")
         assert diar.device == "cpu"
+
+    def test_device_잘못된_값_거부(self) -> None:
+        """diarization device에 허용되지 않은 값을 설정하면 에러가 발생하는지 확인한다."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="device"):
+            DiarizationConfig(device="cuda")
+
+    def test_config_기본값_auto(self) -> None:
+        """DiarizationConfig의 device 기본값이 'auto'인지 확인한다."""
+        diar = DiarizationConfig()
+        assert diar.device == "auto"
+
+    def test_auto_detect_chipset_기본값_false(self) -> None:
+        """STTConfig의 auto_detect_chipset 기본값이 False인지 확인한다."""
+        from config import STTConfig
+
+        stt = STTConfig()
+        assert stt.auto_detect_chipset is False
+
+    def test_auto_detect_chipset_활성화(self) -> None:
+        """auto_detect_chipset을 True로 설정할 수 있는지 확인한다."""
+        from config import STTConfig
+
+        stt = STTConfig(auto_detect_chipset=True)
+        assert stt.auto_detect_chipset is True
+
+    def test_auto_detect_시_batch_size_오버라이드(self, tmp_path: Path) -> None:
+        """auto_detect_chipset=True일 때 칩셋 기반 batch_size가 적용된다."""
+        from unittest.mock import MagicMock, patch
+
+        yaml_file = tmp_path / "test.yaml"
+        yaml_file.write_text(
+            "stt:\n  auto_detect_chipset: true\n  batch_size: 12\n",
+            encoding="utf-8",
+        )
+        # M4 16GB 시뮬레이션
+        with (
+            patch("core.chipset_detector.platform.machine", return_value="arm64"),
+            patch(
+                "core.chipset_detector.subprocess.run",
+                return_value=MagicMock(stdout="Apple M4", returncode=0),
+            ),
+            patch(
+                "core.chipset_detector.psutil.virtual_memory",
+                return_value=MagicMock(total=16 * 1024**3),
+            ),
+        ):
+            config = load_config(yaml_file)
+            assert config.stt.batch_size == 16  # M4 16GB 최적값이 yaml 값을 오버라이드
+
+    def test_auto_detect_비활성화_시_yaml_값_유지(self, tmp_path: Path) -> None:
+        """auto_detect_chipset=False일 때 yaml의 batch_size를 그대로 사용한다."""
+        yaml_file = tmp_path / "test.yaml"
+        yaml_file.write_text(
+            "stt:\n  auto_detect_chipset: false\n  batch_size: 8\n",
+            encoding="utf-8",
+        )
+        config = load_config(yaml_file)
+        assert config.stt.batch_size == 8
+
+    def test_multi_track_기본값_false(self) -> None:
+        """RecordingConfig의 multi_track 기본값이 False이다."""
+        rc = RecordingConfig()
+        assert rc.multi_track is False
+
+    def test_multi_track_활성화(self) -> None:
+        """multi_track=True 설정이 올바르게 적용된다."""
+        rc = RecordingConfig(multi_track=True)
+        assert rc.multi_track is True
 
     def test_cold_action_잘못된_값_거부(self) -> None:
         """lifecycle cold_action에 허용되지 않은 값이 들어오면 에러가 발생하는지 확인한다."""
@@ -448,3 +528,17 @@ class TestLLMBackendConfig:
         config_path = Path(__file__).parent.parent / "config.yaml"
         config = load_config(config_path)
         assert config.llm.backend in {"ollama", "mlx"}
+
+
+class TestMultiTrackConfig:
+    """멀티트랙 녹음 설정 테스트."""
+
+    def test_multi_track_기본값_false(self) -> None:
+        """multi_track 기본값이 False인지 확인한다."""
+        rc = RecordingConfig()
+        assert rc.multi_track is False
+
+    def test_multi_track_활성화(self) -> None:
+        """multi_track을 True로 설정할 수 있는지 확인한다."""
+        rc = RecordingConfig(multi_track=True)
+        assert rc.multi_track is True

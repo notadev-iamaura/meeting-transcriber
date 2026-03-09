@@ -17,6 +17,7 @@
 
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -50,6 +51,7 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.peak_ram_limit_gb = 9.5
     config.pipeline.min_disk_free_gb = 1.0
     config.pipeline.min_memory_free_gb = 2.0
+    config.pipeline.skip_llm_steps = False
 
     # paths 설정
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
@@ -2527,3 +2529,679 @@ class TestE2EIdempotency:
             pipeline.get_status("e2e_multi_a").meeting_id
             != pipeline.get_status("e2e_multi_b").meeting_id
         )
+
+
+# === 파이프라인 단계 시작 콜백 테스트 ===
+
+
+class TestPipelineStepCallback:
+    """파이프라인 단계 시작 콜백 테스트."""
+
+    async def test_콜백_없으면_기존_동작_유지(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """on_step_start가 None이면 기존과 동일하게 동작한다."""
+        wav_path = audio_file.parent / "test_16k.wav"
+        wav_path.write_bytes(b"fake wav content")
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            # on_step_start 미전달 — 예외 없이 정상 실행되어야 함
+            state = await pipeline.run(audio_file, meeting_id="test_cb_none")
+
+        assert state.status == "completed"
+        assert len(state.completed_steps) == 6
+
+    async def test_콜백_있으면_단계_시작시_호출(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """on_step_start 콜백이 각 단계 시작 시 호출된다."""
+        wav_path = audio_file.parent / "test_16k.wav"
+        wav_path.write_bytes(b"fake wav content")
+
+        callback = AsyncMock()
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            state = await pipeline.run(
+                audio_file,
+                meeting_id="test_cb_called",
+                on_step_start=callback,
+            )
+
+        assert state.status == "completed"
+        # 콜백이 6개 단계 모두에서 호출되었는지 확인
+        assert callback.call_count == 6
+        # 호출 인자가 PipelineStep의 value(문자열)인지 확인
+        called_steps = [call.args[0] for call in callback.call_args_list]
+        assert called_steps == [
+            "convert",
+            "transcribe",
+            "diarize",
+            "merge",
+            "correct",
+            "summarize",
+        ]
+
+    async def test_콜백_예외시_파이프라인_중단_안함(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """콜백에서 예외가 발생해도 파이프라인은 계속 진행한다."""
+        wav_path = audio_file.parent / "test_16k.wav"
+        wav_path.write_bytes(b"fake wav content")
+
+        callback = AsyncMock(side_effect=RuntimeError("콜백 에러"))
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            # 콜백이 예외를 던져도 파이프라인은 정상 완료되어야 함
+            state = await pipeline.run(
+                audio_file,
+                meeting_id="test_cb_error",
+                on_step_start=callback,
+            )
+
+        assert state.status == "completed"
+        assert len(state.completed_steps) == 6
+
+
+# === LLM 단계 스킵 테스트 ===
+
+
+class TestSkipLlmSteps:
+    """LLM 단계 스킵 테스트."""
+
+    def test_skip_llm_steps_config_기본값(self) -> None:
+        """PipelineConfig의 skip_llm_steps 기본값이 True인지 확인한다."""
+        from config import PipelineConfig
+
+        cfg = PipelineConfig()
+        assert cfg.skip_llm_steps is True
+
+    async def test_run_skip_llm_steps시_correct_summarize_스킵(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """skip_llm_steps=True일 때 correct, summarize가 스킵되는지 확인한다."""
+        mock_config.pipeline.skip_llm_steps = True
+
+        with (
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="skip_test")
+
+            # LLM 단계가 호출되지 않았는지 확인
+            mock_correct.assert_not_called()
+            mock_summarize.assert_not_called()
+
+            # 스킵된 단계 확인
+            assert "correct" in state.skipped_steps
+            assert "summarize" in state.skipped_steps
+
+    async def test_run_skip_llm_steps시_merged_result_패스스루(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """skip_llm_steps=True일 때 merged_result가 corrected_result로 패스스루되는지 확인한다."""
+        mock_config.pipeline.skip_llm_steps = True
+
+        merged_mock = _make_mock_merged()
+
+        with (
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=merged_mock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ),
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="passthrough_skip")
+
+            # correct 스킵 확인
+            assert "correct" in state.skipped_steps
+            # 스킵 메시지에 skip_llm_steps 사유가 포함되는지 확인
+            skip_warnings = [w for w in state.warnings if "skip_llm_steps" in w]
+            assert len(skip_warnings) > 0
+
+    async def test_run_skip_llm_steps시_정상_완료(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """LLM 스킵해도 status가 completed인지 확인한다."""
+        mock_config.pipeline.skip_llm_steps = True
+
+        with (
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ),
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="skip_completed")
+
+            assert state.status == "completed"
+            # 모든 6단계가 completed_steps에 포함 (스킵된 단계도 포함)
+            assert len(state.completed_steps) == 6
+
+    async def test_run_skip_llm_steps_false시_기존_동작(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """skip_llm_steps=False이면 6단계 모두 실행한다."""
+        mock_config.pipeline.skip_llm_steps = False
+
+        with (
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="no_skip_test")
+
+            # LLM 단계가 실행되었는지 확인
+            mock_correct.assert_called_once()
+            mock_summarize.assert_called_once()
+
+            assert state.status == "completed"
+            assert state.skipped_steps == []
+            assert len(state.completed_steps) == 6
+
+    async def test_run_파라미터_skip_llm_steps가_config_오버라이드(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """run(skip_llm_steps=True) 파라미터가 config 값을 오버라이드하는지 확인한다."""
+        # config는 False지만 파라미터로 True 전달
+        mock_config.pipeline.skip_llm_steps = False
+
+        with (
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(
+                audio_file,
+                meeting_id="override_test",
+                skip_llm_steps=True,
+            )
+
+            # 파라미터가 config를 오버라이드 → LLM 스킵
+            mock_correct.assert_not_called()
+            mock_summarize.assert_not_called()
+            assert "correct" in state.skipped_steps
+            assert "summarize" in state.skipped_steps
+
+
+# === 온디맨드 LLM 실행 테스트 ===
+
+
+class TestRunLlmSteps:
+    """온디맨드 LLM 실행 테스트."""
+
+    async def test_run_llm_steps_merged_체크포인트_로드(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """merge 체크포인트에서 결과를 로드하는지 확인한다."""
+        meeting_id = "llm_test_001"
+        checkpoints_dir = tmp_path / "checkpoints"
+
+        # 상태 파일 생성
+        state_dir = checkpoints_dir / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="completed",
+            completed_steps=["convert", "transcribe", "diarize", "merge", "correct", "summarize"],
+            skipped_steps=["correct", "summarize"],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        )
+        state.save(state_dir / "pipeline_state.json")
+
+        # merge 체크포인트 생성
+        merge_cp = state_dir / "merge.json"
+        merge_cp.write_text('{"utterances": [], "num_speakers": 1}', encoding="utf-8")
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ) as mock_load,
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            result = await pipeline.run_llm_steps(meeting_id)
+
+            # merge 체크포인트에서 로드 확인
+            mock_load.assert_called_once_with(merge_cp)
+            assert result.status == "completed"
+
+    async def test_run_llm_steps_correct_summarize_실행(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """correct + summarize가 실행되는지 확인한다."""
+        meeting_id = "llm_test_002"
+        checkpoints_dir = tmp_path / "checkpoints"
+
+        # 상태 파일 생성
+        state_dir = checkpoints_dir / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="completed",
+            completed_steps=["convert", "transcribe", "diarize", "merge", "correct", "summarize"],
+            skipped_steps=["correct", "summarize"],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        )
+        state.save(state_dir / "pipeline_state.json")
+
+        # merge 체크포인트 생성
+        merge_cp = state_dir / "merge.json"
+        merge_cp.write_text('{"utterances": [], "num_speakers": 1}', encoding="utf-8")
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ) as mock_correct,
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ) as mock_summarize,
+        ):
+            result = await pipeline.run_llm_steps(meeting_id)
+
+            # correct, summarize 실행 확인
+            mock_correct.assert_called_once()
+            mock_summarize.assert_called_once()
+
+            # skipped_steps에서 제거 확인
+            assert "correct" not in result.skipped_steps
+            assert "summarize" not in result.skipped_steps
+
+    async def test_run_llm_steps_체크포인트_없으면_에러(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """체크포인트 미존재 시 PipelineError가 발생하는지 확인한다."""
+        meeting_id = "llm_test_003"
+        checkpoints_dir = tmp_path / "checkpoints"
+
+        # 상태 파일만 생성 (merge 체크포인트 없음)
+        state_dir = checkpoints_dir / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="completed",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+        )
+        state.save(state_dir / "pipeline_state.json")
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with pytest.raises(PipelineError, match="merge 체크포인트"):
+            await pipeline.run_llm_steps(meeting_id)
+
+    async def test_run_llm_steps_상태파일_없으면_에러(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+    ) -> None:
+        """상태 파일이 없으면 PipelineError가 발생하는지 확인한다."""
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with pytest.raises(PipelineError, match="상태 파일"):
+            await pipeline.run_llm_steps("nonexistent_meeting")
+
+
+class TestPipelineStateMultitrack:
+    """PipelineState 멀티트랙 확장 테스트."""
+
+    def test_기본값_싱글트랙(self) -> None:
+        """기존 동작: wav_paths 비어있고 is_multitrack=False."""
+        state = PipelineState(meeting_id="test", audio_path="/test.wav")
+        assert state.wav_paths == {}
+        assert state.is_multitrack is False
+        assert state.wav_path == ""
+
+    def test_멀티트랙_필드_설정(self) -> None:
+        """멀티트랙 필드가 올바르게 설정된다."""
+        state = PipelineState(
+            meeting_id="test",
+            audio_path="/test.wav",
+            wav_paths={"system": "/out/test_system.wav", "mic": "/out/test_mic.wav"},
+            is_multitrack=True,
+            wav_path="/out/test_merged.wav",
+        )
+        assert state.is_multitrack is True
+        assert len(state.wav_paths) == 2
+        assert "system" in state.wav_paths
+        assert "mic" in state.wav_paths
+        assert state.wav_path == "/out/test_merged.wav"
+
+    def test_체크포인트_직렬화_멀티트랙(self) -> None:
+        """멀티트랙 필드가 체크포인트 JSON에 포함된다."""
+        state = PipelineState(
+            meeting_id="test",
+            audio_path="/test.wav",
+            wav_paths={"system": "/s.wav", "mic": "/m.wav"},
+            is_multitrack=True,
+        )
+        d = asdict(state)
+        assert "wav_paths" in d
+        assert "is_multitrack" in d
+        assert d["is_multitrack"] is True

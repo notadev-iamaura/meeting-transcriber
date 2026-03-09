@@ -20,7 +20,7 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -273,8 +273,10 @@ class PipelineState:
         created_at: 파이프라인 생성 시각 (ISO 형식)
         updated_at: 마지막 업데이트 시각 (ISO 형식)
         error_message: 실패 시 에러 메시지
-        wav_path: 변환된 WAV 파일 경로
+        wav_path: 변환된 WAV 파일 경로 (멀티트랙 시 merged 경로)
         output_dir: 이 회의의 출력 디렉토리
+        wav_paths: 멀티트랙 WAV 경로 딕셔너리 (예: {"system": "/path", "mic": "/path"})
+        is_multitrack: 멀티트랙 녹음 여부
     """
 
     meeting_id: str
@@ -291,6 +293,8 @@ class PipelineState:
     degraded: bool = False
     skipped_steps: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    wav_paths: dict[str, str] = field(default_factory=dict)  # {"system": "/path/system.wav", "mic": "/path/mic.wav"}
+    is_multitrack: bool = False
 
     def __post_init__(self) -> None:
         """생성/업데이트 시각 자동 설정."""
@@ -720,6 +724,8 @@ class PipelineManager:
         self,
         audio_path: Path,
         meeting_id: str | None = None,
+        on_step_start: Callable[[str], Awaitable[None]] | None = None,
+        skip_llm_steps: bool | None = None,
     ) -> PipelineState:
         """파이프라인 전체를 실행한다.
 
@@ -729,6 +735,8 @@ class PipelineManager:
         Args:
             audio_path: 입력 오디오 파일 경로
             meeting_id: 회의 ID (None이면 자동 생성, 재개 시 기존 ID 사용)
+            on_step_start: 각 단계 시작 전 호출되는 비동기 콜백 (단계명 문자열 전달)
+            skip_llm_steps: LLM 단계 스킵 여부 (None이면 config 설정값 사용)
 
         Returns:
             최종 파이프라인 상태 (PipelineState)
@@ -775,6 +783,9 @@ class PipelineManager:
             state.warnings.append(state.error_message)
             state.save(state_path)
             raise PipelineError(state.error_message)
+
+        # skip_llm_steps 결정: 명시적 파라미터 > config 설정
+        _skip_llm = skip_llm_steps if skip_llm_steps is not None else self._config.pipeline.skip_llm_steps
 
         # 메모리 부족 시 degraded 모드 설정
         degraded = not resource_status.memory_ok
@@ -837,13 +848,18 @@ class PipelineManager:
             step = PIPELINE_STEPS[step_idx]
             checkpoint_path = self._get_checkpoint_path(meeting_id, step)
 
-            # === Graceful Degradation: 단계별 리소스 재점검 ===
+            # === Graceful Degradation / LLM 스킵: 단계별 리소스 재점검 ===
             if self._resource_guard.is_llm_step(step.value):
                 # 단계 직전에 메모리 재확인
                 mem_ok, mem_free = self._resource_guard.check_memory()
-                if degraded or not mem_ok:
-                    # LLM 단계 스킵
-                    skip_msg = f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
+                if _skip_llm or degraded or not mem_ok:
+                    # 스킵 사유에 따른 메시지 구분
+                    if _skip_llm:
+                        skip_msg = f"설정에 의해 {step.value} 단계 건너뜀 (skip_llm_steps=True)"
+                    elif not mem_ok:
+                        skip_msg = f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
+                    else:
+                        skip_msg = f"degraded 모드로 {step.value} 단계 건너뜀"
                     logger.warning(skip_msg)
                     state.skipped_steps.append(step.value)
                     state.degraded = True
@@ -865,6 +881,13 @@ class PipelineManager:
                     state.completed_steps.append(step.value)
                     state.save(state_path)
                     continue
+
+            # 단계 시작 콜백 호출 (예외 발생 시 무시)
+            if on_step_start is not None:
+                try:
+                    await on_step_start(step.value)
+                except Exception as e:
+                    logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
 
             state.current_step = step.value
             state.save(state_path)
@@ -1114,6 +1137,110 @@ class PipelineManager:
         )
 
         return await self.run(audio_path, meeting_id=meeting_id)
+
+    async def run_llm_steps(
+        self,
+        meeting_id: str,
+        on_step_start: Callable[[str], Awaitable[None]] | None = None,
+    ) -> PipelineState:
+        """온디맨드 LLM 후처리: merge 체크포인트에서 결과를 로드하여 correct -> summarize를 실행한다.
+
+        skip_llm_steps=True로 파이프라인을 실행한 뒤,
+        나중에 LLM 단계만 별도로 실행하고 싶을 때 사용한다.
+
+        Args:
+            meeting_id: 회의 ID
+            on_step_start: 단계 시작 콜백
+
+        Returns:
+            업데이트된 PipelineState
+
+        Raises:
+            PipelineError: 상태 파일 또는 merge 체크포인트 미존재 시
+        """
+        # 1. 상태 파일 확인 및 로드
+        state_path = self._get_state_path(meeting_id)
+        if not state_path.exists():
+            raise PipelineError(f"파이프라인 상태 파일을 찾을 수 없습니다: {meeting_id}")
+
+        state = PipelineState.from_file(state_path)
+
+        # 2. merge 체크포인트 확인 및 로드
+        merge_cp = self._get_checkpoint_path(meeting_id, PipelineStep.MERGE)
+        if not merge_cp.exists():
+            raise PipelineError(
+                f"merge 체크포인트를 찾을 수 없습니다: {merge_cp}. "
+                f"파이프라인을 먼저 실행하세요."
+            )
+
+        from steps.merger import MergedResult
+
+        merged_result = MergedResult.from_checkpoint(merge_cp)
+        logger.info(f"merge 체크포인트 로드 완료: {merge_cp}")
+
+        # 3. 출력 디렉토리 확인
+        output_dir = self._get_output_dir(meeting_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        state.status = "running"
+        state.save(state_path)
+
+        # 4. correct 단계 실행
+        correct_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CORRECT)
+        if correct_cp.exists():
+            # 이미 correct 체크포인트가 있으면 복원
+            from steps.corrector import CorrectedResult
+
+            corrected_result = CorrectedResult.from_checkpoint(correct_cp)
+            logger.info(f"correct 체크포인트 복원: {correct_cp}")
+        else:
+            if on_step_start is not None:
+                try:
+                    await on_step_start(PipelineStep.CORRECT.value)
+                except Exception as e:
+                    logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
+
+            state.current_step = PipelineStep.CORRECT.value
+            state.save(state_path)
+
+            corrected_result = await self._run_step_correct(
+                merged_result,
+                correct_cp,
+            )
+
+        # 5. summarize 단계 실행
+        summarize_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
+        if not summarize_cp.exists():
+            if on_step_start is not None:
+                try:
+                    await on_step_start(PipelineStep.SUMMARIZE.value)
+                except Exception as e:
+                    logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
+
+            state.current_step = PipelineStep.SUMMARIZE.value
+            state.save(state_path)
+
+            await self._run_step_summarize(
+                corrected_result,
+                summarize_cp,
+                output_dir,
+            )
+        else:
+            logger.info(f"summarize 체크포인트 복원: {summarize_cp}")
+
+        # 6. 상태 업데이트: skipped_steps에서 제거, completed_steps에 추가
+        for step_name in ("correct", "summarize"):
+            if step_name in state.skipped_steps:
+                state.skipped_steps.remove(step_name)
+            if step_name not in state.completed_steps:
+                state.completed_steps.append(step_name)
+
+        state.status = "completed"
+        state.current_step = ""
+        state.save(state_path)
+
+        logger.info(f"온디맨드 LLM 단계 완료: meeting_id={meeting_id}")
+        return state
 
     def get_status(self, meeting_id: str) -> PipelineState | None:
         """특정 회의의 파이프라인 상태를 조회한다.

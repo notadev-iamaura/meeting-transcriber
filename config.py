@@ -93,6 +93,7 @@ class STTConfig(BaseModel):
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
     batch_size: int = Field(default=16, ge=1, le=64)
+    auto_detect_chipset: bool = False  # True: 칩셋 기반 batch_size 자동 설정
     # 전사 작업 타임아웃 (초) — 무한 대기 방지 (STAB)
     transcribe_timeout_seconds: int = Field(
         default=1800, ge=60, description="전사 타임아웃 (초, 기본 30분)"
@@ -103,7 +104,7 @@ class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
 
     model_name: str = "pyannote/speaker-diarization-3.1"
-    device: str = "cpu"  # MPS 버그로 CPU 강제
+    device: str = "auto"  # "auto": MPS 가용 시 MPS, 아니면 CPU / "mps" / "cpu"
     min_speakers: int = Field(default=1, ge=1)
     max_speakers: int = Field(default=10, ge=1, le=20)
     huggingface_token: str | None = None
@@ -112,18 +113,21 @@ class DiarizationConfig(BaseModel):
     @field_validator("device")
     @classmethod
     def validate_device(cls, v: str) -> str:
-        """MPS 사용 금지 검증. pyannote는 반드시 CPU로 실행한다.
+        """디바이스 값을 검증한다. auto/mps/cpu만 허용.
 
         Args:
             v: 장치 문자열
 
         Returns:
-            검증된 장치 문자열 (MPS는 CPU로 변환)
+            검증된 장치 문자열 (소문자)
+
+        Raises:
+            ValueError: 허용되지 않은 디바이스 값
         """
-        if v.lower() == "mps":
-            logger.warning("pyannote에서 MPS 사용 금지. CPU로 강제 변경합니다.")
-            return "cpu"
-        return v
+        allowed = {"auto", "mps", "cpu"}
+        if v.lower() not in allowed:
+            raise ValueError(f"device는 {allowed} 중 하나여야 합니다: '{v}'")
+        return v.lower()
 
 
 class LLMConfig(BaseModel):
@@ -226,6 +230,7 @@ class PipelineConfig(BaseModel):
     retry_max_count: int = Field(default=3, ge=0, le=10)
     min_disk_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
     min_memory_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
+    skip_llm_steps: bool = True  # 기본값: 전사만 진행, LLM 단계(correct, summarize) 스킵
 
 
 class ThermalConfig(BaseModel):
@@ -293,6 +298,7 @@ class RecordingConfig(BaseModel):
     max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간
     min_duration_seconds: int = Field(default=5, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
 
 
 class LifecycleConfig(BaseModel):
@@ -430,8 +436,38 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     data = _apply_env_overrides(data)
 
     config = AppConfig(**data)
+
+    # 칩셋 자동 감지 적용 (활성화 시)
+    if config.stt.auto_detect_chipset:
+        config = _apply_chipset_overrides(config)
+
     logger.info(f"설정 로드 완료. base_dir={config.paths.resolved_base_dir}")
     return config
+
+
+def _apply_chipset_overrides(config: AppConfig) -> AppConfig:
+    """칩셋 감지 결과로 STT 설정값을 오버라이드한다.
+
+    ChipsetDetector를 사용해 현재 시스템의 칩셋과 RAM을 감지하고,
+    최적의 batch_size를 자동 설정한다.
+
+    Args:
+        config: 현재 AppConfig 인스턴스
+
+    Returns:
+        칩셋 최적화가 적용된 AppConfig (실패 시 원본 반환)
+    """
+    try:
+        from core.chipset_detector import ChipsetDetector
+
+        detector = ChipsetDetector()
+        profile = detector.get_optimal_profile()
+        logger.info(f"칩셋 최적화 적용: batch_size={profile.batch_size}")
+        new_stt = config.stt.model_copy(update={"batch_size": profile.batch_size})
+        return config.model_copy(update={"stt": new_stt})
+    except Exception as e:
+        logger.warning(f"칩셋 자동 감지 실패, 기존 설정 유지: {e}")
+        return config
 
 
 # 모듈 수준 싱글턴 인스턴스

@@ -171,10 +171,12 @@ class Transcriber:
         self._model_name = self._config.stt.model_name
         self._language = self._config.stt.language
         self._beam_size = self._config.stt.beam_size
+        self._batch_size = self._config.stt.batch_size  # 향후 mlx-whisper batch 지원 대비 캐싱
 
         logger.info(
             f"Transcriber 초기화: model={self._model_name}, "
-            f"language={self._language}, beam_size={self._beam_size}"
+            f"language={self._language}, beam_size={self._beam_size}, "
+            f"batch_size={self._batch_size}"
         )
 
     def _load_whisper_module(self) -> Any:
@@ -307,8 +309,7 @@ class Transcriber:
                 "whisper", self._load_whisper_module
             ) as whisper_module:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
-                # mlx-whisper 0.4.x에서 beam_size는 직접 파라미터가 아닌
-                # decode_options로 전달해야 한다 (미구현 시 무시됨)
+                # beam_size는 decode_options → DecodingOptions로 전달됨
                 raw_result = await asyncio.wait_for(
                     asyncio.to_thread(
                         whisper_module.transcribe,
@@ -316,6 +317,7 @@ class Transcriber:
                         path_or_hf_repo=self._model_name,
                         language=self._language,
                         word_timestamps=False,
+                        beam_size=self._beam_size,  # decode_options로 DecodingOptions에 전달
                     ),
                     timeout=transcribe_timeout,
                 )

@@ -21,7 +21,7 @@ stt:
 # === 화자분리 설정 ===
 diarization:
   model_name: "pyannote/speaker-diarization-3.1"
-  device: "cpu"                              # MPS 버그로 CPU 강제
+  device: "auto"                             # "auto": MPS 가용 시 MPS, 아니면 CPU / "mps" / "cpu"
   min_speakers: 1                            # 최소 화자 수 (1명이어도 정상 처리)
   max_speakers: 10                           # 최대 화자 수
   # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정
@@ -90,6 +90,7 @@ pipeline:
   retry_max_count: 3                         # 최대 재시도 횟수
   min_disk_free_gb: 2.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
+  skip_llm_steps: true                       # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
   diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)
   step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화
 
@@ -132,6 +133,7 @@ recording:
   max_duration_seconds: 14400                  # 최대 녹음 시간 (초, 4시간)
   min_duration_seconds: 5                      # 최소 녹음 시간 (미달 시 파기)
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
+  multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:

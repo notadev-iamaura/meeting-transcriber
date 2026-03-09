@@ -531,3 +531,86 @@ class TestErrorHierarchy:
     def test_AudioConvertError는_Exception의_하위_클래스이다(self) -> None:
         """AudioConvertError가 Exception을 상속하는지 확인한다."""
         assert issubclass(AudioConvertError, Exception)
+
+
+class TestMergeTracksMultitrack:
+    """멀티트랙 병합 테스트."""
+
+    def test_merge_tracks_입력파일_없으면_에러(self, tmp_path: Path) -> None:
+        """트랙 파일이 없으면 FileNotFoundError."""
+        config = AppConfig()
+        converter = AudioConverter(config)
+
+        with pytest.raises(FileNotFoundError, match="트랙 파일"):
+            converter.merge_tracks(
+                {"system": tmp_path / "no.wav"},
+                tmp_path / "out",
+                "merged.wav",
+            )
+
+    @patch("shutil.which", return_value="/usr/bin/ffmpeg")
+    @patch("subprocess.run")
+    def test_merge_tracks_정상_병합(
+        self,
+        mock_run: MagicMock,
+        mock_which: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """정상 병합 시 출력 파일이 생성된다."""
+        config = AppConfig()
+        converter = AudioConverter(config)
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        merged = out_dir / "merged.wav"
+
+        sys_file = tmp_path / "system.wav"
+        mic_file = tmp_path / "mic.wav"
+        sys_file.write_bytes(b"x" * 100)
+        mic_file.write_bytes(b"x" * 100)
+
+        def mock_run_fn(cmd: list[str], **kwargs: object) -> MagicMock:
+            """ffmpeg 병합 명령을 모킹한다."""
+            merged.write_bytes(b"x" * 200)
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        mock_run.side_effect = mock_run_fn
+
+        result = converter.merge_tracks(
+            {"system": sys_file, "mic": mic_file},
+            out_dir,
+            "merged.wav",
+        )
+
+        assert result == merged
+
+    @patch("shutil.which", return_value="/usr/bin/ffmpeg")
+    @patch("subprocess.run")
+    def test_merge_tracks_실패시_에러(
+        self,
+        mock_run: MagicMock,
+        mock_which: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """ffmpeg 실패 시 ConversionFailedError."""
+        config = AppConfig()
+        converter = AudioConverter(config)
+
+        sys_file = tmp_path / "system.wav"
+        mic_file = tmp_path / "mic.wav"
+        sys_file.write_bytes(b"x" * 100)
+        mic_file.write_bytes(b"x" * 100)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "error"
+        mock_run.return_value = mock_result
+
+        with pytest.raises(ConversionFailedError, match="트랙 병합 실패"):
+            converter.merge_tracks(
+                {"system": sys_file, "mic": mic_file},
+                tmp_path / "out",
+                "merged.wav",
+            )

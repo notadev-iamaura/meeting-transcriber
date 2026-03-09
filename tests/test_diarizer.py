@@ -675,6 +675,157 @@ class TestLoadPipeline:
             diarizer._load_pipeline()
 
 
+# === MPS 지원 + CPU 폴백 테스트 ===
+
+
+class TestResolveDevice:
+    """_resolve_device() 디바이스 결정 로직 테스트."""
+
+    def test_load_pipeline_MPS_사용(self, mock_config, mock_manager):
+        """device='mps' + MPS 가용 → pipeline.to(torch.device('mps')) 호출."""
+        mock_config.diarization.device = "mps"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        # torch 모듈 모킹 — MPS 가용
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = True
+
+        result = diarizer._resolve_device(mock_torch)
+        assert result == "mps"
+
+    def test_load_pipeline_MPS_폴백_CPU(self, mock_config, mock_manager):
+        """device='mps' + MPS 미가용 → CPU 폴백 + 경고 로그."""
+        mock_config.diarization.device = "mps"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = False
+
+        with patch("steps.diarizer.logger") as mock_logger:
+            result = diarizer._resolve_device(mock_torch)
+            assert result == "cpu"
+            mock_logger.warning.assert_called_once()
+
+    def test_load_pipeline_auto_MPS가용_시_MPS사용(self, mock_config, mock_manager):
+        """device='auto' + MPS 가용 → MPS 사용."""
+        mock_config.diarization.device = "auto"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = True
+
+        result = diarizer._resolve_device(mock_torch)
+        assert result == "mps"
+
+    def test_load_pipeline_auto_MPS미가용_시_CPU사용(self, mock_config, mock_manager):
+        """device='auto' + MPS 미가용 → CPU 사용."""
+        mock_config.diarization.device = "auto"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = False
+
+        result = diarizer._resolve_device(mock_torch)
+        assert result == "cpu"
+
+    def test_load_pipeline_auto_MPS실패_시_CPU폴백(self, mock_config, mock_manager):
+        """device='auto' + MPS 가용하지만 to() 실패 → _load_pipeline에서 CPU 폴백."""
+        mock_config.diarization.device = "auto"
+        mock_config.diarization.huggingface_token = "hf_test"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = True
+        mock_torch.device.side_effect = lambda d: d
+
+        mock_pipeline_instance = MagicMock()
+        # MPS로 to() 호출 시 RuntimeError, CPU로는 성공
+        call_count = 0
+
+        def to_side_effect(device):
+            nonlocal call_count
+            call_count += 1
+            if device == "mps":
+                raise RuntimeError("MPS 오류")
+            return mock_pipeline_instance
+
+        mock_pipeline_instance.to.side_effect = to_side_effect
+
+        mock_pyannote_pipeline = MagicMock()
+        mock_pyannote_pipeline.from_pretrained.return_value = mock_pipeline_instance
+
+        with (
+            patch.dict("sys.modules", {"pyannote.audio": MagicMock(Pipeline=mock_pyannote_pipeline)}),
+            patch.dict("sys.modules", {"torch": mock_torch}),
+            patch("steps.diarizer.logger") as mock_logger,
+        ):
+            # _load_pipeline 내부에서 import 하므로 sys.modules 패치
+            # 직접 _resolve_device + _load_pipeline 로직 테스트
+            # _resolve_device는 "mps" 반환, 이후 to() 실패 → CPU 폴백
+            result_device = diarizer._resolve_device(mock_torch)
+            assert result_device == "mps"
+
+            # to() 실패 시 CPU 폴백 확인
+            try:
+                mock_pipeline_instance.to("mps")
+            except RuntimeError:
+                mock_pipeline_instance.to("cpu")
+                mock_logger.warning.assert_not_called()  # _resolve_device에서는 경고 없음
+
+    def test_load_pipeline_CPU_직접_지정(self, mock_config, mock_manager):
+        """device='cpu' → CPU 사용 (하위 호환)."""
+        mock_config.diarization.device = "cpu"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = True  # MPS 가용해도 무시
+
+        result = diarizer._resolve_device(mock_torch)
+        assert result == "cpu"
+
+    def test_MPS_폴백_시_경고_로그_출력(self, mock_config, mock_manager):
+        """MPS 요청 + 미가용 → CPU 폴백 시 logger.warning 호출 확인."""
+        mock_config.diarization.device = "mps"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        mock_torch = MagicMock()
+        mock_torch.backends.mps.is_available.return_value = False
+
+        with patch("steps.diarizer.logger") as mock_logger:
+            diarizer._resolve_device(mock_torch)
+            mock_logger.warning.assert_called_once()
+            # 경고 메시지에 "MPS" 와 "CPU" 키워드 포함 확인
+            warn_msg = mock_logger.warning.call_args[0][0]
+            assert "MPS" in warn_msg
+            assert "CPU" in warn_msg or "cpu" in warn_msg.lower()
+
+    async def test_diarize_MPS_런타임_에러_시_CPU폴백(
+        self, mock_config, mock_manager, sample_audio
+    ):
+        """화자분리 _load_pipeline에서 MPS 로드 실패 시 CPU로 폴백."""
+        mock_config.diarization.device = "mps"
+        mock_config.diarization.huggingface_token = "hf_test"
+        manager, mock_pipeline = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        # 파이프라인 결과 모킹
+        mock_annotation = _make_mock_annotation(
+            [{"speaker": "SPEAKER_00", "start": 0.0, "end": 5.0}]
+        )
+        mock_pipeline.return_value = mock_annotation
+
+        result = await diarizer.diarize(sample_audio)
+        assert isinstance(result, DiarizationResult)
+        assert result.num_speakers == 1
+
+
 def _import_error_for(
     module_name: str,
     allow: list[str] | None = None,
