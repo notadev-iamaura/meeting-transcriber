@@ -102,6 +102,24 @@ router = APIRouter(prefix="/api", tags=["api"])
 # === 요청/응답 Pydantic 스키마 ===
 
 
+class SystemResourcesResponse(BaseModel):
+    """시스템 리소스 상태 응답 스키마.
+
+    Attributes:
+        ram_used_gb: 사용 중인 RAM (GB)
+        ram_total_gb: 전체 RAM (GB)
+        ram_percent: RAM 사용률 (%)
+        cpu_percent: CPU 사용률 (%)
+        loaded_model: 현재 로드된 모델명 (없으면 None)
+    """
+
+    ram_used_gb: float
+    ram_total_gb: float
+    ram_percent: float
+    cpu_percent: float
+    loaded_model: str | None = None
+
+
 class StatusResponse(BaseModel):
     """시스템 상태 응답 스키마.
 
@@ -1009,6 +1027,135 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             status_code=500,
             detail=f"Chat 중 오류가 발생했습니다: {e}",
         ) from e
+
+
+# === 시스템 리소스 엔드포인트 ===
+
+
+@router.get("/system/resources", response_model=SystemResourcesResponse)
+async def get_system_resources(request: Request) -> SystemResourcesResponse:
+    """시스템 리소스 사용량을 반환한다.
+
+    psutil로 RAM/CPU 사용량을 측정하고,
+    ModelLoadManager에서 현재 로드된 모델명을 조회한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        SystemResourcesResponse: 시스템 리소스 정보
+    """
+    import psutil
+
+    mem = psutil.virtual_memory()
+    cpu = psutil.cpu_percent(interval=None)
+
+    # model_manager에서 현재 로드된 모델명 조회
+    model_manager = getattr(request.app.state, "model_manager", None)
+    loaded_model = None
+    if model_manager is not None:
+        loaded_model = getattr(model_manager, "current_model_name", None)
+
+    return SystemResourcesResponse(
+        ram_used_gb=round(mem.used / (1024**3), 2),
+        ram_total_gb=round(mem.total / (1024**3), 2),
+        ram_percent=round(mem.percent, 1),
+        cpu_percent=round(cpu, 1),
+        loaded_model=loaded_model,
+    )
+
+
+# === 온디맨드 요약 엔드포인트 ===
+
+
+def _get_pipeline_manager(request: Request) -> Any:
+    """app.state에서 PipelineManager를 가져온다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        PipelineManager 인스턴스
+
+    Raises:
+        HTTPException: pipeline_manager가 초기화되지 않았을 때 (503)
+    """
+    pipeline = getattr(request.app.state, "pipeline_manager", None)
+    if pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="파이프라인이 초기화되지 않았습니다.",
+        )
+    return pipeline
+
+
+@router.post("/meetings/{meeting_id}/summarize")
+async def summarize_meeting(
+    request: Request,
+    meeting_id: str,
+) -> dict[str, str]:
+    """온디맨드로 회의 요약(LLM 후처리)을 실행한다.
+
+    skip_llm_steps=True로 파이프라인을 실행한 뒤,
+    나중에 LLM 단계(correct + summarize)만 별도 실행할 때 사용한다.
+    백그라운드 태스크로 비동기 실행된다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        요약 시작 확인 메시지
+
+    Raises:
+        HTTPException: 유효하지 않은 ID(400), 상태 파일 미존재(404),
+                       체크포인트 미존재(400), 파이프라인 미초기화(503)
+    """
+    import asyncio
+
+    from core.pipeline import PipelineError, PipelineStep
+
+    _validate_meeting_id(meeting_id)
+    pipeline = _get_pipeline_manager(request)
+
+    # 상태 파일 / 체크포인트 존재 여부를 사전 검증
+    try:
+        state_path = pipeline._get_state_path(meeting_id)
+        if not state_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        merge_cp = pipeline._get_checkpoint_path(meeting_id, PipelineStep.MERGE)
+        if not merge_cp.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"merge 체크포인트가 없습니다. 파이프라인을 먼저 실행하세요: {meeting_id}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"요약 사전 검증 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"요약 사전 검증 중 오류가 발생했습니다: {e}",
+        ) from e
+
+    # 백그라운드 태스크로 LLM 단계 실행
+    task = asyncio.create_task(pipeline.run_llm_steps(meeting_id))
+    running_tasks = getattr(request.app.state, "running_tasks", None)
+    if running_tasks is not None:
+        running_tasks.add(task)
+        task.add_done_callback(running_tasks.discard)
+
+    logger.info(f"온디맨드 요약 시작: {meeting_id}")
+
+    return {
+        "status": "ok",
+        "message": "요약 생성을 시작합니다.",
+        "meeting_id": meeting_id,
+    }
 
 
 # === 녹음 관련 헬퍼 ===

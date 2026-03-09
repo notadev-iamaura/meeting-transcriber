@@ -10,6 +10,7 @@ API 라우터 테스트 모듈 (API Routes Test Module)
     - /api/meetings/{meeting_id}/summary: 회의록 조회
     - /api/search: 하이브리드 검색
     - /api/chat: RAG 기반 AI Chat
+    - /api/system/resources: 시스템 리소스 조회
     - 에러 처리 (400, 404, 503, 500)
     - pydantic 스키마 검증
 의존성: pytest, fastapi (TestClient), unittest.mock
@@ -1367,3 +1368,166 @@ class TestDeleteMeetingEndpoint:
             response = client.delete("/api/meetings/meeting_001")
 
         assert response.status_code == 200
+
+
+# === TestSystemResourcesEndpoint ===
+
+
+class TestSystemResourcesEndpoint:
+    """GET /api/system/resources 엔드포인트 테스트."""
+
+    def test_get_system_resources_정상_응답(self, tmp_path: Path) -> None:
+        """시스템 리소스 조회 시 200 OK와 JSON을 반환하는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.get("/api/system/resources")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, dict)
+
+    def test_get_system_resources_스키마_검증(self, tmp_path: Path) -> None:
+        """응답에 필수 필드(ram_used_gb, ram_total_gb, ram_percent, cpu_percent, loaded_model)가 존재하는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.get("/api/system/resources")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "ram_used_gb" in data
+        assert "ram_total_gb" in data
+        assert "ram_percent" in data
+        assert "cpu_percent" in data
+        assert "loaded_model" in data
+
+    def test_get_system_resources_ram_범위(self, tmp_path: Path) -> None:
+        """ram_percent가 0~100 범위인지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.get("/api/system/resources")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert 0 <= data["ram_percent"] <= 100
+
+
+# === TestSummarizeMeetingEndpoint ===
+
+
+class TestSummarizeMeetingEndpoint:
+    """POST /api/meetings/{meeting_id}/summarize 엔드포인트 테스트."""
+
+    def _setup_pipeline(
+        self,
+        app: Any,
+        tmp_path: Path,
+        meeting_id: str,
+        *,
+        create_state: bool = True,
+        create_merge_cp: bool = True,
+    ) -> MagicMock:
+        """테스트용 PipelineManager 모킹을 설정한다.
+
+        Args:
+            app: FastAPI 앱 인스턴스
+            tmp_path: pytest 임시 디렉토리
+            meeting_id: 회의 ID
+            create_state: 상태 파일 생성 여부
+            create_merge_cp: merge 체크포인트 생성 여부
+
+        Returns:
+            모킹된 pipeline_manager 인스턴스
+        """
+        checkpoints_dir = tmp_path / "checkpoints"
+        state_dir = checkpoints_dir / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        state_path = state_dir / "pipeline_state.json"
+        merge_cp_path = state_dir / "merge.json"
+
+        if create_state:
+            state_path.write_text(
+                '{"meeting_id": "' + meeting_id + '", "status": "completed"}',
+                encoding="utf-8",
+            )
+        if create_merge_cp:
+            merge_cp_path.write_text(
+                '{"utterances": [], "num_speakers": 1}',
+                encoding="utf-8",
+            )
+
+        mock_pipeline = MagicMock()
+        mock_pipeline._get_state_path = MagicMock(return_value=state_path)
+        mock_pipeline._get_checkpoint_path = MagicMock(return_value=merge_cp_path)
+        mock_pipeline.run_llm_steps = AsyncMock()
+
+        app.state.pipeline_manager = mock_pipeline
+        app.state.running_tasks = set()
+
+        return mock_pipeline
+
+    def test_summarize_meeting_정상(self, tmp_path: Path) -> None:
+        """정상적으로 요약을 시작하면 200과 확인 메시지를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            self._setup_pipeline(app, tmp_path, "meeting_001")
+            response = client.post("/api/meetings/meeting_001/summarize")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["meeting_id"] == "meeting_001"
+        assert "요약" in data["message"]
+
+    def test_summarize_meeting_존재하지_않는_회의_404(self, tmp_path: Path) -> None:
+        """상태 파일이 없는 meeting_id로 요약 요청 시 404를 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            self._setup_pipeline(
+                app, tmp_path, "nonexistent", create_state=False,
+            )
+            response = client.post("/api/meetings/nonexistent/summarize")
+
+        assert response.status_code == 404
+        assert "찾을 수 없습니다" in response.json()["detail"]
+
+    def test_summarize_meeting_체크포인트_없음_400(self, tmp_path: Path) -> None:
+        """merge 체크포인트가 없을 때 400을 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            self._setup_pipeline(
+                app, tmp_path, "meeting_002", create_merge_cp=False,
+            )
+            response = client.post("/api/meetings/meeting_002/summarize")
+
+        assert response.status_code == 400
+        assert "체크포인트" in response.json()["detail"]
+
+    def test_summarize_meeting_pipeline_미초기화_503(self, tmp_path: Path) -> None:
+        """pipeline_manager가 None일 때 503을 반환한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            app.state.pipeline_manager = None
+            response = client.post("/api/meetings/meeting_001/summarize")
+
+        assert response.status_code == 503
+        assert "파이프라인" in response.json()["detail"]
+
+    def test_summarize_meeting_진행중_표시(self, tmp_path: Path) -> None:
+        """요약 시작 후 running_tasks에 태스크가 등록되는지 확인한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, "meeting_003")
+            response = client.post("/api/meetings/meeting_003/summarize")
+
+        assert response.status_code == 200
+        # run_llm_steps가 호출되었는지 확인
+        mock_pipeline.run_llm_steps.assert_called_once_with("meeting_003")

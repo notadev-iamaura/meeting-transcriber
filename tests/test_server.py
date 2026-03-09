@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -681,3 +681,265 @@ class TestSPARouting:
             response = client.get("/app")
 
         assert response.status_code == 404
+
+
+# === TestLifespanOrchestration ===
+
+
+class TestLifespanOrchestration:
+    """lifespan 오케스트레이션 통합 테스트.
+
+    ThermalManager, PipelineManager, FolderWatcher, JobProcessor가
+    lifespan에서 올바르게 초기화/정리되는지 확인한다.
+    모든 컴포넌트는 mock으로 대체하여 부작용을 방지한다.
+    """
+
+    def _get_orchestration_patches(self) -> dict[str, MagicMock]:
+        """오케스트레이션 4개 컴포넌트의 공통 패치를 반환한다.
+
+        Returns:
+            패치에 사용할 mock 딕셔너리
+        """
+        # ThermalManager mock
+        mock_thermal_cls = MagicMock()
+        mock_thermal_instance = MagicMock()
+        mock_thermal_cls.return_value = mock_thermal_instance
+
+        # PipelineManager mock
+        mock_pipeline_cls = MagicMock()
+        mock_pipeline_instance = MagicMock()
+        mock_pipeline_cls.return_value = mock_pipeline_instance
+
+        # FolderWatcher mock
+        mock_watcher_cls = MagicMock()
+        mock_watcher_instance = MagicMock()
+        mock_watcher_instance.start = AsyncMock()
+        mock_watcher_instance.stop = AsyncMock()
+        mock_watcher_instance.scan_existing = AsyncMock(return_value=[])
+        mock_watcher_cls.return_value = mock_watcher_instance
+
+        # JobProcessor mock
+        mock_processor_cls = MagicMock()
+        mock_processor_instance = MagicMock()
+        mock_processor_instance.start = AsyncMock()
+        mock_processor_instance.stop = AsyncMock()
+        mock_processor_cls.return_value = mock_processor_instance
+
+        return {
+            "thermal_cls": mock_thermal_cls,
+            "thermal": mock_thermal_instance,
+            "pipeline_cls": mock_pipeline_cls,
+            "pipeline": mock_pipeline_instance,
+            "watcher_cls": mock_watcher_cls,
+            "watcher": mock_watcher_instance,
+            "processor_cls": mock_processor_cls,
+            "processor": mock_processor_instance,
+        }
+
+    def test_thermal_manager_초기화(self, tmp_path: Path) -> None:
+        """lifespan 후 app.state.thermal_manager가 존재하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                assert hasattr(app.state, "thermal_manager")
+                assert app.state.thermal_manager is not None
+
+    def test_folder_watcher_초기화_및_시작(self, tmp_path: Path) -> None:
+        """app.state.folder_watcher가 존재하고 start가 호출되었는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                assert hasattr(app.state, "folder_watcher")
+                assert app.state.folder_watcher is not None
+                mocks["watcher"].start.assert_called_once()
+
+    def test_pipeline_manager_초기화(self, tmp_path: Path) -> None:
+        """app.state.pipeline_manager가 존재하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                assert hasattr(app.state, "pipeline_manager")
+                assert app.state.pipeline_manager is not None
+
+    def test_job_processor_초기화_및_시작(self, tmp_path: Path) -> None:
+        """app.state.job_processor가 존재하고 start가 호출되었는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                assert hasattr(app.state, "job_processor")
+                assert app.state.job_processor is not None
+                mocks["processor"].start.assert_called_once()
+
+    def test_shutdown시_job_processor_stop(self, tmp_path: Path) -> None:
+        """종료 시 JobProcessor.stop()이 호출되는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                pass  # TestClient __exit__에서 shutdown 실행
+
+        mocks["processor"].stop.assert_called_once()
+
+    def test_shutdown시_folder_watcher_stop(self, tmp_path: Path) -> None:
+        """종료 시 FolderWatcher.stop()이 호출되는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            mocks["pipeline_cls"],
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                pass  # TestClient __exit__에서 shutdown 실행
+
+        mocks["watcher"].stop.assert_called_once()
+
+    def test_초기화_실패시_서버_시작_가능(self, tmp_path: Path) -> None:
+        """모든 오케스트레이션 컴포넌트 초기화가 실패해도 서버가 정상 시작되는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            side_effect=RuntimeError("ThermalManager 실패"),
+        ), patch(
+            "core.pipeline.PipelineManager",
+            side_effect=RuntimeError("PipelineManager 실패"),
+        ), patch(
+            "core.watcher.FolderWatcher",
+            side_effect=RuntimeError("FolderWatcher 실패"),
+        ):
+            with TestClient(app) as client:
+                response = client.get("/api/health")
+                assert response.status_code == 200
+
+                assert app.state.thermal_manager is None
+                assert app.state.pipeline_manager is None
+                assert app.state.folder_watcher is None
+                assert app.state.job_processor is None
+
+    def test_pipeline_없으면_job_processor_비활성(self, tmp_path: Path) -> None:
+        """PipelineManager가 None이면 JobProcessor가 생성되지 않는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+
+        with patch(
+            "core.thermal_manager.ThermalManager",
+            mocks["thermal_cls"],
+        ), patch(
+            "core.pipeline.PipelineManager",
+            side_effect=RuntimeError("PipelineManager 실패"),
+        ), patch(
+            "core.watcher.FolderWatcher",
+            mocks["watcher_cls"],
+        ), patch(
+            "core.orchestrator.JobProcessor",
+            mocks["processor_cls"],
+        ):
+            with TestClient(app) as _client:
+                assert app.state.pipeline_manager is None
+                assert app.state.job_processor is None
+
+            # JobProcessor 생성자가 호출되지 않아야 함
+            mocks["processor_cls"].assert_not_called()

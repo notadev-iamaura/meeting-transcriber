@@ -159,12 +159,84 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 실행 중인 파이프라인 태스크 추적용 세트
     app.state.running_tasks: set[asyncio.Task] = set()
 
+    # 7. ThermalManager 초기화 (lazy)
+    thermal_manager = None
+    try:
+        from core.thermal_manager import ThermalManager
+
+        thermal_manager = ThermalManager(config)
+        app.state.thermal_manager = thermal_manager
+        logger.info("ThermalManager 초기화 완료")
+    except Exception as e:
+        app.state.thermal_manager = None
+        logger.warning(f"ThermalManager 초기화 실패: {e}")
+
+    # 8. PipelineManager 초기화 (lazy)
+    pipeline_manager = None
+    try:
+        from core.pipeline import PipelineManager
+
+        pipeline_manager = PipelineManager(config=config)
+        app.state.pipeline_manager = pipeline_manager
+        logger.info("PipelineManager 초기화 완료")
+    except Exception as e:
+        app.state.pipeline_manager = None
+        logger.warning(f"PipelineManager 초기화 실패: {e}")
+
+    # 9. FolderWatcher 초기화 + start (lazy)
+    folder_watcher = None
+    try:
+        from core.watcher import FolderWatcher
+
+        folder_watcher = FolderWatcher(async_job_queue=async_queue, config=config)
+        await folder_watcher.start()
+        await folder_watcher.scan_existing()
+        app.state.folder_watcher = folder_watcher
+        logger.info("FolderWatcher 시작 완료")
+    except Exception as e:
+        app.state.folder_watcher = None
+        logger.warning(f"FolderWatcher 초기화 실패: {e}")
+
+    # 10. JobProcessor 초기화 + start (lazy, pipeline과 thermal 필요)
+    job_processor = None
+    if pipeline_manager is not None and thermal_manager is not None:
+        try:
+            from core.orchestrator import JobProcessor
+
+            job_processor = JobProcessor(
+                job_queue=async_queue,
+                pipeline=pipeline_manager,
+                thermal_manager=thermal_manager,
+                ws_manager=ws_manager,
+                poll_interval=5.0,
+            )
+            await job_processor.start()
+            app.state.job_processor = job_processor
+            logger.info("JobProcessor 시작 완료")
+        except Exception as e:
+            app.state.job_processor = None
+            logger.warning(f"JobProcessor 초기화 실패: {e}")
+    else:
+        app.state.job_processor = None
+        if pipeline_manager is None or thermal_manager is None:
+            logger.warning("PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화")
+
     logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
 
     yield  # 앱 실행
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # JobProcessor 정지
+    if hasattr(app.state, "job_processor") and app.state.job_processor is not None:
+        await app.state.job_processor.stop()
+        logger.info("JobProcessor 정지 완료")
+
+    # FolderWatcher 정지
+    if hasattr(app.state, "folder_watcher") and app.state.folder_watcher is not None:
+        await app.state.folder_watcher.stop()
+        logger.info("FolderWatcher 정지 완료")
 
     # 실행 중인 파이프라인 태스크 정리
     running_tasks = getattr(app.state, "running_tasks", set())

@@ -45,6 +45,7 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.peak_ram_limit_gb = 9.5
     config.pipeline.min_disk_free_gb = 2.0
     config.pipeline.min_memory_free_gb = 2.0
+    config.pipeline.skip_llm_steps = False
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
     config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
     config.paths.resolved_base_dir = tmp_path

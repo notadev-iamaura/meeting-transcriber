@@ -2156,6 +2156,134 @@ mark {
 
 
 /* ══════════════════════════════════════════
+   13-A. 리소스 모니터
+   ══════════════════════════════════════════ */
+
+/* 리소스 모니터 컨테이너 */
+.resource-monitor {
+  padding: 16px 24px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* 리소스 바 목록 */
+.resource-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* 개별 리소스 항목 */
+.resource-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 리소스 라벨 행 (이름 + 수치) */
+.resource-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* 리소스 수치 텍스트 */
+.resource-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 리소스 바 배경 (트랙) */
+.resource-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* 리소스 바 채움 */
+.resource-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease, background 0.3s ease;
+  min-width: 0;
+}
+
+/* 경고 (80% 이상): 주황색 */
+.resource-bar-fill.warning {
+  background: var(--warning);
+}
+
+/* 위험 (90% 이상): 빨간색 */
+.resource-bar-fill.danger {
+  background: var(--error);
+}
+
+/* 현재 로드된 모델 표시 */
+.resource-model {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  display: none;
+}
+
+
+/* ══════════════════════════════════════════
+   13-B. 요약 생성 버튼
+   ══════════════════════════════════════════ */
+
+/* 회의 카드 내 요약 생성 버튼 */
+.meeting-card-action.summarize {
+  color: var(--accent);
+  border-color: rgba(0, 122, 255, 0.3);
+}
+
+.meeting-card-action.summarize:hover {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+/* 로딩 중 버튼 */
+.meeting-card-action.loading {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ViewerView 요약 생성 버튼 */
+.btn-summarize {
+  display: inline-block;
+  padding: 10px 24px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font);
+  color: #ffffff;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--transition), opacity var(--transition);
+}
+
+.btn-summarize:hover {
+  background: var(--accent-hover);
+}
+
+.btn-summarize:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-summarize.loading {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+
+/* ══════════════════════════════════════════
    14. 반응형 — 모바일/태블릿 대응
    ══════════════════════════════════════════ */
 
@@ -2178,6 +2306,11 @@ mark {
   #content {
     flex: 1;
     overflow-y: auto;
+  }
+
+  /* 리소스 모니터 패딩 축소 */
+  .resource-monitor {
+    padding: 12px 16px;
   }
 
   /* 카드 그리드 단일 열 */

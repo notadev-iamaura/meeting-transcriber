@@ -474,6 +474,32 @@
         contentEl.innerHTML = "";
 
         var html = [
+            // 리소스 모니터 섹션
+            '<section class="resource-monitor" id="homeResourceMonitor">',
+            '  <h2 class="section-title">시스템 리소스</h2>',
+            '  <div class="resource-bars">',
+            '    <div class="resource-item">',
+            '      <div class="resource-label">',
+            '        <span>RAM</span>',
+            '        <span class="resource-value" id="homeRamValue">--</span>',
+            '      </div>',
+            '      <div class="resource-bar-bg">',
+            '        <div class="resource-bar-fill" id="homeRamBar"></div>',
+            '      </div>',
+            '    </div>',
+            '    <div class="resource-item">',
+            '      <div class="resource-label">',
+            '        <span>CPU</span>',
+            '        <span class="resource-value" id="homeCpuValue">--</span>',
+            '      </div>',
+            '      <div class="resource-bar-bg">',
+            '        <div class="resource-bar-fill" id="homeCpuBar"></div>',
+            '      </div>',
+            '    </div>',
+            '  </div>',
+            '  <div class="resource-model" id="homeLoadedModel"></div>',
+            '</section>',
+
             // 검색 섹션
             '<section class="search-section">',
             '  <h2 class="search-title">회의 내용 검색</h2>',
@@ -575,6 +601,12 @@
             meetingsLoading: document.getElementById("homeMeetingsLoading"),
             meetingsEmpty: document.getElementById("homeMeetingsEmpty"),
             sortSelect: document.getElementById("homeSortSelect"),
+            // 리소스 모니터
+            ramValue: document.getElementById("homeRamValue"),
+            ramBar: document.getElementById("homeRamBar"),
+            cpuValue: document.getElementById("homeCpuValue"),
+            cpuBar: document.getElementById("homeCpuBar"),
+            loadedModel: document.getElementById("homeLoadedModel"),
         };
     };
 
@@ -691,6 +723,59 @@
         };
         document.addEventListener("ws:job_failed", onJobFailed);
         self._listeners.push({ el: document, type: "ws:job_failed", fn: onJobFailed });
+
+        // 리소스 모니터 폴링 (5초 간격)
+        self._pollResources();
+        var resourceTimer = setInterval(function () {
+            self._pollResources();
+        }, STATUS_POLL_INTERVAL);
+        self._timers.push(resourceTimer);
+    };
+
+    /**
+     * 시스템 리소스를 API에서 조회하여 UI를 업데이트한다.
+     */
+    HomeView.prototype._pollResources = async function () {
+        var self = this;
+        var els = self._els;
+
+        try {
+            var data = await App.apiRequest("/system/resources");
+            var ramPct = data.ram_percent || 0;
+            var cpuPct = data.cpu_percent || 0;
+
+            // RAM 프로그레스 바
+            App.safeText(els.ramValue,
+                data.ram_used_gb.toFixed(1) + " / " + data.ram_total_gb.toFixed(1) + " GB (" + ramPct.toFixed(0) + "%)");
+            els.ramBar.style.width = ramPct + "%";
+            els.ramBar.className = "resource-bar-fill" + self._getResourceBarClass(ramPct);
+
+            // CPU 프로그레스 바
+            App.safeText(els.cpuValue, cpuPct.toFixed(0) + "%");
+            els.cpuBar.style.width = cpuPct + "%";
+            els.cpuBar.className = "resource-bar-fill" + self._getResourceBarClass(cpuPct);
+
+            // 로드된 모델명
+            if (data.loaded_model) {
+                App.safeText(els.loadedModel, "현재 모델: " + data.loaded_model);
+                els.loadedModel.style.display = "block";
+            } else {
+                els.loadedModel.style.display = "none";
+            }
+        } catch (_e) {
+            // 리소스 API 실패 시 무시 (모니터링 기능이므로)
+        }
+    };
+
+    /**
+     * 리소스 사용량에 따른 프로그레스 바 CSS 클래스를 반환한다.
+     * @param {number} percent - 사용 비율 (0~100)
+     * @returns {string} 추가 CSS 클래스 문자열
+     */
+    HomeView.prototype._getResourceBarClass = function (percent) {
+        if (percent >= 90) return " danger";
+        if (percent >= 80) return " warning";
+        return "";
     };
 
     /**
@@ -907,6 +992,21 @@
                         self._retryMeeting(meeting.meeting_id);
                     });
                     actionsEl.appendChild(retryBtn);
+                }
+
+                // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
+                var skippedSteps = meeting.skipped_steps || [];
+                var hasSummarizeSkipped = skippedSteps.indexOf("summarize") >= 0;
+                if (meeting.status === "completed" && hasSummarizeSkipped) {
+                    var summarizeBtn = document.createElement("button");
+                    summarizeBtn.className = "meeting-card-action summarize";
+                    summarizeBtn.textContent = "\u2728 요약 생성";
+                    summarizeBtn.setAttribute("aria-label", meeting.meeting_id + " 요약 생성");
+                    summarizeBtn.addEventListener("click", function (e) {
+                        e.stopPropagation();
+                        self._summarizeMeeting(meeting.meeting_id, summarizeBtn);
+                    });
+                    actionsEl.appendChild(summarizeBtn);
                 }
 
                 var deleteBtn = document.createElement("button");
@@ -1173,6 +1273,27 @@
     };
 
     /**
+     * 온디맨드 요약을 요청한다.
+     * @param {string} meetingId - 회의 ID
+     * @param {HTMLElement} btn - 클릭된 버튼 요소 (스피너 표시용)
+     */
+    HomeView.prototype._summarizeMeeting = async function (meetingId, btn) {
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "요약 중...";
+        btn.classList.add("loading");
+
+        try {
+            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/summarize", {});
+        } catch (e) {
+            errorBanner.show("요약 요청 실패: " + e.message);
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.classList.remove("loading");
+        }
+    };
+
+    /**
      * 뷰를 정리한다. (이벤트 리스너, 타이머 해제)
      */
     HomeView.prototype.destroy = function () {
@@ -1307,9 +1428,11 @@
             '    <div class="empty-state-icon">&#x1F4CB;</div>',
             '    <div class="empty-state-text">회의록이 아직 생성되지 않았습니다</div>',
             '    <div class="empty-state-sub">',
-            '      AI 요약 단계까지 파이프라인이 진행되면<br>',
-            '      자동으로 회의록이 생성됩니다.',
+            '      전사가 완료된 후 아래 버튼을 눌러 AI 요약을 생성할 수 있습니다.',
             '    </div>',
+            '    <button class="btn-summarize" id="viewerSummarizeBtn" style="display:none;">',
+            '      &#x2728; 요약 생성',
+            '    </button>',
             '  </div>',
             '</div>',
         ].join("\n");
@@ -1340,6 +1463,7 @@
             searchClear: document.getElementById("viewerSearchClear"),
             searchPrev: document.getElementById("viewerSearchPrev"),
             searchNext: document.getElementById("viewerSearchNext"),
+            summarizeBtn: document.getElementById("viewerSummarizeBtn"),
         };
 
         // 페이지 타이틀 업데이트
@@ -1481,11 +1605,48 @@
         document.addEventListener("ws:job_completed", onJobCompleted);
         self._listeners.push({ el: document, type: "ws:job_completed", fn: onJobCompleted });
 
-        var onPipelineStatus = function () {
+        var onPipelineStatus = function (e) {
             self._loadMeetingInfo();
+            // 요약 완료 시 요약 데이터 갱신
+            var detail = e.detail || {};
+            if (detail.step === "summarize") {
+                self._loadSummary();
+            }
         };
         document.addEventListener("ws:pipeline_status", onPipelineStatus);
         self._listeners.push({ el: document, type: "ws:pipeline_status", fn: onPipelineStatus });
+
+        // 요약 생성 버튼 클릭
+        var onSummarize = function () {
+            self._requestSummarize();
+        };
+        els.summarizeBtn.addEventListener("click", onSummarize);
+        self._listeners.push({ el: els.summarizeBtn, type: "click", fn: onSummarize });
+    };
+
+    /**
+     * 온디맨드 요약 생성을 요청한다.
+     */
+    ViewerView.prototype._requestSummarize = async function () {
+        var self = this;
+        var els = self._els;
+        var btn = els.summarizeBtn;
+        var originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.textContent = "요약 생성 중...";
+        btn.classList.add("loading");
+
+        try {
+            await App.apiPost(
+                "/meetings/" + encodeURIComponent(self._meetingId) + "/summarize", {}
+            );
+            // 요약 완료는 WebSocket 이벤트로 자동 갱신
+        } catch (e) {
+            errorBanner.show("요약 요청 실패: " + e.message);
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            btn.classList.remove("loading");
+        }
     };
 
     /**
@@ -1770,11 +1931,18 @@
 
             if (!data.markdown) {
                 els.summaryEmpty.style.display = "block";
+                // 전사 완료 상태이면 요약 생성 버튼 표시
+                if (self._allUtterances.length > 0) {
+                    els.summarizeBtn.style.display = "inline-block";
+                }
                 return;
             }
 
             // 마크다운 렌더링
             els.summaryContent.innerHTML = App.renderMarkdown(data.markdown);
+
+            // 요약 생성 버튼 숨기기
+            els.summarizeBtn.style.display = "none";
 
             // 탭 표시
             els.tabNav.style.display = "flex";
@@ -1782,6 +1950,10 @@
         } catch (e) {
             if (e.status === 404) {
                 els.summaryEmpty.style.display = "block";
+                // 전사 완료 상태이면 요약 생성 버튼 표시
+                if (self._allUtterances.length > 0) {
+                    els.summarizeBtn.style.display = "inline-block";
+                }
             } else {
                 console.warn("회의록 로드 실패:", e.message);
                 els.summaryEmpty.style.display = "block";
