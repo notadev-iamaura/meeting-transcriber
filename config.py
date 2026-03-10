@@ -422,7 +422,13 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("llm", {})["backend"] = env_backend
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
-    if env_hf := os.environ.get("HUGGINGFACE_TOKEN"):
+    # 우선순위: 환경변수 → huggingface-cli 저장 토큰
+    env_hf = os.environ.get("HUGGINGFACE_TOKEN")
+    if not env_hf:
+        hf_token_path = Path.home() / ".cache" / "huggingface" / "token"
+        if hf_token_path.exists():
+            env_hf = hf_token_path.read_text().strip()
+    if env_hf:
         data.setdefault("diarization", {})["huggingface_token"] = env_hf
 
     return data

@@ -88,7 +88,7 @@ pipeline:
   peak_ram_limit_gb: 9.5                     # 최대 RAM 사용량 (GB)
   checkpoint_enabled: true                   # 체크포인트 활성화
   retry_max_count: 3                         # 최대 재시도 횟수
-  min_disk_free_gb: 2.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
+  min_disk_free_gb: 1.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
   skip_llm_steps: true                       # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
   diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)

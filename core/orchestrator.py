@@ -16,6 +16,8 @@ import asyncio
 import logging
 from typing import Any
 
+from core.job_queue import JobStatus
+
 logger = logging.getLogger(__name__)
 
 
@@ -153,8 +155,9 @@ class JobProcessor:
             error_message: 에러 메시지 (기본값: "")
         """
         try:
+            job_status = JobStatus(status) if isinstance(status, str) else status
             await self._job_queue.update_status(
-                job_id, status, error_message=error_message,
+                job_id, job_status, error_message=error_message,
             )
         except Exception as e:
             logger.error(f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}")

@@ -52,7 +52,7 @@ VALID_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.RECORDING: {JobStatus.TRANSCRIBING, JobStatus.FAILED},
     JobStatus.TRANSCRIBING: {JobStatus.DIARIZING, JobStatus.FAILED},
     JobStatus.DIARIZING: {JobStatus.MERGING, JobStatus.FAILED},
-    JobStatus.MERGING: {JobStatus.EMBEDDING, JobStatus.FAILED},
+    JobStatus.MERGING: {JobStatus.EMBEDDING, JobStatus.COMPLETED, JobStatus.FAILED},  # skip_llm_steps 시 merging→completed 직행
     JobStatus.EMBEDDING: {JobStatus.COMPLETED, JobStatus.FAILED},
     JobStatus.COMPLETED: set(),  # 완료 후 전이 불가
     JobStatus.FAILED: {JobStatus.QUEUED},  # 재시도만 가능
