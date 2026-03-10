@@ -172,6 +172,10 @@ class Transcriber:
         self._language = self._config.stt.language
         self._beam_size = self._config.stt.beam_size
         self._batch_size = self._config.stt.batch_size  # 향후 mlx-whisper batch 지원 대비 캐싱
+        # 컨텍스트 바이어싱용 initial_prompt (None이면 미적용)
+        self._initial_prompt: str | None = getattr(
+            self._config.stt, "initial_prompt", None
+        )
 
         logger.info(
             f"Transcriber 초기화: model={self._model_name}, "
@@ -276,11 +280,48 @@ class Transcriber:
 
         return segments
 
+    def _build_transcribe_kwargs(
+        self,
+        vad_clip_timestamps: list[float] | None = None,
+    ) -> dict[str, Any]:
+        """Whisper 전사 파라미터를 공통 딕셔너리로 구성한다.
+
+        beam search와 greedy decoding 양쪽에서 동일한 파라미터를 사용하여
+        경로 간 불일치를 방지한다.
+
+        Args:
+            vad_clip_timestamps: VAD가 감지한 음성 구간 경계 타임스탬프 리스트.
+                [start1, end1, start2, end2, ...] 형식. None이면 전체 오디오 처리.
+
+        Returns:
+            mlx_whisper.transcribe()에 전달할 키워드 인자 딕셔너리
+        """
+        kwargs: dict[str, Any] = {
+            "path_or_hf_repo": self._model_name,
+            "language": self._language,
+            "word_timestamps": False,
+        }
+
+        # 컨텍스트 바이어싱: initial_prompt 전달 (None이면 생략)
+        if self._initial_prompt is not None:
+            kwargs["initial_prompt"] = self._initial_prompt
+            logger.debug(f"initial_prompt 적용 (길이: {len(self._initial_prompt)}자)")
+
+        # VAD clip_timestamps 전달 (None이면 전체 오디오 처리)
+        if vad_clip_timestamps is not None:
+            kwargs["clip_timestamps"] = vad_clip_timestamps
+            logger.debug(
+                f"VAD clip_timestamps 적용: {len(vad_clip_timestamps) // 2}개 구간"
+            )
+
+        return kwargs
+
     async def _transcribe_with_fallback(
         self,
         whisper_module: Any,
         audio_path: Path,
         timeout: float,
+        vad_clip_timestamps: list[float] | None = None,
     ) -> dict[str, Any]:
         """beam search로 전사를 시도하고, 미지원 시 greedy decoding으로 폴백한다.
 
@@ -288,19 +329,22 @@ class Transcriber:
             whisper_module: mlx_whisper 모듈
             audio_path: 전사할 오디오 파일 경로
             timeout: 전사 타임아웃 (초)
+            vad_clip_timestamps: VAD가 감지한 음성 구간 경계 타임스탬프 리스트.
+                [start1, end1, start2, end2, ...] 형식. None이면 전체 오디오 처리.
 
         Returns:
             mlx_whisper.transcribe() 결과 딕셔너리
         """
+        # 공통 파라미터 구성 (beam search / greedy 양쪽 동일)
+        kwargs = self._build_transcribe_kwargs(vad_clip_timestamps)
+
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
                     whisper_module.transcribe,
                     str(audio_path),
-                    path_or_hf_repo=self._model_name,
-                    language=self._language,
-                    word_timestamps=False,
                     beam_size=self._beam_size,
+                    **kwargs,
                 ),
                 timeout=timeout,
             )
@@ -313,14 +357,16 @@ class Transcriber:
                 asyncio.to_thread(
                     whisper_module.transcribe,
                     str(audio_path),
-                    path_or_hf_repo=self._model_name,
-                    language=self._language,
-                    word_timestamps=False,
+                    **kwargs,
                 ),
                 timeout=timeout,
             )
 
-    async def transcribe(self, audio_path: Path) -> TranscriptResult:
+    async def transcribe(
+        self,
+        audio_path: Path,
+        vad_clip_timestamps: list[float] | None = None,
+    ) -> TranscriptResult:
         """오디오 파일을 한국어로 전사한다.
 
         ModelLoadManager를 통해 whisper 모델을 로드하고,
@@ -329,6 +375,8 @@ class Transcriber:
 
         Args:
             audio_path: 전사할 오디오 파일 경로 (16kHz mono WAV 권장)
+            vad_clip_timestamps: VAD가 감지한 음성 구간 경계 타임스탬프 리스트.
+                [start1, end1, start2, end2, ...] 형식. None이면 전체 오디오 처리.
 
         Returns:
             전사 결과 (TranscriptResult)
@@ -354,7 +402,8 @@ class Transcriber:
             ) as whisper_module:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
                 raw_result = await self._transcribe_with_fallback(
-                    whisper_module, audio_path, transcribe_timeout
+                    whisper_module, audio_path, transcribe_timeout,
+                    vad_clip_timestamps,
                 )
         except TimeoutError as e:
             raise TranscriptionError(

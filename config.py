@@ -86,6 +86,45 @@ class PathsConfig(BaseModel):
         return self.resolve_path(self.recordings_temp_dir)
 
 
+class VADConfig(BaseModel):
+    """VAD (Voice Activity Detection) 설정.
+
+    Silero VAD를 사용하여 오디오에서 음성 구간만 감지한다.
+    감지된 구간을 Whisper의 clip_timestamps로 전달하여
+    무음 구간에서의 환각(hallucination)을 방지한다.
+    """
+
+    enabled: bool = False
+    threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="음성 확률 임계값"
+    )
+    min_speech_duration_ms: int = Field(
+        default=250, ge=50, le=2000, description="최소 음성 구간 길이(ms)"
+    )
+    min_silence_duration_ms: int = Field(
+        default=100, ge=30, le=2000, description="최소 무음 구간 길이(ms)"
+    )
+    speech_pad_ms: int = Field(
+        default=30, ge=0, le=500, description="음성 구간 전후 패딩(ms)"
+    )
+
+
+class NumberNormalizationConfig(BaseModel):
+    """한국어 숫자 정규화 설정.
+
+    한글 숫자(삼십, 이백오십 등)를 아라비아 숫자(30, 250)로 변환한다.
+    안전한 단위어가 동반될 때만 변환하여 고유명사 오변환을 방지한다.
+    """
+
+    enabled: bool = False
+    level: int = Field(
+        default=1,
+        ge=0,
+        le=2,
+        description="변환 수준: 0=비활성, 1=보수적(단위어 동반만), 2=중간(복합 수)",
+    )
+
+
 class STTConfig(BaseModel):
     """STT (Speech-to-Text) 모델 설정"""
 
@@ -94,10 +133,29 @@ class STTConfig(BaseModel):
     beam_size: int = Field(default=5, ge=1, le=20)
     batch_size: int = Field(default=16, ge=1, le=64)
     auto_detect_chipset: bool = False  # True: 칩셋 기반 batch_size 자동 설정
+    initial_prompt: str | None = Field(
+        default=None,
+        description="전사 컨텍스트 힌트 (고유명사, 전문용어). None이면 비활성화.",
+    )
     # 전사 작업 타임아웃 (초) — 무한 대기 방지 (STAB)
     transcribe_timeout_seconds: int = Field(
         default=1800, ge=60, description="전사 타임아웃 (초, 기본 30분)"
     )
+
+    @field_validator("initial_prompt")
+    @classmethod
+    def normalize_initial_prompt(cls, v: str | None) -> str | None:
+        """빈 문자열을 None으로 정규화한다.
+
+        Args:
+            v: initial_prompt 값
+
+        Returns:
+            정규화된 값 (빈 문자열/공백만 있으면 None)
+        """
+        if v is not None and v.strip() == "":
+            return None
+        return v
 
     def resolve_model_path(self) -> str:
         """모델 경로를 해석한다.
@@ -376,6 +434,10 @@ class AppConfig(BaseModel):
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
     window: WindowConfig = Field(default_factory=WindowConfig)
+    vad: VADConfig = Field(default_factory=VADConfig)
+    number_normalization: NumberNormalizationConfig = Field(
+        default_factory=NumberNormalizationConfig
+    )
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:

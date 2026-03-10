@@ -656,6 +656,134 @@ class TestTranscribe:
         assert result.segments[0].text == "한국"
 
 
+# === initial_prompt / vad_clip_timestamps 전달 테스트 ===
+
+
+def _make_fallback_mock_whisper(
+    raw_result: dict[str, Any] | None = None,
+) -> MagicMock:
+    """beam search에서 NotImplementedError를 발생시켜 폴백 경로를 타도록 설정된 mock whisper.
+
+    첫 번째 호출: NotImplementedError (beam search 미지원 시뮬레이션)
+    두 번째 호출: 정상 결과 반환 (greedy decoding 폴백)
+
+    Args:
+        raw_result: 폴백 시 반환할 결과 딕셔너리 (None이면 기본값 사용)
+
+    Returns:
+        mock whisper 모듈
+    """
+    if raw_result is None:
+        raw_result = _make_raw_result()
+    mock_whisper = MagicMock()
+    mock_whisper.transcribe.side_effect = [NotImplementedError("beam 미지원"), raw_result]
+    return mock_whisper
+
+
+class TestInitialPromptAndVadClipTimestamps:
+    """initial_prompt 및 vad_clip_timestamps 전달 테스트."""
+
+    async def test_initial_prompt_전달(
+        self,
+        audio_file: Path,
+    ) -> None:
+        """initial_prompt가 설정되면 폴백 경로에서 whisper.transcribe에 전달된다."""
+        # initial_prompt가 설정된 config 생성
+        config = AppConfig()
+        # getattr 폴백을 위해 직접 속성 설정
+        config.stt.initial_prompt = "회의 전사 테스트 프롬프트"  # type: ignore[attr-defined]
+
+        # 폴백 경로를 타는 mock whisper 설정
+        mock_whisper = _make_fallback_mock_whisper()
+
+        manager = MagicMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_whisper)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        manager.acquire.return_value = ctx
+
+        transcriber = Transcriber(config=config, model_manager=manager)
+        await transcriber.transcribe(audio_file)
+
+        # 두 번째 호출(폴백)의 kwargs 확인
+        assert mock_whisper.transcribe.call_count == 2
+        fallback_call_kwargs = mock_whisper.transcribe.call_args_list[1][1]
+        assert "initial_prompt" in fallback_call_kwargs
+        assert fallback_call_kwargs["initial_prompt"] == "회의 전사 테스트 프롬프트"
+
+    async def test_vad_clip_timestamps_전달(
+        self,
+        config: AppConfig,
+        audio_file: Path,
+    ) -> None:
+        """vad_clip_timestamps가 전달되면 폴백 경로에서 clip_timestamps로 전달된다."""
+        mock_whisper = _make_fallback_mock_whisper()
+
+        manager = MagicMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_whisper)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        manager.acquire.return_value = ctx
+
+        transcriber = Transcriber(config=config, model_manager=manager)
+        timestamps = [1.0, 5.0, 8.0, 12.0]
+        await transcriber.transcribe(audio_file, vad_clip_timestamps=timestamps)
+
+        # 두 번째 호출(폴백)의 kwargs 확인
+        assert mock_whisper.transcribe.call_count == 2
+        fallback_call_kwargs = mock_whisper.transcribe.call_args_list[1][1]
+        assert "clip_timestamps" in fallback_call_kwargs
+        assert fallback_call_kwargs["clip_timestamps"] == [1.0, 5.0, 8.0, 12.0]
+
+    async def test_initial_prompt_None이면_kwargs에_미포함(
+        self,
+        config: AppConfig,
+        audio_file: Path,
+    ) -> None:
+        """initial_prompt가 None이면 폴백 경로의 kwargs에 포함되지 않는다."""
+        # 기본 config에는 initial_prompt가 없으므로 getattr 결과 None
+        mock_whisper = _make_fallback_mock_whisper()
+
+        manager = MagicMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_whisper)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        manager.acquire.return_value = ctx
+
+        transcriber = Transcriber(config=config, model_manager=manager)
+        assert transcriber._initial_prompt is None  # None 확인
+
+        await transcriber.transcribe(audio_file)
+
+        # 두 번째 호출(폴백)의 kwargs에서 initial_prompt 없음 확인
+        assert mock_whisper.transcribe.call_count == 2
+        fallback_call_kwargs = mock_whisper.transcribe.call_args_list[1][1]
+        assert "initial_prompt" not in fallback_call_kwargs
+
+    async def test_vad_clip_timestamps_None이면_kwargs에_미포함(
+        self,
+        config: AppConfig,
+        audio_file: Path,
+    ) -> None:
+        """vad_clip_timestamps가 None이면 폴백 경로의 kwargs에 clip_timestamps가 없다."""
+        mock_whisper = _make_fallback_mock_whisper()
+
+        manager = MagicMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_whisper)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        manager.acquire.return_value = ctx
+
+        transcriber = Transcriber(config=config, model_manager=manager)
+        # vad_clip_timestamps=None (기본값)
+        await transcriber.transcribe(audio_file)
+
+        # 두 번째 호출(폴백)의 kwargs에서 clip_timestamps 없음 확인
+        assert mock_whisper.transcribe.call_count == 2
+        fallback_call_kwargs = mock_whisper.transcribe.call_args_list[1][1]
+        assert "clip_timestamps" not in fallback_call_kwargs
+
+
 # === 에러 계층 구조 테스트 ===
 
 

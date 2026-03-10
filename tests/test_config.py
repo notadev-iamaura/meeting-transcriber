@@ -14,12 +14,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pydantic import ValidationError
+
 from config import (
     AppConfig,
     DiarizationConfig,
     LifecycleConfig,
+    NumberNormalizationConfig,
     PathsConfig,
     RecordingConfig,
+    STTConfig,
+    VADConfig,
     _apply_env_overrides,
     get_config,
     load_config,
@@ -542,3 +547,76 @@ class TestMultiTrackConfig:
         """multi_track을 True로 설정할 수 있는지 확인한다."""
         rc = RecordingConfig(multi_track=True)
         assert rc.multi_track is True
+
+
+class TestVADConfig:
+    """VADConfig 설정 테스트."""
+
+    def test_VADConfig_기본값(self) -> None:
+        """VADConfig 기본값 검증."""
+        config = VADConfig()
+        assert config.enabled is False
+        assert config.threshold == 0.5
+        assert config.min_speech_duration_ms == 250
+        assert config.min_silence_duration_ms == 100
+        assert config.speech_pad_ms == 30
+
+    def test_VADConfig_threshold_범위(self) -> None:
+        """VADConfig threshold 범위 검증."""
+        with pytest.raises(ValidationError):
+            VADConfig(threshold=1.5)
+        with pytest.raises(ValidationError):
+            VADConfig(threshold=-0.1)
+
+    def test_AppConfig_vad_기본값(self) -> None:
+        """AppConfig에 VADConfig 기본값 포함."""
+        config = AppConfig()
+        assert isinstance(config.vad, VADConfig)
+        assert config.vad.enabled is False
+
+
+class TestNumberNormalizationConfig:
+    """NumberNormalizationConfig 설정 테스트."""
+
+    def test_NumberNormalizationConfig_기본값(self) -> None:
+        """NumberNormalizationConfig 기본값 검증."""
+        config = NumberNormalizationConfig()
+        assert config.enabled is False
+        assert config.level == 1
+
+    def test_NumberNormalizationConfig_level_범위(self) -> None:
+        """NumberNormalizationConfig level 범위 검증."""
+        with pytest.raises(ValidationError):
+            NumberNormalizationConfig(level=3)
+        with pytest.raises(ValidationError):
+            NumberNormalizationConfig(level=-1)
+
+    def test_AppConfig_number_normalization_기본값(self) -> None:
+        """AppConfig에 NumberNormalizationConfig 기본값 포함."""
+        config = AppConfig()
+        assert isinstance(config.number_normalization, NumberNormalizationConfig)
+        assert config.number_normalization.enabled is False
+
+
+class TestSTTInitialPrompt:
+    """STTConfig initial_prompt 설정 테스트."""
+
+    def test_STTConfig_initial_prompt_None_기본값(self) -> None:
+        """initial_prompt 기본값은 None."""
+        config = STTConfig()
+        assert config.initial_prompt is None
+
+    def test_STTConfig_initial_prompt_빈문자열_None_변환(self) -> None:
+        """빈 문자열은 None으로 변환."""
+        config = STTConfig(initial_prompt="")
+        assert config.initial_prompt is None
+
+    def test_STTConfig_initial_prompt_공백만_None_변환(self) -> None:
+        """공백만 있는 문자열은 None으로 변환."""
+        config = STTConfig(initial_prompt="   ")
+        assert config.initial_prompt is None
+
+    def test_STTConfig_initial_prompt_정상값(self) -> None:
+        """정상 initial_prompt 값 유지."""
+        config = STTConfig(initial_prompt="분기 매출 KPI")
+        assert config.initial_prompt == "분기 매출 KPI"

@@ -494,6 +494,40 @@ class PipelineManager:
         """
         return self._outputs_dir / meeting_id
 
+    def _apply_number_normalization(self, merged_result: Any) -> None:
+        """병합 결과에 숫자 정규화를 적용한다 (in-place).
+
+        config의 number_normalization 설정에 따라
+        한글 숫자를 아라비아 숫자로 변환한다.
+        실패 시 원본을 유지하고 파이프라인을 중단하지 않는다.
+
+        Args:
+            merged_result: 병합된 전사 결과 (utterances 속성 필요)
+        """
+        norm_config = getattr(self._config, "number_normalization", None)
+        if norm_config is None or not norm_config.enabled:
+            return
+
+        try:
+            from steps.number_normalizer import normalize_numbers
+
+            norm_level = norm_config.level
+            norm_count = 0
+            for utt in merged_result.utterances:
+                original = utt.text
+                utt.text = normalize_numbers(utt.text, level=norm_level)
+                if utt.text != original:
+                    norm_count += 1
+                    logger.debug(f"숫자 정규화: '{original}' → '{utt.text}'")
+            if norm_count > 0:
+                logger.info(
+                    f"숫자 정규화 완료: {norm_count}개 발화 변환 "
+                    f"(level={norm_level})"
+                )
+        except Exception as e:
+            # 숫자 정규화 실패 시 원본 유지 (파이프라인 중단하지 않음)
+            logger.warning(f"숫자 정규화 처리 실패, 원본 유지: {e}")
+
     def _validate_input(self, audio_path: Path) -> None:
         """입력 오디오 파일의 유효성을 검증한다.
 
@@ -569,6 +603,9 @@ class PipelineManager:
     ) -> Any:
         """전사 단계: mlx-whisper로 한국어 STT를 수행한다.
 
+        VAD가 활성화되어 있으면 전사 전에 음성 구간을 감지하여
+        clip_timestamps로 전달한다. 무음 구간의 환각을 방지한다.
+
         Args:
             wav_path: WAV 오디오 파일 경로
             checkpoint_path: 체크포인트 저장 경로
@@ -583,8 +620,30 @@ class PipelineManager:
             logger.info(f"전사 체크포인트 복원: {checkpoint_path}")
             return TranscriptResult.from_checkpoint(checkpoint_path)
 
+        # VAD 전처리: 음성 구간 감지 (enabled=false이면 None 반환)
+        vad_clip_timestamps: list[float] | None = None
+        vad_config = getattr(self._config, "vad", None)
+        if vad_config is not None and vad_config.enabled:
+            try:
+                from steps.vad_detector import VoiceActivityDetector
+
+                vad = VoiceActivityDetector(self._config)
+                vad_result = await vad.detect(wav_path)
+                if vad_result is not None:
+                    vad_clip_timestamps = vad_result.clip_timestamps
+                    logger.info(
+                        f"VAD 적용: {vad_result.num_segments}개 음성 구간, "
+                        f"무음 {vad_result.total_silence_seconds:.1f}초 제거"
+                    )
+            except Exception as e:
+                # VAD 실패 시 전체 오디오로 폴백 (전사는 계속 진행)
+                logger.warning(f"VAD 처리 실패, 전체 오디오로 폴백: {e}")
+                vad_clip_timestamps = None
+
         transcriber = Transcriber(self._config, self._model_manager)
-        result = await transcriber.transcribe(wav_path)
+        result = await transcriber.transcribe(
+            wav_path, vad_clip_timestamps=vad_clip_timestamps
+        )
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
@@ -847,6 +906,10 @@ class PipelineManager:
         for step_idx in range(resume_idx, len(PIPELINE_STEPS)):
             step = PIPELINE_STEPS[step_idx]
             checkpoint_path = self._get_checkpoint_path(meeting_id, step)
+
+            # === 숫자 정규화: CORRECT 단계 진입 직전 (LLM 독립, skip_llm에서도 동작) ===
+            if step == PipelineStep.CORRECT and merged_result is not None:
+                self._apply_number_normalization(merged_result)
 
             # === Graceful Degradation / LLM 스킵: 단계별 리소스 재점검 ===
             if self._resource_guard.is_llm_step(step.value):
@@ -1177,6 +1240,9 @@ class PipelineManager:
 
         merged_result = MergedResult.from_checkpoint(merge_cp)
         logger.info(f"merge 체크포인트 로드 완료: {merge_cp}")
+
+        # 2.5. 숫자 정규화 (LLM 독립, correct 전에 적용)
+        self._apply_number_normalization(merged_result)
 
         # 3. 출력 디렉토리 확인
         output_dir = self._get_output_dir(meeting_id)
