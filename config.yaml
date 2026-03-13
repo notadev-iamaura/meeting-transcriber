@@ -17,7 +17,7 @@ stt:
   language: "ko"                             # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
-  initial_prompt: null                        # 전사 컨텍스트 힌트 (고유명사/전문용어, null이면 비활성화)
+  initial_prompt: null                        # 전사 컨텍스트 힌트 (komixv2 모델에서 환각 유발 확인, 비활성 유지)
 
 # === 화자분리 설정 ===
 diarization:
@@ -144,7 +144,7 @@ lifecycle:
 
 # === VAD (Voice Activity Detection) 설정 ===
 vad:
-  enabled: false                             # VAD 활성화 여부
+  enabled: true                              # VAD 활성화 여부
   threshold: 0.5                             # 음성 확률 임계값 (0.0~1.0)
   min_speech_duration_ms: 250                # 최소 음성 구간 길이 (ms)
   min_silence_duration_ms: 100               # 최소 무음 구간 길이 (ms)
@@ -152,5 +152,5 @@ vad:
 
 # === 숫자 정규화 설정 ===
 number_normalization:
-  enabled: false                             # 숫자 정규화 활성화 여부
+  enabled: true                              # 숫자 정규화 활성화 여부
   level: 1                                   # 변환 수준: 0=비활성, 1=보수적(단위어 동반만), 2=중간(복합 수)
