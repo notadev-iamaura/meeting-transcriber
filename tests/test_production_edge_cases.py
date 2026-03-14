@@ -499,3 +499,90 @@ class TestHallucinationFilterPostprocessIntegration:
         # NFC 정규화 적용 확인
         assert processed[0].text == unicodedata.normalize("NFC", "안녕하세요")
         assert processed[0].text == "안녕하세요"
+
+
+# === 예외 경로 테스트: 환각 필터/후처리 실패 시 원본 유지 ===
+
+
+class TestPipelineErrorFallback:
+    """파이프라인 내 환각 필터/후처리 예외 발생 시 원본 유지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_환각_필터_예외시_원본_유지(self, tmp_path: Path) -> None:
+        """환각 필터링에서 예외 발생 시 원본 세그먼트가 유지된다."""
+        from core.pipeline import PipelineManager
+
+        config = MagicMock()
+        config.pipeline.checkpoint_enabled = False
+        config.pipeline.retry_max_count = 1
+        config.pipeline.peak_ram_limit_gb = 9.5
+        config.vad.enabled = False
+        config.text_postprocessing.enabled = False
+
+        manager = MagicMock()
+        pipeline = PipelineManager(config, manager)
+
+        wav_path = tmp_path / "test.wav"
+        wav_path.write_bytes(b"\x00" * 1024)
+        checkpoint_path = tmp_path / "transcribe.json"
+
+        original_segments = [MagicMock(text="원본 유지됨", start=0.0, end=2.0)]
+
+        mock_transcript = MagicMock()
+        mock_transcript.segments = list(original_segments)
+        mock_transcript.full_text = "원본 유지됨"
+        mock_transcript.save_checkpoint = MagicMock()
+
+        mock_transcriber = MagicMock()
+        mock_transcriber.transcribe = AsyncMock(return_value=mock_transcript)
+
+        with (
+            patch("steps.transcriber.Transcriber", return_value=mock_transcriber),
+            patch(
+                "steps.hallucination_filter.filter_hallucinations",
+                side_effect=RuntimeError("필터 내부 오류"),
+            ),
+        ):
+            result = await pipeline._run_step_transcribe(wav_path, checkpoint_path)
+
+        # 예외에도 불구하고 원본 세그먼트가 유지됨
+        assert result.full_text == "원본 유지됨"
+
+    @pytest.mark.asyncio
+    async def test_텍스트_후처리_예외시_원본_유지(self, tmp_path: Path) -> None:
+        """텍스트 후처리에서 예외 발생 시 원본 세그먼트가 유지된다."""
+        from core.pipeline import PipelineManager
+
+        config = MagicMock()
+        config.pipeline.checkpoint_enabled = False
+        config.pipeline.retry_max_count = 1
+        config.pipeline.peak_ram_limit_gb = 9.5
+        config.vad.enabled = False
+        config.hallucination_filter.enabled = False
+
+        manager = MagicMock()
+        pipeline = PipelineManager(config, manager)
+
+        wav_path = tmp_path / "test.wav"
+        wav_path.write_bytes(b"\x00" * 1024)
+        checkpoint_path = tmp_path / "transcribe.json"
+
+        mock_transcript = MagicMock()
+        mock_transcript.segments = [MagicMock(text="후처리 전 텍스트")]
+        mock_transcript.full_text = "후처리 전 텍스트"
+        mock_transcript.save_checkpoint = MagicMock()
+
+        mock_transcriber = MagicMock()
+        mock_transcriber.transcribe = AsyncMock(return_value=mock_transcript)
+
+        with (
+            patch("steps.transcriber.Transcriber", return_value=mock_transcriber),
+            patch(
+                "steps.text_postprocessor.postprocess_segments",
+                side_effect=RuntimeError("후처리 내부 오류"),
+            ),
+        ):
+            result = await pipeline._run_step_transcribe(wav_path, checkpoint_path)
+
+        # 예외에도 불구하고 전사 결과가 반환됨
+        assert result is not None
