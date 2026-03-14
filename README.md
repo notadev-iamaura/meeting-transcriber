@@ -320,14 +320,23 @@ meeting-transcriber/
 ├── config.py                # 설정 관리 (Pydantic + YAML)
 ├── config.yaml              # 설정 파일
 ├── core/                    # 핵심 엔진
-│   ├── pipeline.py          # 전사 파이프라인 (8단계 순차 처리)
+│   ├── pipeline.py          # 전사 파이프라인 (11단계 순차 처리)
 │   ├── model_manager.py     # 모델 순차 로드 (RAM 9.5GB 제한)
 │   ├── job_queue.py         # 작업 큐 관리
 │   ├── thermal_manager.py   # 서멀 관리 (2-job + 쿨다운)
-│   └── watcher.py           # 폴더 감시
+│   ├── watcher.py           # 폴더 감시
+│   ├── orchestrator.py      # 파이프라인 오케스트레이터
+│   ├── llm_backend.py       # LLM 백엔드 프로토콜 (Ollama/MLX)
+│   ├── ollama_client.py     # Ollama API 클라이언트
+│   ├── mlx_client.py        # MLX in-process LLM 백엔드
+│   └── chipset_detector.py  # Apple Silicon 칩셋 감지
 ├── steps/                   # 파이프라인 단계
 │   ├── audio_converter.py   # 오디오 → WAV 변환
 │   ├── transcriber.py       # STT (mlx-whisper)
+│   ├── vad_detector.py      # 음성 구간 감지 (Silero VAD v5)
+│   ├── hallucination_filter.py  # 환각 필터링 (4중 기준)
+│   ├── text_postprocessor.py    # 텍스트 정규화 (NFC, 공백)
+│   ├── number_normalizer.py     # 숫자 표현 정규화
 │   ├── diarizer.py          # 화자 분리 (pyannote)
 │   ├── merger.py            # 전사 + 화자 병합
 │   ├── corrector.py         # AI 교정 (EXAONE)
@@ -357,8 +366,10 @@ meeting-transcriber/
 │   └── health_check.py      # 시스템 상태 점검
 ├── scripts/                 # 스크립트
 │   ├── install.sh           # 설치 스크립트
-│   └── setup_launchagent.sh # 자동 시작 설정
-└── tests/                   # 테스트 (1215개)
+│   ├── setup_launchagent.sh # 자동 시작 설정
+│   ├── benchmark_ab_test.py # STT A/B 벤치마크
+│   └── convert_whisper_mlx.py # Whisper 모델 MLX 변환
+└── tests/                   # 테스트 (1,644개, 커버리지 87%)
 ```
 
 ## 기술 스택
@@ -384,6 +395,134 @@ meeting-transcriber/
 - **체크포인트 복구**: 파이프라인 중단 시 마지막 단계부터 재개
 - **데이터 보안**: chmod 700, Spotlight 제외, localhost only
 - **파일 스테이징**: 녹음 중 파일은 `recordings_temp/`에 격리, 완료 후 `audio_input/`으로 이동
+- **STT 품질 강화**: VAD 전처리 + 4중 환각 필터링 + 텍스트 정규화
+- **데이터 라이프사이클**: Hot(30일) → Warm(90일, FLAC 압축) → Cold(삭제/아카이브)
+- **Graceful Degradation**: 개별 단계 실패 시 다음 단계로 폴백, 부분 결과 유지
+
+## 프로젝트 현황
+
+### 코드 규모
+
+| 지표 | 수치 |
+|------|------|
+| 소스 코드 | 19,095줄 (43개 파일) |
+| 테스트 코드 | 32,603줄 (46개 파일) |
+| 테스트 케이스 | **1,644개** |
+| 코드-테스트 비율 | 1 : 1.71 |
+| 테스트 커버리지 | **87%** (5,933 statements) |
+| 테스트 실행 시간 | ~65초 |
+
+### 모듈별 테스트 커버리지
+
+| 모듈 | 커버리지 | 주요 파일 |
+|------|:--------:|----------|
+| core/ | 86% | pipeline(88%), job_queue(99%), orchestrator(98%) |
+| steps/ | 88% | transcriber(99%), hallucination_filter(100%), corrector(91%) |
+| search/ | 91% | hybrid_search(92%), chat(91%) |
+| api/ | 88% | websocket(94%), routes(86%), server(85%) |
+| security/ | 93% | secure_dir(96%), health_check(92%), lifecycle(91%) |
+| ui/ | 88% | native_window(100%), menubar(84%) |
+
+### 100% 커버리지 달성 모듈
+
+`hallucination_filter`, `text_postprocessor`, `llm_backend`, `chipset_detector`, `native_window`
+
+### 파이프라인 처리 흐름
+
+```
+오디오 입력 (.wav/.m4a/.mp3)
+  → [1] 오디오 변환 (ffmpeg → 16kHz mono WAV)
+  → [2] VAD 음성 구간 감지 (Silero VAD v5)
+  → [3] STT 전사 (mlx-whisper, 한국어 최적화)
+  → [4] 환각 필터링 (no_speech_prob + logprob + compression_ratio + 반복 패턴)
+  → [5] 텍스트 후처리 (NFC 정규화, 공백 정리)
+  → [6] 화자 분리 (pyannote-audio 3.1, CPU)
+  → [7] 세그먼트 병합 (STT + 화자 시간 매칭)
+  → [8] LLM 교정 (EXAONE 3.5, 배치 보정)
+  → [9] 스마트 청킹 (토픽/시간 기반, 300토큰)
+  → [10] 벡터 임베딩 (ChromaDB + SQLite FTS5 이중 저장)
+  → [11] AI 요약 생성
+  → 검색 가능한 회의록 완성
+```
+
+### 시스템 성능 목표
+
+| 지표 | 목표 | 비고 |
+|------|------|------|
+| 피크 RAM | 9.5GB / 16GB | ModelLoadManager 뮤텍스로 강제 |
+| 배치 처리 | 2건 + 3분 쿨다운 | 팬리스 MacBook Air 서멀 관리 |
+| 체크포인트 | 단계별 JSON 저장 | 중단 시 마지막 성공 단계부터 재개 |
+| 동시 모델 | 최대 1개 | STT→화자분리→LLM 순차 로드/언로드 |
+
+### STT 품질 강화
+
+| 기능 | 설명 |
+|------|------|
+| **VAD 전처리** | Silero VAD v5로 음성 구간만 추출, 무음 구간 제거 |
+| **환각 필터링** | 4중 기준 (no_speech_prob, avg_logprob, compression_ratio, 반복 패턴) |
+| **텍스트 정규화** | NFC 유니코드 정규화, 공백/줄바꿈 정리 |
+| **숫자 정규화** | 한국어 숫자 표현 통일 |
+| **한국어 최적화 모델** | whisper-medium-komixv2 (AI-Hub 다중 도메인 학습) |
+
+### STT 벤치마크
+
+A/B 비교 벤치마크 스크립트가 포함되어 있습니다:
+
+```bash
+# 기본 벤치마크 (Zeroth-Korean 데이터셋, 10샘플)
+python scripts/benchmark_ab_test.py
+
+# 샘플 수 조정
+python scripts/benchmark_ab_test.py --samples 30
+
+# 결과 JSON 저장
+python scripts/benchmark_ab_test.py --output data/results.json
+```
+
+**측정 지표:**
+- **CER** (Character Error Rate) — 문자 오류율
+- **WER** (Word Error Rate) — 단어 오류율
+- **RTF** (Real-Time Factor) — 실시간 배수 (1.0 미만 = 실시간보다 빠름)
+
+**비교 대상:**
+- Baseline: 순수 mlx-whisper (기능 OFF)
+- Enhanced: VAD + initial_prompt + 숫자 정규화 (기능 ON)
+
+## 개발
+
+### 테스트 실행
+
+```bash
+# 전체 테스트
+pytest tests/ -v
+
+# 빠른 실행
+pytest tests/ -q
+
+# 특정 모듈 테스트
+pytest tests/test_transcriber.py -v
+pytest tests/test_hallucination_filter.py -v
+
+# 커버리지 리포트
+pytest tests/ --cov=core --cov=steps --cov=search --cov=api --cov=security --cov=ui --cov-report=term
+
+# 커버리지 HTML 리포트
+pytest tests/ --cov=core --cov=steps --cov=search --cov=api --cov=security --cov=ui --cov-report=html
+# open htmlcov/index.html
+```
+
+### 코드 품질
+
+```bash
+# 린트
+ruff check .
+
+# 포맷팅
+ruff format .
+
+# 타입 체크
+mypy core/ steps/ --ignore-missing-imports
+```
 
 ## 기여하기
 
