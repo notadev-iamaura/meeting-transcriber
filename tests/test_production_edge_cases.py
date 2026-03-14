@@ -17,8 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.asyncio
-
 
 # === Mock 데이터 클래스 ===
 
@@ -80,6 +78,7 @@ class TestVAD_Zero_Segments_Pipeline:
         pipeline = PipelineManager(config, manager)
         return pipeline
 
+    @pytest.mark.asyncio
     async def test_VAD_None_반환시_전체_오디오_전사(self, tmp_path: Path) -> None:
         """VAD가 None을 반환하면 vad_clip_timestamps=None으로 전사한다."""
         pipeline = self._make_pipeline(vad_enabled=True)
@@ -115,6 +114,7 @@ class TestVAD_Zero_Segments_Pipeline:
         assert vad_ts is None
         assert result == mock_transcript
 
+    @pytest.mark.asyncio
     async def test_VAD_예외시_전체_오디오_폴백(self, tmp_path: Path) -> None:
         """VAD에서 예외 발생 시 전체 오디오로 폴백하여 전사를 계속한다."""
         pipeline = self._make_pipeline(vad_enabled=True)
@@ -143,6 +143,7 @@ class TestVAD_Zero_Segments_Pipeline:
         mock_transcriber.transcribe.assert_called_once()
         assert result.full_text == "정상 전사"
 
+    @pytest.mark.asyncio
     async def test_VAD_비활성시_바로_전사(self, tmp_path: Path) -> None:
         """VAD가 비활성화되어 있으면 VAD를 건너뛰고 전사한다."""
         pipeline = self._make_pipeline(vad_enabled=False)
@@ -166,6 +167,7 @@ class TestVAD_Zero_Segments_Pipeline:
         mock_transcriber.transcribe.assert_called_once()
         assert result.full_text == "전체 오디오 전사"
 
+    @pytest.mark.asyncio
     async def test_VAD_config_없을때_전사_진행(self, tmp_path: Path) -> None:
         """config에 vad 속성이 없을 때도 전사가 진행된다."""
         from core.pipeline import PipelineManager
@@ -420,6 +422,7 @@ class TestHallucinationFilterPostprocessIntegration:
         assert len(processed) == 1
         assert processed[0].text == "정상 발화"
 
+    @pytest.mark.asyncio
     async def test_파이프라인_전사_단계_통합흐름(self, tmp_path: Path) -> None:
         """파이프라인의 _run_step_transcribe에서 필터+후처리가 순차 실행된다."""
         from core.pipeline import PipelineManager

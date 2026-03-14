@@ -18,6 +18,12 @@ data/
 *.m4a
 *.mp3
 
+# 모델 파일 (대용량)
+converted_model/
+*.safetensors
+*.msgpack
+*.bin
+
 # ChromaDB
 chroma_db/
 
@@ -34,6 +40,10 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+
+# 벤치마크/임시 (개발용)
+short_clip_comparison.json
+test_short_clip_comparison.py
 
 # Ralph 루프 (개발용)
 .ralph-logs/
