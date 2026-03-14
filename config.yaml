@@ -18,6 +18,7 @@ stt:
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
   initial_prompt: null                        # 전사 컨텍스트 힌트 (komixv2 모델에서 환각 유발 확인, 비활성 유지)
+  condition_on_previous_text: false           # 이전 윈도우 텍스트 전파 비활성 (오류 전파 방지, 위원회 합의)
 
 # === 화자분리 설정 ===
 diarization:
@@ -149,6 +150,18 @@ vad:
   min_speech_duration_ms: 250                # 최소 음성 구간 길이 (ms)
   min_silence_duration_ms: 100               # 최소 무음 구간 길이 (ms)
   speech_pad_ms: 30                          # 음성 구간 전후 패딩 (ms)
+
+# === 환각 필터링 설정 ===
+hallucination_filter:
+  enabled: true                              # 환각 필터링 활성화 여부
+  compression_ratio_threshold: 2.4           # 압축비 임계값 (초과 시 환각으로 판정)
+  logprob_threshold: -1.0                    # 평균 로그 확률 임계값 (미만 시 저신뢰도)
+  no_speech_threshold: 0.6                   # 무음 확률 임계값 (초과 시 무음 세그먼트 제거)
+  repetition_threshold: 3                    # 반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)
+
+# === 텍스트 후처리 설정 ===
+text_postprocessing:
+  enabled: true                              # 텍스트 후처리 활성화 여부
 
 # === 숫자 정규화 설정 ===
 number_normalization:

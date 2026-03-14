@@ -299,6 +299,23 @@ class TestTranscriberInit:
         assert t._language == "en"
         assert t._beam_size == 3
 
+    def test_condition_on_previous_text_기본값(
+        self, config: AppConfig, mock_manager: MagicMock
+    ) -> None:
+        """condition_on_previous_text 기본값은 True이다."""
+        t = Transcriber(config=config, model_manager=mock_manager)
+        assert t._condition_on_previous_text is True
+
+    def test_condition_on_previous_text_False(
+        self, mock_manager: MagicMock
+    ) -> None:
+        """condition_on_previous_text=False가 올바르게 전파된다."""
+        custom_config = AppConfig(
+            stt={"condition_on_previous_text": False}
+        )
+        t = Transcriber(config=custom_config, model_manager=mock_manager)
+        assert t._condition_on_previous_text is False
+
 
 # === 오디오 파일 유효성 검증 테스트 ===
 

@@ -109,6 +109,41 @@ class VADConfig(BaseModel):
     )
 
 
+class HallucinationFilterConfig(BaseModel):
+    """환각 필터링 설정.
+
+    Whisper 모델이 무음/잡음 구간에서 생성하는 환각(hallucination) 세그먼트를
+    compression_ratio, avg_logprob, no_speech_prob, 반복 패턴 기준으로 필터링한다.
+    """
+
+    enabled: bool = False
+    compression_ratio_threshold: float = Field(
+        default=2.4, ge=1.0, le=10.0,
+        description="압축비 임계값 (초과 시 환각으로 판정)",
+    )
+    logprob_threshold: float = Field(
+        default=-1.0, ge=-5.0, le=0.0,
+        description="평균 로그 확률 임계값 (미만 시 저신뢰도)",
+    )
+    no_speech_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="무음 확률 임계값 (초과 시 무음 세그먼트 제거)",
+    )
+    repetition_threshold: int = Field(
+        default=3, ge=2, le=10,
+        description="반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)",
+    )
+
+
+class TextPostprocessingConfig(BaseModel):
+    """텍스트 후처리 설정.
+
+    Whisper 출력 텍스트의 공백 정규화, 줄바꿈 정리 등을 수행한다.
+    """
+
+    enabled: bool = False
+
+
 class NumberNormalizationConfig(BaseModel):
     """한국어 숫자 정규화 설정.
 
@@ -140,6 +175,12 @@ class STTConfig(BaseModel):
     # 전사 작업 타임아웃 (초) — 무한 대기 방지 (STAB)
     transcribe_timeout_seconds: int = Field(
         default=1800, ge=60, description="전사 타임아웃 (초, 기본 30분)"
+    )
+    # 이전 윈도우 텍스트 전파 제어 (False: 각 윈도우 독립 전사, 오류 전파 방지)
+    condition_on_previous_text: bool = Field(
+        default=True,
+        description="True: 이전 윈도우 텍스트를 다음 윈도우 prompt로 전달. "
+        "False: 각 윈도우 독립 전사 (오류 전파 방지, 위원회 권장).",
     )
 
     @field_validator("initial_prompt")
@@ -435,6 +476,12 @@ class AppConfig(BaseModel):
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
     window: WindowConfig = Field(default_factory=WindowConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
+    hallucination_filter: HallucinationFilterConfig = Field(
+        default_factory=HallucinationFilterConfig
+    )
+    text_postprocessing: TextPostprocessingConfig = Field(
+        default_factory=TextPostprocessingConfig
+    )
     number_normalization: NumberNormalizationConfig = Field(
         default_factory=NumberNormalizationConfig
     )

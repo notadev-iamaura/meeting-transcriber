@@ -176,6 +176,10 @@ class Transcriber:
         self._initial_prompt: str | None = getattr(
             self._config.stt, "initial_prompt", None
         )
+        # 이전 윈도우 텍스트 전파 제어 (False: 각 윈도우 독립 전사)
+        self._condition_on_previous_text: bool = getattr(
+            self._config.stt, "condition_on_previous_text", True
+        )
 
         logger.info(
             f"Transcriber 초기화: model={self._model_name}, "
@@ -300,6 +304,7 @@ class Transcriber:
             "path_or_hf_repo": self._model_name,
             "language": self._language,
             "word_timestamps": False,
+            "condition_on_previous_text": self._condition_on_previous_text,
         }
 
         # 컨텍스트 바이어싱: initial_prompt 전달 (None이면 생략)

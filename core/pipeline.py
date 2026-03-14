@@ -645,6 +645,36 @@ class PipelineManager:
             wav_path, vad_clip_timestamps=vad_clip_timestamps
         )
 
+        # 환각 필터링 (hallucination_filter 설정에 따라)
+        try:
+            from steps.hallucination_filter import filter_hallucinations
+
+            filtered_segments, removed = filter_hallucinations(
+                result.segments, self._config
+            )
+            result.segments = filtered_segments
+            if removed:
+                # 환각 제거 시 전체 텍스트 재구성
+                result.full_text = " ".join(
+                    seg.text for seg in filtered_segments if seg.text
+                ).strip()
+        except Exception as e:
+            logger.warning(f"환각 필터링 중 오류, 원본 유지: {e}")
+
+        # 텍스트 후처리 (text_postprocessing 설정에 따라)
+        try:
+            from steps.text_postprocessor import postprocess_segments
+
+            result.segments = postprocess_segments(
+                result.segments, self._config
+            )
+            # 전체 텍스트 재구성
+            result.full_text = " ".join(
+                seg.text for seg in result.segments if seg.text
+            ).strip()
+        except Exception as e:
+            logger.warning(f"텍스트 후처리 중 오류, 원본 유지: {e}")
+
         # 체크포인트 저장
         if self._checkpoint_enabled:
             result.save_checkpoint(checkpoint_path)

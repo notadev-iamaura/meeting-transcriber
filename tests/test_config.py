@@ -50,11 +50,18 @@ class TestConfigYamlParsing:
 
         assert config.stt.model_name == "youngouk/whisper-medium-komixv2-mlx"
         assert config.stt.language == "ko"
+        assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "auto"
         assert config.llm.host == "http://127.0.0.1:11434"
         assert config.embedding.dimension == 384
         assert config.search.vector_weight == 0.6
         assert config.server.port == 8765
+        # 환각 필터링 설정 검증
+        assert config.hallucination_filter.enabled is True
+        assert config.hallucination_filter.no_speech_threshold == 0.6
+        assert config.hallucination_filter.repetition_threshold == 3
+        # 텍스트 후처리 설정 검증
+        assert config.text_postprocessing.enabled is True
 
     def test_커스텀_yaml_파싱(self, tmp_path: Path) -> None:
         """사용자 지정 YAML 파일을 올바르게 파싱하는지 확인한다."""
