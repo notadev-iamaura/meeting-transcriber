@@ -38,7 +38,6 @@ from steps.corrector import (
 )
 from steps.merger import MergedResult, MergedUtterance
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 헬퍼 함수 ===
@@ -422,6 +421,7 @@ class TestCorrectedResult:
 class TestCorrector정상보정:
     """Corrector 클래스의 정상 보정 테스트."""
 
+    @pytest.mark.asyncio
     async def test_단일_발화_보정(self) -> None:
         """발화 1개를 보정한다."""
         merged = _make_merged_result(
@@ -449,6 +449,7 @@ class TestCorrector정상보정:
         assert result.utterances[0].was_corrected is True
         assert result.total_corrected == 1
 
+    @pytest.mark.asyncio
     async def test_다중_발화_보정(self) -> None:
         """여러 발화를 보정한다."""
         merged = _make_merged_result(
@@ -480,6 +481,7 @@ class TestCorrector정상보정:
         assert result.utterances[2].text == "다음 안건으로 넘어가죠"
         assert result.utterances[2].was_corrected is False
 
+    @pytest.mark.asyncio
     async def test_보정_불필요_시_원본_유지(self) -> None:
         """보정이 필요 없는 텍스트는 원본 그대로 유지한다."""
         merged = _make_merged_result(
@@ -508,6 +510,7 @@ class TestCorrector정상보정:
 class TestCorrector배치처리:
     """배치 분할 및 처리 테스트."""
 
+    @pytest.mark.asyncio
     async def test_배치_크기_미만(self) -> None:
         """발화가 배치 크기(10)보다 적을 때 단일 배치로 처리."""
         utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(3)]
@@ -525,6 +528,7 @@ class TestCorrector배치처리:
 
         assert len(result.utterances) == 3
 
+    @pytest.mark.asyncio
     async def test_배치_크기_초과_분할(self) -> None:
         """발화가 배치 크기를 초과하면 여러 배치로 분할한다."""
         utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(15)]
@@ -546,6 +550,7 @@ class TestCorrector배치처리:
 
         assert len(result.utterances) == 15
 
+    @pytest.mark.asyncio
     async def test_정확히_배치_크기(self) -> None:
         """발화 수가 정확히 배치 크기와 같을 때."""
         utterances = [(f"발화 {i}", "S0", i * 5.0, (i + 1) * 5.0) for i in range(10)]
@@ -572,6 +577,7 @@ class TestCorrector배치처리:
 class TestCorrector에러처리:
     """에러 발생 시 처리 테스트."""
 
+    @pytest.mark.asyncio
     async def test_빈_입력(self) -> None:
         """빈 MergedResult로 보정 시 EmptyInputError 발생."""
         merged = MergedResult(
@@ -589,6 +595,7 @@ class TestCorrector에러처리:
         with pytest.raises(EmptyInputError):
             await corrector.correct(merged)
 
+    @pytest.mark.asyncio
     async def test_LLM_연결_실패(self) -> None:
         """LLM 백엔드 연결 실패 시 LLMConnectionError 발생."""
         merged = _make_merged_result(
@@ -611,6 +618,7 @@ class TestCorrector에러처리:
         with pytest.raises(LLMConnectionError):
             await corrector.correct(merged)
 
+    @pytest.mark.asyncio
     async def test_배치_실패_시_원본_유지(self) -> None:
         """LLM 호출 실패 시 원본 텍스트를 유지한다."""
         merged = _make_merged_result(
@@ -638,6 +646,7 @@ class TestCorrector에러처리:
         assert result.total_corrected == 0
         assert result.total_failed == 2
 
+    @pytest.mark.asyncio
     async def test_LLM_타임아웃(self) -> None:
         """LLM 타임아웃 발생 시 원본 유지 (배치 단위 graceful degradation)."""
         merged = _make_merged_result(
@@ -660,6 +669,7 @@ class TestCorrector에러처리:
         assert result.utterances[0].text == "텍스트"
         assert result.utterances[0].was_corrected is False
 
+    @pytest.mark.asyncio
     async def test_잘못된_응답_포맷(self) -> None:
         """LLM이 잘못된 포맷으로 응답할 때 원본 유지."""
         merged = _make_merged_result(
@@ -682,6 +692,7 @@ class TestCorrector에러처리:
         assert result.utterances[0].text == "테스트"
         assert result.utterances[0].was_corrected is False
 
+    @pytest.mark.asyncio
     async def test_빈_content_응답(self) -> None:
         """LLM 응답이 빈 문자열일 때 원본 유지."""
         merged = _make_merged_result(
@@ -711,6 +722,7 @@ class TestCorrector에러처리:
 class TestCorrector한국어처리:
     """한국어 텍스트 처리 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_한국어_NFC_정규화(self) -> None:
         """보정 후 한국어 텍스트가 NFC 정규화되는지 확인."""
         import unicodedata
@@ -738,6 +750,7 @@ class TestCorrector한국어처리:
         # NFC 정규화 확인
         assert result.utterances[0].text == unicodedata.normalize("NFC", "한국어 보정")
 
+    @pytest.mark.asyncio
     async def test_한국어_조사_보정(self) -> None:
         """한국어 조사 오류 보정 시나리오."""
         merged = _make_merged_result(
@@ -759,6 +772,7 @@ class TestCorrector한국어처리:
         assert result.utterances[0].text == "프로젝트 진행 상황을 말씀해 주세요"
         assert result.utterances[0].was_corrected is True
 
+    @pytest.mark.asyncio
     async def test_특수문자_포함_보정(self) -> None:
         """특수문자가 포함된 텍스트의 보정."""
         merged = _make_merged_result(
@@ -949,6 +963,7 @@ class TestErrorHierarchy:
 class TestModelManagerIntegration:
     """ModelLoadManager 연동 테스트."""
 
+    @pytest.mark.asyncio
     async def test_acquire_호출_확인(self) -> None:
         """correct() 실행 시 ModelLoadManager.acquire()가 호출되는지 확인."""
         merged = _make_merged_result(
@@ -972,6 +987,7 @@ class TestModelManagerIntegration:
         call_args = manager.acquire.call_args
         assert call_args[0][0] == "exaone"
 
+    @pytest.mark.asyncio
     async def test_화자_정보_보존(self) -> None:
         """보정 후에도 화자 정보가 유지되는지 확인."""
         merged = _make_merged_result(
@@ -995,6 +1011,7 @@ class TestModelManagerIntegration:
         assert result.utterances[1].speaker == "SPEAKER_01"
         assert result.num_speakers == 2
 
+    @pytest.mark.asyncio
     async def test_시간_정보_보존(self) -> None:
         """보정 후에도 시간 정보가 유지되는지 확인."""
         merged = _make_merged_result(

@@ -32,8 +32,6 @@ from steps.transcriber import (
     TranscriptSegment,
 )
 
-# 모든 비동기 테스트에 asyncio 마크 적용
-pytestmark = pytest.mark.asyncio
 
 
 # === 픽스처 ===
@@ -462,6 +460,7 @@ class TestLoadWhisperModule:
 class TestTranscribe:
     """Transcriber.transcribe() 비동기 전사 테스트."""
 
+    @pytest.mark.asyncio
     async def test_정상_전사(
         self,
         transcriber: Transcriber,
@@ -485,6 +484,7 @@ class TestTranscribe:
         assert result.language == "ko"
         assert str(audio_file) in result.audio_path
 
+    @pytest.mark.asyncio
     async def test_whisper_transcribe_호출_파라미터(
         self,
         transcriber: Transcriber,
@@ -508,6 +508,7 @@ class TestTranscribe:
         assert call_kwargs[1]["beam_size"] == 5
         assert call_kwargs[1]["word_timestamps"] is False
 
+    @pytest.mark.asyncio
     async def test_beam_size_decode_options_전달(
         self,
         transcriber: Transcriber,
@@ -525,6 +526,7 @@ class TestTranscribe:
         assert "beam_size" in call_kwargs
         assert call_kwargs["beam_size"] == 5  # STTConfig 기본값
 
+    @pytest.mark.asyncio
     async def test_커스텀_beam_size_전달(
         self,
         config: AppConfig,
@@ -561,6 +563,7 @@ class TestTranscribe:
         t = Transcriber(config=custom_config, model_manager=mock_manager)
         assert t._batch_size == 8
 
+    @pytest.mark.asyncio
     async def test_batch_size_미전달_확인(
         self,
         transcriber: Transcriber,
@@ -576,11 +579,13 @@ class TestTranscribe:
         call_kwargs = mock_whisper.transcribe.call_args[1]
         assert "batch_size" not in call_kwargs
 
+    @pytest.mark.asyncio
     async def test_파일_없음_에러(self, transcriber: Transcriber) -> None:
         """존재하지 않는 파일에 대해 FileNotFoundError를 발생시킨다."""
         with pytest.raises(FileNotFoundError):
             await transcriber.transcribe(Path("/nonexistent/audio.wav"))
 
+    @pytest.mark.asyncio
     async def test_빈_파일_에러(self, transcriber: Transcriber, tmp_path: Path) -> None:
         """빈 파일에 대해 EmptyAudioError를 발생시킨다."""
         empty = tmp_path / "empty.wav"
@@ -588,6 +593,7 @@ class TestTranscribe:
         with pytest.raises(EmptyAudioError, match="비어있습니다"):
             await transcriber.transcribe(empty)
 
+    @pytest.mark.asyncio
     async def test_빈_전사결과_에러(
         self,
         config: AppConfig,
@@ -608,6 +614,7 @@ class TestTranscribe:
         with pytest.raises(EmptyAudioError, match="전사 결과가 비어있습니다"):
             await transcriber.transcribe(audio_file)
 
+    @pytest.mark.asyncio
     async def test_모델_로드_실패(
         self,
         config: AppConfig,
@@ -625,6 +632,7 @@ class TestTranscribe:
         with pytest.raises(ModelNotAvailableError, match="mlx-whisper"):
             await transcriber.transcribe(audio_file)
 
+    @pytest.mark.asyncio
     async def test_전사_중_예외_래핑(
         self,
         config: AppConfig,
@@ -644,6 +652,7 @@ class TestTranscribe:
         with pytest.raises(TranscriptionError, match="전사 처리 중 오류"):
             await transcriber.transcribe(audio_file)
 
+    @pytest.mark.asyncio
     async def test_한국어_NFC_정규화_전체텍스트(
         self,
         config: AppConfig,
@@ -700,6 +709,7 @@ def _make_fallback_mock_whisper(
 class TestInitialPromptAndVadClipTimestamps:
     """initial_prompt 및 vad_clip_timestamps 전달 테스트."""
 
+    @pytest.mark.asyncio
     async def test_initial_prompt_전달(
         self,
         audio_file: Path,
@@ -728,6 +738,7 @@ class TestInitialPromptAndVadClipTimestamps:
         assert "initial_prompt" in fallback_call_kwargs
         assert fallback_call_kwargs["initial_prompt"] == "회의 전사 테스트 프롬프트"
 
+    @pytest.mark.asyncio
     async def test_vad_clip_timestamps_전달(
         self,
         config: AppConfig,
@@ -752,6 +763,7 @@ class TestInitialPromptAndVadClipTimestamps:
         assert "clip_timestamps" in fallback_call_kwargs
         assert fallback_call_kwargs["clip_timestamps"] == [1.0, 5.0, 8.0, 12.0]
 
+    @pytest.mark.asyncio
     async def test_initial_prompt_None이면_kwargs에_미포함(
         self,
         config: AppConfig,
@@ -777,6 +789,7 @@ class TestInitialPromptAndVadClipTimestamps:
         fallback_call_kwargs = mock_whisper.transcribe.call_args_list[1][1]
         assert "initial_prompt" not in fallback_call_kwargs
 
+    @pytest.mark.asyncio
     async def test_vad_clip_timestamps_None이면_kwargs에_미포함(
         self,
         config: AppConfig,

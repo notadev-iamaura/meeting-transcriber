@@ -29,8 +29,6 @@ from steps.zoom_detector import (
     ZoomDetectorError,
 )
 
-# 모듈 내 모든 비동기 테스트에 적용
-pytestmark = pytest.mark.asyncio
 
 
 # === 테스트 픽스처 ===
@@ -97,6 +95,7 @@ class TestZoomDetectorInit:
 class TestProcessCheck:
     """pgrep 기반 프로세스 확인 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_프로세스_존재_시_True(self, detector: ZoomDetector) -> None:
         """pgrep이 returncode 0을 반환하면 True를 반환하는지 검증."""
         mock_proc = AsyncMock()
@@ -107,6 +106,7 @@ class TestProcessCheck:
 
         assert result is True
 
+    @pytest.mark.asyncio
     async def test_프로세스_미존재_시_False(self, detector: ZoomDetector) -> None:
         """pgrep이 returncode 1을 반환하면 False를 반환하는지 검증."""
         mock_proc = AsyncMock()
@@ -117,6 +117,7 @@ class TestProcessCheck:
 
         assert result is False
 
+    @pytest.mark.asyncio
     async def test_pgrep_올바른_인자(self, detector: ZoomDetector) -> None:
         """pgrep이 올바른 인자로 호출되는지 검증."""
         mock_proc = AsyncMock()
@@ -133,6 +134,7 @@ class TestProcessCheck:
             stderr=asyncio.subprocess.DEVNULL,
         )
 
+    @pytest.mark.asyncio
     async def test_pgrep_미설치_시_에러(self, detector: ZoomDetector) -> None:
         """pgrep 명령이 없을 때 ProcessCheckError가 발생하는지 검증."""
         with (
@@ -144,6 +146,7 @@ class TestProcessCheck:
         ):
             await detector._check_zoom_process()
 
+    @pytest.mark.asyncio
     async def test_OS_에러_시_에러(self, detector: ZoomDetector) -> None:
         """OSError 발생 시 ProcessCheckError로 래핑되는지 검증."""
         with (
@@ -155,6 +158,7 @@ class TestProcessCheck:
         ):
             await detector._check_zoom_process()
 
+    @pytest.mark.asyncio
     async def test_타임아웃_시_이전_상태_유지(self, detector: ZoomDetector) -> None:
         """pgrep 타임아웃 시 이전 상태를 유지하는지 검증."""
         detector._is_meeting_active = True
@@ -168,6 +172,7 @@ class TestProcessCheck:
         # 이전 상태(True) 유지
         assert result is True
 
+    @pytest.mark.asyncio
     async def test_타임아웃_시_이전_상태_False_유지(self, detector: ZoomDetector) -> None:
         """이전 상태가 False일 때 타임아웃 시 False를 유지하는지 검증."""
         detector._is_meeting_active = False
@@ -187,6 +192,7 @@ class TestProcessCheck:
 class TestStateChange:
     """미팅 상태 변화 감지 및 이벤트 발행 테스트."""
 
+    @pytest.mark.asyncio
     async def test_미팅_시작_이벤트(self, detector: ZoomDetector) -> None:
         """미팅이 시작되면 started 이벤트가 set 되는지 검증."""
         await detector._handle_state_change(True)
@@ -195,6 +201,7 @@ class TestStateChange:
         assert detector.meeting_started_event.is_set()
         assert not detector.meeting_ended_event.is_set()
 
+    @pytest.mark.asyncio
     async def test_미팅_종료_이벤트(self, detector: ZoomDetector) -> None:
         """미팅이 종료되면 ended 이벤트가 set 되는지 검증."""
         # 먼저 미팅 시작 상태로 전환
@@ -207,6 +214,7 @@ class TestStateChange:
         assert not detector.meeting_started_event.is_set()
         assert detector.meeting_ended_event.is_set()
 
+    @pytest.mark.asyncio
     async def test_중복_이벤트_방지_시작(self, detector: ZoomDetector) -> None:
         """이미 시작 상태에서 다시 시작 감지 시 콜백이 호출되지 않는지 검증."""
         callback = MagicMock()
@@ -220,6 +228,7 @@ class TestStateChange:
         await detector._handle_state_change(True)
         assert callback.call_count == 1
 
+    @pytest.mark.asyncio
     async def test_중복_이벤트_방지_종료(self, detector: ZoomDetector) -> None:
         """이미 종료 상태에서 다시 종료 감지 시 콜백이 호출되지 않는지 검증."""
         callback = MagicMock()
@@ -229,6 +238,7 @@ class TestStateChange:
         await detector._handle_state_change(False)
         assert callback.call_count == 0  # 상태 변화 없음
 
+    @pytest.mark.asyncio
     async def test_시작_후_종료_순서(self, detector: ZoomDetector) -> None:
         """미팅 시작 → 종료 순서대로 이벤트가 발행되는지 검증."""
         states: list[bool] = []
@@ -248,6 +258,7 @@ class TestStateChange:
 class TestCallbacks:
     """동기/비동기 콜백 등록 및 호출 테스트."""
 
+    @pytest.mark.asyncio
     async def test_동기_콜백_호출(self, detector: ZoomDetector) -> None:
         """동기 콜백이 올바르게 호출되는지 검증."""
         callback = MagicMock()
@@ -257,6 +268,7 @@ class TestCallbacks:
 
         callback.assert_called_once_with(True)
 
+    @pytest.mark.asyncio
     async def test_비동기_콜백_호출(self, detector: ZoomDetector) -> None:
         """비동기 콜백이 올바르게 호출되는지 검증."""
         callback = AsyncMock()
@@ -266,6 +278,7 @@ class TestCallbacks:
 
         callback.assert_called_once_with(True)
 
+    @pytest.mark.asyncio
     async def test_다중_콜백_호출(self, detector: ZoomDetector) -> None:
         """여러 개의 콜백이 모두 호출되는지 검증."""
         sync_cb = MagicMock()
@@ -278,6 +291,7 @@ class TestCallbacks:
         sync_cb.assert_called_once_with(True)
         async_cb.assert_called_once_with(True)
 
+    @pytest.mark.asyncio
     async def test_콜백_에러_격리(self, detector: ZoomDetector) -> None:
         """하나의 콜백 에러가 다른 콜백에 영향 주지 않는지 검증."""
         error_cb = MagicMock(side_effect=RuntimeError("콜백 에러"))
@@ -292,6 +306,7 @@ class TestCallbacks:
         error_cb.assert_called_once_with(True)
         normal_cb.assert_called_once_with(True)
 
+    @pytest.mark.asyncio
     async def test_비동기_콜백_에러_격리(self, detector: ZoomDetector) -> None:
         """비동기 콜백 에러가 다른 콜백에 영향 주지 않는지 검증."""
         error_cb = AsyncMock(side_effect=RuntimeError("비동기 에러"))
@@ -312,6 +327,7 @@ class TestCallbacks:
 class TestStartStop:
     """감지기 시작/중지 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_시작_후_실행_상태(self, detector: ZoomDetector) -> None:
         """start() 호출 후 is_running이 True인지 검증."""
         mock_proc = AsyncMock()
@@ -324,6 +340,7 @@ class TestStartStop:
 
         await detector.stop()
 
+    @pytest.mark.asyncio
     async def test_중지_후_상태(self, detector: ZoomDetector) -> None:
         """stop() 호출 후 is_running이 False인지 검증."""
         mock_proc = AsyncMock()
@@ -335,6 +352,7 @@ class TestStartStop:
         await detector.stop()
         assert detector.is_running is False
 
+    @pytest.mark.asyncio
     async def test_이중_시작_방지(self, detector: ZoomDetector) -> None:
         """이미 실행 중일 때 start()가 AlreadyRunningError를 발생시키는지 검증."""
         mock_proc = AsyncMock()
@@ -348,12 +366,14 @@ class TestStartStop:
 
         await detector.stop()
 
+    @pytest.mark.asyncio
     async def test_이중_중지_안전(self, detector: ZoomDetector) -> None:
         """이미 중지된 상태에서 stop()이 에러 없이 처리되는지 검증."""
         # 이미 중지 상태 — 에러 없이 반환
         await detector.stop()
         assert detector.is_running is False
 
+    @pytest.mark.asyncio
     async def test_시작_시_초기_상태_확인_미팅_없음(self, detector: ZoomDetector) -> None:
         """시작 시 미팅이 없으면 ended 이벤트가 set 되는지 검증."""
         mock_proc = AsyncMock()
@@ -367,6 +387,7 @@ class TestStartStop:
 
         await detector.stop()
 
+    @pytest.mark.asyncio
     async def test_시작_시_초기_상태_확인_미팅_중(self, detector: ZoomDetector) -> None:
         """시작 시 미팅이 진행 중이면 started 이벤트가 set 되는지 검증."""
         mock_proc = AsyncMock()
@@ -380,6 +401,7 @@ class TestStartStop:
 
         await detector.stop()
 
+    @pytest.mark.asyncio
     async def test_시작_시_프로세스_확인_실패_계속_진행(self, detector: ZoomDetector) -> None:
         """초기 프로세스 확인 실패해도 감지기가 시작되는지 검증."""
         call_count = 0
@@ -407,6 +429,7 @@ class TestStartStop:
 class TestPollLoop:
     """폴링 루프 동작 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_폴링으로_미팅_시작_감지(self, detector: ZoomDetector) -> None:
         """폴링 루프가 미팅 시작을 감지하는지 검증."""
         call_count = 0
@@ -435,6 +458,7 @@ class TestPollLoop:
         # 콜백이 True(미팅 시작)로 호출되었는지 확인
         callback.assert_called_with(True)
 
+    @pytest.mark.asyncio
     async def test_폴링으로_미팅_종료_감지(self, detector: ZoomDetector) -> None:
         """폴링 루프가 미팅 종료를 감지하는지 검증."""
         call_count = 0
@@ -463,6 +487,7 @@ class TestPollLoop:
         # 종료 이벤트 (False)가 콜백에 전달되었는지 확인
         assert False in states
 
+    @pytest.mark.asyncio
     async def test_프로세스_확인_실패_시_루프_계속(self, detector: ZoomDetector) -> None:
         """pgrep 실패 시에도 폴링 루프가 중단되지 않는지 검증."""
         call_count = 0
@@ -487,6 +512,7 @@ class TestPollLoop:
         # 에러 이후에도 계속 폴링했으므로 호출 횟수 > 2
         assert call_count >= 3
 
+    @pytest.mark.asyncio
     async def test_stop_후_폴링_중단(self, detector: ZoomDetector) -> None:
         """stop() 후 폴링이 즉시 중단되는지 검증."""
         mock_proc = AsyncMock()
@@ -508,6 +534,7 @@ class TestPollLoop:
 class TestCheckOnce:
     """1회성 상태 확인 테스트."""
 
+    @pytest.mark.asyncio
     async def test_미팅_진행_중_확인(self, detector: ZoomDetector) -> None:
         """check_once가 미팅 진행 중이면 True를 반환하는지 검증."""
         mock_proc = AsyncMock()
@@ -519,6 +546,7 @@ class TestCheckOnce:
         assert result is True
         assert detector.is_meeting_active is True
 
+    @pytest.mark.asyncio
     async def test_미팅_없음_확인(self, detector: ZoomDetector) -> None:
         """check_once가 미팅 없으면 False를 반환하는지 검증."""
         mock_proc = AsyncMock()
@@ -530,6 +558,7 @@ class TestCheckOnce:
         assert result is False
         assert detector.is_meeting_active is False
 
+    @pytest.mark.asyncio
     async def test_상태_변화_시_이벤트_발행(self, detector: ZoomDetector) -> None:
         """check_once에서 상태가 변하면 이벤트가 발행되는지 검증."""
         callback = MagicMock()
@@ -551,6 +580,7 @@ class TestCheckOnce:
 class TestResetEvents:
     """이벤트 초기화 테스트."""
 
+    @pytest.mark.asyncio
     async def test_이벤트_초기화(self, detector: ZoomDetector) -> None:
         """reset_events가 모든 이벤트와 상태를 초기화하는지 검증."""
         # 상태를 설정
@@ -598,6 +628,7 @@ class TestErrorHierarchy:
 class TestCustomProcessName:
     """커스텀 프로세스명 설정 테스트."""
 
+    @pytest.mark.asyncio
     async def test_커스텀_프로세스명으로_pgrep_호출(self) -> None:
         """config에서 설정한 프로세스명으로 pgrep이 호출되는지 검증."""
         config = _make_config()
@@ -626,6 +657,7 @@ class TestCustomProcessName:
 class TestIntegrationScenarios:
     """미팅 시작 → 진행 → 종료 전체 시나리오 테스트."""
 
+    @pytest.mark.asyncio
     async def test_미팅_전체_라이프사이클(self, detector: ZoomDetector) -> None:
         """미팅 없음 → 시작 → 진행 → 종료 전체 흐름 검증."""
         call_count = 0
@@ -653,6 +685,7 @@ class TestIntegrationScenarios:
         # 시작(True) → 종료(False) 순서로 콜백 호출
         assert states == [True, False]
 
+    @pytest.mark.asyncio
     async def test_여러_번_미팅_반복(self, detector: ZoomDetector) -> None:
         """미팅이 여러 번 시작/종료되는 시나리오 검증."""
         call_count = 0

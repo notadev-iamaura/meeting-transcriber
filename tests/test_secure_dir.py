@@ -29,7 +29,6 @@ from security.secure_dir import (
     ensure_secure_dirs,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 픽스처 (Fixtures) ===
@@ -462,6 +461,7 @@ class TestVerifySecurity:
 class TestAsyncWrapper:
     """비동기 래퍼 함수를 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_async_ensure_secure_dirs(
         self, manager: SecureDirManager, base_dir: Path
     ) -> None:

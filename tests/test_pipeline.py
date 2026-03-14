@@ -34,7 +34,6 @@ from core.pipeline import (
     StepResult,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 픽스처 ===
@@ -400,6 +399,7 @@ class TestPipelineState:
 class TestPipelineManagerValidation:
     """PipelineManager 입력 검증 테스트."""
 
+    @pytest.mark.asyncio
     async def test_nonexistent_file(
         self,
         pipeline: PipelineManager,
@@ -410,6 +410,7 @@ class TestPipelineManagerValidation:
         with pytest.raises(InvalidInputError, match="찾을 수 없습니다"):
             await pipeline.run(fake_path)
 
+    @pytest.mark.asyncio
     async def test_empty_file(
         self,
         pipeline: PipelineManager,
@@ -421,6 +422,7 @@ class TestPipelineManagerValidation:
         with pytest.raises(InvalidInputError, match="비어있습니다"):
             await pipeline.run(empty)
 
+    @pytest.mark.asyncio
     async def test_directory_input(
         self,
         pipeline: PipelineManager,
@@ -468,6 +470,7 @@ class TestPipelineManagerInit:
 class TestPipelineManagerRun:
     """PipelineManager 전체 파이프라인 실행 테스트."""
 
+    @pytest.mark.asyncio
     async def test_full_pipeline_success(
         self,
         pipeline: PipelineManager,
@@ -534,6 +537,7 @@ class TestPipelineManagerRun:
             "summarize",
         ]
 
+    @pytest.mark.asyncio
     async def test_step_failure_with_retry(
         self,
         pipeline: PipelineManager,
@@ -563,6 +567,7 @@ class TestPipelineManagerRun:
             assert exc_info.value.step == "transcribe"
             assert "재시도" in str(exc_info.value)
 
+    @pytest.mark.asyncio
     async def test_step_failure_then_retry_success(
         self,
         pipeline: PipelineManager,
@@ -628,6 +633,7 @@ class TestPipelineManagerRun:
         assert state.status == "completed"
         assert transcribe_mock.call_count == 2
 
+    @pytest.mark.asyncio
     async def test_state_saved_on_failure(
         self,
         pipeline: PipelineManager,
@@ -655,6 +661,7 @@ class TestPipelineManagerRun:
         assert state.status == "failed"
         assert "변환 실패" in state.error_message
 
+    @pytest.mark.asyncio
     async def test_custom_meeting_id(
         self,
         pipeline: PipelineManager,
@@ -722,6 +729,7 @@ class TestPipelineManagerRun:
 class TestPipelineResume:
     """파이프라인 재개 기능 테스트."""
 
+    @pytest.mark.asyncio
     async def test_resume_from_failed_step(
         self,
         pipeline: PipelineManager,
@@ -799,6 +807,7 @@ class TestPipelineResume:
         # convert는 이미 완료되었으므로 다시 호출되지 않아야 함
         convert_mock.assert_not_called()
 
+    @pytest.mark.asyncio
     async def test_resume_nonexistent_meeting(
         self,
         pipeline: PipelineManager,
@@ -807,6 +816,7 @@ class TestPipelineResume:
         with pytest.raises(PipelineError, match="찾을 수 없습니다"):
             await pipeline.resume("nonexistent_meeting")
 
+    @pytest.mark.asyncio
     async def test_resume_all_completed(
         self,
         pipeline: PipelineManager,
@@ -849,6 +859,7 @@ class TestPipelineResume:
 class TestCheckpointDisabled:
     """체크포인트 비활성화 모드 테스트."""
 
+    @pytest.mark.asyncio
     async def test_no_checkpoint_saving(
         self,
         mock_config: MagicMock,
@@ -1087,6 +1098,7 @@ class TestPathGeneration:
 class TestIndividualSteps:
     """개별 파이프라인 단계의 단위 테스트."""
 
+    @pytest.mark.asyncio
     async def test_run_step_convert(
         self,
         pipeline: PipelineManager,
@@ -1112,6 +1124,7 @@ class TestIndividualSteps:
         assert result == expected_wav
         mock_converter.convert_async.assert_called_once()
 
+    @pytest.mark.asyncio
     async def test_run_step_transcribe_with_checkpoint(
         self,
         pipeline: PipelineManager,
@@ -1138,6 +1151,7 @@ class TestIndividualSteps:
 
         assert result == mock_result
 
+    @pytest.mark.asyncio
     async def test_run_step_summarize_saves_markdown(
         self,
         pipeline: PipelineManager,
@@ -1175,6 +1189,7 @@ class TestIndividualSteps:
 class TestStateTransitions:
     """파이프라인 상태 전이 테스트."""
 
+    @pytest.mark.asyncio
     async def test_pending_to_running(
         self,
         pipeline: PipelineManager,
@@ -1244,6 +1259,7 @@ class TestStateTransitions:
         # 마지막 save는 "completed" 상태여야 함
         assert states_captured[-1] == "completed"
 
+    @pytest.mark.asyncio
     async def test_running_to_failed(
         self,
         pipeline: PipelineManager,
@@ -1435,6 +1451,7 @@ class TestE2EFullPipeline:
     실제 데이터 클래스를 사용하여 단계 간 데이터 흐름을 검증한다.
     """
 
+    @pytest.mark.asyncio
     async def test_e2e_full_pipeline_with_real_data_classes(
         self,
         pipeline: PipelineManager,
@@ -1498,6 +1515,7 @@ class TestE2EFullPipeline:
         assert len(state.completed_steps) == 6
         assert state.step_results[-1]["success"] is True
 
+    @pytest.mark.asyncio
     async def test_e2e_checkpoint_roundtrip(
         self,
         pipeline: PipelineManager,
@@ -1558,6 +1576,7 @@ class TestE2EFullPipeline:
         assert restored_s.num_speakers == 2
         assert restored_s.speakers == ["SPEAKER_00", "SPEAKER_01"]
 
+    @pytest.mark.asyncio
     async def test_e2e_step_results_recorded(
         self,
         pipeline: PipelineManager,
@@ -1633,6 +1652,7 @@ class TestE2EFullPipeline:
 class TestE2ECheckpointResume:
     """체크포인트 기반 파이프라인 재개 E2E 통합 테스트."""
 
+    @pytest.mark.asyncio
     async def test_e2e_resume_from_merge_step(
         self,
         pipeline: PipelineManager,
@@ -1719,6 +1739,7 @@ class TestE2ECheckpointResume:
         assert result.status == "completed"
         assert len(result.completed_steps) == 6
 
+    @pytest.mark.asyncio
     async def test_e2e_failed_state_persists(
         self,
         pipeline: PipelineManager,
@@ -1799,6 +1820,7 @@ class TestE2ECheckpointResume:
         convert_mock.assert_not_called()
         assert result.status == "completed"
 
+    @pytest.mark.asyncio
     async def test_e2e_state_file_integrity(
         self,
         pipeline: PipelineManager,
@@ -1871,6 +1893,7 @@ class TestE2ECheckpointResume:
 class TestE2EKoreanTextPreservation:
     """한국어 텍스트가 파이프라인 전체를 통과한 뒤에도 보존되는지 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_e2e_korean_nfc_roundtrip(
         self,
         tmp_path: Path,
@@ -1942,6 +1965,7 @@ class TestE2EKoreanTextPreservation:
         restored_c = CorrectedResult.from_checkpoint(cp)
         assert restored_c.utterances[0].original_text == nfc_text
 
+    @pytest.mark.asyncio
     async def test_e2e_korean_meeting_id_pipeline(
         self,
         pipeline: PipelineManager,
@@ -2019,6 +2043,7 @@ class TestE2EKoreanTextPreservation:
 class TestE2EDataFlowIntegration:
     """실제 Merger 로직을 사용하여 데이터 흐름 연동을 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_merger_with_real_dataclasses(self) -> None:
         """실제 TranscriptResult + DiarizationResult → Merger → MergedResult.
 
@@ -2043,6 +2068,7 @@ class TestE2EDataFlowIntegration:
         assert result.utterances[0].text == "안녕하세요 오늘 회의를 시작하겠습니다"
         assert result.utterances[1].text == "네 좋습니다 진행해주세요"
 
+    @pytest.mark.asyncio
     async def test_merger_output_checkpoint_to_corrector_input(
         self,
         tmp_path: Path,
@@ -2066,6 +2092,7 @@ class TestE2EDataFlowIntegration:
             assert isinstance(u.text, str)
             assert isinstance(u.speaker, str)
 
+    @pytest.mark.asyncio
     async def test_summary_result_saves_markdown_file(
         self,
         tmp_path: Path,
@@ -2088,6 +2115,7 @@ class TestE2EDataFlowIntegration:
 class TestE2ESecurityIntegration:
     """보안 모듈(secure_dir)과 파이프라인의 연동 테스트."""
 
+    @pytest.mark.asyncio
     async def test_secure_dir_manager_setup(
         self,
         tmp_path: Path,
@@ -2121,6 +2149,7 @@ class TestE2ESecurityIntegration:
         assert (tmp_path / "data" / "checkpoints").exists()
         assert len(created) > 0
 
+    @pytest.mark.asyncio
     async def test_pipeline_output_dir_creation(
         self,
         pipeline: PipelineManager,
@@ -2183,6 +2212,7 @@ class TestE2ESecurityIntegration:
 class TestE2EErrorPropagation:
     """각 단계에서 발생하는 에러의 전파 경로를 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_convert_error_propagation(
         self,
         pipeline: PipelineManager,
@@ -2204,6 +2234,7 @@ class TestE2EErrorPropagation:
                 )
             assert exc_info.value.step == "convert"
 
+    @pytest.mark.asyncio
     async def test_transcribe_error_propagation(
         self,
         pipeline: PipelineManager,
@@ -2236,6 +2267,7 @@ class TestE2EErrorPropagation:
                 )
             assert exc_info.value.step == "transcribe"
 
+    @pytest.mark.asyncio
     async def test_diarize_error_propagation(
         self,
         pipeline: PipelineManager,
@@ -2274,6 +2306,7 @@ class TestE2EErrorPropagation:
                 )
             assert exc_info.value.step == "diarize"
 
+    @pytest.mark.asyncio
     async def test_correct_error_with_fallback_state(
         self,
         pipeline: PipelineManager,
@@ -2334,6 +2367,7 @@ class TestE2EErrorPropagation:
         assert "merge" in state.completed_steps
         assert "correct" not in state.completed_steps
 
+    @pytest.mark.asyncio
     async def test_summarize_error_preserves_all_prior(
         self,
         pipeline: PipelineManager,
@@ -2402,6 +2436,7 @@ class TestE2EErrorPropagation:
 class TestE2EIdempotency:
     """파이프라인 다중 실행 및 멱등성 테스트."""
 
+    @pytest.mark.asyncio
     async def test_completed_pipeline_no_rerun(
         self,
         pipeline: PipelineManager,
@@ -2468,6 +2503,7 @@ class TestE2EIdempotency:
         convert_mock.assert_not_called()
         assert second.status == "completed"
 
+    @pytest.mark.asyncio
     async def test_multiple_pipelines_independent(
         self,
         pipeline: PipelineManager,
@@ -2537,6 +2573,7 @@ class TestE2EIdempotency:
 class TestPipelineStepCallback:
     """파이프라인 단계 시작 콜백 테스트."""
 
+    @pytest.mark.asyncio
     async def test_콜백_없으면_기존_동작_유지(
         self,
         pipeline: PipelineManager,
@@ -2590,6 +2627,7 @@ class TestPipelineStepCallback:
         assert state.status == "completed"
         assert len(state.completed_steps) == 6
 
+    @pytest.mark.asyncio
     async def test_콜백_있으면_단계_시작시_호출(
         self,
         pipeline: PipelineManager,
@@ -2659,6 +2697,7 @@ class TestPipelineStepCallback:
             "summarize",
         ]
 
+    @pytest.mark.asyncio
     async def test_콜백_예외시_파이프라인_중단_안함(
         self,
         pipeline: PipelineManager,
@@ -2732,6 +2771,7 @@ class TestSkipLlmSteps:
         cfg = PipelineConfig()
         assert cfg.skip_llm_steps is True
 
+    @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_correct_summarize_스킵(
         self,
         mock_config: MagicMock,
@@ -2788,6 +2828,7 @@ class TestSkipLlmSteps:
             assert "correct" in state.skipped_steps
             assert "summarize" in state.skipped_steps
 
+    @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_merged_result_패스스루(
         self,
         mock_config: MagicMock,
@@ -2844,6 +2885,7 @@ class TestSkipLlmSteps:
             skip_warnings = [w for w in state.warnings if "skip_llm_steps" in w]
             assert len(skip_warnings) > 0
 
+    @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_정상_완료(
         self,
         mock_config: MagicMock,
@@ -2896,6 +2938,7 @@ class TestSkipLlmSteps:
             # 모든 6단계가 completed_steps에 포함 (스킵된 단계도 포함)
             assert len(state.completed_steps) == 6
 
+    @pytest.mark.asyncio
     async def test_run_skip_llm_steps_false시_기존_동작(
         self,
         mock_config: MagicMock,
@@ -2954,6 +2997,7 @@ class TestSkipLlmSteps:
             assert state.skipped_steps == []
             assert len(state.completed_steps) == 6
 
+    @pytest.mark.asyncio
     async def test_run_파라미터_skip_llm_steps가_config_오버라이드(
         self,
         mock_config: MagicMock,
@@ -3020,6 +3064,7 @@ class TestSkipLlmSteps:
 class TestRunLlmSteps:
     """온디맨드 LLM 실행 테스트."""
 
+    @pytest.mark.asyncio
     async def test_run_llm_steps_merged_체크포인트_로드(
         self,
         mock_config: MagicMock,
@@ -3073,6 +3118,7 @@ class TestRunLlmSteps:
             mock_load.assert_called_once_with(merge_cp)
             assert result.status == "completed"
 
+    @pytest.mark.asyncio
     async def test_run_llm_steps_correct_summarize_실행(
         self,
         mock_config: MagicMock,
@@ -3130,6 +3176,7 @@ class TestRunLlmSteps:
             assert "correct" not in result.skipped_steps
             assert "summarize" not in result.skipped_steps
 
+    @pytest.mark.asyncio
     async def test_run_llm_steps_체크포인트_없으면_에러(
         self,
         mock_config: MagicMock,
@@ -3156,6 +3203,7 @@ class TestRunLlmSteps:
         with pytest.raises(PipelineError, match="merge 체크포인트"):
             await pipeline.run_llm_steps(meeting_id)
 
+    @pytest.mark.asyncio
     async def test_run_llm_steps_상태파일_없으면_에러(
         self,
         mock_config: MagicMock,

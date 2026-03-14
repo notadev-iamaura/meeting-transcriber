@@ -37,7 +37,6 @@ from steps.summarizer import (
     _split_utterances,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 헬퍼 함수 ===
@@ -714,6 +713,7 @@ class TestSummarizer:
 class TestSummarizeSingle:
     """단일 요약 (전체 전사문이 컨텍스트 내) 테스트."""
 
+    @pytest.mark.asyncio
     async def test_단일_요약_성공(self) -> None:
         """짧은 전사문은 단일 호출로 요약된다."""
         summarizer = _create_summarizer()
@@ -738,6 +738,7 @@ class TestSummarizeSingle:
         assert "SPEAKER_00" in result.speakers
         assert "SPEAKER_01" in result.speakers
 
+    @pytest.mark.asyncio
     async def test_빈_발화_에러(self) -> None:
         """빈 발화 목록은 EmptySummaryInputError를 발생한다."""
         summarizer = _create_summarizer()
@@ -750,6 +751,7 @@ class TestSummarizeSingle:
         with pytest.raises(EmptySummaryInputError):
             await summarizer.summarize(corrected)
 
+    @pytest.mark.asyncio
     async def test_요약_실패_폴백(self) -> None:
         """요약 실패 시 폴백 회의록이 생성된다."""
         summarizer = _create_summarizer()
@@ -773,6 +775,7 @@ class TestSummarizeSingle:
         assert "AI 요약 실패" in result.markdown
         assert "안녕하세요" in result.markdown
 
+    @pytest.mark.asyncio
     async def test_LLM_연결_실패_전파(self) -> None:
         """LLMConnectionError는 폴백 없이 전파된다."""
         summarizer = _create_summarizer()
@@ -787,6 +790,7 @@ class TestSummarizeSingle:
         with pytest.raises(LLMConnectionError):
             await summarizer.summarize(corrected)
 
+    @pytest.mark.asyncio
     async def test_LLM_타임아웃_전파(self) -> None:
         """LLMGenerationError는 폴백 없이 전파된다."""
         summarizer = _create_summarizer()
@@ -801,6 +805,7 @@ class TestSummarizeSingle:
         with pytest.raises(LLMGenerationError):
             await summarizer.summarize(corrected)
 
+    @pytest.mark.asyncio
     async def test_예상치_못한_오류_폴백(self) -> None:
         """예상치 못한 오류 발생 시 폴백 회의록을 생성한다."""
         summarizer = _create_summarizer()
@@ -823,6 +828,7 @@ class TestSummarizeSingle:
 
         assert "AI 요약 실패" in result.markdown
 
+    @pytest.mark.asyncio
     async def test_ModelLoadManager_acquire_호출(self) -> None:
         """ModelLoadManager.acquire가 'exaone'으로 호출된다."""
         summarizer = _create_summarizer()
@@ -846,6 +852,7 @@ class TestSummarizeSingle:
 class TestSummarizeChunked:
     """분할 요약 (긴 전사문) 테스트."""
 
+    @pytest.mark.asyncio
     async def test_분할_요약_자동_감지(self) -> None:
         """컨텍스트 초과 전사문은 자동으로 분할 요약된다."""
         summarizer = _create_summarizer()
@@ -878,6 +885,7 @@ class TestSummarizeChunked:
         assert result.was_chunked is True
         assert result.chunk_count > 1
 
+    @pytest.mark.asyncio
     async def test_분할_요약_부분_실패_계속(self) -> None:
         """일부 청크 요약이 실패해도 나머지 청크로 통합 요약한다."""
         summarizer = _create_summarizer()
@@ -907,6 +915,7 @@ class TestSummarizeChunked:
         # 폴백 없이 결과가 생성되어야 함 (부분 실패는 원본으로 대체)
         assert result.was_chunked is True
 
+    @pytest.mark.asyncio
     async def test_분할_요약_연결_실패_전파(self) -> None:
         """분할 요약 중 연결 실패는 전파된다."""
         summarizer = _create_summarizer()

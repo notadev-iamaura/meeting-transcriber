@@ -50,7 +50,6 @@ from steps.chunker import (
 from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.embedder import _FTS_TABLE_NAME
 
-pytestmark = pytest.mark.asyncio
 
 
 # === FTS5 테이블 이름 ===
@@ -685,6 +684,7 @@ class TestFTSQueryBuilder:
 class TestSearchGracefulDegradation:
     """검색 실패 시 graceful degradation 동작을 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_empty_query_raises(self) -> None:
         """빈 쿼리가 EmptyQueryError를 발생시키는지 확인한다."""
         config = MagicMock()
@@ -704,6 +704,7 @@ class TestSearchGracefulDegradation:
         with pytest.raises(EmptyQueryError):
             await engine.search("")
 
+    @pytest.mark.asyncio
     async def test_search_with_no_chroma_returns_fts_only(
         self,
         fts_db_with_data: Path,
@@ -1000,6 +1001,7 @@ class TestJobQueueRetry:
 class TestAsyncJobQueue:
     """AsyncJobQueue 비동기 래퍼를 통합 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_async_full_cycle(
         self,
         async_queue: AsyncJobQueue,
@@ -1024,6 +1026,7 @@ class TestAsyncJobQueue:
 
         assert job.status == "completed"
 
+    @pytest.mark.asyncio
     async def test_async_retry(
         self,
         async_queue: AsyncJobQueue,
@@ -1070,6 +1073,7 @@ class TestChunkQuality:
             ),
         )
 
+    @pytest.mark.asyncio
     async def test_chunk_size_within_bounds(self) -> None:
         """생성된 청크가 max_tokens 이내인지 확인한다."""
         config = self._make_chunker_config(max_tokens=100, min_tokens=10)
@@ -1094,6 +1098,7 @@ class TestChunkQuality:
             # 합리적인 범위 내에 있어야 함
             assert chunk.estimated_tokens > 0
 
+    @pytest.mark.asyncio
     async def test_time_gap_creates_separate_chunks(self) -> None:
         """시간 간격이 임계값을 초과하면 별도 청크로 분리되는지 확인한다."""
         config = self._make_chunker_config(
@@ -1116,6 +1121,7 @@ class TestChunkQuality:
         # 시간 간격으로 인해 2개 이상의 청크 생성
         assert len(result.chunks) >= 2
 
+    @pytest.mark.asyncio
     async def test_speaker_grouping(self) -> None:
         """동일 화자의 연속 발화가 올바르게 그룹핑되는지 확인한다."""
         config = self._make_chunker_config(max_tokens=1000, min_tokens=10)
@@ -1135,6 +1141,7 @@ class TestChunkQuality:
         # 첫 청크에 SPEAKER_00이 포함되어야 함
         assert "SPEAKER_00" in first_chunk.speakers
 
+    @pytest.mark.asyncio
     async def test_metadata_completeness(self) -> None:
         """청크 메타데이터가 완전한지 확인한다."""
         config = self._make_chunker_config(max_tokens=1000, min_tokens=10)
@@ -1158,6 +1165,7 @@ class TestChunkQuality:
         assert chunk.estimated_tokens > 0
         assert chunk.chunk_index == 0
 
+    @pytest.mark.asyncio
     async def test_empty_input_raises(self) -> None:
         """빈 발화 입력 시 EmptyInputError가 발생하는지 확인한다."""
         config = self._make_chunker_config()
@@ -1167,6 +1175,7 @@ class TestChunkQuality:
         with pytest.raises(EmptyInputError):
             await chunker.chunk(corrected, "m_empty", "2026-03-04")
 
+    @pytest.mark.asyncio
     async def test_korean_nfc_normalization(self) -> None:
         """한국어 텍스트에 NFC 정규화가 적용되는지 확인한다."""
         import unicodedata
@@ -1186,6 +1195,7 @@ class TestChunkQuality:
         chunk_text = result.chunks[0].text
         assert chunk_text == unicodedata.normalize("NFC", chunk_text)
 
+    @pytest.mark.asyncio
     async def test_min_tokens_merge(self) -> None:
         """min_tokens 미만인 마지막 청크가 이전 청크와 병합되는지 확인한다."""
         config = self._make_chunker_config(
@@ -1301,6 +1311,7 @@ class TestChunkQuality:
         # 동일 화자이지만 시간 간격으로 2개 그룹
         assert len(groups) == 2
 
+    @pytest.mark.asyncio
     async def test_multi_speaker_chunk_quality(self) -> None:
         """다중 화자 대화에서 청크 품질이 적절한지 확인한다."""
         config = self._make_chunker_config(max_tokens=200, min_tokens=20)
@@ -1336,6 +1347,7 @@ class TestChunkQuality:
 class TestEndToEnd:
     """청크 생성부터 FTS5 저장, 검색까지의 전체 파이프라인을 검증한다."""
 
+    @pytest.mark.asyncio
     async def test_chunk_to_fts_to_search(
         self,
         tmp_path: Path,
@@ -1408,6 +1420,7 @@ class TestEndToEnd:
         found_texts = [r["text"] for r in results]
         assert any("프로젝트" in t or "일정" in t for t in found_texts)
 
+    @pytest.mark.asyncio
     async def test_chunk_to_fts_with_filter(
         self,
         tmp_path: Path,
@@ -1481,6 +1494,7 @@ class TestEndToEnd:
         )
         assert all(r["date"] == "2026-03-05" for r in results_date)
 
+    @pytest.mark.asyncio
     async def test_rrf_with_real_fts_data(
         self,
         tmp_path: Path,
@@ -1569,6 +1583,7 @@ class TestEndToEnd:
         for i in range(len(combined) - 1):
             assert combined[i].score >= combined[i + 1].score
 
+    @pytest.mark.asyncio
     async def test_chunked_result_properties(self) -> None:
         """ChunkedResult의 계산 속성이 정확한지 확인한다."""
         config = AppConfig(

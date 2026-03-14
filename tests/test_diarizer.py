@@ -33,7 +33,6 @@ from steps.diarizer import (
     TokenNotConfiguredError,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === Fixture ===
@@ -481,6 +480,7 @@ class TestParseAnnotation:
 class TestDiarize:
     """Diarizer.diarize() 비동기 실행 테스트."""
 
+    @pytest.mark.asyncio
     async def test_정상_화자분리(self, mock_config, mock_manager, sample_audio):
         """정상적으로 화자분리를 수행한다."""
         manager, mock_pipeline = mock_manager
@@ -504,6 +504,7 @@ class TestDiarize:
         assert result.audio_path == str(sample_audio)
         manager.acquire.assert_called_once_with("pyannote", diarizer._load_pipeline)
 
+    @pytest.mark.asyncio
     async def test_파일_없으면_FileNotFoundError(self, mock_config, mock_manager, tmp_path):
         """오디오 파일이 없으면 FileNotFoundError를 발생시킨다."""
         manager, _ = mock_manager
@@ -511,6 +512,7 @@ class TestDiarize:
         with pytest.raises(FileNotFoundError):
             await diarizer.diarize(tmp_path / "no_file.wav")
 
+    @pytest.mark.asyncio
     async def test_빈_결과시_EmptyAudioError(self, mock_config, mock_manager, sample_audio):
         """화자분리 결과가 없으면 EmptyAudioError를 발생시킨다."""
         manager, mock_pipeline = mock_manager
@@ -522,6 +524,7 @@ class TestDiarize:
         with pytest.raises(EmptyAudioError, match="비어있습니다"):
             await diarizer.diarize(sample_audio)
 
+    @pytest.mark.asyncio
     async def test_파이프라인_예외시_DiarizationError로_래핑(
         self, mock_config, mock_manager, sample_audio
     ):
@@ -534,6 +537,7 @@ class TestDiarize:
         with pytest.raises(DiarizationError, match="화자분리 처리 중 오류"):
             await diarizer.diarize(sample_audio)
 
+    @pytest.mark.asyncio
     async def test_ModelNotAvailableError_직접_전파(self, mock_config, mock_manager, sample_audio):
         """ModelNotAvailableError는 래핑 없이 직접 전파한다."""
         manager, _ = mock_manager
@@ -548,6 +552,7 @@ class TestDiarize:
         with pytest.raises(ModelNotAvailableError, match="pyannote 미설치"):
             await diarizer.diarize(sample_audio)
 
+    @pytest.mark.asyncio
     async def test_TokenNotConfiguredError_직접_전파(
         self, mock_config, mock_manager, sample_audio
     ):
@@ -563,6 +568,7 @@ class TestDiarize:
         with pytest.raises(TokenNotConfiguredError, match="토큰 없음"):
             await diarizer.diarize(sample_audio)
 
+    @pytest.mark.asyncio
     async def test_다중_화자_감지(self, mock_config, mock_manager, sample_audio):
         """여러 화자를 올바르게 감지한다."""
         manager, mock_pipeline = mock_manager
@@ -584,6 +590,7 @@ class TestDiarize:
         assert "SPEAKER_01" in result.speakers
         assert "SPEAKER_02" in result.speakers
 
+    @pytest.mark.asyncio
     async def test_min_max_speakers_파라미터_전달(self, mock_config, mock_manager, sample_audio):
         """min_speakers, max_speakers 파라미터가 파이프라인에 전달된다."""
         manager, mock_pipeline = mock_manager
@@ -604,6 +611,7 @@ class TestDiarize:
         assert call_args[1]["min_speakers"] == 1
         assert call_args[1]["max_speakers"] == 10
 
+    @pytest.mark.asyncio
     async def test_화자분리_타임아웃(self, mock_config, mock_manager, sample_audio):
         """타임아웃 시 DiarizationError가 발생하는지 확인한다."""
         manager, _ = mock_manager
@@ -806,6 +814,7 @@ class TestResolveDevice:
             assert "MPS" in warn_msg
             assert "CPU" in warn_msg or "cpu" in warn_msg.lower()
 
+    @pytest.mark.asyncio
     async def test_diarize_MPS_런타임_에러_시_CPU폴백(
         self, mock_config, mock_manager, sample_audio
     ):

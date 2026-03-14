@@ -30,7 +30,6 @@ from core.pipeline import (
     ResourceStatus,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 픽스처 ===
@@ -440,6 +439,7 @@ class TestPipelineManagerDiskInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_disk_insufficient_raises_pipeline_error(
         self,
         mock_disk: MagicMock,
@@ -462,6 +462,7 @@ class TestPipelineManagerDiskInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_disk_insufficient_state_is_failed(
         self,
         mock_disk: MagicMock,
@@ -492,6 +493,7 @@ class TestPipelineManagerDiskInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_disk_insufficient_callback_called(
         self,
         mock_disk: MagicMock,
@@ -525,6 +527,7 @@ class TestPipelineManagerMemoryInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_memory_insufficient_skips_correct_and_summarize(
         self,
         mock_disk: MagicMock,
@@ -594,6 +597,7 @@ class TestPipelineManagerMemoryInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_memory_insufficient_completes_non_llm_steps(
         self,
         mock_disk: MagicMock,
@@ -659,6 +663,7 @@ class TestPipelineManagerMemoryInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_correct_skip_passes_merged_as_corrected(
         self,
         mock_disk: MagicMock,
@@ -725,6 +730,7 @@ class TestPipelineManagerMemoryInsufficient:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_memory_warning_callback_called(
         self,
         mock_disk: MagicMock,
@@ -791,6 +797,7 @@ class TestPipelineManagerNormalResources:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_normal_resources_runs_all_steps(
         self,
         mock_disk: MagicMock,
@@ -863,6 +870,7 @@ class TestPipelineManagerNormalResources:
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
+    @pytest.mark.asyncio
     async def test_normal_resources_no_callback(
         self,
         mock_disk: MagicMock,

@@ -37,7 +37,6 @@ from search.hybrid_search import (
     _search_fts,
 )
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 헬퍼 함수 ===
@@ -660,6 +659,7 @@ class TestHybridSearchEngine:
         engine._fts_conn_lock = threading.Lock()
         return engine
 
+    @pytest.mark.asyncio
     async def test_빈_쿼리_에러(self) -> None:
         """빈 쿼리 시 EmptyQueryError를 발생시킨다."""
         engine = self._create_engine()
@@ -670,6 +670,7 @@ class TestHybridSearchEngine:
         with pytest.raises(EmptyQueryError):
             await engine.search("   ")
 
+    @pytest.mark.asyncio
     async def test_양쪽_검색_결과_결합(self) -> None:
         """벡터 + FTS 양쪽 결과를 RRF로 결합한다."""
         engine = self._create_engine()
@@ -704,6 +705,7 @@ class TestHybridSearchEngine:
         for i in range(len(response.results) - 1):
             assert response.results[i].score >= response.results[i + 1].score
 
+    @pytest.mark.asyncio
     async def test_벡터만_성공_fts_실패(self) -> None:
         """FTS 검색 실패 시 벡터 결과만 반환한다 (graceful degradation)."""
         engine = self._create_engine()
@@ -735,6 +737,7 @@ class TestHybridSearchEngine:
         for r in response.results:
             assert r.source == "vector"
 
+    @pytest.mark.asyncio
     async def test_fts만_성공_벡터_실패(self) -> None:
         """벡터 검색 실패 시 FTS 결과만 반환한다."""
         engine = self._create_engine()
@@ -765,6 +768,7 @@ class TestHybridSearchEngine:
         for r in response.results:
             assert r.source == "fts"
 
+    @pytest.mark.asyncio
     async def test_양쪽_모두_빈_결과(self) -> None:
         """양쪽 모두 결과가 없으면 빈 응답을 반환한다."""
         engine = self._create_engine()
@@ -790,6 +794,7 @@ class TestHybridSearchEngine:
         assert response.results == []
         assert response.total_found == 0
 
+    @pytest.mark.asyncio
     async def test_필터_적용(self) -> None:
         """날짜/화자/회의 필터가 올바르게 전달된다."""
         engine = self._create_engine()
@@ -824,6 +829,7 @@ class TestHybridSearchEngine:
         assert response.filters_applied["speaker"] == "SPEAKER_00"
         assert response.filters_applied["meeting_id"] == "meeting_001"
 
+    @pytest.mark.asyncio
     async def test_custom_top_k(self) -> None:
         """사용자 지정 top_k를 적용한다."""
         engine = self._create_engine()
@@ -850,6 +856,7 @@ class TestHybridSearchEngine:
 
         assert len(response.results) <= 2
 
+    @pytest.mark.asyncio
     async def test_한국어_NFC_정규화(self) -> None:
         """검색 쿼리에 NFC 정규화를 적용한다."""
         engine = self._create_engine()
@@ -878,6 +885,7 @@ class TestHybridSearchEngine:
         # NFC로 정규화된 쿼리가 저장됨
         assert response.query == "한국어"
 
+    @pytest.mark.asyncio
     async def test_query_prefix_적용(self) -> None:
         """쿼리 임베딩 시 query: 접두사가 적용된다."""
         engine = self._create_engine()
@@ -901,6 +909,7 @@ class TestHybridSearchEngine:
 class TestSearchVector:
     """벡터 검색 기능 테스트 (ChromaDB mock)."""
 
+    @pytest.mark.asyncio
     async def test_컬렉션_None(self) -> None:
         """컬렉션이 None이면 빈 결과를 반환한다. (PERF-011 변경 반영)"""
         from search.hybrid_search import _search_vector
@@ -912,6 +921,7 @@ class TestSearchVector:
         )
         assert results == []
 
+    @pytest.mark.asyncio
     async def test_빈_컬렉션(self) -> None:
         """비어있는 컬렉션이면 빈 결과를 반환한다."""
         from search.hybrid_search import _search_vector
@@ -923,6 +933,7 @@ class TestSearchVector:
 
         assert results == []
 
+    @pytest.mark.asyncio
     async def test_검색_결과_변환(self) -> None:
         """ChromaDB 검색 결과를 올바르게 변환한다. (PERF-011 변경 반영)"""
         from search.hybrid_search import _search_vector
@@ -1102,6 +1113,7 @@ class TestPerformanceOptimizations:
 
         assert result is None
 
+    @pytest.mark.asyncio
     async def test_PERF010_병렬_검색_실행(self) -> None:
         """PERF-010: 벡터 검색과 FTS5 검색이 병렬로 실행되는지 확인한다."""
         import time

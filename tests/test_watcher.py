@@ -33,8 +33,6 @@ from core.watcher import (
     _AudioFileHandler,
 )
 
-# 모듈 내 모든 비동기 테스트에 적용
-pytestmark = pytest.mark.asyncio
 
 
 # === 테스트 픽스처 ===
@@ -93,16 +91,19 @@ async def watcher(tmp_path: Path, job_queue: AsyncJobQueue) -> FolderWatcher:
 class TestInit:
     """FolderWatcher 초기화 테스트."""
 
+    @pytest.mark.asyncio
     async def test_기본_속성_초기화(self, watcher: FolderWatcher) -> None:
         """기본 속성이 올바르게 초기화되는지 확인한다."""
         assert watcher.is_watching is False
         assert watcher.watch_dir.exists()
 
+    @pytest.mark.asyncio
     async def test_지원_확장자_설정(self, watcher: FolderWatcher) -> None:
         """config에서 읽은 확장자가 올바르게 설정되는지 확인한다."""
         expected = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
         assert watcher._supported_extensions == expected
 
+    @pytest.mark.asyncio
     async def test_설정_기본값_사용(self, tmp_path: Path, job_queue: AsyncJobQueue) -> None:
         """config 기본값(싱글턴)이 정상 사용되는지 확인한다."""
         config = _make_config(tmp_path)
@@ -219,6 +220,7 @@ class TestAudioFileHandler:
 class TestMeetingIdGeneration:
     """meeting_id 생성 테스트."""
 
+    @pytest.mark.asyncio
     async def test_파일명에서_meeting_id_생성(self, watcher: FolderWatcher) -> None:
         """파일명(확장자 제외)이 meeting_id로 사용되는지 확인한다."""
         assert watcher._generate_meeting_id(Path("/tmp/meeting_001.wav")) == "meeting_001"
@@ -227,6 +229,7 @@ class TestMeetingIdGeneration:
             == "2024-03-04_standup"
         )
 
+    @pytest.mark.asyncio
     async def test_한국어_파일명_meeting_id(self, watcher: FolderWatcher) -> None:
         """한국어 파일명이 meeting_id로 올바르게 변환되는지 확인한다."""
         assert watcher._generate_meeting_id(Path("/tmp/3월_정기회의.wav")) == "3월_정기회의"
@@ -239,6 +242,7 @@ class TestMeetingIdGeneration:
 class TestDebounce:
     """파일 크기 안정화 대기 테스트."""
 
+    @pytest.mark.asyncio
     async def test_안정된_파일_통과(self, watcher: FolderWatcher, tmp_path: Path) -> None:
         """크기가 안정된 파일이 정상 통과하는지 확인한다."""
         test_file = tmp_path / "audio_input" / "test.wav"
@@ -247,6 +251,7 @@ class TestDebounce:
         result = await watcher._wait_for_stable_size(test_file)
         assert result is True
 
+    @pytest.mark.asyncio
     async def test_사라진_파일_False(self, watcher: FolderWatcher, tmp_path: Path) -> None:
         """파일이 사라지면 False를 반환하는지 확인한다."""
         missing_file = tmp_path / "audio_input" / "missing.wav"
@@ -254,6 +259,7 @@ class TestDebounce:
         result = await watcher._wait_for_stable_size(missing_file)
         assert result is False
 
+    @pytest.mark.asyncio
     async def test_빈_파일_대기_후_안정화(self, watcher: FolderWatcher, tmp_path: Path) -> None:
         """빈 파일이 데이터 쓰기 후 안정화되는지 확인한다."""
         test_file = tmp_path / "audio_input" / "growing.wav"
@@ -278,6 +284,7 @@ class TestDebounce:
 class TestJobRegistration:
     """작업 큐 자동 등록 테스트."""
 
+    @pytest.mark.asyncio
     async def test_새_파일_큐_등록(
         self,
         watcher: FolderWatcher,
@@ -296,6 +303,7 @@ class TestJobRegistration:
         assert job.meeting_id == "new_meeting"
         assert job.status == "queued"
 
+    @pytest.mark.asyncio
     async def test_중복_파일_등록_방지(
         self,
         watcher: FolderWatcher,
@@ -317,6 +325,7 @@ class TestJobRegistration:
         meeting_jobs = [j for j in all_jobs if j.meeting_id == "duplicate"]
         assert len(meeting_jobs) == 1
 
+    @pytest.mark.asyncio
     async def test_비오디오_파일_무시(
         self,
         watcher: FolderWatcher,
@@ -333,6 +342,7 @@ class TestJobRegistration:
         )
         assert handler._is_audio_file(Path("test.txt")) is False
 
+    @pytest.mark.asyncio
     async def test_한국어_파일명_등록(
         self,
         watcher: FolderWatcher,
@@ -356,6 +366,7 @@ class TestJobRegistration:
 class TestCallbacks:
     """파일 등록 콜백 테스트."""
 
+    @pytest.mark.asyncio
     async def test_동기_콜백_호출(
         self,
         watcher: FolderWatcher,
@@ -373,6 +384,7 @@ class TestCallbacks:
         assert len(called_with) == 1
         assert called_with[0].name == "cb_test.wav"
 
+    @pytest.mark.asyncio
     async def test_비동기_콜백_호출(
         self,
         watcher: FolderWatcher,
@@ -393,6 +405,7 @@ class TestCallbacks:
 
         assert len(called_with) == 1
 
+    @pytest.mark.asyncio
     async def test_콜백_에러_격리(
         self,
         watcher: FolderWatcher,
@@ -423,23 +436,27 @@ class TestCallbacks:
 class TestLifecycle:
     """start/stop 생명주기 테스트."""
 
+    @pytest.mark.asyncio
     async def test_시작_후_상태(self, watcher: FolderWatcher) -> None:
         """시작 후 is_watching이 True인지 확인한다."""
         await watcher.start()
         assert watcher.is_watching is True
 
+    @pytest.mark.asyncio
     async def test_중지_후_상태(self, watcher: FolderWatcher) -> None:
         """중지 후 is_watching이 False인지 확인한다."""
         await watcher.start()
         await watcher.stop()
         assert watcher.is_watching is False
 
+    @pytest.mark.asyncio
     async def test_이중_시작_에러(self, watcher: FolderWatcher) -> None:
         """이미 실행 중에 start() 호출 시 에러를 확인한다."""
         await watcher.start()
         with pytest.raises(AlreadyWatchingError):
             await watcher.start()
 
+    @pytest.mark.asyncio
     async def test_이중_중지_안전(self, watcher: FolderWatcher) -> None:
         """이미 중지 상태에서 stop() 호출이 안전한지 확인한다."""
         await watcher.start()
@@ -448,11 +465,13 @@ class TestLifecycle:
         await watcher.stop()
         assert watcher.is_watching is False
 
+    @pytest.mark.asyncio
     async def test_미시작_상태_중지_안전(self, watcher: FolderWatcher) -> None:
         """시작하지 않은 상태에서 stop()이 안전한지 확인한다."""
         await watcher.stop()
         assert watcher.is_watching is False
 
+    @pytest.mark.asyncio
     async def test_감시_디렉토리_자동_생성(
         self,
         job_queue: AsyncJobQueue,
@@ -476,6 +495,7 @@ class TestLifecycle:
 class TestScanExisting:
     """기존 파일 스캔 테스트."""
 
+    @pytest.mark.asyncio
     async def test_기존_오디오_파일_등록(
         self,
         watcher: FolderWatcher,
@@ -500,6 +520,7 @@ class TestScanExisting:
         assert job1 is not None
         assert job2 is not None
 
+    @pytest.mark.asyncio
     async def test_빈_파일_건너뜀(
         self,
         watcher: FolderWatcher,
@@ -513,6 +534,7 @@ class TestScanExisting:
         ids = await watcher.scan_existing()
         assert len(ids) == 0
 
+    @pytest.mark.asyncio
     async def test_이미_등록된_파일_건너뜀(
         self,
         watcher: FolderWatcher,
@@ -530,6 +552,7 @@ class TestScanExisting:
         ids = await watcher.scan_existing()
         assert len(ids) == 0
 
+    @pytest.mark.asyncio
     async def test_존재하지_않는_디렉토리(
         self,
         job_queue: AsyncJobQueue,
@@ -550,6 +573,7 @@ class TestScanExisting:
 class TestErrorHandling:
     """에러 처리 테스트."""
 
+    @pytest.mark.asyncio
     async def test_큐_등록_실패_시_계속_동작(
         self,
         watcher: FolderWatcher,
@@ -569,6 +593,7 @@ class TestErrorHandling:
             # 에러 없이 처리 완료
             await watcher._handle_new_file(test_file)
 
+    @pytest.mark.asyncio
     async def test_파일_접근_에러_처리(
         self,
         watcher: FolderWatcher,
@@ -580,6 +605,7 @@ class TestErrorHandling:
         result = await watcher._wait_for_stable_size(bad_file)
         assert result is False
 
+    @pytest.mark.asyncio
     async def test_에러_계층_구조(self) -> None:
         """에러 클래스 계층 구조를 확인한다."""
         assert issubclass(AlreadyWatchingError, WatcherError)
@@ -593,6 +619,7 @@ class TestErrorHandling:
 class TestIntegration:
     """watchdog Observer와의 통합 테스트."""
 
+    @pytest.mark.asyncio
     async def test_실시간_파일_감지(
         self,
         watcher: FolderWatcher,
@@ -617,6 +644,7 @@ class TestIntegration:
 
         await watcher.stop()
 
+    @pytest.mark.asyncio
     async def test_비오디오_파일_실시간_무시(
         self,
         watcher: FolderWatcher,
@@ -639,6 +667,7 @@ class TestIntegration:
 
         await watcher.stop()
 
+    @pytest.mark.asyncio
     async def test_다중_파일_연속_감지(
         self,
         watcher: FolderWatcher,

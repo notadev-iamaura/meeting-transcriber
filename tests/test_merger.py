@@ -28,7 +28,6 @@ from steps.merger import (
 )
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
-pytestmark = pytest.mark.asyncio
 
 
 # === 헬퍼 함수 ===
@@ -364,6 +363,7 @@ class TestMergedResult:
 class TestMerger정상병합:
     """Merger 클래스의 정상 병합 테스트."""
 
+    @pytest.mark.asyncio
     async def test_완전_포함_병합(self) -> None:
         """STT 세그먼트가 화자 구간에 완전 포함될 때."""
         transcript = _make_transcript(
@@ -387,6 +387,7 @@ class TestMerger정상병합:
         assert result.utterances[0].speaker == "SPEAKER_00"
         assert result.utterances[1].speaker == "SPEAKER_00"
 
+    @pytest.mark.asyncio
     async def test_두_화자_교대(self) -> None:
         """두 화자가 교대로 발화하는 정상 케이스."""
         transcript = _make_transcript(
@@ -419,6 +420,7 @@ class TestMerger정상병합:
         assert result.utterances[2].speaker == "SPEAKER_00"
         assert result.utterances[3].speaker == "SPEAKER_01"
 
+    @pytest.mark.asyncio
     async def test_다중_화자_겹침(self) -> None:
         """STT 세그먼트가 여러 화자 구간에 걸칠 때 최대 겹침 화자 선택."""
         transcript = _make_transcript(
@@ -439,6 +441,7 @@ class TestMerger정상병합:
 
         assert result.utterances[0].speaker == "SPEAKER_01"
 
+    @pytest.mark.asyncio
     async def test_세_화자_회의(self) -> None:
         """세 명의 화자가 참여하는 회의."""
         transcript = _make_transcript(
@@ -464,6 +467,7 @@ class TestMerger정상병합:
         assert result.utterances[1].speaker == "SPEAKER_01"
         assert result.utterances[2].speaker == "SPEAKER_02"
 
+    @pytest.mark.asyncio
     async def test_audio_path_보존(self) -> None:
         """결과의 audio_path가 TranscriptResult에서 가져와지는지 확인."""
         transcript = _make_transcript(
@@ -484,6 +488,7 @@ class TestMerger정상병합:
 class TestMergerUNKNOWN처리:
     """화자 매칭 실패 시 UNKNOWN 할당 테스트."""
 
+    @pytest.mark.asyncio
     async def test_빈_화자_세그먼트(self) -> None:
         """화자분리 세그먼트가 비어있으면 모든 발화에 UNKNOWN 할당."""
         transcript = _make_transcript(
@@ -502,6 +507,7 @@ class TestMergerUNKNOWN처리:
         assert result.unknown_count == 2
         assert all(u.speaker == UNKNOWN_SPEAKER for u in result.utterances)
 
+    @pytest.mark.asyncio
     async def test_부분_매칭(self) -> None:
         """일부 발화만 화자와 매칭되는 케이스."""
         transcript = _make_transcript(
@@ -527,6 +533,7 @@ class TestMergerUNKNOWN처리:
 class TestMerger에러처리:
     """Merger 에러 처리 테스트."""
 
+    @pytest.mark.asyncio
     async def test_빈_STT_세그먼트(self) -> None:
         """STT 세그먼트가 비어있으면 EmptySegmentsError 발생."""
         transcript = TranscriptResult(
@@ -546,6 +553,7 @@ class TestMerger에러처리:
 class TestMerger시간정렬:
     """시간순 정렬 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_역순_입력_정렬(self) -> None:
         """시간순이 아닌 입력도 결과는 시간순으로 정렬."""
         # 역순으로 세그먼트 생성
@@ -579,6 +587,7 @@ class TestMerger시간정렬:
 class TestMerger한국어텍스트:
     """한국어 텍스트 관련 테스트."""
 
+    @pytest.mark.asyncio
     async def test_한국어_텍스트_보존(self) -> None:
         """병합 후 한국어 텍스트가 원본 그대로 보존되는지 확인."""
         korean_texts = [
@@ -608,6 +617,7 @@ class TestMerger한국어텍스트:
         for i, text in enumerate(korean_texts):
             assert result.utterances[i].text == text
 
+    @pytest.mark.asyncio
     async def test_특수문자_포함_텍스트(self) -> None:
         """특수문자가 포함된 텍스트 보존."""
         transcript = _make_transcript(
@@ -632,6 +642,7 @@ class TestMerger한국어텍스트:
 class TestMerger엣지케이스:
     """엣지 케이스 테스트."""
 
+    @pytest.mark.asyncio
     async def test_단일_세그먼트(self) -> None:
         """세그먼트가 하나일 때."""
         transcript = _make_transcript([("안녕하세요", 0.0, 5.0)])
@@ -643,6 +654,7 @@ class TestMerger엣지케이스:
         assert len(result.utterances) == 1
         assert result.utterances[0].speaker == "SPEAKER_00"
 
+    @pytest.mark.asyncio
     async def test_매우_짧은_세그먼트(self) -> None:
         """매우 짧은 시간의 세그먼트 처리."""
         transcript = _make_transcript([("네", 5.0, 5.1)])
@@ -654,6 +666,7 @@ class TestMerger엣지케이스:
         assert result.utterances[0].speaker == "SPEAKER_00"
         assert result.utterances[0].duration == pytest.approx(0.1)
 
+    @pytest.mark.asyncio
     async def test_긴_회의_시뮬레이션(self) -> None:
         """1시간 회의 시뮬레이션 (200 세그먼트)."""
         # 200개 STT 세그먼트 (각 18초 간격으로 분포)
@@ -677,6 +690,7 @@ class TestMerger엣지케이스:
         assert len(result.utterances) == 200
         assert result.num_speakers == 2
 
+    @pytest.mark.asyncio
     async def test_speakers_프로퍼티(self) -> None:
         """speakers 프로퍼티가 UNKNOWN 제외하고 정렬된 리스트를 반환."""
         transcript = _make_transcript(
@@ -699,6 +713,7 @@ class TestMerger엣지케이스:
         assert result.speakers == ["SPEAKER_00", "SPEAKER_01"]
         assert UNKNOWN_SPEAKER not in result.speakers
 
+    @pytest.mark.asyncio
     async def test_체크포인트_라운드트립_전체(self, tmp_path) -> None:
         """병합 → 체크포인트 저장 → 복원 전체 흐름."""
         transcript = _make_transcript(

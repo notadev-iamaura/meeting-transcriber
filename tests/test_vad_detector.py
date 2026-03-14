@@ -32,8 +32,6 @@ from steps.vad_detector import (
     VoiceActivityDetector,
 )
 
-# 모든 비동기 테스트에 asyncio 마크 적용
-pytestmark = pytest.mark.asyncio
 
 
 # === 픽스처 ===
@@ -96,6 +94,7 @@ def audio_file(tmp_path: Path) -> Path:
 class TestVAD비활성화:
     """VAD가 비활성화되었을 때의 동작 테스트."""
 
+    @pytest.mark.asyncio
     async def test_VAD_비활성화시_None_반환(
         self, detector_disabled: VoiceActivityDetector, audio_file: Path
     ) -> None:
@@ -110,6 +109,7 @@ class TestVAD비활성화:
 class TestFileValidation:
     """오디오 파일 유효성 검증 테스트."""
 
+    @pytest.mark.asyncio
     async def test_파일_미존재시_FileNotFoundError(
         self, detector: VoiceActivityDetector
     ) -> None:
@@ -174,6 +174,7 @@ class TestTimestampAdjustment:
 class TestEmptySpeech:
     """음성 구간이 없을 때의 동작 테스트."""
 
+    @pytest.mark.asyncio
     async def test_빈_음성구간시_None_반환(
         self,
         detector: VoiceActivityDetector,
@@ -239,6 +240,7 @@ class TestCPU강제실행:
 class TestModelLoadManager미사용:
     """ModelLoadManager를 사용하지 않는지 확인하는 테스트."""
 
+    @pytest.mark.asyncio
     async def test_ModelLoadManager_미사용(
         self,
         detector: VoiceActivityDetector,
@@ -265,6 +267,7 @@ class TestModelLoadManager미사용:
 class TestVADResult데이터:
     """VADResult 데이터의 정확성 테스트."""
 
+    @pytest.mark.asyncio
     async def test_VADResult_데이터_정확성(
         self,
         detector: VoiceActivityDetector,
@@ -307,6 +310,7 @@ class TestConfig기본값:
         assert detector._min_silence_duration_ms == 100
         assert detector._speech_pad_ms == 30
 
+    @pytest.mark.asyncio
     async def test_config_기본값_비활성_detect_None(
         self, mock_config_no_vad: MagicMock, audio_file: Path
     ) -> None:
@@ -370,6 +374,7 @@ class TestMultipleSegments:
         result = VoiceActivityDetector._to_clip_timestamps([], duration=10.0)
         assert result == []
 
+    @pytest.mark.asyncio
     async def test_다중_구간_detect_결과(
         self,
         detector: VoiceActivityDetector,
@@ -405,6 +410,7 @@ class TestSingleSegment:
         assert result == [2.0, 7.0]
         assert len(result) == 2
 
+    @pytest.mark.asyncio
     async def test_단일_구간_detect_결과(
         self,
         detector: VoiceActivityDetector,
