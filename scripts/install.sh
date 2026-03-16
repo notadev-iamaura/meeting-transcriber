@@ -200,49 +200,20 @@ create_venv() {
 # === 5단계: pip 패키지 설치 ===
 
 generate_requirements() {
-    # requirements.txt가 없으면 생성
+    # requirements.txt가 없으면 pyproject.toml 참조 스텁 생성
     if [[ -f "${REQUIREMENTS_FILE}" ]]; then
         _info "requirements.txt 발견: ${REQUIREMENTS_FILE}"
         return 0
     fi
 
-    _info "requirements.txt 생성 중..."
+    _info "requirements.txt 생성 중 (pyproject.toml 참조)..."
     cat > "${REQUIREMENTS_FILE}" << 'REQ_EOF'
 # 한국어 로컬 AI 회의 전사 시스템 — 의존성 목록
-# 생성일: 자동 생성 (install.sh)
-
-# === 웹 프레임워크 ===
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pydantic>=2.5.0
-
-# === macOS UI ===
-rumps>=0.4.0
-
-# === 파일 감시 ===
-watchdog>=3.0.0
-
-# === 설정 관리 ===
-pyyaml>=6.0
-
-# === 시스템 모니터링 ===
-psutil>=5.9.0
-
-# === 벡터 DB ===
-chromadb>=0.4.0
-
-# === AI/ML — STT ===
-mlx-whisper>=0.1.0
-
-# === AI/ML — 화자분리 ===
-pyannote.audio>=3.1.0
-
-# === AI/ML — 임베딩 ===
-sentence-transformers>=2.2.0
-
-# === 테스트 ===
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
+#
+# SSOT: pyproject.toml [project.dependencies]
+# 이 파일은 하위 호환성을 위해 유지합니다.
+# 권장 설치 방법: pip install -e .
+-e .
 REQ_EOF
     _success "requirements.txt 생성 완료"
 }
@@ -252,7 +223,12 @@ install_pip_packages() {
     "${PIP_BIN}" install --upgrade pip --quiet
 
     _info "pip 패키지 설치 중... (시간이 소요될 수 있습니다)"
-    "${PIP_BIN}" install -r "${REQUIREMENTS_FILE}"
+    # pyproject.toml을 SSOT로 사용 (dev 의존성 포함)
+    if [[ -f "${PROJECT_DIR}/pyproject.toml" ]]; then
+        "${PIP_BIN}" install -e "${PROJECT_DIR}[dev]"
+    else
+        "${PIP_BIN}" install -r "${REQUIREMENTS_FILE}"
+    fi
     _success "pip 패키지 설치 완료"
 }
 

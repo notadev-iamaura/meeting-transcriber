@@ -10,7 +10,7 @@ version = "0.1.0"
 description = "한국어 로컬 AI 회의 전사 시스템 — 100% 오프라인, Apple Silicon 최적화"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 authors = [
     { name = "notadev-iamaura" },
 ]
@@ -23,7 +23,7 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -43,9 +43,9 @@ dependencies = [
     # 시스템 모니터링
     "psutil>=5.9.0",
     # 벡터 DB
-    "chromadb>=0.4.0",
+    "chromadb>=0.4.0,<2.0",
     # AI/ML — STT (Apple Silicon MLX)
-    "mlx-whisper>=0.1.0",
+    "mlx-whisper>=0.1.0,<1.0",
     # AI/ML — 화자분리
     "pyannote.audio>=3.1.0",
     # AI/ML — 임베딩

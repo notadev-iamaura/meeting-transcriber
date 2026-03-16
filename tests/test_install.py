@@ -616,27 +616,18 @@ class TestGenerateRequirements:
         req_file = Path(mock_env["project_dir"]) / "requirements.txt"
         assert req_file.exists()
 
-    def test_requirements_필수_패키지_포함(self, tmp_path: Path) -> None:
-        """requirements.txt에 필수 패키지가 포함되는지 확인한다."""
+    def test_requirements_pyproject_참조_스텁(self, tmp_path: Path) -> None:
+        """requirements.txt가 pyproject.toml 참조 스텁으로 생성되는지 확인한다."""
         mock_env = _create_mock_env(tmp_path)
         _source_and_call(mock_env, "generate_requirements")
 
         req_file = Path(mock_env["project_dir"]) / "requirements.txt"
         content = req_file.read_text(encoding="utf-8")
 
-        # 핵심 패키지 확인
-        assert "fastapi" in content
-        assert "uvicorn" in content
-        assert "pydantic" in content
-        assert "rumps" in content
-        assert "watchdog" in content
-        assert "pyyaml" in content
-        assert "psutil" in content
-        assert "chromadb" in content
-        assert "mlx-whisper" in content
-        assert "pyannote" in content
-        assert "sentence-transformers" in content
-        assert "pytest" in content
+        # pyproject.toml을 SSOT로 참조하는 스텁 확인
+        assert "-e ." in content
+        assert "SSOT" in content
+        assert "pyproject.toml" in content
 
     def test_기존_파일_보존(self, tmp_path: Path) -> None:
         """이미 requirements.txt가 있으면 덮어쓰지 않는지 확인한다."""

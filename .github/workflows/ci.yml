@@ -1,8 +1,11 @@
 # CI 파이프라인 — 푸시 및 PR 시 자동 실행
 #
 # 목적: 코드 품질(린트) + 테스트 자동 검증
-# 린트: ruff check + ruff format --check
-# 테스트: pytest (Python 3.11, 3.12 매트릭스)
+# 린트: ubuntu (빠름) — ruff check + ruff format --check
+# 테스트: macOS (실제 타깃 플랫폼) — pytest 전체 실행
+#
+# 참고: macOS 전용 앱이므로 테스트는 macos runner에서 실행한다.
+#       public repo에서 macOS runner는 무료.
 
 name: CI
 
@@ -37,7 +40,7 @@ jobs:
 
   test:
     name: 테스트 (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -48,13 +51,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: ffmpeg 설치
+        run: brew install ffmpeg
+
       - name: 의존성 설치
         run: |
           pip install --upgrade pip
-          pip install pytest pytest-asyncio pytest-cov pydantic pyyaml psutil
+          pip install -e ".[dev]"
 
       - name: 단위 테스트 실행
         run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
-        env:
-          # macOS 전용 모듈 import 방지
-          SKIP_MACOS_MODULES: "1"

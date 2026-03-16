@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import sys
 import threading
 import unicodedata
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.preflight import run_preflight
 from steps.embedder import _CHROMA_COLLECTION_NAME, _FTS_TABLE_NAME
 
 logger = logging.getLogger(__name__)
@@ -651,6 +653,16 @@ class HybridSearchEngine:
                 return None
 
             try:
+                # SIGSEGV 방지: Python 3.13+ 호환성 사전 검증
+                preflight = run_preflight()
+                if not preflight.can_use_chromadb:
+                    logger.warning(
+                        f"ChromaDB는 현재 Python 버전과 호환되지 않습니다 "
+                        f"(Python {sys.version_info.major}.{sys.version_info.minor}). "
+                        "벡터 검색이 비활성화됩니다."
+                    )
+                    return None
+
                 import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
 
                 self._chroma_client = chromadb.PersistentClient(path=str(self._chroma_dir))

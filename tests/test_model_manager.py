@@ -44,6 +44,27 @@ def _reset_singletons(tmp_path: Any) -> Any:
     reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _mock_metal_cache() -> Any:
+    """테스트 환경에서 Metal GPU 캐시 정리를 mock하여 SIGABRT를 방지한다.
+
+    mlx.core가 설치된 환경에서 Metal 컨텍스트 없이
+    mx.metal.clear_cache()를 호출하면 프로세스가 크래시하므로,
+    테스트에서는 해당 import를 차단한다.
+    """
+    import builtins
+
+    original_import = builtins.__import__
+
+    def _mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "mlx.core":
+            raise ImportError("테스트 환경에서 mlx.core mock 처리")
+        return original_import(name, *args, **kwargs)
+
+    with patch.object(builtins, "__import__", side_effect=_mock_import):
+        yield
+
+
 @pytest.fixture
 def config_file(tmp_path: Any) -> Any:
     """임시 config.yaml 파일을 생성한다."""

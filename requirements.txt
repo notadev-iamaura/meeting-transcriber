@@ -1,38 +1,8 @@
 # 한국어 로컬 AI 회의 전사 시스템 — 의존성 목록
-# pip install -r requirements.txt
-
-# === 웹 프레임워크 ===
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pydantic>=2.5.0
-
-# === macOS UI ===
-rumps>=0.4.0
-
-# === 파일 감시 ===
-watchdog>=3.0.0
-
-# === 설정 관리 ===
-pyyaml>=6.0
-
-# === 시스템 모니터링 ===
-psutil>=5.9.0
-
-# === 벡터 DB ===
-chromadb>=0.4.0
-
-# === AI/ML — STT (Apple Silicon MLX) ===
-mlx-whisper>=0.1.0
-
-# === AI/ML — 화자분리 ===
-pyannote.audio>=3.1.0
-
-# === AI/ML — 임베딩 ===
-sentence-transformers>=2.2.0
-
-# === AI/ML — Ollama 클라이언트 ===
-ollama>=0.1.0
-
-# === 오디오 처리 ===
-soundfile>=0.12.0
-numpy>=1.24.0
+#
+# SSOT: pyproject.toml [project.dependencies]
+# 이 파일은 하위 호환성을 위해 유지합니다.
+# 신규 의존성 추가 시 pyproject.toml을 수정하세요.
+#
+# 권장 설치 방법: pip install -e .
+-e .

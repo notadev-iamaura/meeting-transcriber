@@ -24,6 +24,7 @@ from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.preflight import run_preflight
 
 logger = logging.getLogger(__name__)
 
@@ -193,13 +194,26 @@ class Transcriber:
         ModelLoadManager의 loader 함수로 사용된다.
         모듈 임포트 시점에 MLX 런타임이 초기화된다.
 
+        사전 검증(preflight)에서 Metal 불가로 판정된 경우
+        import를 시도하지 않아 SIGABRT를 방지한다.
+
         Returns:
             mlx_whisper 모듈 객체
 
         Raises:
-            ModelNotAvailableError: mlx-whisper가 설치되지 않았을 때
+            ModelNotAvailableError: mlx-whisper가 설치되지 않았거나
+                Metal GPU를 사용할 수 없을 때
             ImportError: 모듈 임포트 실패 시
         """
+        # SIGABRT 방지: Metal 가용성 사전 검증
+        preflight = run_preflight()
+        if not preflight.can_use_mlx:
+            reasons = "; ".join(preflight.warnings) if preflight.warnings else "알 수 없는 원인"
+            raise ModelNotAvailableError(
+                f"MLX를 사용할 수 없습니다: {reasons}. "
+                "Apple Silicon Mac + Python 3.11/3.12 환경이 필요합니다."
+            )
+
         try:
             import mlx_whisper  # type: ignore[import-untyped]
 

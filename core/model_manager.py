@@ -24,6 +24,7 @@ from typing import Any, TypeVar, Union
 import psutil
 
 from config import get_config
+from core.preflight import run_preflight
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,16 @@ class ModelLoadManager:
 
         mlx 라이브러리가 설치된 경우에만 동작하며,
         설치되지 않은 환경에서는 조용히 건너뛴다.
+
+        사전 검증(preflight)에서 Metal 불가로 판정된 경우
+        import 자체를 시도하지 않아 SIGABRT를 방지한다.
         """
+        # SIGABRT 방지: preflight에서 Metal 사용 불가 판정 시 스킵
+        preflight = run_preflight()
+        if not preflight.can_use_mlx:
+            logger.debug("MLX 사용 불가 — Metal 캐시 정리 건너뜀")
+            return
+
         try:
             import mlx.core as mx  # type: ignore[import-untyped]
 

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.preflight import run_preflight
 from steps.chunker import ChunkedResult
 
 logger = logging.getLogger(__name__)
@@ -313,6 +315,15 @@ def _store_chunks_chroma(
     Raises:
         StorageError: ChromaDB 저장 실패 시
     """
+    # SIGSEGV 방지: Python 3.13+ 에서 chromadb Rust 바인딩 호환성 문제
+    preflight = run_preflight()
+    if not preflight.can_use_chromadb:
+        raise StorageError(
+            "ChromaDB는 현재 Python 버전과 호환되지 않습니다. "
+            "Python 3.11 또는 3.12를 사용하세요. "
+            f"(현재: Python {sys.version_info.major}.{sys.version_info.minor})"
+        )
+
     import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
 
     # ChromaDB PersistentClient는 내부적으로 파일 핸들/스레드를 보유하므로

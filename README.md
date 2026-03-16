@@ -1,11 +1,14 @@
 # Meeting Transcriber
 
-[![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11~3.12](https://img.shields.io/badge/python-3.11~3.12-blue.svg)](https://www.python.org/downloads/)
 
 **한국어 로컬 AI 회의 전사 시스템** — 100% 오프라인, Apple Silicon 최적화
 
 회의 녹음 파일을 넣으면 자동으로 텍스트 변환, 화자 분리, AI 교정, 요약까지 처리합니다.
 모든 데이터는 로컬에서만 처리되며, 외부 서버로 전송되지 않습니다.
+
+> **⚠️ Apple Silicon Mac 전용** — 이 프로젝트는 MLX 프레임워크를 사용하며, Apple Silicon(M1/M2/M3/M4) Mac에서만 동작합니다.
+> Intel Mac, Linux, Windows에서는 MLX 기반 STT가 지원되지 않습니다.
 
 ## 주요 기능
 
@@ -27,11 +30,13 @@
 | 항목 | 최소 사양 |
 |------|-----------|
 | OS | macOS 14 (Sonoma) 이상 |
-| 칩 | Apple Silicon (M1, M2, M3, M4) |
+| 칩 | **Apple Silicon (M1, M2, M3, M4)** — Intel Mac 미지원 |
 | RAM | 16GB 이상 |
 | 디스크 | 20GB 이상 여유 공간 |
-| Python | 3.11 이상 |
+| Python | **3.11 또는 3.12** (3.13 이상 미지원) |
 | 기타 | ffmpeg |
+
+> **⚠️ Python 버전 주의**: Python 3.13 이상에서는 ChromaDB의 Rust 네이티브 바인딩이 호환되지 않아 크래시가 발생할 수 있습니다. 반드시 Python 3.11 또는 3.12를 사용하세요.
 
 > **참고**: LLM 백엔드로 Ollama 또는 MLX를 선택할 수 있습니다.
 > Ollama 선택 시 별도 Ollama 앱 설치가 필요하고, MLX 선택 시 추가 설치 없이 동작합니다.

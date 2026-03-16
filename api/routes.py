@@ -14,6 +14,7 @@ API 라우터 모듈 (API Router Module)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -25,6 +26,26 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+def _log_task_exception(task: asyncio.Task[Any]) -> None:
+    """백그라운드 태스크의 미처리 예외를 로깅한다.
+
+    asyncio.Task.add_done_callback()에 등록하여 사용한다.
+    태스크가 예외로 종료된 경우 logger.error로 기록하고,
+    CancelledError는 정상 취소이므로 무시한다.
+
+    Args:
+        task: 완료된 asyncio.Task 객체
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            f"백그라운드 태스크 실패: {task.get_name()}: {exc}",
+            exc_info=exc,
+        )
 
 
 # === PERF: JSON 파일 캐시 (mtime 기반 무효화) ===
@@ -1143,7 +1164,11 @@ async def summarize_meeting(
         ) from e
 
     # 백그라운드 태스크로 LLM 단계 실행
-    task = asyncio.create_task(pipeline.run_llm_steps(meeting_id))
+    task = asyncio.create_task(
+        pipeline.run_llm_steps(meeting_id),
+        name=f"llm-steps-{meeting_id}",
+    )
+    task.add_done_callback(_log_task_exception)
     running_tasks = getattr(request.app.state, "running_tasks", None)
     if running_tasks is not None:
         running_tasks.add(task)
