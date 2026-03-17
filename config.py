@@ -421,6 +421,9 @@ class RecordingConfig(BaseModel):
     min_duration_seconds: int = Field(default=5, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
+    silence_threshold_rms: float = Field(
+        default=0.001, ge=0.0, le=1.0
+    )  # 무음 판정 RMS 임계값
 
 
 class LifecycleConfig(BaseModel):

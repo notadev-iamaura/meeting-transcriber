@@ -526,7 +526,7 @@ class TestAudioDevice:
         """딕셔너리 변환이 올바르다."""
         device = AudioDevice(index=0, name="Mic", is_blackhole=False)
         d = device.to_dict()
-        assert d == {"index": 0, "name": "Mic", "is_blackhole": False}
+        assert d == {"index": 0, "name": "Mic", "is_blackhole": False, "is_virtual": False}
 
 
 # === TestRecordingState ===
@@ -798,3 +798,251 @@ class TestMultiTrackRecording:
         )
         assert result.is_multitrack is False
         assert result.file_paths is None
+
+
+# === 가상 장치 필터링 테스트 ===
+
+
+class TestVirtualDeviceFiltering:
+    """가상 장치 필터링 및 장치 선택 우선순위를 테스트한다."""
+
+    def test_parse_device_가상장치_감지(self, tmp_path: Path) -> None:
+        """ZoomAudioDevice가 is_virtual=True로 파싱되는지 확인한다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        stderr_output = (
+            "[AVFoundation indev @ 0x7f8] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x7f8] [0] ZoomAudioDevice\n"
+            "[AVFoundation indev @ 0x7f8] [1] MacBook Air Microphone\n"
+        )
+        devices = recorder._parse_device_list(stderr_output)
+
+        assert len(devices) == 2
+        # ZoomAudioDevice는 is_virtual=True
+        assert devices[0].name == "ZoomAudioDevice"
+        assert devices[0].is_virtual is True
+        assert devices[0].is_blackhole is False
+        # MacBook Air Microphone은 is_virtual=False
+        assert devices[1].name == "MacBook Air Microphone"
+        assert devices[1].is_virtual is False
+
+    def test_parse_device_blackhole_is_not_virtual(self, tmp_path: Path) -> None:
+        """BlackHole은 is_blackhole=True이고 is_virtual=False이다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        stderr_output = (
+            "[AVFoundation indev @ 0x7f8] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x7f8] [0] BlackHole 2ch\n"
+        )
+        devices = recorder._parse_device_list(stderr_output)
+
+        assert len(devices) == 1
+        assert devices[0].is_blackhole is True
+        assert devices[0].is_virtual is False
+
+    def test_parse_device_여러_가상장치_키워드(self, tmp_path: Path) -> None:
+        """다양한 가상 장치 키워드(virtual, soundflower, aggregate, loopback)가 감지된다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        stderr_output = (
+            "[AVFoundation indev @ 0x7f8] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x7f8] [0] Virtual Audio Cable\n"
+            "[AVFoundation indev @ 0x7f8] [1] Soundflower (2ch)\n"
+            "[AVFoundation indev @ 0x7f8] [2] Aggregate Device\n"
+            "[AVFoundation indev @ 0x7f8] [3] Loopback Audio\n"
+        )
+        devices = recorder._parse_device_list(stderr_output)
+
+        assert len(devices) == 4
+        for dev in devices:
+            assert dev.is_virtual is True, f"{dev.name}이 is_virtual=False로 감지됨"
+
+    @pytest.mark.asyncio
+    async def test_select_device_가상장치_필터링(self, tmp_path: Path) -> None:
+        """ZoomAudioDevice + 마이크가 있으면 마이크가 선택된다."""
+        config = _make_test_config(tmp_path)
+        config.recording.prefer_system_audio = False
+        recorder = AudioRecorder(config=config)
+
+        mock_devices = [
+            AudioDevice(index=0, name="ZoomAudioDevice", is_virtual=True),
+            AudioDevice(index=1, name="MacBook Air Microphone"),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=mock_devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.index == 1
+        assert selected.name == "MacBook Air Microphone"
+
+    @pytest.mark.asyncio
+    async def test_select_device_blackhole_우선(self, tmp_path: Path) -> None:
+        """prefer_system_audio=True일 때 BlackHole + 마이크 + ZoomAudioDevice → BlackHole 선택."""
+        config = _make_test_config(tmp_path)
+        config.recording.prefer_system_audio = True
+        recorder = AudioRecorder(config=config)
+
+        mock_devices = [
+            AudioDevice(index=0, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=1, name="MacBook Air Microphone"),
+            AudioDevice(index=2, name="ZoomAudioDevice", is_virtual=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=mock_devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.index == 0
+        assert selected.is_blackhole is True
+
+    @pytest.mark.asyncio
+    async def test_select_device_마이크_키워드(self, tmp_path: Path) -> None:
+        """여러 실제 장치 중 'Microphone' 포함 장치가 우선 선택된다."""
+        config = _make_test_config(tmp_path)
+        config.recording.prefer_system_audio = False
+        recorder = AudioRecorder(config=config)
+
+        mock_devices = [
+            AudioDevice(index=0, name="External USB Audio"),
+            AudioDevice(index=1, name="Built-in Microphone"),
+            AudioDevice(index=2, name="Line In"),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=mock_devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.index == 1
+        assert "Microphone" in selected.name
+
+    @pytest.mark.asyncio
+    async def test_select_device_가상장치만(self, tmp_path: Path) -> None:
+        """가상 장치만 있으면 경고 후 첫 번째 장치를 폴백 사용한다."""
+        config = _make_test_config(tmp_path)
+        config.recording.prefer_system_audio = False
+        recorder = AudioRecorder(config=config)
+
+        mock_devices = [
+            AudioDevice(index=0, name="ZoomAudioDevice", is_virtual=True),
+            AudioDevice(index=1, name="Virtual Audio Cable", is_virtual=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=mock_devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.index == 0
+        assert selected.name == "ZoomAudioDevice"
+
+    @pytest.mark.asyncio
+    async def test_select_device_키워드없는_실제장치_첫번째(self, tmp_path: Path) -> None:
+        """마이크 키워드가 없는 실제 장치들 중 첫 번째가 선택된다."""
+        config = _make_test_config(tmp_path)
+        config.recording.prefer_system_audio = False
+        recorder = AudioRecorder(config=config)
+
+        mock_devices = [
+            AudioDevice(index=0, name="ZoomAudioDevice", is_virtual=True),
+            AudioDevice(index=1, name="USB Audio Interface"),
+            AudioDevice(index=2, name="External Sound Card"),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=mock_devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.index == 1
+        assert selected.name == "USB Audio Interface"
+
+    def test_AudioDevice_is_virtual_기본값(self) -> None:
+        """AudioDevice의 is_virtual 기본값은 False이다."""
+        device = AudioDevice(index=0, name="Test")
+        assert device.is_virtual is False
+
+    def test_to_dict_includes_is_virtual(self) -> None:
+        """to_dict()에 is_virtual 필드가 포함된다."""
+        dev = AudioDevice(index=0, name="ZoomAudioDevice", is_virtual=True)
+        d = dev.to_dict()
+        assert d["is_virtual"] is True
+        assert d["is_blackhole"] is False
+
+
+class TestSilenceDetection:
+    """무음 감지 로직(_check_audio_energy)을 테스트한다."""
+
+    def _make_wav(self, path: Path, samples: list[float], sr: int = 16000) -> None:
+        """테스트용 WAV 파일을 생성한다."""
+        import numpy as np
+        import soundfile as sf
+
+        data = np.array(samples, dtype=np.float32)
+        sf.write(str(path), data, sr)
+
+    def test_무음_파일_감지(self, tmp_path: Path) -> None:
+        """RMS가 임계값 미만인 무음 파일은 False를 반환한다."""
+        config = _make_test_config(tmp_path)
+        config.recording.silence_threshold_rms = 0.001
+        recorder = AudioRecorder(config=config)
+
+        wav_path = tmp_path / "silent.wav"
+        # 1초 분량의 완전 무음 (모두 0.0)
+        self._make_wav(wav_path, [0.0] * 16000)
+
+        assert recorder._check_audio_energy(wav_path) is False
+
+    def test_정상_오디오_통과(self, tmp_path: Path) -> None:
+        """RMS가 임계값 이상인 정상 오디오는 True를 반환한다."""
+        import numpy as np
+
+        config = _make_test_config(tmp_path)
+        config.recording.silence_threshold_rms = 0.001
+        recorder = AudioRecorder(config=config)
+
+        wav_path = tmp_path / "normal.wav"
+        # 1초 분량의 정상 오디오 (사인파)
+        t = np.linspace(0, 1, 16000, dtype=np.float32)
+        samples = (0.5 * np.sin(2 * np.pi * 440 * t)).tolist()
+        self._make_wav(wav_path, samples)
+
+        assert recorder._check_audio_energy(wav_path) is True
+
+    def test_매우_작은_소리_감지(self, tmp_path: Path) -> None:
+        """극소량의 노이즈(RMS < 임계값)도 무음으로 판정한다."""
+        import numpy as np
+
+        config = _make_test_config(tmp_path)
+        config.recording.silence_threshold_rms = 0.001
+        recorder = AudioRecorder(config=config)
+
+        wav_path = tmp_path / "almost_silent.wav"
+        # RMS ≈ 0.0001 수준의 극소 노이즈
+        samples = (np.ones(16000, dtype=np.float32) * 0.0001).tolist()
+        self._make_wav(wav_path, samples)
+
+        assert recorder._check_audio_energy(wav_path) is False
+
+    def test_soundfile_import_실패시_통과(self, tmp_path: Path) -> None:
+        """soundfile을 import할 수 없으면 True를 반환한다 (graceful fallback)."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        wav_path = tmp_path / "test.wav"
+        wav_path.touch()
+
+        with patch.dict("sys.modules", {"soundfile": None}):
+            assert recorder._check_audio_energy(wav_path) is True
+
+    def test_파일_읽기_실패시_통과(self, tmp_path: Path) -> None:
+        """파일을 읽을 수 없으면 True를 반환한다 (graceful fallback)."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        # 유효하지 않은 WAV 파일
+        bad_wav = tmp_path / "bad.wav"
+        bad_wav.write_text("not a wav file")
+
+        assert recorder._check_audio_energy(bad_wav) is True
+
+    def test_빈_데이터_파일_감지(self, tmp_path: Path) -> None:
+        """WAV 헤더만 있고 오디오 데이터가 없으면 False를 반환한다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        wav_path = tmp_path / "empty_data.wav"
+        self._make_wav(wav_path, [])
+
+        assert recorder._check_audio_energy(wav_path) is False

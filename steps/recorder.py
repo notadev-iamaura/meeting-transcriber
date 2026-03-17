@@ -99,11 +99,13 @@ class AudioDevice:
         index: ffmpeg AVFoundation 장치 인덱스
         name: 장치 이름
         is_blackhole: BlackHole 가상 장치 여부
+        is_virtual: 가상 오디오 장치 여부 (ZoomAudioDevice, SoundFlower 등)
     """
 
     index: int
     name: str
     is_blackhole: bool = False
+    is_virtual: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다."""
@@ -111,6 +113,7 @@ class AudioDevice:
             "index": self.index,
             "name": self.name,
             "is_blackhole": self.is_blackhole,
+            "is_virtual": self.is_virtual,
         }
 
 
@@ -159,6 +162,7 @@ class AudioRecorder:
         self._min_duration = self._recording_config.min_duration_seconds
         self._graceful_timeout = self._recording_config.ffmpeg_graceful_timeout_seconds
         self._multi_track = self._recording_config.multi_track
+        self._silence_threshold = self._recording_config.silence_threshold_rms
 
         # 경로 설정
         self._temp_dir = self._config.paths.resolved_recordings_temp_dir
@@ -263,6 +267,51 @@ class AudioRecorder:
 
         return self._parse_device_list(stderr.decode("utf-8", errors="replace"))
 
+    def _check_audio_energy(self, file_path: Path) -> bool:
+        """녹음 파일의 RMS 에너지를 검사하여 무음 여부를 판정한다.
+
+        soundfile로 WAV 파일을 읽고 RMS(Root Mean Square)를 계산한다.
+        RMS가 silence_threshold_rms 미만이면 무음으로 판정한다.
+
+        Args:
+            file_path: 검사할 WAV 파일 경로
+
+        Returns:
+            True: 유효한 오디오 (무음 아님)
+            False: 무음 파일
+        """
+        try:
+            import numpy as np
+            import soundfile as sf
+        except ImportError:
+            logger.warning(
+                "soundfile/numpy 미설치 — 무음 감지를 건너뜁니다. "
+                "'pip install soundfile numpy'로 설치하세요."
+            )
+            return True  # 라이브러리 없으면 통과시킨다
+
+        try:
+            data, _ = sf.read(file_path, dtype="float32")
+        except Exception as e:
+            logger.warning(f"오디오 파일 읽기 실패 — 무음 감지를 건너뜁니다: {e}")
+            return True  # 파일 읽기 실패 시 통과시킨다
+
+        if data.size == 0:
+            logger.warning(f"오디오 데이터가 비어있습니다: {file_path}")
+            return False
+
+        rms = float(np.sqrt(np.mean(data**2)))
+        logger.info(f"오디오 RMS 에너지: {rms:.6f} (임계값: {self._silence_threshold})")
+
+        if rms < self._silence_threshold:
+            logger.warning(
+                f"무음 파일 감지: RMS={rms:.6f} < 임계값={self._silence_threshold}. "
+                f"오디오 장치를 확인하세요."
+            )
+            return False
+
+        return True
+
     def _parse_device_list(self, stderr_output: str) -> list[AudioDevice]:
         """ffmpeg stderr 출력에서 오디오 장치 목록을 파싱한다.
 
@@ -302,11 +351,21 @@ class AudioRecorder:
                         name = name.strip()
 
                         is_blackhole = "blackhole" in name.lower()
+                        # 가상 장치 감지 (BlackHole은 별도 is_blackhole로 처리)
+                        virtual_keywords = [
+                            "zoom", "virtual", "aggregate",
+                            "soundflower", "loopback",
+                        ]
+                        name_lower = name.lower()
+                        is_virtual = any(
+                            kw in name_lower for kw in virtual_keywords
+                        )
                         devices.append(
                             AudioDevice(
                                 index=idx,
                                 name=name,
                                 is_blackhole=is_blackhole,
+                                is_virtual=is_virtual,
                             )
                         )
                 except (ValueError, IndexError):
@@ -314,15 +373,25 @@ class AudioRecorder:
 
         logger.info(f"오디오 장치 감지: {len(devices)}개")
         for dev in devices:
-            logger.info(f"  [{dev.index}] {dev.name}{' (BlackHole)' if dev.is_blackhole else ''}")
+            # 장치 타입 레이블 생성
+            label = ""
+            if dev.is_blackhole:
+                label = " (BlackHole)"
+            elif dev.is_virtual:
+                label = " (가상 장치)"
+            logger.info(f"  [{dev.index}] {dev.name}{label}")
 
         return devices
 
     async def _select_audio_device(self) -> AudioDevice:
         """녹음에 사용할 오디오 장치를 선택한다.
 
-        prefer_system_audio가 True이고 BlackHole이 설치되어 있으면
-        BlackHole을 사용한다. 그렇지 않으면 기본 마이크를 사용한다.
+        선택 우선순위:
+            1단계: BlackHole 우선 (시스템 오디오 캡처, prefer_system_audio 설정 시)
+            2단계: 가상 장치를 제외한 실제 장치 목록 필터링
+            3단계: 마이크 키워드 매칭 (microphone, built-in 등)
+            4단계: 실제 장치 중 첫 번째 선택
+            5단계: 가상 장치만 있는 경우 경고 후 폴백
 
         Returns:
             선택된 오디오 장치
@@ -335,18 +404,37 @@ class AudioRecorder:
         if not devices:
             raise AudioDeviceError("사용 가능한 오디오 입력 장치가 없습니다.")
 
-        # BlackHole 우선 선택 (설정에서 시스템 오디오 우선일 때)
+        # 1단계: BlackHole 우선 선택 (시스템 오디오 캡처)
         if self._recording_config.prefer_system_audio:
             for dev in devices:
                 if dev.is_blackhole:
-                    logger.info(
-                        f"BlackHole 장치 선택: [{dev.index}] {dev.name} (시스템 오디오 캡처)"
-                    )
+                    logger.info(f"시스템 오디오 장치 선택: [{dev.index}] {dev.name}")
                     return dev
 
-        # 기본 마이크 (첫 번째 장치)
+        # 2단계: 가상 장치 제외한 실제 장치 목록
+        real_devices = [
+            d for d in devices if not d.is_virtual and not d.is_blackhole
+        ]
+
+        # 3단계: 마이크 키워드 매칭
+        mic_keywords = ["microphone", "마이크", "built-in", "internal", "macbook"]
+        for dev in real_devices:
+            if any(kw in dev.name.lower() for kw in mic_keywords):
+                logger.info(f"마이크 장치 선택: [{dev.index}] {dev.name}")
+                return dev
+
+        # 4단계: 가상 장치 제외 후 첫 번째
+        if real_devices:
+            selected = real_devices[0]
+            logger.info(f"기본 오디오 장치 선택: [{selected.index}] {selected.name}")
+            return selected
+
+        # 5단계: 최후 폴백 (가상 장치만 있는 경우)
         selected = devices[0]
-        logger.info(f"기본 마이크 선택: [{selected.index}] {selected.name}")
+        logger.warning(
+            f"실제 마이크를 찾을 수 없어 가상 장치를 사용합니다: "
+            f"[{selected.index}] {selected.name}"
+        )
         return selected
 
     async def start_recording(
@@ -749,6 +837,15 @@ class AudioRecorder:
         file_size = self._current_file.stat().st_size
         if file_size == 0:
             logger.warning(f"녹음 파일이 비어있습니다: {self._current_file}")
+            self._current_file.unlink()
+            return None
+
+        # 무음 감지: RMS 에너지가 임계값 미만이면 무음 파일로 판정
+        if not self._check_audio_energy(self._current_file):
+            logger.warning(
+                f"무음 녹음 파일 파기: {self._current_file} "
+                f"(장치: {self._current_device.name if self._current_device else '알 수 없음'})"
+            )
             self._current_file.unlink()
             return None
 

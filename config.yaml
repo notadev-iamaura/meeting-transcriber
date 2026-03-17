@@ -136,6 +136,7 @@ recording:
   min_duration_seconds: 5                      # 최소 녹음 시간 (미달 시 파기)
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
   multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음
+  silence_threshold_rms: 0.001                   # 무음 판정 RMS 임계값 (0.0~1.0)
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:
