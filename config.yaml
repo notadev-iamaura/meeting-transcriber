@@ -30,7 +30,7 @@ diarization:
 
 # === LLM 설정 (EXAONE via Ollama) ===
 llm:
-  backend: "ollama"                           # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
+  backend: "mlx"                              # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
   model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
   mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # MLX 모델명

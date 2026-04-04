@@ -265,6 +265,8 @@ class Transcriber:
     def _parse_segments(self, raw_result: dict[str, Any]) -> list[TranscriptSegment]:
         """mlx_whisper의 원시 결과를 TranscriptSegment 리스트로 변환한다.
 
+        word_timestamps=True일 때 세그먼트 내 words 배열에서
+        세밀한 시작/종료 시간을 추출하여 30초 고정 윈도우 문제를 해결한다.
         빈 텍스트 세그먼트는 필터링하고, 한국어 텍스트는 NFC 정규화한다.
 
         Args:
@@ -286,11 +288,20 @@ class Transcriber:
             # 한국어 텍스트 NFC 정규화
             text = self._normalize_korean_text(text)
 
+            # word_timestamps가 있으면 세밀한 타임스탬프 사용
+            words = seg.get("words")
+            if words and len(words) > 0:
+                start = float(words[0].get("start", seg.get("start", 0.0)))
+                end = float(words[-1].get("end", seg.get("end", 0.0)))
+            else:
+                start = float(seg.get("start", 0.0))
+                end = float(seg.get("end", 0.0))
+
             segments.append(
                 TranscriptSegment(
                     text=text,
-                    start=float(seg.get("start", 0.0)),
-                    end=float(seg.get("end", 0.0)),
+                    start=start,
+                    end=end,
                     avg_logprob=float(seg.get("avg_logprob", 0.0)),
                     no_speech_prob=float(seg.get("no_speech_prob", 0.0)),
                 )
@@ -317,7 +328,7 @@ class Transcriber:
         kwargs: dict[str, Any] = {
             "path_or_hf_repo": self._model_name,
             "language": self._language,
-            "word_timestamps": False,
+            "word_timestamps": True,
             "condition_on_previous_text": self._condition_on_previous_text,
         }
 

@@ -31,11 +31,13 @@ class JobStatus(str, Enum):
     """작업 큐의 상태를 정의하는 열거형.
 
     상태 전이 규칙:
+        recorded → queued (수동 전사 요청 시)
         queued → recording → transcribing → diarizing → merging → embedding → completed
         어떤 상태에서든 → failed 전이 가능
         failed → queued (재시도 시)
     """
 
+    RECORDED = "recorded"
     QUEUED = "queued"
     RECORDING = "recording"
     TRANSCRIBING = "transcribing"
@@ -48,6 +50,7 @@ class JobStatus(str, Enum):
 
 # 유효한 상태 전이 맵 (현재 상태 → 전이 가능한 상태 집합)
 VALID_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
+    JobStatus.RECORDED: {JobStatus.QUEUED, JobStatus.FAILED},  # 수동 전사 요청 시
     JobStatus.QUEUED: {JobStatus.RECORDING, JobStatus.TRANSCRIBING, JobStatus.FAILED},
     JobStatus.RECORDING: {JobStatus.TRANSCRIBING, JobStatus.FAILED},
     JobStatus.TRANSCRIBING: {JobStatus.DIARIZING, JobStatus.FAILED},
@@ -303,12 +306,14 @@ class JobQueue:
         self,
         meeting_id: str,
         audio_path: str,
+        initial_status: str = JobStatus.QUEUED.value,
     ) -> int:
         """새 작업을 큐에 등록한다.
 
         Args:
             meeting_id: 회의 고유 식별자
             audio_path: 오디오 파일 경로
+            initial_status: 초기 상태 (기본값: "queued", "recorded"로 설정 시 전사 대기)
 
         Returns:
             생성된 작업 ID
@@ -332,7 +337,7 @@ class JobQueue:
                     (
                         meeting_id,
                         audio_path,
-                        JobStatus.QUEUED.value,
+                        initial_status,
                         self._max_retries,
                         now,
                         now,
@@ -341,7 +346,7 @@ class JobQueue:
                 conn.commit()
                 job_id = cursor.lastrowid
 
-            logger.info(f"작업 등록: id={job_id}, meeting_id={meeting_id}, audio={audio_path}")
+            logger.info(f"작업 등록: id={job_id}, meeting_id={meeting_id}, status={initial_status}, audio={audio_path}")
             return job_id
 
         except sqlite3.IntegrityError as e:
@@ -705,12 +710,14 @@ class AsyncJobQueue:
         self,
         meeting_id: str,
         audio_path: str,
+        initial_status: str = JobStatus.QUEUED.value,
     ) -> int:
         """비동기로 새 작업을 등록한다.
 
         Args:
             meeting_id: 회의 고유 식별자
             audio_path: 오디오 파일 경로
+            initial_status: 초기 상태 (기본값: "queued", "recorded"로 설정 시 전사 대기)
 
         Returns:
             생성된 작업 ID
@@ -721,6 +728,7 @@ class AsyncJobQueue:
             self._queue.add_job,
             meeting_id,
             audio_path,
+            initial_status,
         )
 
     async def get_job(self, job_id: int) -> Job:

@@ -374,13 +374,16 @@ class FolderWatcher:
                 logger.warning(f"파일 안정화 실패: {resolved.name} — 등록 건너뜀")
                 return
 
-            # 작업 큐에 등록
+            # 작업 큐에 recorded 상태로 등록 (전사는 수동 요청 시 시작)
+            from core.job_queue import JobStatus
+
             job_id = await self._job_queue.add_job(
                 meeting_id=meeting_id,
                 audio_path=str(resolved),
+                initial_status=JobStatus.RECORDED.value,
             )
             logger.info(
-                f"작업 큐 자동 등록: job_id={job_id}, "
+                f"작업 큐 등록 (녹음 완료, 전사 대기): job_id={job_id}, "
                 f"meeting_id={meeting_id}, "
                 f"file={resolved.name}"
             )
@@ -502,12 +505,15 @@ class FolderWatcher:
                 continue
 
             try:
+                from core.job_queue import JobStatus
+
                 job_id = await self._job_queue.add_job(
                     meeting_id=meeting_id,
                     audio_path=str(file_path.resolve()),
+                    initial_status=JobStatus.RECORDED.value,
                 )
                 registered_ids.append(job_id)
-                logger.info(f"기존 파일 큐 등록: {file_path.name} → job_id={job_id}")
+                logger.info(f"기존 파일 등록 (녹음 완료, 전사 대기): {file_path.name} → job_id={job_id}")
             except JobQueueError as e:
                 logger.error(f"기존 파일 등록 실패: {file_path.name} — {e}")
 

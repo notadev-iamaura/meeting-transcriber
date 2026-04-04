@@ -40,8 +40,9 @@
         merging: 3,
         embedding: 4,
         queued: 5,
-        failed: 6,
-        completed: 7,
+        recorded: 6,
+        failed: 7,
+        completed: 8,
     };
 
     // =================================================================
@@ -555,6 +556,10 @@
             '  <div class="section-header">',
             '    <h2 class="section-title">회의 목록</h2>',
             '    <div class="sort-controls">',
+            '      <button class="batch-summarize-btn" id="homeBatchSummarizeBtn"',
+            '              title="요약이 없는 회의들의 AI 요약을 일괄 생성합니다">',
+            '        일괄 요약 생성',
+            '      </button>',
             '      <select class="sort-select" id="homeSortSelect" aria-label="회의 목록 정렬">',
             '        <option value="newest">최신순</option>',
             '        <option value="oldest">오래된순</option>',
@@ -601,6 +606,7 @@
             meetingsLoading: document.getElementById("homeMeetingsLoading"),
             meetingsEmpty: document.getElementById("homeMeetingsEmpty"),
             sortSelect: document.getElementById("homeSortSelect"),
+            batchSummarizeBtn: document.getElementById("homeBatchSummarizeBtn"),
             // 리소스 모니터
             ramValue: document.getElementById("homeRamValue"),
             ramBar: document.getElementById("homeRamBar"),
@@ -649,6 +655,31 @@
         };
         els.sortSelect.addEventListener("change", onSortChange);
         self._listeners.push({ el: els.sortSelect, type: "change", fn: onSortChange });
+
+        // 일괄 요약 생성 버튼
+        var onBatchSummarize = function () {
+            var btn = els.batchSummarizeBtn;
+            btn.disabled = true;
+            btn.textContent = "요약 생성 중...";
+            App.api("/meetings/summarize-batch", { method: "POST", body: JSON.stringify({}) })
+                .then(function (res) {
+                    if (res.total === 0) {
+                        btn.textContent = "요약 대상 없음";
+                        setTimeout(function () {
+                            btn.textContent = "일괄 요약 생성";
+                            btn.disabled = false;
+                        }, 2000);
+                    } else {
+                        btn.textContent = "요약 생성 중 (" + res.total + "건)...";
+                    }
+                })
+                .catch(function () {
+                    btn.textContent = "일괄 요약 생성";
+                    btn.disabled = false;
+                });
+        };
+        els.batchSummarizeBtn.addEventListener("click", onBatchSummarize);
+        self._listeners.push({ el: els.batchSummarizeBtn, type: "click", fn: onBatchSummarize });
 
         // WebSocket 이벤트: 파이프라인 상태
         var onPipelineStatus = function (e) {
@@ -977,10 +1008,22 @@
 
             card.appendChild(progressEl);
 
-            // 액션 버튼 (실패 시 재시도, 완료/실패 시 삭제)
-            if (meeting.status === "failed" || meeting.status === "completed") {
+            // 액션 버튼 (녹음 완료 시 전사 시작, 실패 시 재시도, 완료/실패 시 삭제)
+            if (meeting.status === "recorded" || meeting.status === "failed" || meeting.status === "completed") {
                 var actionsEl = document.createElement("div");
                 actionsEl.className = "meeting-card-actions";
+
+                if (meeting.status === "recorded") {
+                    var transcribeBtn = document.createElement("button");
+                    transcribeBtn.className = "meeting-card-action transcribe";
+                    transcribeBtn.textContent = "\u25B6 전사 시작";
+                    transcribeBtn.setAttribute("aria-label", meeting.meeting_id + " 전사 시작");
+                    transcribeBtn.addEventListener("click", function (e) {
+                        e.stopPropagation();
+                        self._transcribeMeeting(meeting.meeting_id, transcribeBtn);
+                    });
+                    actionsEl.appendChild(transcribeBtn);
+                }
 
                 if (meeting.status === "failed") {
                     var retryBtn = document.createElement("button");
@@ -1240,6 +1283,26 @@
         if (fillEl && currentIdx >= 0) {
             var pct = Math.round(((currentIdx + 1) / PIPELINE_STEPS.length) * 100);
             fillEl.style.width = pct + "%";
+        }
+    };
+
+    /**
+     * 녹음 완료된 회의의 전사를 시작한다.
+     * @param {string} meetingId - 전사할 회의 ID
+     * @param {HTMLElement} btn - 클릭된 버튼 요소
+     */
+    HomeView.prototype._transcribeMeeting = async function (meetingId, btn) {
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "요청 중...";
+
+        try {
+            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/transcribe", {});
+            this._fetchMeetings();
+        } catch (e) {
+            errorBanner.show("전사 시작 실패: " + e.message);
+            btn.disabled = false;
+            btn.textContent = originalText;
         }
     };
 
@@ -2203,6 +2266,7 @@
 
                 var statusLabel = {
                     completed: "\u2705",
+                    recorded: "\uD83C\uDFA4",
                     recording: "\uD83D\uDD34",
                     transcribing: "\u2699\uFE0F",
                     diarizing: "\u2699\uFE0F",

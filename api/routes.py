@@ -714,6 +714,77 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
         ) from e
 
 
+@router.post("/meetings/{meeting_id}/transcribe")
+async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
+    """녹음 완료된 회의의 전사를 시작한다.
+
+    recorded 상태의 작업을 queued로 전환하여 전사 파이프라인을 트리거한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 전사할 회의 고유 식별자
+
+    Returns:
+        MeetingItem: 업데이트된 회의 정보
+
+    Raises:
+        HTTPException: 회의를 찾을 수 없을 때 (404), 상태 전이 불가 시 (409)
+    """
+    from core.job_queue import InvalidTransitionError, JobNotFoundError, JobStatus
+
+    queue = _get_job_queue(request)
+
+    try:
+        import asyncio
+
+        job = await asyncio.to_thread(
+            queue.queue.get_job_by_meeting_id,
+            meeting_id,
+        )
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        if job.status != JobStatus.RECORDED.value:
+            raise HTTPException(
+                status_code=409,
+                detail=f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)",
+            )
+
+        updated_job = await asyncio.to_thread(
+            queue.queue.update_status,
+            job.id,
+            JobStatus.QUEUED,
+        )
+
+        logger.info(f"전사 시작 요청: {meeting_id} (job_id={job.id})")
+
+        return MeetingItem(
+            id=updated_job.id,
+            meeting_id=updated_job.meeting_id,
+            audio_path=updated_job.audio_path,
+            status=updated_job.status,
+            retry_count=updated_job.retry_count,
+            error_message=updated_job.error_message,
+            created_at=updated_job.created_at,
+            updated_at=updated_job.updated_at,
+        )
+    except HTTPException:
+        raise
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"전사 시작 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"전사 시작 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     """회의를 삭제한다.
@@ -776,7 +847,10 @@ async def get_transcript(
 ) -> TranscriptResponse:
     """특정 회의의 전사문(보정된 발화 목록)을 반환한다.
 
-    outputs/{meeting_id}/corrected.json 파일에서 발화 데이터를 읽어 반환한다.
+    다음 순서로 폴백하여 데이터를 찾는다:
+      1. outputs/{meeting_id}/corrected.json (LLM 보정 완료)
+      2. checkpoints/{meeting_id}/correct.json (보정 체크포인트)
+      3. checkpoints/{meeting_id}/merge.json (병합 결과, 미보정)
 
     Args:
         request: FastAPI Request 객체
@@ -789,10 +863,27 @@ async def get_transcript(
         HTTPException: 유효하지 않은 ID(400), 파일 미존재(404), 서버 에러(500)
     """
     _validate_meeting_id(meeting_id)
-    outputs_dir = _get_outputs_dir(request)
-    corrected_path = outputs_dir / meeting_id / "corrected.json"
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
-    if not corrected_path.is_file():
+    outputs_dir = config.paths.resolved_outputs_dir
+    checkpoints_dir = config.paths.resolved_checkpoints_dir
+
+    # 폴백 순서: corrected.json → correct.json → merge.json
+    candidates = [
+        outputs_dir / meeting_id / "corrected.json",
+        checkpoints_dir / meeting_id / "correct.json",
+        checkpoints_dir / meeting_id / "merge.json",
+    ]
+
+    transcript_path: Path | None = None
+    for candidate in candidates:
+        if candidate.is_file():
+            transcript_path = candidate
+            break
+
+    if transcript_path is None:
         raise HTTPException(
             status_code=404,
             detail=f"전사문을 찾을 수 없습니다: {meeting_id}",
@@ -802,16 +893,19 @@ async def get_transcript(
         import asyncio
 
         # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
-        data = await asyncio.to_thread(_json_cache.get, corrected_path)
+        data = await asyncio.to_thread(_json_cache.get, transcript_path)
+
+        # merge.json은 original_text/was_corrected 필드가 없으므로 폴백 처리
+        is_merge_fallback = "merge" in transcript_path.name
 
         utterances = [
             TranscriptUtteranceItem(
                 text=u.get("text", ""),
-                original_text=u.get("original_text", ""),
+                original_text=u.get("original_text", u.get("text", "")),
                 speaker=u.get("speaker", "UNKNOWN"),
                 start=u.get("start", 0.0),
                 end=u.get("end", 0.0),
-                was_corrected=u.get("was_corrected", False),
+                was_corrected=u.get("was_corrected", False) if not is_merge_fallback else False,
             )
             for u in data.get("utterances", [])
         ]
@@ -1180,6 +1274,112 @@ async def summarize_meeting(
         "status": "ok",
         "message": "요약 생성을 시작합니다.",
         "meeting_id": meeting_id,
+    }
+
+
+class SummarizeBatchRequest(BaseModel):
+    """일괄 요약 요청 모델."""
+
+    meeting_ids: list[str] = Field(
+        default_factory=list,
+        description="요약할 회의 ID 목록. 빈 리스트이면 요약이 없는 전체 회의 대상.",
+    )
+
+
+@router.post("/meetings/summarize-batch")
+async def summarize_batch(
+    request: Request,
+    body: SummarizeBatchRequest | None = None,
+) -> dict[str, Any]:
+    """일괄 요약 생성: 여러 회의의 LLM 후처리를 순차 실행한다.
+
+    meeting_ids를 지정하면 해당 회의만, 빈 리스트이면
+    merge 체크포인트가 있고 summary가 없는 모든 회의를 대상으로 한다.
+    메모리 부족 방지를 위해 백그라운드에서 순차(하나씩) 실행된다.
+
+    Args:
+        request: FastAPI Request 객체
+        body: 요약할 회의 ID 목록 (선택)
+
+    Returns:
+        요약 시작 확인 메시지 및 대상 회의 목록
+    """
+    from core.pipeline import PipelineStep
+
+    pipeline = _get_pipeline_manager(request)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
+
+    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    outputs_dir = config.paths.resolved_outputs_dir
+
+    meeting_ids = body.meeting_ids if body and body.meeting_ids else []
+
+    if not meeting_ids:
+        # merge 체크포인트가 있고 summary가 없는 회의 자동 탐색
+        for cp_dir in sorted(checkpoints_dir.iterdir()):
+            if not cp_dir.is_dir():
+                continue
+            mid = cp_dir.name
+            merge_cp = cp_dir / "merge.json"
+            summary_md = outputs_dir / mid / "summary.md"
+            if merge_cp.is_file() and not summary_md.is_file():
+                meeting_ids.append(mid)
+
+    if not meeting_ids:
+        return {
+            "status": "ok",
+            "message": "요약 대상 회의가 없습니다.",
+            "meeting_ids": [],
+            "total": 0,
+        }
+
+    # 유효성 검증: merge 체크포인트 존재 여부
+    valid_ids: list[str] = []
+    for mid in meeting_ids:
+        _validate_meeting_id(mid)
+        merge_cp = checkpoints_dir / mid / "merge.json"
+        if merge_cp.is_file():
+            valid_ids.append(mid)
+        else:
+            logger.warning(f"일괄 요약 건너뜀: merge 체크포인트 없음 ({mid})")
+
+    if not valid_ids:
+        return {
+            "status": "ok",
+            "message": "유효한 요약 대상이 없습니다.",
+            "meeting_ids": [],
+            "total": 0,
+        }
+
+    async def _run_batch(ids: list[str]) -> None:
+        """백그라운드에서 순차적으로 LLM 단계를 실행한다."""
+        for mid in ids:
+            try:
+                logger.info(f"일괄 요약 실행: {mid}")
+                await pipeline.run_llm_steps(mid)
+                logger.info(f"일괄 요약 완료: {mid}")
+            except Exception:
+                logger.exception(f"일괄 요약 실패: {mid}")
+
+    task = asyncio.create_task(
+        _run_batch(valid_ids),
+        name="summarize-batch",
+    )
+    task.add_done_callback(_log_task_exception)
+    running_tasks = getattr(request.app.state, "running_tasks", None)
+    if running_tasks is not None:
+        running_tasks.add(task)
+        task.add_done_callback(running_tasks.discard)
+
+    logger.info(f"일괄 요약 시작: {len(valid_ids)}건")
+
+    return {
+        "status": "ok",
+        "message": f"일괄 요약 생성을 시작합니다 ({len(valid_ids)}건).",
+        "meeting_ids": valid_ids,
+        "total": len(valid_ids),
     }
 
 

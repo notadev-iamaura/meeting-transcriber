@@ -15,6 +15,7 @@
     // 상태별 한국어 레이블 (회의 상태 표시에 사용)
     var STATUS_LABELS = {
         completed: "완료",
+        recorded: "녹음 완료",
         recording: "녹음 중",
         transcribing: "전사 중",
         diarizing: "화자분리 중",
