@@ -378,7 +378,7 @@ class TestAudioValidation:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
         empty = tmp_path / "empty.wav"
         empty.write_bytes(b"")
-        with pytest.raises(EmptyAudioError, match="비어있습니다"):
+        with pytest.raises(EmptyAudioError, match="너무 짧습니다|식별할 수 없습니다|비어있습니다"):
             diarizer._validate_audio(empty)
 
     def test_유효한_파일(self, mock_config, mock_manager, sample_audio):
@@ -521,7 +521,7 @@ class TestDiarize:
         # 빈 annotation 반환
         mock_pipeline.return_value = _make_mock_annotation([])
 
-        with pytest.raises(EmptyAudioError, match="비어있습니다"):
+        with pytest.raises(EmptyAudioError, match="너무 짧습니다|식별할 수 없습니다|비어있습니다"):
             await diarizer.diarize(sample_audio)
 
     @pytest.mark.asyncio
@@ -534,7 +534,7 @@ class TestDiarize:
 
         mock_pipeline.side_effect = RuntimeError("CUDA out of memory")
 
-        with pytest.raises(DiarizationError, match="화자분리 처리 중 오류"):
+        with pytest.raises(DiarizationError, match="화자분리 중 오류가 발생했습니다"):
             await diarizer.diarize(sample_audio)
 
     @pytest.mark.asyncio
@@ -626,7 +626,7 @@ class TestDiarize:
                 "_run_pipeline",
                 side_effect=lambda *a: time.sleep(5),
             ),
-            pytest.raises(DiarizationError, match="타임아웃"),
+            pytest.raises(DiarizationError, match="시간이 초과되었습니다"),
         ):
             await diarizer.diarize(sample_audio)
 

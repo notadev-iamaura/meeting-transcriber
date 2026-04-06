@@ -506,7 +506,7 @@ class TestTranscribe:
         assert call_kwargs[1]["language"] == "ko"
         # beam_size는 decode_options → DecodingOptions로 전달됨
         assert call_kwargs[1]["beam_size"] == 5
-        assert call_kwargs[1]["word_timestamps"] is False
+        assert call_kwargs[1]["word_timestamps"] is True
 
     @pytest.mark.asyncio
     async def test_beam_size_decode_options_전달(

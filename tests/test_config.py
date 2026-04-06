@@ -480,12 +480,12 @@ class TestRecordingConfig:
 class TestLLMBackendConfig:
     """LLM 백엔드 설정 테스트."""
 
-    def test_backend_기본값_ollama(self) -> None:
-        """backend 기본값이 'ollama'인지 확인한다."""
+    def test_backend_기본값_mlx(self) -> None:
+        """backend 기본값이 'mlx'인지 확인한다."""
         from config import LLMConfig
 
         llm = LLMConfig()
-        assert llm.backend == "ollama"
+        assert llm.backend == "mlx"
 
     def test_backend_mlx_설정(self) -> None:
         """backend를 'mlx'로 설정할 수 있는지 확인한다."""

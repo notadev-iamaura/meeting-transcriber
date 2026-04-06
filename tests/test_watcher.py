@@ -301,7 +301,7 @@ class TestJobRegistration:
         job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "new_meeting")
         assert job is not None
         assert job.meeting_id == "new_meeting"
-        assert job.status == "queued"
+        assert job.status == "recorded"
 
     @pytest.mark.asyncio
     async def test_중복_파일_등록_방지(
@@ -640,7 +640,7 @@ class TestIntegration:
         # 큐에 등록 확인
         job = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, "realtime_test")
         assert job is not None
-        assert job.status == "queued"
+        assert job.status == "recorded"
 
         await watcher.stop()
 

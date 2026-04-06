@@ -138,6 +138,9 @@ class TestMLXBackendChat:
         backend._temperature = 0.3
         backend._max_tokens = 1000
         backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
         backend._tokenizer.apply_chat_template = MagicMock(
             return_value="formatted prompt"
         )
@@ -148,6 +151,7 @@ class TestMLXBackendChat:
         backend = MLXBackend.__new__(MLXBackend)
         backend._model = None
         backend._tokenizer = None
+        backend._use_vlm = False
 
         with pytest.raises(MLXGenerationError, match="모델이 로드되지 않았습니다"):
             backend.chat(messages=[{"role": "user", "content": "테스트"}])
@@ -202,6 +206,9 @@ class TestMLXBackendChatStream:
         backend._temperature = 0.3
         backend._max_tokens = 1000
         backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
         backend._tokenizer.apply_chat_template = MagicMock(
             return_value="formatted prompt"
         )
@@ -212,6 +219,7 @@ class TestMLXBackendChatStream:
         backend = MLXBackend.__new__(MLXBackend)
         backend._model = None
         backend._tokenizer = None
+        backend._use_vlm = False
 
         with pytest.raises(MLXGenerationError, match="모델이 로드되지 않았습니다"):
             list(
@@ -233,6 +241,9 @@ class TestMLXBackendCleanup:
         backend._model = MagicMock()
         backend._tokenizer = MagicMock()
         backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
 
         with patch.dict("sys.modules", {"mlx": None, "mlx.core": None}):
             backend.cleanup()
@@ -246,6 +257,9 @@ class TestMLXBackendCleanup:
         backend._model = MagicMock()
         backend._tokenizer = MagicMock()
         backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
 
         mock_mx = MagicMock()
         mock_mx.metal.clear_cache = MagicMock()
@@ -263,6 +277,9 @@ class TestMLXBackendCleanup:
         backend._model = MagicMock()
         backend._tokenizer = MagicMock()
         backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
 
         # ImportError가 발생해도 정상 종료
         with patch(
@@ -284,6 +301,7 @@ class TestApplyChatTemplate:
     def test_챗_템플릿_적용(self) -> None:
         """tokenizer.apply_chat_template를 올바르게 호출한다."""
         backend = MLXBackend.__new__(MLXBackend)
+        backend._use_vlm = False
         backend._tokenizer = MagicMock()
         backend._tokenizer.apply_chat_template.return_value = "formatted"
 

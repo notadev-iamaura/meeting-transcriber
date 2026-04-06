@@ -108,6 +108,7 @@ def _make_config() -> AppConfig:
             system_prompt="당신은 회의 내용 기반 AI 어시스턴트입니다.",
         ),
         llm=LLMConfig(
+            backend="ollama",
             model_name="exaone3.5:7.8b-instruct-q4_K_M",
             host="http://127.0.0.1:11434",
             temperature=0.3,
