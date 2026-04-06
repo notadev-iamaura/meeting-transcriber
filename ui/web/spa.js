@@ -1,10 +1,10 @@
 /* =================================================================
  * 회의 전사 시스템 — SPA 모듈 (spa.js)
  *
- * 목적: 3개의 독립 HTML 페이지(index, viewer, chat)를
- *       단일 페이지 애플리케이션(SPA)으로 통합한다.
- *       History API 기반 클라이언트 라우터, 사이드바 회의 목록,
- *       HomeView / ViewerView / ChatView 를 제공한다.
+ * 목적: 3-column 레이아웃(nav-bar + list-panel + content) 기반
+ *       단일 페이지 애플리케이션(SPA)을 구현한다.
+ *       History API 기반 클라이언트 라우터, 네비게이션 바,
+ *       리스트 패널, EmptyView / ViewerView / SearchView / ChatView 를 제공한다.
  *
  * 의존성: MeetingApp (app.js) — apiRequest, apiPost, apiDelete,
  *         formatDate, formatTime, escapeHtml, safeText, getFileName,
@@ -16,6 +16,40 @@
     "use strict";
 
     var App = window.MeetingApp;
+
+    // === SVG 아이콘 (macOS SF Symbols 스타일, 16x16, stroke-width 1.5) ===
+    var Icons = {
+        // 마이크 아이콘 (오디오 파일)
+        mic: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1.5a2 2 0 0 0-2 2v4a2 2 0 0 0 4 0v-4a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 6.5v1a4 4 0 0 0 8 0v-1M8 11.5v3M6 14.5h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 달력 아이콘 (날짜)
+        calendar: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="2.5" width="13" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M1.5 6.5h13M5 1v3M11 1v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        // 사람 아이콘 (화자)
+        person: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="5" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M3 14.5c0-2.76 2.24-5 5-5s5 2.24 5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        // 말풍선 아이콘 (발화)
+        chat: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.5 2.5h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-6l-3 2.5v-2.5h-2a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 메모 아이콘 (전사/기록)
+        doc: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3a1.5 1.5 0 0 1 1-1.5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.5 1.5V5H13M5.5 8.5h5M5.5 11h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        // 시계 아이콘 (타임스탬프)
+        clock: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 4v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 클립 아이콘 (참조/첨부)
+        clip: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 14.5a3.5 3.5 0 0 1-3.5-3.5V5a2.5 2.5 0 0 1 5 0v6a1.5 1.5 0 0 1-3 0V5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 복사 아이콘
+        copy: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 10.5h-1a1.5 1.5 0 0 1-1.5-1.5v-7a1.5 1.5 0 0 1 1.5-1.5h7a1.5 1.5 0 0 1 1.5 1.5v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        // 체크 아이콘 (완료/복사됨)
+        check: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 8.5l3.5 3.5L13 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 클립보드/목록 아이콘 (빈 상태)
+        clipboard: '<svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="6" width="28" height="36" rx="4" stroke="currentColor" stroke-width="2"/><path d="M18 6v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1M16 18h16M16 26h10M16 34h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+        // 녹음 도트 아이콘
+        recordDot: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="4" fill="#FF3B30"/></svg>',
+        // 재생 아이콘
+        play: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 2.5l9 5.5-9 5.5V2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // 기어 아이콘 (처리 중)
+        gear: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        // 모래시계 아이콘 (대기 중)
+        hourglass: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 1.5h8M4 14.5h8M4.5 1.5v3.5L8 8l-3.5 3v3.5M11.5 1.5v3.5L8 8l3.5 3v3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        // X 아이콘 (실패)
+        xCircle: '<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    };
 
     // === 상수 ===
     var STATUS_POLL_INTERVAL = 5000;     // 상태 폴링 간격 (ms)
@@ -68,6 +102,59 @@
 
 
     // =================================================================
+    // === NavBar (네비게이션 바 제어) ===
+    // =================================================================
+
+    var NavBar = (function () {
+        var _buttons = [];
+
+        /**
+         * 네비게이션 바를 초기화한다.
+         * nav-btn 클릭 시 라우터 내비게이션을 수행한다.
+         */
+        function init() {
+            _buttons = Array.from(document.querySelectorAll("#nav-bar .nav-btn"));
+
+            _buttons.forEach(function (btn) {
+                btn.addEventListener("click", function () {
+                    var route = btn.getAttribute("data-route");
+                    if (route) {
+                        Router.navigate(route);
+                    }
+                });
+            });
+        }
+
+        /**
+         * 현재 경로에 맞는 네비게이션 버튼을 활성화한다.
+         * @param {string} path - URL 경로
+         */
+        function setActiveFromPath(path) {
+            var pathname = path.split("?")[0];
+
+            _buttons.forEach(function (btn) {
+                var route = btn.getAttribute("data-route");
+                btn.classList.remove("active");
+
+                // /app 라우트: /app 또는 /app/viewer/* 경로에서 활성화
+                if (route === "/app") {
+                    if (pathname === "/app" || pathname === "/app/" || pathname.indexOf("/app/viewer/") === 0) {
+                        btn.classList.add("active");
+                    }
+                } else if (route === pathname) {
+                    btn.classList.add("active");
+                }
+            });
+        }
+
+        return {
+            init: init,
+            setActiveFromPath: setActiveFromPath,
+        };
+    })();
+
+
+    // =================================================================
     // === Router (History API 기반 클라이언트 라우터) ===
     // =================================================================
 
@@ -88,6 +175,13 @@
                 },
             },
             {
+                // /app/search
+                pattern: /^\/app\/search$/,
+                handler: function () {
+                    return new SearchView();
+                },
+            },
+            {
                 // /app/chat
                 pattern: /^\/app\/chat$/,
                 handler: function () {
@@ -95,10 +189,17 @@
                 },
             },
             {
-                // /app (홈) — 기본 라우트
+                // /app/settings
+                pattern: /^\/app\/settings$/,
+                handler: function () {
+                    return new SettingsView();
+                },
+            },
+            {
+                // /app (홈) — 기본 라우트 → EmptyView
                 pattern: /^\/app\/?$/,
                 handler: function () {
-                    return new HomeView();
+                    return new EmptyView();
                 },
             },
         ];
@@ -120,11 +221,25 @@
             // 콘텐츠 영역 초기화
             _contentEl.innerHTML = "";
 
+            // list-panel chat-mode 처리 (채팅 뷰에서는 CSS로 숨김)
+            var listPanel = document.getElementById("list-panel");
+            if (listPanel) {
+                if (pathname === "/app/chat" || pathname === "/app/settings") {
+                    listPanel.classList.add("chat-mode");
+                } else {
+                    listPanel.classList.remove("chat-mode");
+                }
+            }
+
             // 경로 매칭
             for (var i = 0; i < routes.length; i++) {
                 var match = pathname.match(routes[i].pattern);
                 if (match) {
                     _currentView = routes[i].handler(match);
+                    // 네비게이션 바 활성 상태 업데이트
+                    NavBar.setActiveFromPath(path);
+                    // 리스트 패널 활성 항목 업데이트
+                    ListPanel.setActiveFromPath(pathname);
                     return;
                 }
             }
@@ -142,10 +257,8 @@
 
             // 뒤로가기/앞으로가기 처리
             window.addEventListener("popstate", function () {
-                // navigate()와 동일하게 전체 경로 전달 (resolve() 내부에서 쿼리 분리)
                 var fullPath = window.location.pathname + window.location.search;
                 resolve(fullPath);
-                Sidebar.setActiveFromPath(window.location.pathname);
             });
 
             // 현재 경로에 맞는 뷰 렌더링
@@ -158,7 +271,6 @@
             }
 
             resolve(path);
-            Sidebar.setActiveFromPath(path);
         }
 
         /**
@@ -171,7 +283,6 @@
             if (current === path) return;
             history.pushState(null, "", path);
             resolve(path);
-            Sidebar.setActiveFromPath(path);
         }
 
         /**
@@ -191,14 +302,16 @@
 
 
     // =================================================================
-    // === Sidebar (사이드바 회의 목록) ===
+    // === ListPanel (리스트 패널 — 회의 목록) ===
     // =================================================================
 
-    var Sidebar = (function () {
+    var ListPanel = (function () {
         var _meetings = [];           // 전체 회의 목록 데이터
         var _activeId = null;         // 현재 활성화된 회의 ID
-        var _listEl = null;           // #meeting-list 엘리먼트
-        var _searchEl = null;         // #sidebar-search 엘리먼트
+        var _listEl = null;           // #listContent 엘리먼트
+        var _searchEl = null;         // #listSearchInput 엘리먼트
+        var _sortEl = null;           // #listSortSelect 엘리먼트
+        var _countEl = null;          // #listCount 엘리먼트
         var _statusDot = null;        // #statusDot 엘리먼트
         var _statusText = null;       // #statusText 엘리먼트
         var _statusTimer = null;      // 상태 폴링 타이머
@@ -206,21 +319,32 @@
         var _searchTimeout = null;    // 검색 디바운스 타이머
 
         /**
-         * 사이드바를 초기화한다.
+         * 리스트 패널을 초기화한다.
          */
         function init() {
-            _listEl = document.getElementById("meeting-list");
-            _searchEl = document.getElementById("sidebar-search");
+            _listEl = document.getElementById("listContent");
+            _searchEl = document.getElementById("listSearchInput");
+            _sortEl = document.getElementById("listSortSelect");
+            _countEl = document.getElementById("listCount");
             _statusDot = document.getElementById("statusDot");
             _statusText = document.getElementById("statusText");
 
             // 검색 입력 디바운스
-            _searchEl.addEventListener("input", function () {
-                clearTimeout(_searchTimeout);
-                _searchTimeout = setTimeout(function () {
-                    filter(_searchEl.value.trim());
-                }, 250);
-            });
+            if (_searchEl) {
+                _searchEl.addEventListener("input", function () {
+                    clearTimeout(_searchTimeout);
+                    _searchTimeout = setTimeout(function () {
+                        _applyFilterAndSort();
+                    }, 250);
+                });
+            }
+
+            // 정렬 변경
+            if (_sortEl) {
+                _sortEl.addEventListener("change", function () {
+                    _applyFilterAndSort();
+                });
+            }
 
             // WebSocket 이벤트 리스닝 — 회의 목록 자동 갱신
             document.addEventListener("ws:job_completed", function () {
@@ -303,16 +427,95 @@
         }
 
         /**
-         * 회의 목록을 API에서 가져와 사이드바에 렌더링한다.
+         * 회의 목록을 API에서 가져와 렌더링한다.
          */
         async function loadMeetings() {
             try {
                 var data = await App.apiRequest("/meetings");
                 _meetings = data.meetings || [];
-                render(_meetings);
+                _applyFilterAndSort();
             } catch (e) {
-                // 조용히 처리 (사이드바 로드 실패는 치명적이지 않음)
+                // 조용히 처리 (리스트 로드 실패는 치명적이지 않음)
             }
+        }
+
+        /**
+         * 현재 검색어와 정렬 기준으로 필터링 및 정렬 후 렌더링한다.
+         */
+        function _applyFilterAndSort() {
+            var query = _searchEl ? _searchEl.value.trim() : "";
+            var filtered = _meetings;
+
+            // 검색 필터
+            if (query) {
+                var lower = query.toLowerCase();
+                filtered = _meetings.filter(function (m) {
+                    var idMatch = (m.meeting_id || "").toLowerCase().indexOf(lower) >= 0;
+                    var summaryMatch = (m.summary_preview || "").toLowerCase().indexOf(lower) >= 0;
+                    return idMatch || summaryMatch;
+                });
+            }
+
+            // 정렬
+            var sortBy = _sortEl ? _sortEl.value : "newest";
+            filtered = _sortMeetings(filtered, sortBy);
+
+            // 카운트 업데이트
+            if (_countEl) {
+                App.safeText(_countEl, filtered.length + "/" + _meetings.length);
+            }
+
+            render(filtered);
+        }
+
+        /**
+         * 회의 목록을 정렬한다.
+         * @param {Array} meetings - 회의 목록
+         * @param {string} sortBy - 정렬 기준
+         * @returns {Array} 정렬된 배열
+         */
+        function _sortMeetings(meetings, sortBy) {
+            var sorted = meetings.slice();
+
+            if (sortBy === "newest") {
+                sorted.sort(function (a, b) {
+                    return (b.created_at || "").localeCompare(a.created_at || "");
+                });
+            } else if (sortBy === "oldest") {
+                sorted.sort(function (a, b) {
+                    return (a.created_at || "").localeCompare(b.created_at || "");
+                });
+            } else if (sortBy === "status") {
+                sorted.sort(function (a, b) {
+                    var oa = STATUS_SORT_ORDER[a.status] != null ? STATUS_SORT_ORDER[a.status] : 99;
+                    var ob = STATUS_SORT_ORDER[b.status] != null ? STATUS_SORT_ORDER[b.status] : 99;
+                    if (oa !== ob) return oa - ob;
+                    return (b.created_at || "").localeCompare(a.created_at || "");
+                });
+            }
+
+            return sorted;
+        }
+
+        /**
+         * meeting_id에서 날짜 기반 제목을 추출한다.
+         * 예: "meeting_20260310_193619" → "2026-03-10 19:36"
+         * @param {string} meetingId - 회의 ID
+         * @param {string} createdAt - 생성일 (폴백)
+         * @returns {string} 날짜 기반 제목
+         */
+        function _extractTitle(meetingId, createdAt) {
+            // meeting_YYYYMMDD_HHMMSS 패턴 매칭
+            var match = (meetingId || "").match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+            if (match) {
+                return match[1] + "-" + match[2] + "-" + match[3] + " " +
+                       match[4] + ":" + match[5];
+            }
+            // 폴백: created_at 날짜 사용
+            if (createdAt) {
+                return App.formatDate(createdAt);
+            }
+            return meetingId || "-";
         }
 
         /**
@@ -323,50 +526,95 @@
             _listEl.innerHTML = "";
 
             if (meetings.length === 0) {
-                var empty = document.createElement("li");
-                empty.className = "meeting-list-empty";
-                empty.textContent = "회의가 없습니다";
+                var empty = document.createElement("div");
+                empty.className = "list-empty";
+                empty.textContent = "회의 없음";
                 _listEl.appendChild(empty);
                 return;
             }
 
-            // 최신순 정렬
-            var sorted = meetings.slice().sort(function (a, b) {
-                return (b.created_at || "").localeCompare(a.created_at || "");
-            });
-
-            sorted.forEach(function (meeting) {
-                var li = document.createElement("li");
-                li.className = "meeting-list-item";
+            meetings.forEach(function (meeting) {
+                var item = document.createElement("div");
+                item.className = "meeting-item";
+                item.setAttribute("data-meeting-id", meeting.meeting_id);
+                item.setAttribute("role", "option");
+                item.setAttribute("tabindex", "0");
+                item.setAttribute("aria-label",
+                    _extractTitle(meeting.meeting_id, meeting.created_at) +
+                    " — " + App.getStatusLabel(meeting.status));
                 if (meeting.meeting_id === _activeId) {
-                    li.classList.add("active");
+                    item.classList.add("active");
+                    item.setAttribute("aria-selected", "true");
+                } else {
+                    item.setAttribute("aria-selected", "false");
                 }
 
-                // 상태 아이콘
-                var statusIcon = document.createElement("span");
-                statusIcon.className = "meeting-list-status " + meeting.status;
-                statusIcon.textContent = App.getStatusLabel(meeting.status);
+                // 처리 중인 항목: pulse 애니메이션
+                var isProcessing = (
+                    meeting.status !== "completed" &&
+                    meeting.status !== "failed" &&
+                    meeting.status !== "recorded" &&
+                    meeting.status !== "queued"
+                );
+                if (isProcessing) {
+                    item.classList.add("processing");
+                }
 
-                // 회의 ID
-                var titleEl = document.createElement("span");
-                titleEl.className = "meeting-list-title";
-                titleEl.textContent = meeting.meeting_id;
+                // 상태 도트
+                var statusDot = document.createElement("span");
+                statusDot.className = "meeting-item-dot";
+                if (meeting.status === "completed") {
+                    statusDot.classList.add("completed");
+                } else if (meeting.status === "failed") {
+                    statusDot.classList.add("failed");
+                } else if (isProcessing) {
+                    statusDot.classList.add("processing");
+                } else if (meeting.status === "recorded") {
+                    statusDot.classList.add("recorded");
+                } else {
+                    statusDot.classList.add("queued");
+                }
 
-                // 날짜
-                var dateEl = document.createElement("span");
-                dateEl.className = "meeting-list-date";
-                dateEl.textContent = App.formatDate(meeting.created_at);
+                // 텍스트 컨테이너
+                var textContainer = document.createElement("div");
+                textContainer.className = "meeting-item-text";
 
-                li.appendChild(titleEl);
-                li.appendChild(statusIcon);
-                li.appendChild(dateEl);
+                // 제목: 날짜 기반
+                var titleEl = document.createElement("div");
+                titleEl.className = "meeting-item-title";
+                titleEl.textContent = _extractTitle(meeting.meeting_id, meeting.created_at);
+
+                // 요약 프리뷰 1줄
+                var previewEl = document.createElement("div");
+                previewEl.className = "meeting-item-preview";
+                if (meeting.summary_preview) {
+                    previewEl.textContent = meeting.summary_preview;
+                } else if (meeting.status === "completed") {
+                    previewEl.textContent = App.getStatusLabel(meeting.status);
+                } else {
+                    previewEl.textContent = App.getStatusLabel(meeting.status);
+                }
+
+                textContainer.appendChild(titleEl);
+                textContainer.appendChild(previewEl);
+
+                item.appendChild(statusDot);
+                item.appendChild(textContainer);
 
                 // 클릭 → ViewerView로 이동
-                li.addEventListener("click", function () {
+                item.addEventListener("click", function () {
                     Router.navigate("/app/viewer/" + encodeURIComponent(meeting.meeting_id));
                 });
 
-                _listEl.appendChild(li);
+                // 키보드 접근성 (Enter/Space)
+                item.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        item.click();
+                    }
+                });
+
+                _listEl.appendChild(item);
             });
         }
 
@@ -376,14 +624,15 @@
          */
         function setActive(meetingId) {
             _activeId = meetingId;
-            // 기존 active 클래스 제거 후 새로 부여
-            var items = _listEl.querySelectorAll(".meeting-list-item");
+            var items = _listEl.querySelectorAll(".meeting-item");
             items.forEach(function (item) {
-                var titleEl = item.querySelector(".meeting-list-title");
-                if (titleEl && titleEl.textContent === meetingId) {
+                var itemId = item.getAttribute("data-meeting-id");
+                if (itemId === meetingId) {
                     item.classList.add("active");
+                    item.setAttribute("aria-selected", "true");
                 } else {
                     item.classList.remove("active");
+                    item.setAttribute("aria-selected", "false");
                 }
             });
         }
@@ -402,22 +651,6 @@
         }
 
         /**
-         * 검색어로 회의 목록을 필터링한다.
-         * @param {string} query - 검색어
-         */
-        function filter(query) {
-            if (!query) {
-                render(_meetings);
-                return;
-            }
-            var lower = query.toLowerCase();
-            var filtered = _meetings.filter(function (m) {
-                return (m.meeting_id || "").toLowerCase().indexOf(lower) >= 0;
-            });
-            render(filtered);
-        }
-
-        /**
          * 현재 회의 목록 데이터를 반환한다.
          * @returns {Array}
          */
@@ -426,10 +659,9 @@
         }
 
         /**
-         * 사이드바 타이머를 정리한다.
+         * 리스트 패널 타이머를 정리한다.
          */
         function destroy() {
-            // 사이드바 타이머 정리
             if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; }
             if (_meetingsTimer) { clearInterval(_meetingsTimer); _meetingsTimer = null; }
             if (_searchTimeout) { clearTimeout(_searchTimeout); _searchTimeout = null; }
@@ -440,7 +672,6 @@
             loadMeetings: loadMeetings,
             setActive: setActive,
             setActiveFromPath: setActiveFromPath,
-            filter: filter,
             getMeetings: getMeetings,
             destroy: destroy,
         };
@@ -448,178 +679,279 @@
 
 
     // =================================================================
-    // === HomeView (기존 index.html 로직 이식) ===
+    // === EmptyView (회의 미선택 초기 상태) ===
     // =================================================================
 
     /**
-     * 홈 뷰: 검색 폼, 검색 결과, 회의 목록 카드, 파이프라인 진행 표시.
+     * 회의 목록에서 아무것도 선택하지 않은 초기 상태.
+     * 시스템 리소스 모니터와 일괄 요약 기능을 포함한다.
      * @constructor
      */
-    function HomeView() {
+    function EmptyView() {
+        this._resourceTimer = null;
+        this._render();
+        this._loadResources();
+        // 5초마다 리소스 갱신
         var self = this;
-        self._timers = [];          // 정리해야 할 타이머 목록
-        self._listeners = [];       // 정리해야 할 이벤트 리스너 목록
-        self._allMeetings = [];     // 전체 회의 데이터 (정렬용)
-        self._els = {};             // DOM 참조
-
-        self._render();
-        self._bind();
-        self._loadData();
+        this._resourceTimer = setInterval(function () {
+            self._loadResources();
+        }, 5000);
     }
 
     /**
-     * 홈 뷰 DOM을 생성한다.
+     * EmptyView DOM을 생성한다.
+     * 리소스 모니터 + 일괄 요약 버튼 + 안내 메시지를 표시한다.
      */
-    HomeView.prototype._render = function () {
+    EmptyView.prototype._render = function () {
         var contentEl = Router.getContentEl();
         contentEl.innerHTML = "";
 
         var html = [
             // 리소스 모니터 섹션
-            '<section class="resource-monitor" id="homeResourceMonitor">',
-            '  <h2 class="section-title">시스템 리소스</h2>',
+            '<div class="resource-monitor">',
+            '  <div class="section-title">시스템 상태</div>',
             '  <div class="resource-bars">',
             '    <div class="resource-item">',
             '      <div class="resource-label">',
             '        <span>RAM</span>',
-            '        <span class="resource-value" id="homeRamValue">--</span>',
+            '        <span class="resource-value" id="res-ram-text">--</span>',
             '      </div>',
             '      <div class="resource-bar-bg">',
-            '        <div class="resource-bar-fill" id="homeRamBar"></div>',
+            '        <div class="resource-bar-fill" id="res-ram-bar" style="width:0%"></div>',
             '      </div>',
             '    </div>',
             '    <div class="resource-item">',
             '      <div class="resource-label">',
             '        <span>CPU</span>',
-            '        <span class="resource-value" id="homeCpuValue">--</span>',
+            '        <span class="resource-value" id="res-cpu-text">--</span>',
             '      </div>',
             '      <div class="resource-bar-bg">',
-            '        <div class="resource-bar-fill" id="homeCpuBar"></div>',
+            '        <div class="resource-bar-fill" id="res-cpu-bar" style="width:0%"></div>',
             '      </div>',
             '    </div>',
             '  </div>',
-            '  <div class="resource-model" id="homeLoadedModel"></div>',
-            '</section>',
+            '  <div class="resource-model" id="res-model-text"></div>',
+            '</div>',
+            // 메인 안내 영역
+            '<div class="empty-view">',
+            '  <div class="empty-view-icon">' + Icons.clipboard + '</div>',
+            '  <h2 class="empty-view-title">회의를 선택하세요</h2>',
+            '  <p class="empty-view-desc">왼쪽 목록에서 회의를 선택하면 전사 내용을 볼 수 있습니다.</p>',
+            '  <div style="margin-top:16px;">',
+            '    <button class="batch-summarize-btn" id="batch-summarize-btn">일괄 요약 생성</button>',
+            '  </div>',
+            '  <div class="empty-view-shortcuts">',
+            '    <div class="empty-view-shortcut">\u2318K 검색</div>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
 
-            // 검색 섹션
-            '<section class="search-section">',
-            '  <h2 class="search-title">회의 내용 검색</h2>',
-            '  <form class="search-form" id="homeSearchForm">',
+        contentEl.innerHTML = html;
+        document.title = "회의록";
+
+        // 일괄 요약 버튼 이벤트
+        var self = this;
+        var batchBtn = document.getElementById("batch-summarize-btn");
+        if (batchBtn) {
+            batchBtn.addEventListener("click", function () {
+                self._batchSummarize(batchBtn);
+            });
+        }
+    };
+
+    /**
+     * 시스템 리소스 정보를 조회하여 UI에 반영한다.
+     * GET /api/system/resources
+     */
+    EmptyView.prototype._loadResources = function () {
+        App.apiRequest("/system/resources")
+            .then(function (data) {
+                // RAM 바
+                var ramBar = document.getElementById("res-ram-bar");
+                var ramText = document.getElementById("res-ram-text");
+                if (ramBar && ramText) {
+                    var ramPct = data.ram_percent || 0;
+                    ramBar.style.width = ramPct + "%";
+                    ramBar.className = "resource-bar-fill" +
+                        (ramPct > 85 ? " danger" : ramPct > 70 ? " warning" : "");
+                    ramText.textContent =
+                        data.ram_used_gb + " / " + data.ram_total_gb + " GB (" + ramPct + "%)";
+                }
+                // CPU 바
+                var cpuBar = document.getElementById("res-cpu-bar");
+                var cpuText = document.getElementById("res-cpu-text");
+                if (cpuBar && cpuText) {
+                    var cpuPct = data.cpu_percent || 0;
+                    cpuBar.style.width = cpuPct + "%";
+                    cpuBar.className = "resource-bar-fill" +
+                        (cpuPct > 85 ? " danger" : cpuPct > 70 ? " warning" : "");
+                    cpuText.textContent = cpuPct + "%";
+                }
+                // 로드된 모델
+                var modelText = document.getElementById("res-model-text");
+                if (modelText) {
+                    modelText.textContent = data.loaded_model
+                        ? "로드된 모델: " + data.loaded_model
+                        : "";
+                }
+            })
+            .catch(function () {
+                // 리소스 조회 실패 시 무시 (서버 미시작 등)
+            });
+    };
+
+    /**
+     * 일괄 요약 생성을 실행한다.
+     * POST /api/meetings/summarize-batch
+     * @param {HTMLButtonElement} btn - 버튼 요소 (비활성화용)
+     */
+    EmptyView.prototype._batchSummarize = function (btn) {
+        btn.disabled = true;
+        btn.textContent = "요약 실행 중...";
+        App.apiPost("/meetings/summarize-batch", {})
+            .then(function (data) {
+                var total = data.total || 0;
+                btn.textContent = total > 0
+                    ? total + "건 요약 시작됨"
+                    : "요약 대상 없음";
+                setTimeout(function () {
+                    btn.disabled = false;
+                    btn.textContent = "일괄 요약 생성";
+                }, 3000);
+            })
+            .catch(function () {
+                btn.textContent = "요약 실패";
+                setTimeout(function () {
+                    btn.disabled = false;
+                    btn.textContent = "일괄 요약 생성";
+                }, 3000);
+            });
+    };
+
+    /**
+     * 뷰를 정리한다. 리소스 모니터 타이머를 해제한다.
+     */
+    EmptyView.prototype.destroy = function () {
+        if (this._resourceTimer) {
+            clearInterval(this._resourceTimer);
+            this._resourceTimer = null;
+        }
+    };
+
+
+    // =================================================================
+    // === SearchView (검색 전용 뷰, /app/search) ===
+    // =================================================================
+
+    /**
+     * 검색 뷰: 검색 폼, 필터, 검색 결과 목록.
+     * @constructor
+     */
+    function SearchView() {
+        var self = this;
+        self._listeners = [];
+        self._timers = [];
+        self._els = {};
+
+        self._render();
+        self._bind();
+    }
+
+    /**
+     * 검색 뷰 DOM을 생성한다.
+     */
+    SearchView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        contentEl.innerHTML = "";
+
+        var html = [
+            '<div class="search-view">',
+
+            // 검색 헤더
+            '  <div class="search-view-header">',
+            '    <h2 class="search-view-title">회의 내용 검색</h2>',
+            '  </div>',
+
+            // 검색 폼
+            '  <form class="search-form" id="searchForm">',
             '    <div class="search-input-row">',
             '      <div class="search-input-wrapper">',
-            '        <span class="search-icon">&#x1F50D;</span>',
-            '        <input type="text" class="search-input" id="homeSearchQuery"',
+            '        <span class="search-icon"><svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 10l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>',
+            '        <input type="text" class="search-input" id="searchQuery"',
             '               placeholder="검색어를 입력하세요 (예: 프로젝트 일정, 결정사항...)"',
+            '               aria-label="회의 내용 검색"',
             '               autocomplete="off" />',
             '      </div>',
-            '      <button type="submit" class="search-btn" id="homeSearchBtn">검색</button>',
+            '      <button type="submit" class="search-btn" id="searchBtn">검색</button>',
             '    </div>',
             '    <div class="filter-row">',
             '      <div class="filter-group">',
             '        <span class="filter-label">날짜</span>',
-            '        <input type="date" class="filter-input" id="homeFilterDate" />',
+            '        <input type="date" class="filter-input" id="searchFilterDate" />',
             '      </div>',
             '      <div class="filter-group">',
             '        <span class="filter-label">화자</span>',
-            '        <input type="text" class="filter-input" id="homeFilterSpeaker" placeholder="예: SPEAKER_00" />',
+            '        <input type="text" class="filter-input" id="searchFilterSpeaker" placeholder="예: SPEAKER_00" />',
             '      </div>',
-            '      <button type="button" class="filter-clear-btn" id="homeFilterClearBtn" aria-label="검색 필터 초기화">',
+            '      <button type="button" class="filter-clear-btn" id="searchFilterClearBtn" aria-label="검색 필터 초기화">',
             '        필터 초기화',
             '      </button>',
             '    </div>',
             '  </form>',
-            '</section>',
 
             // 검색 결과
-            '<section class="search-results" id="homeSearchResults">',
-            '  <div class="search-results-header">',
-            '    <div>',
-            '      <h2 class="section-title">검색 결과</h2>',
-            '      <span class="search-stats" id="homeSearchStats"></span>',
+            '  <section class="search-results" id="searchResults">',
+            '    <div class="search-results-header">',
+            '      <div>',
+            '        <span class="search-stats" id="searchStats"></span>',
+            '      </div>',
             '    </div>',
-            '    <button class="search-close-btn" id="homeSearchCloseBtn" aria-label="검색 결과 닫기">결과 닫기</button>',
-            '  </div>',
-            '  <div id="homeSearchResultsList"></div>',
-            '  <div class="loading-overlay" id="homeSearchLoading" role="status" aria-live="polite">',
-            '    <span class="loading-spinner" aria-hidden="true"></span>',
-            '    <span>검색 중...</span>',
-            '  </div>',
-            '  <div class="empty-state" id="homeSearchEmpty" style="display:none;">',
-            '    <div class="empty-state-icon">&#x1F50D;</div>',
-            '    <div class="empty-state-text" id="homeSearchEmptyText">검색 결과가 없습니다</div>',
-            '    <div class="empty-state-sub" id="homeSearchEmptySub">다른 검색어나 필터를 시도해보세요</div>',
-            '  </div>',
-            '</section>',
+            '    <div id="searchResultsList"></div>',
+            '    <div class="loading-overlay" id="searchLoading" role="status" aria-live="polite">',
+            '      <span class="loading-spinner" aria-hidden="true"></span>',
+            '      <span>검색 중...</span>',
+            '    </div>',
+            '    <div class="empty-state" id="searchEmpty" style="display:none;">',
+            '      <div class="empty-state-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="20" cy="20" r="14" stroke="currentColor" stroke-width="3"/><path d="M30 30l12 12" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></div>',
+            '      <div class="empty-state-text" id="searchEmptyText">검색 결과가 없습니다</div>',
+            '      <div class="empty-state-sub" id="searchEmptySub">다른 검색어나 필터를 시도해보세요</div>',
+            '    </div>',
+            '  </section>',
 
-            // 회의 목록
-            '<section>',
-            '  <div class="section-header">',
-            '    <h2 class="section-title">회의 목록</h2>',
-            '    <div class="sort-controls">',
-            '      <button class="batch-summarize-btn" id="homeBatchSummarizeBtn"',
-            '              title="요약이 없는 회의들의 AI 요약을 일괄 생성합니다">',
-            '        일괄 요약 생성',
-            '      </button>',
-            '      <select class="sort-select" id="homeSortSelect" aria-label="회의 목록 정렬">',
-            '        <option value="newest">최신순</option>',
-            '        <option value="oldest">오래된순</option>',
-            '        <option value="status">상태별</option>',
-            '        <option value="name">이름순</option>',
-            '      </select>',
-            '      <span class="section-count" id="homeMeetingsCount"></span>',
-            '    </div>',
+            // 검색 안내 (결과 없을 때 기본 표시)
+            '  <div class="search-view-hint" id="searchHint">',
+            '    <p>회의 전사 내용을 벡터 검색 + 키워드 검색으로 찾습니다.</p>',
+            '    <p>검색어를 입력하고 Enter 또는 검색 버튼을 누르세요.</p>',
             '  </div>',
-            '  <div class="meetings-grid" id="homeMeetingsGrid"></div>',
-            '  <div class="loading-overlay" id="homeMeetingsLoading" role="status" aria-live="polite">',
-            '    <span class="loading-spinner" aria-hidden="true"></span>',
-            '    <span>회의 목록 불러오는 중...</span>',
-            '  </div>',
-            '  <div class="empty-state" id="homeMeetingsEmpty" style="display:none;">',
-            '    <div class="empty-state-icon">&#x1F4CB;</div>',
-            '    <div class="empty-state-text">아직 등록된 회의가 없습니다</div>',
-            '    <div class="empty-state-sub">',
-            '      Zoom 회의를 녹음하거나, 오디오 파일(.m4a, .wav)을<br>',
-            '      감시 폴더에 추가하면 자동으로 전사가 시작됩니다.',
-            '    </div>',
-            '  </div>',
-            '</section>',
+
+            '</div>',
         ].join("\n");
 
         contentEl.innerHTML = html;
 
         // DOM 참조 캐싱
         this._els = {
-            searchForm: document.getElementById("homeSearchForm"),
-            searchQuery: document.getElementById("homeSearchQuery"),
-            searchBtn: document.getElementById("homeSearchBtn"),
-            filterDate: document.getElementById("homeFilterDate"),
-            filterSpeaker: document.getElementById("homeFilterSpeaker"),
-            filterClearBtn: document.getElementById("homeFilterClearBtn"),
-            searchResults: document.getElementById("homeSearchResults"),
-            searchResultsList: document.getElementById("homeSearchResultsList"),
-            searchStats: document.getElementById("homeSearchStats"),
-            searchLoading: document.getElementById("homeSearchLoading"),
-            searchEmpty: document.getElementById("homeSearchEmpty"),
-            searchCloseBtn: document.getElementById("homeSearchCloseBtn"),
-            meetingsGrid: document.getElementById("homeMeetingsGrid"),
-            meetingsCount: document.getElementById("homeMeetingsCount"),
-            meetingsLoading: document.getElementById("homeMeetingsLoading"),
-            meetingsEmpty: document.getElementById("homeMeetingsEmpty"),
-            sortSelect: document.getElementById("homeSortSelect"),
-            batchSummarizeBtn: document.getElementById("homeBatchSummarizeBtn"),
-            // 리소스 모니터
-            ramValue: document.getElementById("homeRamValue"),
-            ramBar: document.getElementById("homeRamBar"),
-            cpuValue: document.getElementById("homeCpuValue"),
-            cpuBar: document.getElementById("homeCpuBar"),
-            loadedModel: document.getElementById("homeLoadedModel"),
+            searchForm: document.getElementById("searchForm"),
+            searchQuery: document.getElementById("searchQuery"),
+            searchBtn: document.getElementById("searchBtn"),
+            filterDate: document.getElementById("searchFilterDate"),
+            filterSpeaker: document.getElementById("searchFilterSpeaker"),
+            filterClearBtn: document.getElementById("searchFilterClearBtn"),
+            searchResults: document.getElementById("searchResults"),
+            searchResultsList: document.getElementById("searchResultsList"),
+            searchStats: document.getElementById("searchStats"),
+            searchLoading: document.getElementById("searchLoading"),
+            searchEmpty: document.getElementById("searchEmpty"),
+            searchHint: document.getElementById("searchHint"),
         };
+
+        document.title = "검색 — 회의록";
     };
 
     /**
      * 이벤트 리스너를 바인딩한다.
      */
-    HomeView.prototype._bind = function () {
+    SearchView.prototype._bind = function () {
         var self = this;
         var els = self._els;
 
@@ -639,453 +971,14 @@
         els.filterClearBtn.addEventListener("click", onFilterClear);
         self._listeners.push({ el: els.filterClearBtn, type: "click", fn: onFilterClear });
 
-        // 검색 결과 닫기
-        var onSearchClose = function () {
-            els.searchResults.classList.remove("visible");
-            els.searchResultsList.innerHTML = "";
-        };
-        els.searchCloseBtn.addEventListener("click", onSearchClose);
-        self._listeners.push({ el: els.searchCloseBtn, type: "click", fn: onSearchClose });
-
-        // 정렬 드롭다운 변경
-        var onSortChange = function () {
-            if (self._allMeetings.length > 0) {
-                self._renderMeetings(self._sortMeetings(self._allMeetings));
-            }
-        };
-        els.sortSelect.addEventListener("change", onSortChange);
-        self._listeners.push({ el: els.sortSelect, type: "change", fn: onSortChange });
-
-        // 일괄 요약 생성 버튼
-        var onBatchSummarize = function () {
-            var btn = els.batchSummarizeBtn;
-            btn.disabled = true;
-            btn.textContent = "요약 생성 중...";
-            App.api("/meetings/summarize-batch", { method: "POST", body: JSON.stringify({}) })
-                .then(function (res) {
-                    if (res.total === 0) {
-                        btn.textContent = "요약 대상 없음";
-                        setTimeout(function () {
-                            btn.textContent = "일괄 요약 생성";
-                            btn.disabled = false;
-                        }, 2000);
-                    } else {
-                        btn.textContent = "요약 생성 중 (" + res.total + "건)...";
-                    }
-                })
-                .catch(function () {
-                    btn.textContent = "일괄 요약 생성";
-                    btn.disabled = false;
-                });
-        };
-        els.batchSummarizeBtn.addEventListener("click", onBatchSummarize);
-        self._listeners.push({ el: els.batchSummarizeBtn, type: "click", fn: onBatchSummarize });
-
-        // WebSocket 이벤트: 파이프라인 상태
-        var onPipelineStatus = function (e) {
-            var detail = e.detail || {};
-            var meetingId = detail.meeting_id;
-            var step = detail.step || detail.current_step || detail.status || "";
-            if (meetingId && step) {
-                self._updatePipelineProgress(meetingId, step);
-            }
-        };
-        document.addEventListener("ws:pipeline_status", onPipelineStatus);
-        self._listeners.push({ el: document, type: "ws:pipeline_status", fn: onPipelineStatus });
-
-        // WebSocket 이벤트: 작업 완료
-        var onJobCompleted = function (e) {
-            self._fetchMeetings();
-
-            // 해당 회의의 진행 표시를 완료 상태로 전환
-            var detail = e.detail || {};
-            var meetingId = detail.meeting_id;
-            if (meetingId) {
-                var progressEl = document.querySelector(
-                    '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
-                );
-                if (progressEl) {
-                    var dots = progressEl.querySelectorAll(".step-dot");
-                    dots.forEach(function (dot) {
-                        dot.classList.remove("active");
-                        dot.classList.add("completed");
-                    });
-                    var fillEl = progressEl.querySelector(".progress-fill");
-                    if (fillEl) fillEl.style.width = "100%";
-                    setTimeout(function () {
-                        progressEl.style.display = "none";
-                    }, 2000);
-                }
-            }
-        };
-        document.addEventListener("ws:job_completed", onJobCompleted);
-        self._listeners.push({ el: document, type: "ws:job_completed", fn: onJobCompleted });
-
-        // WebSocket 이벤트: 작업 추가
-        var onJobAdded = function () {
-            self._fetchMeetings();
-        };
-        document.addEventListener("ws:job_added", onJobAdded);
-        self._listeners.push({ el: document, type: "ws:job_added", fn: onJobAdded });
-
-        // WebSocket 이벤트: 작업 실패
-        var onJobFailed = function (e) {
-            var detail = e.detail || {};
-            var meetingId = detail.meeting_id;
-            var errMsg = detail.error || detail.error_message || "알 수 없는 오류";
-            errorBanner.show(
-                "작업 실패" +
-                (meetingId ? " (" + meetingId + ")" : "") +
-                ": " + errMsg
-            );
-
-            if (meetingId) {
-                var progressEl = document.querySelector(
-                    '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
-                );
-                if (progressEl) {
-                    var activeDot = progressEl.querySelector(".step-dot.active");
-                    if (activeDot) {
-                        activeDot.style.backgroundColor = "var(--error)";
-                    }
-                }
-            }
-            self._fetchMeetings();
-        };
-        document.addEventListener("ws:job_failed", onJobFailed);
-        self._listeners.push({ el: document, type: "ws:job_failed", fn: onJobFailed });
-
-        // 리소스 모니터 폴링 (5초 간격)
-        self._pollResources();
-        var resourceTimer = setInterval(function () {
-            self._pollResources();
-        }, STATUS_POLL_INTERVAL);
-        self._timers.push(resourceTimer);
-    };
-
-    /**
-     * 시스템 리소스를 API에서 조회하여 UI를 업데이트한다.
-     */
-    HomeView.prototype._pollResources = async function () {
-        var self = this;
-        var els = self._els;
-
-        try {
-            var data = await App.apiRequest("/system/resources");
-            var ramPct = data.ram_percent || 0;
-            var cpuPct = data.cpu_percent || 0;
-
-            // RAM 프로그레스 바
-            App.safeText(els.ramValue,
-                data.ram_used_gb.toFixed(1) + " / " + data.ram_total_gb.toFixed(1) + " GB (" + ramPct.toFixed(0) + "%)");
-            els.ramBar.style.width = ramPct + "%";
-            els.ramBar.className = "resource-bar-fill" + self._getResourceBarClass(ramPct);
-
-            // CPU 프로그레스 바
-            App.safeText(els.cpuValue, cpuPct.toFixed(0) + "%");
-            els.cpuBar.style.width = cpuPct + "%";
-            els.cpuBar.className = "resource-bar-fill" + self._getResourceBarClass(cpuPct);
-
-            // 로드된 모델명
-            if (data.loaded_model) {
-                App.safeText(els.loadedModel, "현재 모델: " + data.loaded_model);
-                els.loadedModel.style.display = "block";
-            } else {
-                els.loadedModel.style.display = "none";
-            }
-        } catch (_e) {
-            // 리소스 API 실패 시 무시 (모니터링 기능이므로)
-        }
-    };
-
-    /**
-     * 리소스 사용량에 따른 프로그레스 바 CSS 클래스를 반환한다.
-     * @param {number} percent - 사용 비율 (0~100)
-     * @returns {string} 추가 CSS 클래스 문자열
-     */
-    HomeView.prototype._getResourceBarClass = function (percent) {
-        if (percent >= 90) return " danger";
-        if (percent >= 80) return " warning";
-        return "";
-    };
-
-    /**
-     * 초기 데이터를 로드한다.
-     */
-    HomeView.prototype._loadData = function () {
-        this._fetchMeetings();
-    };
-
-    /**
-     * 회의 목록을 정렬한다.
-     * @param {Array} meetings - 회의 목록
-     * @returns {Array} 정렬된 배열
-     */
-    HomeView.prototype._sortMeetings = function (meetings) {
-        var sortBy = this._els.sortSelect.value;
-        var sorted = meetings.slice();
-
-        if (sortBy === "newest") {
-            sorted.sort(function (a, b) {
-                return (b.created_at || "").localeCompare(a.created_at || "");
-            });
-        } else if (sortBy === "oldest") {
-            sorted.sort(function (a, b) {
-                return (a.created_at || "").localeCompare(b.created_at || "");
-            });
-        } else if (sortBy === "status") {
-            sorted.sort(function (a, b) {
-                var oa = STATUS_SORT_ORDER[a.status] != null ? STATUS_SORT_ORDER[a.status] : 99;
-                var ob = STATUS_SORT_ORDER[b.status] != null ? STATUS_SORT_ORDER[b.status] : 99;
-                if (oa !== ob) return oa - ob;
-                return (b.created_at || "").localeCompare(a.created_at || "");
-            });
-        } else if (sortBy === "name") {
-            sorted.sort(function (a, b) {
-                return (a.meeting_id || "").localeCompare(b.meeting_id || "");
-            });
-        }
-
-        return sorted;
-    };
-
-    /**
-     * 회의 목록을 API에서 가져와 렌더링한다.
-     */
-    HomeView.prototype._fetchMeetings = async function () {
-        var self = this;
-        var els = self._els;
-
-        // 스켈레톤 로딩
-        if (self._allMeetings.length === 0) {
-            els.meetingsGrid.innerHTML = "";
-            els.meetingsGrid.appendChild(App.createSkeletonCards(3));
-        }
-        els.meetingsLoading.classList.add("visible");
-        els.meetingsEmpty.style.display = "none";
-
-        try {
-            var data = await App.apiRequest("/meetings");
-            self._allMeetings = data.meetings || [];
-            self._renderMeetings(self._sortMeetings(self._allMeetings));
-            App.safeText(els.meetingsCount, "총 " + (data.total || 0) + "건");
-        } catch (e) {
-            errorBanner.show("회의 목록을 불러올 수 없습니다: " + e.message);
-        } finally {
-            els.meetingsLoading.classList.remove("visible");
-        }
-    };
-
-    /**
-     * 회의 목록을 카드 형태로 렌더링한다.
-     * @param {Array} meetings - 회의 아이템 배열
-     */
-    HomeView.prototype._renderMeetings = function (meetings) {
-        var self = this;
-        var els = self._els;
-        els.meetingsGrid.innerHTML = "";
-
-        if (meetings.length === 0) {
-            els.meetingsEmpty.style.display = "block";
-            return;
-        }
-
-        els.meetingsEmpty.style.display = "none";
-
-        meetings.forEach(function (meeting) {
-            var card = document.createElement("div");
-            card.className = "meeting-card";
-            card.setAttribute("role", "button");
-            card.setAttribute("tabindex", "0");
-            card.setAttribute("aria-label",
-                meeting.meeting_id + " 회의 — " +
-                App.getStatusLabel(meeting.status));
-
-            // 카드 헤더: ID + 상태 배지
-            var header = document.createElement("div");
-            header.className = "meeting-card-header";
-
-            var idEl = document.createElement("span");
-            idEl.className = "meeting-id";
-            idEl.textContent = meeting.meeting_id;
-
-            var statusEl = document.createElement("span");
-            statusEl.className = "meeting-status " + meeting.status;
-            statusEl.textContent = App.getStatusLabel(meeting.status);
-
-            header.appendChild(idEl);
-            header.appendChild(statusEl);
-
-            // 메타 정보
-            var meta = document.createElement("div");
-            meta.className = "meeting-meta";
-
-            // 파일명
-            var fileItem = document.createElement("div");
-            fileItem.className = "meeting-meta-item";
-            var fileIcon = document.createElement("span");
-            fileIcon.className = "meeting-meta-icon";
-            fileIcon.textContent = "\uD83C\uDFA4";
-            var fileText = document.createElement("span");
-            fileText.textContent = App.getFileName(meeting.audio_path);
-            fileItem.appendChild(fileIcon);
-            fileItem.appendChild(fileText);
-            meta.appendChild(fileItem);
-
-            // 생성일
-            if (meeting.created_at) {
-                var dateItem = document.createElement("div");
-                dateItem.className = "meeting-meta-item";
-                var dateIcon = document.createElement("span");
-                dateIcon.className = "meeting-meta-icon";
-                dateIcon.textContent = "\uD83D\uDCC5";
-                var dateText = document.createElement("span");
-                dateText.textContent = App.formatDate(meeting.created_at);
-                dateItem.appendChild(dateIcon);
-                dateItem.appendChild(dateText);
-                meta.appendChild(dateItem);
-            }
-
-            // 재시도 횟수
-            if (meeting.retry_count > 0) {
-                var retryItem = document.createElement("div");
-                retryItem.className = "meeting-meta-item";
-                var retryIcon = document.createElement("span");
-                retryIcon.className = "meeting-meta-icon";
-                retryIcon.textContent = "\u21BB";
-                var retryText = document.createElement("span");
-                retryText.textContent = "재시도 " + meeting.retry_count + "회";
-                retryItem.appendChild(retryIcon);
-                retryItem.appendChild(retryText);
-                meta.appendChild(retryItem);
-            }
-
-            card.appendChild(header);
-            card.appendChild(meta);
-
-            // 에러 메시지
-            if (meeting.error_message) {
-                var errorEl = document.createElement("div");
-                errorEl.className = "meeting-error";
-                errorEl.textContent = meeting.error_message;
-                card.appendChild(errorEl);
-            }
-
-            // 파이프라인 진행 표시
-            var isProcessing = (
-                meeting.status !== "completed" &&
-                meeting.status !== "failed" &&
-                meeting.status !== "queued"
-            );
-
-            var progressEl = document.createElement("div");
-            progressEl.className = "pipeline-progress";
-            progressEl.setAttribute("data-meeting-id", meeting.meeting_id);
-
-            var stepsEl = document.createElement("div");
-            stepsEl.className = "progress-steps";
-
-            PIPELINE_STEPS.forEach(function (stepDef) {
-                var dot = document.createElement("span");
-                dot.className = "step-dot";
-                dot.setAttribute("data-step", stepDef.key);
-                dot.textContent = stepDef.label;
-                stepsEl.appendChild(dot);
-            });
-
-            var barEl = document.createElement("div");
-            barEl.className = "progress-bar";
-            var fillEl = document.createElement("div");
-            fillEl.className = "progress-fill";
-            barEl.appendChild(fillEl);
-
-            progressEl.appendChild(stepsEl);
-            progressEl.appendChild(barEl);
-
-            if (!isProcessing) {
-                progressEl.style.display = "none";
-            }
-
-            card.appendChild(progressEl);
-
-            // 액션 버튼 (녹음 완료 시 전사 시작, 실패 시 재시도, 완료/실패 시 삭제)
-            if (meeting.status === "recorded" || meeting.status === "failed" || meeting.status === "completed") {
-                var actionsEl = document.createElement("div");
-                actionsEl.className = "meeting-card-actions";
-
-                if (meeting.status === "recorded") {
-                    var transcribeBtn = document.createElement("button");
-                    transcribeBtn.className = "meeting-card-action transcribe";
-                    transcribeBtn.textContent = "\u25B6 전사 시작";
-                    transcribeBtn.setAttribute("aria-label", meeting.meeting_id + " 전사 시작");
-                    transcribeBtn.addEventListener("click", function (e) {
-                        e.stopPropagation();
-                        self._transcribeMeeting(meeting.meeting_id, transcribeBtn);
-                    });
-                    actionsEl.appendChild(transcribeBtn);
-                }
-
-                if (meeting.status === "failed") {
-                    var retryBtn = document.createElement("button");
-                    retryBtn.className = "meeting-card-action retry";
-                    retryBtn.textContent = "\u21BB 재시도";
-                    retryBtn.setAttribute("aria-label", meeting.meeting_id + " 재시도");
-                    retryBtn.addEventListener("click", function (e) {
-                        e.stopPropagation();
-                        self._retryMeeting(meeting.meeting_id);
-                    });
-                    actionsEl.appendChild(retryBtn);
-                }
-
-                // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
-                var skippedSteps = meeting.skipped_steps || [];
-                var hasSummarizeSkipped = skippedSteps.indexOf("summarize") >= 0;
-                if (meeting.status === "completed" && hasSummarizeSkipped) {
-                    var summarizeBtn = document.createElement("button");
-                    summarizeBtn.className = "meeting-card-action summarize";
-                    summarizeBtn.textContent = "\u2728 요약 생성";
-                    summarizeBtn.setAttribute("aria-label", meeting.meeting_id + " 요약 생성");
-                    summarizeBtn.addEventListener("click", function (e) {
-                        e.stopPropagation();
-                        self._summarizeMeeting(meeting.meeting_id, summarizeBtn);
-                    });
-                    actionsEl.appendChild(summarizeBtn);
-                }
-
-                var deleteBtn = document.createElement("button");
-                deleteBtn.className = "meeting-card-action delete";
-                deleteBtn.textContent = "\u2715 삭제";
-                deleteBtn.setAttribute("aria-label", meeting.meeting_id + " 삭제");
-                deleteBtn.addEventListener("click", function (e) {
-                    e.stopPropagation();
-                    self._deleteMeeting(meeting.meeting_id);
-                });
-                actionsEl.appendChild(deleteBtn);
-
-                card.appendChild(actionsEl);
-            }
-
-            // 클릭 → ViewerView로 이동 (SPA 내비게이션)
-            card.addEventListener("click", function () {
-                Router.navigate("/app/viewer/" + encodeURIComponent(meeting.meeting_id));
-            });
-
-            // 키보드 접근성 (Enter/Space)
-            card.addEventListener("keydown", function (e) {
-                if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    card.click();
-                }
-            });
-
-            els.meetingsGrid.appendChild(card);
-        });
+        // 입력 필드에 포커스
+        els.searchQuery.focus();
     };
 
     /**
      * 검색을 수행한다.
      */
-    HomeView.prototype._performSearch = async function () {
+    SearchView.prototype._performSearch = async function () {
         var self = this;
         var els = self._els;
         var query = els.searchQuery.value.trim();
@@ -1095,6 +988,7 @@
         els.searchLoading.classList.add("visible");
         els.searchResultsList.innerHTML = "";
         els.searchEmpty.style.display = "none";
+        els.searchHint.style.display = "none";
         els.searchBtn.disabled = true;
 
         try {
@@ -1113,6 +1007,7 @@
                 errorBanner.show("검색 실패: " + e.message);
             }
             els.searchResults.classList.remove("visible");
+            els.searchHint.style.display = "block";
         } finally {
             els.searchLoading.classList.remove("visible");
             els.searchBtn.disabled = false;
@@ -1123,7 +1018,7 @@
      * 검색 결과를 렌더링한다.
      * @param {Object} data - SearchResponse
      */
-    HomeView.prototype._renderSearchResults = function (data) {
+    SearchView.prototype._renderSearchResults = function (data) {
         var self = this;
         var els = self._els;
         var results = data.results || [];
@@ -1138,8 +1033,8 @@
         );
 
         if (results.length === 0) {
-            var emptyText = document.getElementById("homeSearchEmptyText");
-            var emptySub = document.getElementById("homeSearchEmptySub");
+            var emptyText = document.getElementById("searchEmptyText");
+            var emptySub = document.getElementById("searchEmptySub");
             var query = els.searchQuery.value.trim();
 
             App.safeText(emptyText, "'" + query + "'에 대한 검색 결과가 없습니다");
@@ -1195,20 +1090,20 @@
 
             var dateItem = document.createElement("span");
             dateItem.className = "result-meta-item";
-            dateItem.textContent = "\uD83D\uDCC5 " + (item.date || "-");
+            dateItem.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(item.date || "-") + '</span>';
             meta.appendChild(dateItem);
 
             if (item.speakers && item.speakers.length > 0) {
                 var speakerItem = document.createElement("span");
                 speakerItem.className = "result-meta-item";
-                speakerItem.textContent = "\uD83D\uDC64 " + item.speakers.join(", ");
+                speakerItem.innerHTML = Icons.person + ' <span>' + App.escapeHtml(item.speakers.join(", ")) + '</span>';
                 meta.appendChild(speakerItem);
             }
 
             var timeItem = document.createElement("span");
             timeItem.className = "result-meta-item";
-            timeItem.textContent = "\u23F1 " + App.formatTime(item.start_time) +
-                " ~ " + App.formatTime(item.end_time);
+            timeItem.innerHTML = Icons.clock + ' <span>' + App.escapeHtml(App.formatTime(item.start_time) +
+                " ~ " + App.formatTime(item.end_time)) + '</span>';
             meta.appendChild(timeItem);
 
             // 검색 소스 태그
@@ -1226,10 +1121,9 @@
             el.appendChild(text);
             el.appendChild(meta);
 
-            // 클릭 → ViewerView로 이동 (SPA 내비게이션)
+            // 클릭 → ViewerView로 이동 (검색어 + 타임스탬프 전달)
             el.addEventListener("click", function () {
                 var viewerPath = "/app/viewer/" + encodeURIComponent(item.meeting_id);
-                // 검색어와 타임스탬프를 쿼리 파라미터로 전달
                 var params = [];
                 var q = els.searchQuery.value.trim();
                 if (q) params.push("q=" + encodeURIComponent(q));
@@ -1250,130 +1144,20 @@
     };
 
     /**
-     * 파이프라인 진행 표시를 업데이트한다.
-     * @param {string} meetingId - 회의 ID
-     * @param {string} currentStep - 현재 단계
+     * 뷰를 정리한다.
      */
-    HomeView.prototype._updatePipelineProgress = function (meetingId, currentStep) {
-        var progressEl = document.querySelector(
-            '.pipeline-progress[data-meeting-id="' + meetingId + '"]'
-        );
-        if (!progressEl) return;
-
-        progressEl.style.display = "block";
-
-        var currentIdx = -1;
-        PIPELINE_STEPS.forEach(function (stepDef, idx) {
-            if (stepDef.key === currentStep) {
-                currentIdx = idx;
-            }
-        });
-
-        var dots = progressEl.querySelectorAll(".step-dot");
-        dots.forEach(function (dot, idx) {
-            dot.classList.remove("active", "completed");
-            if (idx < currentIdx) {
-                dot.classList.add("completed");
-            } else if (idx === currentIdx) {
-                dot.classList.add("active");
-            }
-        });
-
-        var fillEl = progressEl.querySelector(".progress-fill");
-        if (fillEl && currentIdx >= 0) {
-            var pct = Math.round(((currentIdx + 1) / PIPELINE_STEPS.length) * 100);
-            fillEl.style.width = pct + "%";
-        }
-    };
-
-    /**
-     * 녹음 완료된 회의의 전사를 시작한다.
-     * @param {string} meetingId - 전사할 회의 ID
-     * @param {HTMLElement} btn - 클릭된 버튼 요소
-     */
-    HomeView.prototype._transcribeMeeting = async function (meetingId, btn) {
-        var originalText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "요청 중...";
-
-        try {
-            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/transcribe", {});
-            this._fetchMeetings();
-        } catch (e) {
-            errorBanner.show("전사 시작 실패: " + e.message);
-            btn.disabled = false;
-            btn.textContent = originalText;
-        }
-    };
-
-    /**
-     * 실패한 회의를 재시도한다.
-     * @param {string} meetingId - 재시도할 회의 ID
-     */
-    HomeView.prototype._retryMeeting = async function (meetingId) {
-        try {
-            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/retry", {});
-            this._fetchMeetings();
-        } catch (e) {
-            errorBanner.show("재시도 실패: " + e.message);
-        }
-    };
-
-    /**
-     * 회의를 삭제한다.
-     * @param {string} meetingId - 삭제할 회의 ID
-     */
-    HomeView.prototype._deleteMeeting = async function (meetingId) {
-        if (!confirm("'" + meetingId + "' 회의를 삭제하시겠습니까?\n삭제된 데이터는 복구할 수 없습니다.")) {
-            return;
-        }
-        try {
-            await App.apiDelete("/meetings/" + encodeURIComponent(meetingId));
-            this._fetchMeetings();
-        } catch (e) {
-            errorBanner.show("삭제 실패: " + e.message);
-        }
-    };
-
-    /**
-     * 온디맨드 요약을 요청한다.
-     * @param {string} meetingId - 회의 ID
-     * @param {HTMLElement} btn - 클릭된 버튼 요소 (스피너 표시용)
-     */
-    HomeView.prototype._summarizeMeeting = async function (meetingId, btn) {
-        var originalText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "요약 중...";
-        btn.classList.add("loading");
-
-        try {
-            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/summarize", {});
-        } catch (e) {
-            errorBanner.show("요약 요청 실패: " + e.message);
-            btn.disabled = false;
-            btn.textContent = originalText;
-            btn.classList.remove("loading");
-        }
-    };
-
-    /**
-     * 뷰를 정리한다. (이벤트 리스너, 타이머 해제)
-     */
-    HomeView.prototype.destroy = function () {
-        // 이벤트 리스너 해제
+    SearchView.prototype.destroy = function () {
         this._listeners.forEach(function (entry) {
             entry.el.removeEventListener(entry.type, entry.fn);
         });
         this._listeners = [];
-
-        // 타이머 해제
         this._timers.forEach(function (t) { clearInterval(t); clearTimeout(t); });
         this._timers = [];
     };
 
 
     // =================================================================
-    // === ViewerView (기존 viewer.html 로직 이식) ===
+    // === ViewerView (전사문 뷰어) ===
     // =================================================================
 
     /**
@@ -1414,24 +1198,20 @@
         contentEl.innerHTML = "";
 
         var html = [
-            // 뒤로가기 링크
-            '<a href="#" class="back-link" id="viewerBackLink">',
-            '  <span>&#x2190;</span> 회의 목록으로 돌아가기',
-            '</a>',
-
-            // 회의 정보
-            '<div class="meeting-info" id="viewerMeetingInfo" style="display:none;">',
-            '  <div class="meeting-info-header">',
-            '    <span class="meeting-info-title" id="viewerMeetingTitle"></span>',
-            '    <span class="meeting-info-status" id="viewerMeetingStatus"></span>',
+            // 회의 정보 헤더
+            '<div class="viewer-header" id="viewerMeetingInfo" style="display:none;">',
+            '  <div class="viewer-header-top">',
+            '    <h2 class="viewer-title" id="viewerMeetingTitle"></h2>',
+            '    <span class="viewer-status" id="viewerMeetingStatus"></span>',
             '  </div>',
-            '  <div class="meeting-meta-row">',
-            '    <span class="meeting-meta-item" id="viewerMetaFile"></span>',
-            '    <span class="meeting-meta-item" id="viewerMetaDate"></span>',
-            '    <span class="meeting-meta-item" id="viewerMetaSpeakers"></span>',
-            '    <span class="meeting-meta-item" id="viewerMetaUtterances"></span>',
+            '  <div class="viewer-meta">',
+            '    <span class="viewer-meta-item" id="viewerMetaFile"></span>',
+            '    <span class="viewer-meta-item" id="viewerMetaDate"></span>',
+            '    <span class="viewer-meta-item" id="viewerMetaSpeakers"></span>',
+            '    <span class="viewer-meta-item" id="viewerMetaUtterances"></span>',
             '  </div>',
             '  <div class="speaker-legend" id="viewerSpeakerLegend"></div>',
+            '  <div class="viewer-actions" id="viewerActions"></div>',
             '</div>',
 
             // 탭 네비게이션
@@ -1468,11 +1248,15 @@
             '  </div>',
 
             '  <div class="empty-state" id="viewerTranscriptEmpty" style="display:none;">',
-            '    <div class="empty-state-icon">&#x1F4DD;</div>',
-            '    <div class="empty-state-text">전사문이 아직 생성되지 않았습니다</div>',
-            '    <div class="empty-state-sub">',
+            '    <div class="empty-state-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4h16l12 12v28a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4Z" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M28 4v12h12M16 24h16M16 32h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg></div>',
+            '    <div class="empty-state-text" id="viewerEmptyText">전사문이 아직 생성되지 않았습니다</div>',
+            '    <div class="empty-state-sub" id="viewerEmptySub">',
             '      파이프라인이 처리 중이라면 잠시 기다려 주세요.<br>',
             '      완료되면 전사문이 자동으로 표시됩니다.',
+            '    </div>',
+            '    <div class="pipeline-progress" id="viewerPipelineProgress" style="display:none;">',
+            '      <div class="pipeline-steps" id="viewerPipelineSteps"></div>',
+            '      <div class="pipeline-status-text" id="viewerPipelineStatus"></div>',
             '    </div>',
             '  </div>',
             '</div>',
@@ -1488,13 +1272,13 @@
             '  </div>',
 
             '  <div class="empty-state" id="viewerSummaryEmpty" style="display:none;">',
-            '    <div class="empty-state-icon">&#x1F4CB;</div>',
+            '    <div class="empty-state-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="6" width="28" height="36" rx="4" stroke="currentColor" stroke-width="2.5"/><path d="M18 6v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1M16 18h16M16 26h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg></div>',
             '    <div class="empty-state-text">회의록이 아직 생성되지 않았습니다</div>',
             '    <div class="empty-state-sub">',
             '      전사가 완료된 후 아래 버튼을 눌러 AI 요약을 생성할 수 있습니다.',
             '    </div>',
             '    <button class="btn-summarize" id="viewerSummarizeBtn" style="display:none;">',
-            '      &#x2728; 요약 생성',
+            '      ' + Icons.doc + ' 요약 생성',
             '    </button>',
             '  </div>',
             '</div>',
@@ -1504,7 +1288,6 @@
 
         // DOM 참조 캐싱
         this._els = {
-            backLink: document.getElementById("viewerBackLink"),
             meetingInfo: document.getElementById("viewerMeetingInfo"),
             meetingTitle: document.getElementById("viewerMeetingTitle"),
             meetingStatus: document.getElementById("viewerMeetingStatus"),
@@ -1513,10 +1296,14 @@
             metaSpeakers: document.getElementById("viewerMetaSpeakers"),
             metaUtterances: document.getElementById("viewerMetaUtterances"),
             speakerLegend: document.getElementById("viewerSpeakerLegend"),
+            viewerActions: document.getElementById("viewerActions"),
             tabNav: document.getElementById("viewerTabNav"),
             timeline: document.getElementById("viewerTimeline"),
             transcriptLoading: document.getElementById("viewerTranscriptLoading"),
             transcriptEmpty: document.getElementById("viewerTranscriptEmpty"),
+            pipelineProgress: document.getElementById("viewerPipelineProgress"),
+            pipelineSteps: document.getElementById("viewerPipelineSteps"),
+            pipelineStatus: document.getElementById("viewerPipelineStatus"),
             summaryContent: document.getElementById("viewerSummaryContent"),
             summaryLoading: document.getElementById("viewerSummaryLoading"),
             summaryEmpty: document.getElementById("viewerSummaryEmpty"),
@@ -1539,14 +1326,6 @@
     ViewerView.prototype._bind = function () {
         var self = this;
         var els = self._els;
-
-        // 뒤로가기 링크 (SPA 내비게이션)
-        var onBack = function (e) {
-            e.preventDefault();
-            Router.navigate("/app");
-        };
-        els.backLink.addEventListener("click", onBack);
-        self._listeners.push({ el: els.backLink, type: "click", fn: onBack });
 
         // 탭 전환
         var tabBtns = document.querySelectorAll("#viewerTabNav .tab-btn");
@@ -1690,20 +1469,76 @@
     /**
      * 온디맨드 요약 생성을 요청한다.
      */
-    ViewerView.prototype._requestSummarize = async function () {
+    ViewerView.prototype._requestSummarize = async function (force) {
         var self = this;
         var els = self._els;
-        var btn = els.summarizeBtn;
+        // force=true면 재생성 버튼에서 호출, false면 최초 생성 버튼에서 호출
+        var btn = force ? els.summaryContent.querySelector(".btn-regenerate") : els.summarizeBtn;
+        if (!btn) btn = els.summarizeBtn;
         var originalText = btn.innerHTML;
         btn.disabled = true;
-        btn.textContent = "요약 생성 중...";
+        btn.innerHTML = Icons.gear + ' 요약 준비 중...';
         btn.classList.add("loading");
 
         try {
-            await App.apiPost(
-                "/meetings/" + encodeURIComponent(self._meetingId) + "/summarize", {}
-            );
-            // 요약 완료는 WebSocket 이벤트로 자동 갱신
+            var url = "/meetings/" + encodeURIComponent(self._meetingId) + "/summarize";
+            if (force) url += "?force=true";
+            await App.apiPost(url, {});
+
+            // 2초 간격 폴링: 진행 단계 감지 + 완료 감지 (최대 5분)
+            var pollCount = 0;
+            var maxPolls = 150;
+            var dots = 0;
+            var stepLabels = {
+                correct: "LLM 보정",
+                summarize: "요약 생성",
+            };
+
+            var pollTimer = setInterval(async function () {
+                pollCount++;
+                dots = (dots + 1) % 4;
+
+                if (pollCount > maxPolls) {
+                    clearInterval(pollTimer);
+                    btn.disabled = false;
+                    btn.innerHTML = originalText;
+                    btn.classList.remove("loading");
+                    errorBanner.show("요약 생성 시간이 초과되었습니다.");
+                    return;
+                }
+
+                try {
+                    // 요약 완료 확인
+                    var summary = await App.apiRequest(
+                        "/meetings/" + encodeURIComponent(self._meetingId) + "/summary"
+                    );
+                    if (summary.markdown) {
+                        clearInterval(pollTimer);
+                        btn.classList.remove("loading");
+                        els.summaryContent.innerHTML = App.renderMarkdown(summary.markdown);
+                        els.summaryEmpty.style.display = "none";
+                        btn.style.display = "none";
+                        return;
+                    }
+                } catch (ignore) {
+                    // 404 = 아직 생성 중 → 진행 상태 확인
+                }
+
+                // 회의 상태에서 현재 단계 확인
+                try {
+                    var meeting = await App.apiRequest(
+                        "/meetings/" + encodeURIComponent(self._meetingId)
+                    );
+                    var status = meeting.status || "";
+                    var label = stepLabels[status] || "처리";
+                    btn.innerHTML = Icons.gear + ' ' + label + ' 중' + '.'.repeat(dots + 1);
+                } catch (ignore) {
+                    btn.innerHTML = Icons.gear + ' 처리 중' + '.'.repeat(dots + 1);
+                }
+            }, 2000);
+
+            self._timers.push(pollTimer);
+
         } catch (e) {
             errorBanner.show("요약 요청 실패: " + e.message);
             btn.disabled = false;
@@ -1752,18 +1587,27 @@
         legendEl.innerHTML = "";
         if (!speakers || speakers.length === 0) return;
 
+        // 화자별 번호 매핑
+        var speakerNumbers = {};
+        var count = 0;
+        speakers.forEach(function (s) {
+            count++;
+            speakerNumbers[s] = count;
+        });
+
         speakers.forEach(function (speaker) {
             var chip = document.createElement("span");
             chip.className = "speaker-chip";
 
-            var dot = document.createElement("span");
-            dot.className = "speaker-dot";
-            dot.style.backgroundColor = self._getSpeakerColor(speaker);
+            var badge = document.createElement("span");
+            badge.className = "speaker-badge";
+            badge.style.backgroundColor = self._getSpeakerColor(speaker);
+            badge.textContent = speakerNumbers[speaker] || "?";
 
             var label = document.createElement("span");
-            label.textContent = speaker;
+            label.textContent = speaker === "UNKNOWN" ? "참석자 ?" : "참석자 " + (speakerNumbers[speaker] || "?");
 
-            chip.appendChild(dot);
+            chip.appendChild(badge);
             chip.appendChild(label);
             legendEl.appendChild(chip);
         });
@@ -1780,25 +1624,58 @@
         els.timeline.innerHTML = "";
         var matchCount = 0;
 
+        // 화자별 번호 매핑 (SPEAKER_00 → 1, SPEAKER_01 → 2, ...)
+        var speakerNumbers = {};
+        var speakerCount = 0;
+
+        utterances.forEach(function (u) {
+            if (!(u.speaker in speakerNumbers)) {
+                speakerCount++;
+                speakerNumbers[u.speaker] = speakerCount;
+            }
+        });
+
+        // 화자 표시명 변환 (SPEAKER_00 → 참석자 1)
+        function getSpeakerLabel(speaker) {
+            var num = speakerNumbers[speaker];
+            if (speaker === "UNKNOWN") return "참석자 ?";
+            return "참석자 " + (num || "?");
+        }
+
         utterances.forEach(function (u) {
             var el = document.createElement("div");
             el.className = "utterance";
             var color = self._getSpeakerColor(u.speaker);
-            el.style.borderLeftColor = color;
+            var num = speakerNumbers[u.speaker] || "?";
 
-            // 시간
+            // 좌측 번호 배지 (원형)
+            var badge = document.createElement("div");
+            badge.className = "utterance-badge";
+            badge.style.backgroundColor = color;
+            badge.textContent = num;
+
+            // 우측 콘텐츠 영역
+            var content = document.createElement("div");
+            content.className = "utterance-content";
+
+            // 헤더 (화자명 + 타임스탬프)
+            var header = document.createElement("div");
+            header.className = "utterance-header";
+
+            var speakerEl = document.createElement("span");
+            speakerEl.className = "utterance-speaker";
+            speakerEl.textContent = getSpeakerLabel(u.speaker);
+            speakerEl.style.color = color;
+
             var timeEl = document.createElement("span");
             timeEl.className = "utterance-time";
             timeEl.textContent = App.formatTime(u.start);
 
-            // 화자
-            var speakerEl = document.createElement("span");
-            speakerEl.className = "utterance-speaker";
-            speakerEl.textContent = u.speaker;
-            speakerEl.style.color = color;
+            header.appendChild(speakerEl);
+            header.appendChild(timeEl);
 
-            // 텍스트 (검색어 하이라이팅 적용)
-            var textEl = document.createElement("span");
+            // 텍스트
+            var textEl = document.createElement("div");
             textEl.className = "utterance-text";
 
             if (query) {
@@ -1813,9 +1690,11 @@
                 textEl.textContent = u.text;
             }
 
-            el.appendChild(timeEl);
-            el.appendChild(speakerEl);
-            el.appendChild(textEl);
+            content.appendChild(header);
+            content.appendChild(textEl);
+
+            el.appendChild(badge);
+            el.appendChild(content);
             els.timeline.appendChild(el);
         });
 
@@ -1904,17 +1783,151 @@
             els.meetingInfo.style.display = "block";
             App.safeText(els.meetingTitle, data.meeting_id);
 
-            els.meetingStatus.className = "meeting-info-status " + data.status;
+            els.meetingStatus.className = "viewer-status " + data.status;
             App.safeText(els.meetingStatus, App.getStatusLabel(data.status));
 
-            App.safeText(els.metaFile, "\uD83C\uDFA4 " + App.getFileName(data.audio_path));
-            App.safeText(els.metaDate, "\uD83D\uDCC5 " + App.formatDate(data.created_at));
+            els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(App.getFileName(data.audio_path)) + '</span>';
+            els.metaDate.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(App.formatDate(data.created_at)) + '</span>';
+
+            // 액션 버튼 렌더링 (전사 시작, 재시도, 요약 생성, 삭제)
+            self._renderActions(data);
+
         } catch (e) {
             if (e.status === 404) {
                 errorBanner.show("회의를 찾을 수 없습니다: " + self._meetingId);
             } else {
                 errorBanner.show("회의 정보 로드 실패: " + e.message);
             }
+        }
+    };
+
+    /**
+     * 회의 상태에 따른 액션 버튼을 렌더링한다.
+     * @param {Object} data - 회의 데이터
+     */
+    ViewerView.prototype._renderActions = function (data) {
+        var self = this;
+        var els = self._els;
+        var actionsEl = els.viewerActions;
+        actionsEl.innerHTML = "";
+
+        // 녹음 완료 시 전사 시작 버튼
+        if (data.status === "recorded") {
+            var transcribeBtn = document.createElement("button");
+            transcribeBtn.className = "viewer-action-btn transcribe";
+            transcribeBtn.innerHTML = Icons.play + ' 전사 시작';
+            transcribeBtn.addEventListener("click", function () {
+                self._transcribeMeeting(data.meeting_id, transcribeBtn);
+            });
+            actionsEl.appendChild(transcribeBtn);
+        }
+
+        // 실패 시 재시도 버튼
+        if (data.status === "failed") {
+            var retryBtn = document.createElement("button");
+            retryBtn.className = "viewer-action-btn retry";
+            retryBtn.textContent = "\u21BB 재시도";
+            retryBtn.addEventListener("click", function () {
+                self._retryMeeting(data.meeting_id);
+            });
+            actionsEl.appendChild(retryBtn);
+        }
+
+        // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
+        var skippedSteps = data.skipped_steps || [];
+        var hasSummarizeSkipped = skippedSteps.indexOf("summarize") >= 0;
+        if (data.status === "completed" && hasSummarizeSkipped) {
+            var summarizeBtn = document.createElement("button");
+            summarizeBtn.className = "viewer-action-btn summarize";
+            summarizeBtn.innerHTML = Icons.doc + ' 요약 생성';
+            summarizeBtn.addEventListener("click", function () {
+                self._summarizeMeeting(data.meeting_id, summarizeBtn);
+            });
+            actionsEl.appendChild(summarizeBtn);
+        }
+
+        // 삭제 버튼 (완료/실패/녹음완료 시)
+        if (data.status === "completed" || data.status === "failed" || data.status === "recorded") {
+            var deleteBtn = document.createElement("button");
+            deleteBtn.className = "viewer-action-btn delete";
+            deleteBtn.textContent = "\u2715 삭제";
+            deleteBtn.addEventListener("click", function () {
+                self._deleteMeeting(data.meeting_id);
+            });
+            actionsEl.appendChild(deleteBtn);
+        }
+    };
+
+    /**
+     * 녹음 완료된 회의의 전사를 시작한다.
+     * @param {string} meetingId - 전사할 회의 ID
+     * @param {HTMLElement} btn - 클릭된 버튼 요소
+     */
+    ViewerView.prototype._transcribeMeeting = async function (meetingId, btn) {
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "요청 중...";
+
+        try {
+            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/transcribe", {});
+            this._loadMeetingInfo();
+            ListPanel.loadMeetings();
+        } catch (e) {
+            errorBanner.show("전사 시작 실패: " + e.message);
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
+    };
+
+    /**
+     * 실패한 회의를 재시도한다.
+     * @param {string} meetingId - 재시도할 회의 ID
+     */
+    ViewerView.prototype._retryMeeting = async function (meetingId) {
+        try {
+            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/retry", {});
+            this._loadMeetingInfo();
+            ListPanel.loadMeetings();
+        } catch (e) {
+            errorBanner.show("재시도 실패: " + e.message);
+        }
+    };
+
+    /**
+     * 회의를 삭제한다.
+     * @param {string} meetingId - 삭제할 회의 ID
+     */
+    ViewerView.prototype._deleteMeeting = async function (meetingId) {
+        if (!confirm("'" + meetingId + "' 회의를 삭제하시겠습니까?\n삭제된 데이터는 복구할 수 없습니다.")) {
+            return;
+        }
+        try {
+            await App.apiDelete("/meetings/" + encodeURIComponent(meetingId));
+            ListPanel.loadMeetings();
+            Router.navigate("/app");
+        } catch (e) {
+            errorBanner.show("삭제 실패: " + e.message);
+        }
+    };
+
+    /**
+     * 온디맨드 요약을 요청한다.
+     * @param {string} meetingId - 회의 ID
+     * @param {HTMLElement} btn - 클릭된 버튼 요소
+     */
+    ViewerView.prototype._summarizeMeeting = async function (meetingId, btn) {
+        var originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "요약 중...";
+        btn.classList.add("loading");
+
+        try {
+            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/summarize", {});
+        } catch (e) {
+            errorBanner.show("요약 요청 실패: " + e.message);
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.classList.remove("loading");
         }
     };
 
@@ -1936,6 +1949,8 @@
 
             if (self._allUtterances.length === 0) {
                 els.transcriptEmpty.style.display = "block";
+                // 처리 중 상태면 파이프라인 진행 표시 + 폴링 시작
+                self._startPipelinePolling();
                 return;
             }
 
@@ -1944,10 +1959,8 @@
             self._renderSpeakerLegend(data.speakers || []);
 
             // 메타 정보 업데이트
-            App.safeText(els.metaSpeakers,
-                "\uD83D\uDC64 화자 " + (data.num_speakers || 0) + "명");
-            App.safeText(els.metaUtterances,
-                "\uD83D\uDCDD 발화 " + (data.total_utterances || 0) + "건");
+            els.metaSpeakers.innerHTML = Icons.person + ' <span>화자 ' + App.escapeHtml(String(data.num_speakers || 0)) + '명</span>';
+            els.metaUtterances.innerHTML = Icons.chat + ' <span>발화 ' + App.escapeHtml(String(data.total_utterances || 0)) + '건</span>';
 
             // 탭과 검색바 표시
             els.tabNav.style.display = "flex";
@@ -1970,12 +1983,133 @@
         } catch (e) {
             if (e.status === 404) {
                 els.transcriptEmpty.style.display = "block";
+                self._startPipelinePolling();
             } else {
                 errorBanner.show("전사문 로드 실패: " + e.message);
             }
         } finally {
             els.transcriptLoading.classList.remove("visible");
         }
+    };
+
+    /**
+     * 파이프라인 진행 상태 폴링을 시작한다.
+     * 처리 중인 회의일 때 3초마다 상태를 확인하고 프로그레스 바를 업데이트한다.
+     * 전사 완료 시 자동으로 전사문을 다시 로드한다.
+     */
+    ViewerView.prototype._startPipelinePolling = function () {
+        var self = this;
+        var els = self._els;
+
+        // 파이프라인 6단계 정의
+        var pipelineSteps = [
+            { key: "convert", label: "변환" },
+            { key: "transcribe", label: "전사" },
+            { key: "diarize", label: "화자분리" },
+            { key: "merge", label: "병합" },
+            { key: "correct", label: "보정" },
+            { key: "summarize", label: "요약" },
+        ];
+
+        // 진행 중 상태 목록
+        var processingStatuses = {
+            queued: true, transcribing: true, diarizing: true,
+            merging: true, embedding: true, recording: true,
+        };
+
+        // 상태 → 파이프라인 단계 매핑
+        var statusToStep = {
+            transcribing: "transcribe",
+            diarizing: "diarize",
+            merging: "merge",
+            embedding: "correct",
+        };
+
+        function renderProgress(currentStep, completedSteps) {
+            var html = "";
+            for (var i = 0; i < pipelineSteps.length; i++) {
+                var step = pipelineSteps[i];
+                var state = "pending";
+                if (completedSteps && completedSteps.indexOf(step.key) >= 0) {
+                    state = "done";
+                } else if (currentStep === step.key) {
+                    state = "active";
+                }
+                html += '<div class="pipeline-step ' + state + '">';
+                html += '<div class="pipeline-step-dot"></div>';
+                html += '<div class="pipeline-step-label">' + App.escapeHtml(step.label) + '</div>';
+                html += '</div>';
+                if (i < pipelineSteps.length - 1) {
+                    html += '<div class="pipeline-step-line ' + (state === "done" ? "done" : "") + '"></div>';
+                }
+            }
+            els.pipelineSteps.innerHTML = html;
+        }
+
+        // 초기 렌더링
+        els.pipelineProgress.style.display = "block";
+        renderProgress("", []);
+        App.safeText(els.pipelineStatus, "상태 확인 중...");
+
+        // 빈 상태 텍스트 업데이트
+        App.safeText(document.getElementById("viewerEmptyText"), "파이프라인 처리 중");
+        var subEl = document.getElementById("viewerEmptySub");
+        if (subEl) subEl.innerHTML = "완료되면 전사문이 자동으로 표시됩니다.";
+
+        // 3초 간격 폴링
+        var pollTimer = setInterval(async function () {
+            try {
+                var meeting = await App.apiRequest(
+                    "/meetings/" + encodeURIComponent(self._meetingId)
+                );
+                var status = meeting.status || "";
+
+                // 완료 시: 전사문 다시 로드
+                if (status === "completed") {
+                    clearInterval(pollTimer);
+                    els.pipelineProgress.style.display = "none";
+                    els.transcriptEmpty.style.display = "none";
+                    self._loadTranscript();
+                    self._loadSummary();
+                    self._loadMeetingInfo();
+                    return;
+                }
+
+                // 실패 시: 에러 표시
+                if (status === "failed") {
+                    clearInterval(pollTimer);
+                    App.safeText(els.pipelineStatus, "처리 실패: " + (meeting.error_message || "알 수 없는 오류"));
+                    els.pipelineStatus.classList.add("error");
+                    return;
+                }
+
+                // 처리 중: 단계 업데이트
+                var currentStep = statusToStep[status] || "";
+                // completed_steps는 API에 없으므로 현재 단계 이전을 완료로 추정
+                var completedSteps = [];
+                if (currentStep) {
+                    for (var i = 0; i < pipelineSteps.length; i++) {
+                        if (pipelineSteps[i].key === currentStep) break;
+                        completedSteps.push(pipelineSteps[i].key);
+                    }
+                }
+
+                renderProgress(currentStep, completedSteps);
+                var stepLabel = "";
+                for (var j = 0; j < pipelineSteps.length; j++) {
+                    if (pipelineSteps[j].key === currentStep) {
+                        stepLabel = pipelineSteps[j].label;
+                        break;
+                    }
+                }
+                App.safeText(els.pipelineStatus, stepLabel ? stepLabel + " 진행 중..." : App.getStatusLabel(status));
+
+            } catch (e) {
+                // 네트워크 오류 등 → 무시하고 계속 폴링
+            }
+        }, 3000);
+
+        self._timers.push(pollTimer);
     };
 
     /**
@@ -1994,15 +2128,24 @@
 
             if (!data.markdown) {
                 els.summaryEmpty.style.display = "block";
-                // 전사 완료 상태이면 요약 생성 버튼 표시
-                if (self._allUtterances.length > 0) {
-                    els.summarizeBtn.style.display = "inline-block";
-                }
+                els.summarizeBtn.style.display = "inline-block";
                 return;
             }
 
-            // 마크다운 렌더링
+            // 마크다운 렌더링 + 재생성 버튼
             els.summaryContent.innerHTML = App.renderMarkdown(data.markdown);
+
+            // 재생성 버튼 추가
+            var regenerateDiv = document.createElement("div");
+            regenerateDiv.className = "summary-regenerate";
+            var regenerateBtn = document.createElement("button");
+            regenerateBtn.className = "btn-regenerate";
+            regenerateBtn.innerHTML = Icons.gear + ' 요약 재생성';
+            regenerateBtn.addEventListener("click", function () {
+                self._requestSummarize(true);
+            });
+            regenerateDiv.appendChild(regenerateBtn);
+            els.summaryContent.appendChild(regenerateDiv);
 
             // 요약 생성 버튼 숨기기
             els.summarizeBtn.style.display = "none";
@@ -2013,10 +2156,7 @@
         } catch (e) {
             if (e.status === 404) {
                 els.summaryEmpty.style.display = "block";
-                // 전사 완료 상태이면 요약 생성 버튼 표시
-                if (self._allUtterances.length > 0) {
-                    els.summarizeBtn.style.display = "inline-block";
-                }
+                els.summarizeBtn.style.display = "inline-block";
             } else {
                 console.warn("회의록 로드 실패:", e.message);
                 els.summaryEmpty.style.display = "block";
@@ -2042,12 +2182,12 @@
         this._timers = [];
 
         // 페이지 타이틀 복원
-        document.title = "회의 전사 시스템";
+        document.title = "회의록";
     };
 
 
     // =================================================================
-    // === ChatView (기존 chat.html 로직 이식) ===
+    // === ChatView (AI 채팅) ===
     // =================================================================
 
     /**
@@ -2093,16 +2233,16 @@
      */
     ChatView.prototype._createWelcomeHtml = function () {
         return '<div class="welcome-message" id="chatWelcomeMessage">' +
-            '<div class="welcome-icon">&#x1F4AC;</div>' +
+            '<div class="welcome-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8h36a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H18l-8 6V32H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="20" r="2" fill="currentColor"/><circle cx="24" cy="20" r="2" fill="currentColor"/><circle cx="32" cy="20" r="2" fill="currentColor"/></svg></div>' +
             '<div class="welcome-title">AI 회의 어시스턴트</div>' +
             '<div class="welcome-desc">' +
                 '회의 내용에 대해 자유롭게 질문하세요.<br>' +
                 '관련 회의 내용을 검색하여 AI가 답변합니다.' +
             '</div>' +
             '<div class="welcome-tips">' +
-                '<div class="welcome-tip">&#x1F4A1; "지난 회의에서 결정된 일정이 뭐야?"</div>' +
-                '<div class="welcome-tip">&#x1F4A1; "프로젝트 진행 상황을 요약해줘"</div>' +
-                '<div class="welcome-tip">&#x1F4A1; "다음 마일스톤까지 해야 할 일은?"</div>' +
+                '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "지난 회의에서 결정된 일정이 뭐야?"</div>' +
+                '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "프로젝트 진행 상황을 요약해줘"</div>' +
+                '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "다음 마일스톤까지 해야 할 일은?"</div>' +
             '</div>' +
         '</div>';
     };
@@ -2120,7 +2260,7 @@
             // 제어 바
             '  <div class="controls-bar">',
             '    <span class="controls-label">검색 범위:</span>',
-            '    <select class="controls-select" id="chatMeetingFilter">',
+            '    <select class="controls-select" id="chatMeetingFilter" aria-label="검색 범위 회의 선택">',
             '      <option value="">전체 회의</option>',
             '    </select>',
             '    <div class="controls-right">',
@@ -2128,13 +2268,13 @@
             '    </div>',
             '  </div>',
 
-            // 메시지 영역 (환영 메시지는 _createWelcomeHtml() 공용 메서드 사용)
-            '  <div class="messages-area" id="chatMessagesArea">',
-            self._createWelcomeHtml(),
+            // 메시지 영역
+            '  <div class="messages-area" id="chatMessagesArea" role="log" aria-live="polite" aria-label="채팅 메시지">',
+            this._createWelcomeHtml(),
             '  </div>',
 
             // 타이핑 인디케이터
-            '  <div class="typing-indicator" id="chatTypingIndicator">',
+            '  <div class="typing-indicator" id="chatTypingIndicator" role="status" aria-live="polite">',
             '    <div class="typing-dots">',
             '      <span class="typing-dot"></span>',
             '      <span class="typing-dot"></span>',
@@ -2149,6 +2289,7 @@
             '      <div class="input-wrapper">',
             '        <textarea class="chat-input" id="chatInput"',
             '                  placeholder="회의 내용에 대해 질문하세요..."',
+            '                  aria-label="회의 내용 질문 입력"',
             '                  rows="1"></textarea>',
             '      </div>',
             '      <button class="send-btn" id="chatSendBtn" disabled aria-label="메시지 전송">전송</button>',
@@ -2175,7 +2316,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = "AI Chat — 회의 전사 시스템";
+        document.title = "AI Chat — 회의록";
     };
 
     /**
@@ -2265,15 +2406,15 @@
                 option.value = meeting.meeting_id;
 
                 var statusLabel = {
-                    completed: "\u2705",
-                    recorded: "\uD83C\uDFA4",
-                    recording: "\uD83D\uDD34",
-                    transcribing: "\u2699\uFE0F",
-                    diarizing: "\u2699\uFE0F",
-                    merging: "\u2699\uFE0F",
-                    embedding: "\u2699\uFE0F",
-                    queued: "\u23F3",
-                    failed: "\u274C",
+                    completed: "\u2713",
+                    recorded: "\u25CF",
+                    recording: "\u25CF",
+                    transcribing: "\u2022",
+                    diarizing: "\u2022",
+                    merging: "\u2022",
+                    embedding: "\u2022",
+                    queued: "\u2022",
+                    failed: "\u2717",
                 };
                 var icon = statusLabel[meeting.status] || "";
                 option.textContent = icon + " " + meeting.meeting_id;
@@ -2321,7 +2462,7 @@
 
         var avatar = document.createElement("div");
         avatar.className = "message-avatar";
-        avatar.textContent = "\uD83D\uDC64";
+        avatar.innerHTML = Icons.person;
 
         var body = document.createElement("div");
         body.className = "message-body";
@@ -2380,7 +2521,7 @@
 
             var refsTitle = document.createElement("div");
             refsTitle.className = "references-title";
-            refsTitle.textContent = "\uD83D\uDCCE 참조 출처 (" + data.references.length + "건)";
+            refsTitle.innerHTML = Icons.clip + ' 참조 출처 (' + data.references.length + '건)';
             refsSection.appendChild(refsTitle);
 
             data.references.forEach(function (ref, index) {
@@ -2450,16 +2591,16 @@
         actions.className = "message-actions";
         var copyBtn = document.createElement("button");
         copyBtn.className = "btn-copy";
-        copyBtn.textContent = "\uD83D\uDCCB 복사";
+        copyBtn.innerHTML = Icons.copy + ' 복사';
         copyBtn.setAttribute("aria-label", "답변 복사");
         copyBtn.addEventListener("click", function () {
             var textToCopy = data.answer || bubble.textContent;
             App.copyToClipboard(textToCopy).then(function (ok) {
                 if (ok) {
-                    copyBtn.textContent = "\u2713 복사됨";
+                    copyBtn.innerHTML = Icons.check + ' 복사됨';
                     copyBtn.classList.add("copied");
                     setTimeout(function () {
-                        copyBtn.textContent = "\uD83D\uDCCB 복사";
+                        copyBtn.innerHTML = Icons.copy + ' 복사';
                         copyBtn.classList.remove("copied");
                     }, 2000);
                 }
@@ -2600,7 +2741,7 @@
         els.messagesArea.innerHTML = "";
         self._messageCount = 0;
 
-        // 환영 메시지 복원 (_createWelcomeHtml() 공용 메서드 사용)
+        // 환영 메시지 복원
         els.messagesArea.innerHTML = self._createWelcomeHtml();
         els.welcomeMessage = document.getElementById("chatWelcomeMessage");
 
@@ -2628,9 +2769,276 @@
         this._timers.forEach(function (t) { clearInterval(t); clearTimeout(t); });
         this._timers = [];
 
+        // chat-mode 클래스 제거 (리스트 패널 복원)
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+
         // 페이지 타이틀 복원
-        document.title = "회의 전사 시스템";
+        document.title = "회의록";
     };
+
+
+    // =================================================================
+    // === SettingsView (설정 페이지, /app/settings) ===
+    // =================================================================
+
+    /**
+     * 설정 뷰: config.yaml 값을 조회/수정하는 macOS 시스템 환경설정 스타일 UI.
+     * GET /api/settings 로 현재 설정을 불러오고,
+     * PUT /api/settings 로 변경사항을 저장한다.
+     * @constructor
+     */
+    function SettingsView() {
+        var self = this;
+        self._els = {};
+        self._settings = null;
+        self._listeners = [];
+        self._render();
+        self._bind();
+        self._loadSettings();
+    }
+
+    /**
+     * 설정 UI를 렌더링한다.
+     * macOS 시스템 환경설정 스타일 레이아웃.
+     */
+    SettingsView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        var html = [
+            '<div class="settings-view">',
+            '  <div class="settings-header">',
+            '    <h2 class="settings-title">설정</h2>',
+            '  </div>',
+            '  <div class="settings-content">',
+
+            // LLM 모델 섹션
+            '    <section class="settings-section">',
+            '      <h3 class="settings-section-title">LLM 모델</h3>',
+            '      <div class="settings-group">',
+            '        <div class="setting-row">',
+            '          <label class="setting-label" for="settingsModel">모델</label>',
+            '          <select class="setting-select" id="settingsModel"></select>',
+            '        </div>',
+            '        <div class="setting-row">',
+            '          <label class="setting-label" for="settingsBackend">백엔드</label>',
+            '          <select class="setting-select" id="settingsBackend">',
+            '            <option value="mlx">MLX (기본, in-process)</option>',
+            '            <option value="ollama">Ollama (외부 서버)</option>',
+            '          </select>',
+            '        </div>',
+            '        <div class="setting-row">',
+            '          <label class="setting-label" for="settingsTemp">Temperature</label>',
+            '          <div class="setting-slider-group">',
+            '            <input type="range" class="setting-slider" id="settingsTemp" min="0" max="2" step="0.1">',
+            '            <span class="setting-slider-value" id="settingsTempValue">0.3</span>',
+            '          </div>',
+            '        </div>',
+            '      </div>',
+            '    </section>',
+
+            // 파이프라인 섹션
+            '    <section class="settings-section">',
+            '      <h3 class="settings-section-title">파이프라인</h3>',
+            '      <div class="settings-group">',
+            '        <div class="setting-row">',
+            '          <label class="setting-label" for="settingsSkipLlm">LLM 보정/요약 스킵</label>',
+            '          <label class="setting-toggle">',
+            '            <input type="checkbox" id="settingsSkipLlm">',
+            '            <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+            '          </label>',
+            '        </div>',
+            '      </div>',
+            '    </section>',
+
+            // STT 섹션
+            '    <section class="settings-section">',
+            '      <h3 class="settings-section-title">음성 인식</h3>',
+            '      <div class="settings-group">',
+            '        <div class="setting-row">',
+            '          <label class="setting-label" for="settingsLang">전사 언어</label>',
+            '          <select class="setting-select" id="settingsLang">',
+            '            <option value="ko">한국어</option>',
+            '            <option value="en">English</option>',
+            '            <option value="ja">日本語</option>',
+            '            <option value="zh">中文</option>',
+            '          </select>',
+            '        </div>',
+            '      </div>',
+            '    </section>',
+
+            // 저장 버튼
+            '    <div class="settings-actions">',
+            '      <button class="settings-save-btn" id="settingsSaveBtn">변경사항 저장</button>',
+            '      <span class="settings-save-status" id="settingsSaveStatus"></span>',
+            '    </div>',
+
+            '  </div>',
+            '</div>',
+        ].join("\n");
+
+        contentEl.innerHTML = html;
+
+        // 엘리먼트 참조 캐싱
+        this._els = {
+            model: document.getElementById("settingsModel"),
+            backend: document.getElementById("settingsBackend"),
+            temp: document.getElementById("settingsTemp"),
+            tempValue: document.getElementById("settingsTempValue"),
+            skipLlm: document.getElementById("settingsSkipLlm"),
+            lang: document.getElementById("settingsLang"),
+            saveBtn: document.getElementById("settingsSaveBtn"),
+            saveStatus: document.getElementById("settingsSaveStatus"),
+        };
+
+        // 페이지 타이틀 업데이트
+        document.title = "설정 — 회의록";
+    };
+
+    /**
+     * 이벤트 리스너를 바인딩한다.
+     */
+    SettingsView.prototype._bind = function () {
+        var self = this;
+        var els = self._els;
+
+        // Temperature 슬라이더 실시간 값 표시
+        var onTempInput = function () {
+            els.tempValue.textContent = els.temp.value;
+        };
+        els.temp.addEventListener("input", onTempInput);
+        self._listeners.push({ el: els.temp, type: "input", fn: onTempInput });
+
+        // 저장 버튼 클릭
+        var onSave = function () {
+            self._saveSettings();
+        };
+        els.saveBtn.addEventListener("click", onSave);
+        self._listeners.push({ el: els.saveBtn, type: "click", fn: onSave });
+    };
+
+    /**
+     * GET /api/settings 로 현재 설정을 불러와 폼에 반영한다.
+     */
+    SettingsView.prototype._loadSettings = async function () {
+        var self = this;
+        var els = self._els;
+
+        try {
+            var data = await App.apiRequest("/settings");
+            self._settings = data;
+
+            // 모델 드롭다운 채우기 (available_models: [{id, label, size}])
+            if (data.available_models && data.available_models.length > 0) {
+                els.model.innerHTML = "";
+                data.available_models.forEach(function (m) {
+                    var opt = document.createElement("option");
+                    opt.value = m.id;
+                    opt.textContent = m.label + " (" + m.size + ")";
+                    els.model.appendChild(opt);
+                });
+            }
+
+            // 현재 값 세팅 (API 필드명: llm_* 접두사 사용)
+            if (data.llm_mlx_model_name) els.model.value = data.llm_mlx_model_name;
+            if (data.llm_backend) els.backend.value = data.llm_backend;
+            if (data.llm_temperature !== undefined && data.llm_temperature !== null) {
+                els.temp.value = data.llm_temperature;
+                els.tempValue.textContent = data.llm_temperature;
+            }
+            els.skipLlm.checked = !!data.llm_skip_steps;
+            if (data.stt_language) els.lang.value = data.stt_language;
+
+        } catch (err) {
+            errorBanner.show("설정 불러오기 실패: " + (err.message || err));
+        }
+    };
+
+    /**
+     * 폼 값을 수집하여 PUT /api/settings 로 저장한다.
+     */
+    SettingsView.prototype._saveSettings = async function () {
+        var self = this;
+        var els = self._els;
+
+        // 저장 중 상태 표시
+        els.saveBtn.disabled = true;
+        els.saveBtn.textContent = "저장 중...";
+        els.saveStatus.textContent = "";
+
+        var payload = {
+            llm_mlx_model_name: els.model.value,
+            llm_backend: els.backend.value,
+            llm_temperature: parseFloat(els.temp.value),
+            llm_skip_steps: els.skipLlm.checked,
+            stt_language: els.lang.value,
+        };
+
+        try {
+            var resp = await fetch("/api/settings", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+
+            if (!resp.ok) {
+                var errData = await resp.json().catch(function () { return {}; });
+                throw new Error(errData.detail || "HTTP " + resp.status);
+            }
+
+            // 성공 표시
+            els.saveStatus.textContent = "저장 완료";
+            els.saveStatus.className = "settings-save-status success";
+
+            // 3초 후 상태 메시지 숨김
+            setTimeout(function () {
+                els.saveStatus.textContent = "";
+                els.saveStatus.className = "settings-save-status";
+            }, 3000);
+
+        } catch (err) {
+            els.saveStatus.textContent = "저장 실패: " + App.escapeHtml(err.message || String(err));
+            els.saveStatus.className = "settings-save-status error";
+        } finally {
+            els.saveBtn.disabled = false;
+            els.saveBtn.textContent = "변경사항 저장";
+        }
+    };
+
+    /**
+     * 뷰를 정리한다.
+     */
+    SettingsView.prototype.destroy = function () {
+        // 이벤트 리스너 해제
+        this._listeners.forEach(function (entry) {
+            entry.el.removeEventListener(entry.type, entry.fn);
+        });
+        this._listeners = [];
+
+        // settings-mode 제거 (리스트 패널 복원)
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+
+        // 페이지 타이틀 복원
+        document.title = "회의록";
+    };
+
+
+    // =================================================================
+    // === 키보드 단축키 (글로벌) ===
+    // =================================================================
+
+    document.addEventListener("keydown", function (e) {
+        // Cmd+K → 검색 뷰로 이동
+        if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+            e.preventDefault();
+            Router.navigate("/app/search");
+            // 검색 입력에 포커스
+            setTimeout(function () {
+                var searchInput = document.getElementById("searchQuery");
+                if (searchInput) searchInput.focus();
+            }, 100);
+        }
+    });
 
 
     // =================================================================
@@ -2639,10 +3047,13 @@
 
     window.SPA = {
         Router: Router,
-        Sidebar: Sidebar,
-        HomeView: HomeView,
+        NavBar: NavBar,
+        ListPanel: ListPanel,
+        EmptyView: EmptyView,
+        SearchView: SearchView,
         ViewerView: ViewerView,
         ChatView: ChatView,
+        SettingsView: SettingsView,
     };
 
 
@@ -2653,10 +3064,48 @@
     // WebSocket 연결
     App.connectWebSocket();
 
-    // 사이드바 초기화
-    Sidebar.init();
+    // 네비게이션 바 초기화
+    NavBar.init();
+
+    // 리스트 패널 초기화
+    ListPanel.init();
 
     // 라우터 초기화 (현재 경로에 맞는 뷰 렌더링)
     Router.init();
+
+    // 테마 토글 초기화
+    (function initThemeToggle() {
+        var btn = document.getElementById("themeToggle");
+        if (!btn) return;
+
+        // 저장된 테마 복원
+        var saved = localStorage.getItem("theme");
+        if (saved === "dark" || saved === "light") {
+            document.documentElement.setAttribute("data-theme", saved);
+        }
+
+        btn.addEventListener("click", function () {
+            var current = document.documentElement.getAttribute("data-theme");
+            var isDark;
+
+            if (current === "dark") {
+                // 다크 → 라이트
+                document.documentElement.setAttribute("data-theme", "light");
+                localStorage.setItem("theme", "light");
+                isDark = false;
+            } else if (current === "light") {
+                // 라이트 → 다크
+                document.documentElement.setAttribute("data-theme", "dark");
+                localStorage.setItem("theme", "dark");
+                isDark = true;
+            } else {
+                // 시스템 기본 → 반대로 전환
+                isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+                var newTheme = isDark ? "light" : "dark";
+                document.documentElement.setAttribute("data-theme", newTheme);
+                localStorage.setItem("theme", newTheme);
+            }
+        });
+    })();
 
 })();

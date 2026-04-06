@@ -62,16 +62,17 @@ pip install -e ".[dev]"
 # 2단계: ffmpeg
 brew install ffmpeg
 
-# 3단계: LLM 백엔드 선택 (하드웨어에 따라 택 1)
-#
-# [옵션 A] Ollama 백엔드 (기본값, 모든 Apple Silicon)
-ollama pull exaone3.5:7.8b-instruct-q4_K_M
-# config.yaml의 llm.backend: "ollama" (기본값이므로 변경 불필요)
-#
-# [옵션 B] MLX 백엔드 (M3/M4 + 16GB 이상 권장)
+# 3단계: LLM 모델 (MLX 기본, 추가 설치 불필요)
 # mlx-lm은 pip install -e ".[dev]"에 포함됨
-sed -i '' 's/backend: "ollama"/backend: "mlx"/' config.yaml
-# 또는 환경변수: export MT_LLM_BACKEND=mlx
+# 첫 실행 시 EXAONE 3.5 7.8B 4bit 모델이 자동 다운로드됨
+#
+# [선택] Gemma 4로 모델 변경 시:
+# config.yaml의 llm.mlx_model_name을 변경하면 자동 다운로드
+# 예: mlx-community/gemma-4-e4b-it-4bit
+#
+# [선택] Ollama 백엔드 사용 시 (별도 서버 프로세스):
+# ollama pull exaone3.5:7.8b-instruct-q4_K_M
+# config.yaml의 llm.backend: "ollama"로 변경
 
 # 4단계: HuggingFace 토큰 (화자분리용, 아래 "수동 개입 필요" 참고)
 export HUGGINGFACE_TOKEN=hf_xxxxx
@@ -112,7 +113,7 @@ python main.py --no-menubar  # Ctrl+C로 종료
 |------|------|---------|------|
 | STT | mlx-whisper + `mlx-community/whisper-medium-mlx` | MPS(GPU) | Apple MLX 가속 |
 | 화자분리 | pyannote-audio 3.1 | **CPU 강제** | MPS 버그 있음 |
-| LLM | EXAONE 3.5 7.8B — **Ollama 또는 MLX 백엔드 선택 가능** | GPU | `config.yaml`의 `llm.backend` |
+| LLM | EXAONE 3.5 7.8B 또는 Gemma 4 — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
 | 벡터DB | ChromaDB PersistentClient | — | |
 | 키워드검색 | SQLite FTS5 (unicode61) | — | |
@@ -121,72 +122,53 @@ python main.py --no-menubar  # Ctrl+C로 종료
 | 네이티브 창 | pywebview 4.x | — | 서브프로세스로 실행 (rumps와 메인스레드 충돌 방지) |
 | 프론트엔드 | 순수 HTML/CSS/JS (SPA) | — | 프레임워크 없음, History API 라우팅 |
 
-### LLM 백엔드 선택 가이드
+### LLM 모델 선택 가이드
 
-> **"이 프로젝트 셋업해줘"** 시 사용자의 하드웨어를 확인하고 적합한 백엔드를 안내하세요.
+> MLX가 기본 백엔드입니다. 추가 설치 없이 `pip install -e ".[dev]"`로 완료됩니다.
+> 모델은 첫 실행 시 HuggingFace에서 자동 다운로드됩니다.
 
-**하드웨어 확인 명령:**
+**지원 모델:**
 
-```bash
-# Apple Silicon 칩 종류 확인
-sysctl -n machdep.cpu.brand_string
+| 모델 | config.yaml `mlx_model_name` | 크기 | 특징 |
+|------|------------------------------|------|------|
+| **EXAONE 3.5** (기본) | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` | ~5GB | 한국어 특화, 검증됨 |
+| **Gemma 4 E4B** | `mlx-community/gemma-4-e4b-it-4bit` | ~6GB | Google, 다국어 140+, Thinking 모드 |
+| **Gemma 4 E2B** | `mlx-community/gemma-4-e2b-it-4bit` | ~3GB | 경량, 8GB RAM 가능 |
 
-# RAM 용량 확인 (바이트 → GB)
-echo "$(( $(sysctl -n hw.memsize) / 1073741824 ))GB"
-
-# macOS 버전 확인
-sw_vers --productVersion
-```
-
-**백엔드 선택 기준:**
-
-| 조건 | 권장 백엔드 | 이유 |
-|------|-------------|------|
-| M3/M4 + 16GB 이상 | **MLX** (권장) | 통합 메모리 네이티브 활용, 10~30% 빠름, 별도 서버 불필요 |
-| M1/M2 + 16GB 이상 | **MLX** 또는 **Ollama** | MLX도 동작하지만, 성능 차이가 적음 |
-| M1/M2 + 8GB | **Ollama** | MLX in-process 로드 시 메모리 부족 위험 |
-| Ollama 이미 설치/사용 중 | **Ollama** | 기존 환경 유지 |
-| 서버 없이 단일 프로세스 선호 | **MLX** | 별도 Ollama 서버 프로세스 불필요 |
-
-**백엔드별 차이:**
-
-| 항목 | Ollama | MLX |
-|------|--------|-----|
-| 모델 위치 | Ollama 서버 (별도 프로세스) | in-process (파이썬 내 로드) |
-| 설치 | `ollama pull exaone3.5:...` | `pip install mlx-lm` (자동) |
-| 메모리 관리 | Ollama가 독립 관리 | ModelLoadManager가 직접 관리 |
-| 속도 (M4) | 기준선 | **10~30% 빠름** (통합 메모리 네이티브) |
-| 설정 | `llm.backend: "ollama"` | `llm.backend: "mlx"` |
-| 환경변수 | `MT_LLM_BACKEND=ollama` | `MT_LLM_BACKEND=mlx` |
-
-**설정 방법 (config.yaml):**
+**모델 변경 방법:**
 
 ```yaml
-# Ollama 백엔드 (기본값)
+# config.yaml — mlx_model_name만 교체하면 됨
+llm:
+  backend: "mlx"
+  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # ← 여기를 변경
+```
+
+```bash
+# 또는 환경변수로 오버라이드
+export MT_LLM_MODEL=mlx-community/gemma-4-e4b-it-4bit
+```
+
+**하드웨어별 권장 모델:**
+
+| 조건 | 권장 모델 | 이유 |
+|------|----------|------|
+| M3/M4 + 16GB 이상 | EXAONE 3.5 또는 Gemma 4 E4B | 둘 다 여유 있게 실행 |
+| M1/M2 + 16GB 이상 | EXAONE 3.5 | 검증된 성능 |
+| M1/M2 + 8GB | Gemma 4 E2B | ~3GB로 메모리 절약 |
+
+**Ollama 백엔드 (선택, 별도 서버 필요):**
+
+```yaml
+# Ollama를 사용하려면 backend를 변경하고 Ollama 앱 설치 필요
 llm:
   backend: "ollama"
   model_name: "exaone3.5:7.8b-instruct-q4_K_M"
   host: "http://127.0.0.1:11434"
-
-# MLX 백엔드
-llm:
-  backend: "mlx"
-  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
-  mlx_max_tokens: 2000
 ```
 
-**MLX 백엔드 선택 시 추가 셋업:**
-
 ```bash
-# mlx-lm은 pyproject.toml에 포함되어 자동 설치됨
-# config.yaml만 변경하면 됨
-sed -i '' 's/backend: "ollama"/backend: "mlx"/' config.yaml
-```
-
-**Ollama 백엔드 선택 시 (기본):**
-
-```bash
-# Ollama 앱 설치 필요 (https://ollama.com)
+# Ollama 앱 설치: https://ollama.com
 ollama pull exaone3.5:7.8b-instruct-q4_K_M
 ```
 
@@ -200,7 +182,7 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 청크 → 임베딩 → 저장
 3. **피크 RAM 9.5GB 이하** 유지 (16GB 중 나머지는 OS + 앱)
 4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
-5. **Ollama 사용 시 localhost만** (`http://127.0.0.1:11434`), MLX는 in-process
+5. **MLX는 in-process** (기본), Ollama 사용 시 localhost만 (`http://127.0.0.1:11434`)
 6. **rumps는 메인 스레드**, FastAPI는 데몬 스레드
 7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
@@ -387,6 +369,7 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 | `MT_SERVER_PORT` | 웹서버 포트 오버라이드 | `8765` |
 | `MT_LLM_HOST` | Ollama 호스트 오버라이드 | `http://127.0.0.1:11434` |
 | `MT_LLM_BACKEND` | LLM 백엔드 오버라이드 | `ollama` 또는 `mlx` |
+| `MT_LLM_MODEL` | MLX 모델명 오버라이드 | `mlx-community/gemma-4-e4b-it-4bit` |
 | `MT_LOG_LEVEL` | 로그 레벨 | `debug` |
 
 ---

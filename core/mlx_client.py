@@ -1,14 +1,16 @@
 """
 MLX 백엔드 모듈 (MLX Backend Module)
 
-목적: Apple Silicon에서 mlx-lm 라이브러리를 사용하여 LLM 추론을 수행한다.
+목적: Apple Silicon에서 mlx-lm 또는 mlx-vlm 라이브러리를 사용하여 LLM 추론을 수행한다.
 주요 기능:
     - MLXBackend 클래스 (LLMBackend 프로토콜 구현)
-    - mlx_lm.load()로 모델 로드 (in-process, 통합 메모리 활용)
-    - mlx_lm.generate()로 텍스트 생성
-    - mlx_lm.stream_generate()로 스트리밍 생성
+    - mlx_lm.load()로 일반 모델 로드 (EXAONE 등)
+    - mlx_vlm.load()로 VLM 모델 로드 (Gemma 4 등)
+    - 모델명에 "gemma-4" 또는 "gemma4" 포함 시 자동으로 mlx-vlm 사용
+    - mlx_lm.generate() / mlx_vlm.generate()로 텍스트 생성
+    - mlx_lm.stream_generate()로 스트리밍 생성 (VLM은 전체 생성 후 yield 폴백)
     - cleanup()으로 모델 메모리 해제 + Metal 캐시 정리
-의존성: mlx-lm (선택적), core/llm_backend 모듈
+의존성: mlx-lm (선택적), mlx-vlm (Gemma 4 사용 시), core/llm_backend 모듈
 """
 
 from __future__ import annotations
@@ -61,14 +63,19 @@ class MLXBackend:
     def __init__(self, config: Any) -> None:
         """MLXBackend를 초기화하고 모델을 메모리에 로드한다.
 
+        모델명에 "gemma-4" 또는 "gemma4"가 포함되면 mlx-vlm 백엔드를 사용하고,
+        그 외에는 기존 mlx-lm 백엔드를 사용한다.
+
         Args:
             config: LLMConfig 인스턴스 (mlx_model_name, temperature 등)
 
         Raises:
-            MLXLoadError: mlx-lm 미설치 또는 모델 로드 실패 시
+            MLXLoadError: mlx-lm/mlx-vlm 미설치 또는 모델 로드 실패 시
         """
         self._model: Any = None
         self._tokenizer: Any = None
+        self._processor: Any = None
+        self._vlm_generate: Any = None
         self._temperature = config.temperature
         self._max_tokens = getattr(config, "mlx_max_tokens", 2000)
         self._model_name = getattr(
@@ -77,6 +84,51 @@ class MLXBackend:
             "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
         )
 
+        # Gemma 4 모델 여부 판별 → mlx-vlm 또는 mlx-lm 자동 분기
+        model_name_lower = self._model_name.lower()
+        self._use_vlm = "gemma-4" in model_name_lower or "gemma4" in model_name_lower
+
+        if self._use_vlm:
+            self._load_vlm_model()
+        else:
+            self._load_lm_model()
+
+    def _load_vlm_model(self) -> None:
+        """mlx-vlm으로 Gemma 4 등 VLM 모델을 로드한다.
+
+        Raises:
+            MLXLoadError: mlx-vlm 미설치 또는 모델 로드 실패 시
+        """
+        try:
+            from mlx_vlm import load as vlm_load  # type: ignore[import-untyped]
+            from mlx_vlm import generate as vlm_generate  # type: ignore[import-untyped]
+
+            self._vlm_generate = vlm_generate
+
+            logger.info(f"MLX-VLM 모델 로드 시작: {self._model_name}")
+            model, processor = vlm_load(self._model_name)
+            self._model = model
+            self._processor = processor
+            # VLM의 tokenizer는 processor.tokenizer에서 추출
+            self._tokenizer = processor.tokenizer
+            logger.info(f"MLX-VLM 모델 로드 완료: {self._model_name}")
+
+        except ImportError as e:
+            raise MLXLoadError(
+                "Gemma 4 모델은 mlx-vlm 패키지가 필요합니다. "
+                "'pip install mlx-vlm' 으로 설치하세요."
+            ) from e
+        except Exception as e:
+            raise MLXLoadError(
+                f"MLX-VLM 모델 로드 실패: {self._model_name} — {e}"
+            ) from e
+
+    def _load_lm_model(self) -> None:
+        """mlx-lm으로 일반 LLM 모델을 로드한다 (EXAONE 등).
+
+        Raises:
+            MLXLoadError: mlx-lm 미설치 또는 모델 로드 실패 시
+        """
         try:
             from mlx_lm import load  # type: ignore[import-untyped]
 
@@ -144,20 +196,30 @@ class MLXBackend:
             raise MLXGenerationError("MLX 모델이 로드되지 않았습니다")
 
         try:
-            from mlx_lm import generate  # type: ignore[import-untyped]
-
             prompt = self._apply_chat_template(messages)
             temp = temperature if temperature is not None else self._temperature
 
-            response = generate(
-                self._model,
-                self._tokenizer,
-                prompt=prompt,
-                max_tokens=self._max_tokens,
-                temp=temp,
-            )
+            if self._use_vlm:
+                # mlx-vlm: GenerationResult 객체 반환 → .text 추출
+                result = self._vlm_generate(
+                    self._model,
+                    self._processor,
+                    prompt=prompt,
+                    max_tokens=self._max_tokens,
+                    verbose=False,
+                )
+                return result.text
+            else:
+                from mlx_lm import generate  # type: ignore[import-untyped]
 
-            return response
+                response = generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt=prompt,
+                    max_tokens=self._max_tokens,
+                    temp=temp,
+                )
+                return response
 
         except MLXGenerationError:
             raise
@@ -192,23 +254,35 @@ class MLXBackend:
             raise MLXGenerationError("MLX 모델이 로드되지 않았습니다")
 
         try:
-            from mlx_lm import stream_generate  # type: ignore[import-untyped]
-
             prompt = self._apply_chat_template(messages)
             temp = temperature if temperature is not None else self._temperature
 
-            for response in stream_generate(
-                self._model,
-                self._tokenizer,
-                prompt=prompt,
-                max_tokens=self._max_tokens,
-                temp=temp,
-            ):
-                # stream_generate는 GenerateStepOutput 객체를 반환
-                # .text 속성에서 토큰 텍스트를 추출
-                text = getattr(response, "text", str(response))
-                if text:
-                    yield text
+            if self._use_vlm:
+                # mlx-vlm은 스트리밍을 별도로 지원하지 않으므로
+                # 전체 생성 후 한번에 yield하는 폴백 처리
+                result = self._vlm_generate(
+                    self._model,
+                    self._processor,
+                    prompt=prompt,
+                    max_tokens=self._max_tokens,
+                    verbose=False,
+                )
+                yield result.text
+            else:
+                from mlx_lm import stream_generate  # type: ignore[import-untyped]
+
+                for response in stream_generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt=prompt,
+                    max_tokens=self._max_tokens,
+                    temp=temp,
+                ):
+                    # stream_generate는 GenerateStepOutput 객체를 반환
+                    # .text 속성에서 토큰 텍스트를 추출
+                    text = getattr(response, "text", str(response))
+                    if text:
+                        yield text
 
         except MLXGenerationError:
             raise
@@ -226,6 +300,8 @@ class MLXBackend:
 
         self._model = None
         self._tokenizer = None
+        self._processor = None
+        self._vlm_generate = None
 
         gc.collect()
 

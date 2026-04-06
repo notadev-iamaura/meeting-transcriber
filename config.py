@@ -253,16 +253,22 @@ class DiarizationConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM (EXAONE via Ollama/MLX) 설정"""
+    """LLM 백엔드 설정 (MLX 기본, Ollama 선택 가능)
 
-    # 백엔드 선택: "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
-    backend: str = Field(default="ollama")
+    MLX 지원 모델:
+        - mlx-community/EXAONE-3.5-7.8B-Instruct-4bit (한국어 특화, 기본값)
+        - mlx-community/gemma-4-e4b-it-4bit (Google Gemma 4, 다국어)
+        - mlx-community/gemma-4-e2b-it-4bit (경량, 저사양용)
+    """
 
-    # Ollama 전용 설정
+    # 백엔드 선택: "mlx" (기본, in-process Apple Silicon) 또는 "ollama" (외부 서버)
+    backend: str = Field(default="mlx")
+
+    # Ollama 전용 설정 (backend: "ollama" 시 사용)
     model_name: str = "exaone3.5:7.8b-instruct-q4_K_M"
     host: str = "http://127.0.0.1:11434"
 
-    # MLX 전용 설정
+    # MLX 전용 설정 (backend: "mlx" 시 사용)
     mlx_model_name: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
     mlx_max_tokens: int = Field(default=2000, ge=100)
 
@@ -532,6 +538,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     # LLM 백엔드 오버라이드
     if env_backend := os.environ.get("MT_LLM_BACKEND"):
         data.setdefault("llm", {})["backend"] = env_backend
+
+    # LLM 모델명 오버라이드 (MLX 백엔드)
+    if env_model := os.environ.get("MT_LLM_MODEL"):
+        data.setdefault("llm", {})["mlx_model_name"] = env_model
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰

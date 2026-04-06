@@ -8,8 +8,9 @@ API 라우터 모듈 (API Router Module)
     - /api/meetings/{meeting_id}: 특정 회의 상세 조회
     - /api/search: 하이브리드 검색 (벡터 + FTS5)
     - /api/chat: RAG 기반 AI Chat
+    - /api/settings: 시스템 설정 조회/수정 (GET/PUT)
     - pydantic 요청/응답 스키마 정의
-의존성: fastapi, pydantic, search/hybrid_search, search/chat, core/job_queue
+의존성: fastapi, pydantic, pyyaml, search/hybrid_search, search/chat, core/job_queue
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -962,10 +964,16 @@ async def get_summary(
     outputs_dir = _get_outputs_dir(request)
     meeting_dir = outputs_dir / meeting_id
 
+    # 폴백 순서: summary.md → meeting_minutes.md → summary.json → checkpoints/summarize.json
     summary_md_path = meeting_dir / "summary.md"
+    minutes_md_path = meeting_dir / "meeting_minutes.md"
     summary_json_path = meeting_dir / "summary.json"
+    # 체크포인트 폴백
+    config = getattr(request.app.state, "config", None)
+    checkpoints_dir = config.paths.resolved_checkpoints_dir if config else meeting_dir.parent.parent / "checkpoints"
+    checkpoint_path = checkpoints_dir / meeting_id / "summarize.json"
 
-    if not summary_md_path.is_file() and not summary_json_path.is_file():
+    if not summary_md_path.is_file() and not minutes_md_path.is_file() and not summary_json_path.is_file() and not checkpoint_path.is_file():
         raise HTTPException(
             status_code=404,
             detail=f"회의록을 찾을 수 없습니다: {meeting_id}",
@@ -977,21 +985,30 @@ async def get_summary(
         markdown = ""
         meta: dict = {}
 
-        # 마크다운 파일 읽기
+        # 마크다운 파일 읽기 (폴백 순서: summary.md → meeting_minutes.md)
+        md_file = None
         if summary_md_path.is_file():
+            md_file = summary_md_path
+        elif minutes_md_path.is_file():
+            md_file = minutes_md_path
 
+        if md_file:
             def _read_md() -> str:
-                return summary_md_path.read_text(encoding="utf-8")
-
+                return md_file.read_text(encoding="utf-8")
             markdown = await asyncio.to_thread(_read_md)
 
-        # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
+        # PERF: mtime 기반 JSON 캐시 사용
         if summary_json_path.is_file():
             meta = await asyncio.to_thread(_json_cache.get, summary_json_path)
-
-            # JSON에 마크다운이 포함되어 있고 파일이 없는 경우 대체
             if not markdown and meta.get("markdown"):
                 markdown = meta["markdown"]
+
+        # 체크포인트 폴백 (outputs에 없을 때)
+        if not markdown and checkpoint_path.is_file():
+            cp_data = await asyncio.to_thread(_json_cache.get, checkpoint_path)
+            if cp_data.get("markdown"):
+                markdown = cp_data["markdown"]
+                meta = cp_data
 
         return SummaryResponse(
             markdown=markdown,
@@ -1208,6 +1225,7 @@ def _get_pipeline_manager(request: Request) -> Any:
 async def summarize_meeting(
     request: Request,
     meeting_id: str,
+    force: bool = False,
 ) -> dict[str, str]:
     """온디맨드로 회의 요약(LLM 후처리)을 실행한다.
 
@@ -1218,6 +1236,7 @@ async def summarize_meeting(
     Args:
         request: FastAPI Request 객체
         meeting_id: 회의 고유 식별자
+        force: True이면 기존 요약 체크포인트를 삭제하고 재생성
 
     Returns:
         요약 시작 확인 메시지
@@ -1248,6 +1267,24 @@ async def summarize_meeting(
                 status_code=400,
                 detail=f"merge 체크포인트가 없습니다. 파이프라인을 먼저 실행하세요: {meeting_id}",
             )
+
+        # force=True: 기존 요약 체크포인트/출력 삭제 (재생성)
+        if force:
+            outputs_dir = _get_outputs_dir(request)
+            # 체크포인트 삭제
+            for cp_name in ("correct.json", "summarize.json"):
+                cp_path = pipeline._get_checkpoint_path(meeting_id, PipelineStep.CORRECT if "correct" in cp_name else PipelineStep.SUMMARIZE)
+                if cp_path.exists():
+                    cp_path.unlink()
+                    logger.info(f"기존 체크포인트 삭제: {cp_path}")
+            # 출력 파일 삭제
+            meeting_out = outputs_dir / meeting_id
+            for fname in ("summary.md", "meeting_minutes.md", "summary.json", "corrected.json"):
+                fpath = meeting_out / fname
+                if fpath.exists():
+                    fpath.unlink()
+                    logger.info(f"기존 출력 파일 삭제: {fpath}")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1268,7 +1305,7 @@ async def summarize_meeting(
         running_tasks.add(task)
         task.add_done_callback(running_tasks.discard)
 
-    logger.info(f"온디맨드 요약 시작: {meeting_id}")
+    logger.info(f"온디맨드 요약 시작: {meeting_id} (force={force})")
 
     return {
         "status": "ok",
@@ -1585,3 +1622,364 @@ async def get_recording_devices(
             status_code=500,
             detail=f"오디오 장치 조회 중 오류가 발생했습니다: {e}",
         ) from e
+
+
+# === 설정 관리 API ===
+
+# 허용된 MLX 모델 목록 (보안: 화이트리스트 방식)
+_ALLOWED_MLX_MODELS = {
+    "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
+    "mlx-community/gemma-4-e4b-it-4bit",
+    "mlx-community/gemma-4-e2b-it-4bit",
+}
+
+# 프론트엔드 드롭다운용 모델 프리셋 (읽기 전용)
+_AVAILABLE_MODELS = [
+    {
+        "id": "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
+        "label": "EXAONE 3.5 7.8B (한국어 특화)",
+        "size": "~5GB",
+    },
+    {
+        "id": "mlx-community/gemma-4-e4b-it-4bit",
+        "label": "Gemma 4 E4B (다국어, 빠름)",
+        "size": "~5.3GB",
+    },
+    {
+        "id": "mlx-community/gemma-4-e2b-it-4bit",
+        "label": "Gemma 4 E2B (경량)",
+        "size": "~3GB",
+    },
+]
+
+
+class SettingsResponse(BaseModel):
+    """설정 응답 스키마.
+
+    현재 시스템 설정값을 프론트엔드에 전달한다.
+
+    Attributes:
+        llm_backend: LLM 백엔드 ("mlx" 또는 "ollama")
+        llm_mlx_model_name: MLX 모델명
+        llm_temperature: 생성 온도 (0.0~2.0)
+        llm_mlx_max_tokens: MLX 최대 생성 토큰
+        llm_skip_steps: LLM 단계 스킵 여부 (pipeline.skip_llm_steps)
+        stt_language: STT 언어 코드
+        available_models: 선택 가능한 모델 프리셋 목록 (읽기 전용)
+    """
+
+    llm_backend: str = "mlx"
+    llm_mlx_model_name: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+    llm_temperature: float = 0.3
+    llm_mlx_max_tokens: int = 2000
+    llm_skip_steps: bool = True
+    stt_language: str = "ko"
+    available_models: list[dict] = Field(default_factory=lambda: _AVAILABLE_MODELS)
+
+
+class SettingsUpdateRequest(BaseModel):
+    """설정 업데이트 요청 스키마.
+
+    변경하려는 필드만 전송하면 된다 (부분 업데이트).
+
+    Attributes:
+        llm_backend: LLM 백엔드 ("mlx" 또는 "ollama")
+        llm_mlx_model_name: MLX 모델명 (허용 목록 내)
+        llm_temperature: 생성 온도 (0.0~2.0)
+        llm_mlx_max_tokens: MLX 최대 생성 토큰 (100 이상)
+        llm_skip_steps: LLM 단계 스킵 여부
+        stt_language: STT 언어 코드
+    """
+
+    llm_backend: Optional[str] = None
+    llm_mlx_model_name: Optional[str] = None
+    llm_temperature: Optional[float] = None
+    llm_mlx_max_tokens: Optional[int] = None
+    llm_skip_steps: Optional[bool] = None
+    stt_language: Optional[str] = None
+
+
+class SettingsUpdateResponse(BaseModel):
+    """설정 업데이트 응답 스키마.
+
+    Attributes:
+        settings: 업데이트된 설정값
+        message: 결과 메시지
+        changed_fields: 변경된 필드 목록
+    """
+
+    settings: SettingsResponse
+    message: str = "설정이 저장되었습니다."
+    changed_fields: list[str] = Field(default_factory=list)
+
+
+def _get_config_path() -> Path:
+    """config.yaml 파일 경로를 반환한다.
+
+    Returns:
+        프로젝트 루트의 config.yaml 절대 경로
+    """
+    return Path(__file__).parent.parent / "config.yaml"
+
+
+@router.get("/settings", response_model=SettingsResponse)
+async def get_settings(request: Request) -> SettingsResponse:
+    """현재 시스템 설정을 반환한다.
+
+    app.state.config에서 설정값을 읽어 SettingsResponse로 매핑한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        현재 설정값
+
+    Raises:
+        HTTPException: 설정이 초기화되지 않았을 때 (503)
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 설정이 초기화되지 않았습니다.",
+        )
+
+    return SettingsResponse(
+        llm_backend=config.llm.backend,
+        llm_mlx_model_name=config.llm.mlx_model_name,
+        llm_temperature=config.llm.temperature,
+        llm_mlx_max_tokens=config.llm.mlx_max_tokens,
+        llm_skip_steps=config.pipeline.skip_llm_steps,
+        stt_language=config.stt.language,
+        available_models=_AVAILABLE_MODELS,
+    )
+
+
+@router.put("/settings", response_model=SettingsUpdateResponse)
+async def update_settings(
+    request: Request,
+    body: SettingsUpdateRequest,
+) -> SettingsUpdateResponse:
+    """시스템 설정을 업데이트한다.
+
+    전달된 필드만 config.yaml에 반영하고 런타임 config도 갱신한다.
+    모델이 변경된 경우 안내 메시지를 포함한다.
+
+    Args:
+        request: FastAPI Request 객체
+        body: 변경할 설정 필드 (Optional — 전달된 것만 반영)
+
+    Returns:
+        업데이트 결과 (변경된 설정, 메시지, 변경 필드 목록)
+
+    Raises:
+        HTTPException: 검증 실패(400), 설정 미초기화(503), 파일 저장 실패(500)
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 설정이 초기화되지 않았습니다.",
+        )
+
+    # 변경할 필드만 추출 (None이 아닌 값)
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return SettingsUpdateResponse(
+            settings=SettingsResponse(
+                llm_backend=config.llm.backend,
+                llm_mlx_model_name=config.llm.mlx_model_name,
+                llm_temperature=config.llm.temperature,
+                llm_mlx_max_tokens=config.llm.mlx_max_tokens,
+                llm_skip_steps=config.pipeline.skip_llm_steps,
+                stt_language=config.stt.language,
+                available_models=_AVAILABLE_MODELS,
+            ),
+            message="변경할 설정이 없습니다.",
+            changed_fields=[],
+        )
+
+    # === 입력 검증 ===
+    if "llm_backend" in updates:
+        if updates["llm_backend"] not in ("mlx", "ollama"):
+            raise HTTPException(
+                status_code=400,
+                detail="llm_backend는 'mlx' 또는 'ollama'만 허용됩니다.",
+            )
+
+    if "llm_mlx_model_name" in updates:
+        if updates["llm_mlx_model_name"] not in _ALLOWED_MLX_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"허용되지 않은 모델입니다. 허용 목록: {sorted(_ALLOWED_MLX_MODELS)}",
+            )
+
+    if "llm_temperature" in updates:
+        temp = updates["llm_temperature"]
+        if not (0.0 <= temp <= 2.0):
+            raise HTTPException(
+                status_code=400,
+                detail="llm_temperature는 0.0~2.0 범위여야 합니다.",
+            )
+
+    if "llm_mlx_max_tokens" in updates:
+        if updates["llm_mlx_max_tokens"] < 100:
+            raise HTTPException(
+                status_code=400,
+                detail="llm_mlx_max_tokens는 100 이상이어야 합니다.",
+            )
+
+    if "stt_language" in updates:
+        lang = updates["stt_language"]
+        if not lang or len(lang) > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="stt_language가 유효하지 않습니다.",
+            )
+
+    # === config.yaml 파일 업데이트 ===
+    config_path = _get_config_path()
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logger.warning(f"config.yaml 미발견: {config_path}. 새로 생성합니다.")
+        yaml_data = {}
+
+    # YAML 필드 매핑 (API 필드명 → YAML 경로)
+    changed_fields: list[str] = []
+    model_changed = False
+
+    if "llm_backend" in updates:
+        yaml_data.setdefault("llm", {})["backend"] = updates["llm_backend"]
+        changed_fields.append("llm_backend")
+
+    if "llm_mlx_model_name" in updates:
+        yaml_data.setdefault("llm", {})["mlx_model_name"] = updates["llm_mlx_model_name"]
+        changed_fields.append("llm_mlx_model_name")
+        model_changed = True
+
+    if "llm_temperature" in updates:
+        yaml_data.setdefault("llm", {})["temperature"] = updates["llm_temperature"]
+        changed_fields.append("llm_temperature")
+
+    if "llm_mlx_max_tokens" in updates:
+        yaml_data.setdefault("llm", {})["mlx_max_tokens"] = updates["llm_mlx_max_tokens"]
+        changed_fields.append("llm_mlx_max_tokens")
+
+    if "llm_skip_steps" in updates:
+        yaml_data.setdefault("pipeline", {})["skip_llm_steps"] = updates["llm_skip_steps"]
+        changed_fields.append("llm_skip_steps")
+
+    if "stt_language" in updates:
+        yaml_data.setdefault("stt", {})["language"] = updates["stt_language"]
+        changed_fields.append("stt_language")
+
+    # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            content = f.read()
+
+        # 정규식 기반 값 교체 (섹션 컨텍스트를 고려한 정확한 매칭)
+        import re
+
+        def _replace_yaml_value(text: str, section: str, key: str, new_val: str) -> str:
+            """YAML 파일에서 특정 섹션의 키 값을 교체한다 (주석 보존)."""
+            # 섹션 시작 위치 찾기
+            section_pattern = re.compile(rf'^{re.escape(section)}:', re.MULTILINE)
+            section_match = section_pattern.search(text)
+            if not section_match:
+                return text
+
+            # 섹션 내에서 키 찾기 (다음 섹션 시작 전까지만)
+            start = section_match.end()
+            next_section = re.search(r'^\S', text[start:], re.MULTILINE)
+            end = start + next_section.start() if next_section else len(text)
+
+            section_text = text[start:end]
+            # 키의 값 부분만 교체 (주석 보존)
+            key_pattern = re.compile(
+                rf'^(  {re.escape(key)}:)\s*[^\n#]*(#[^\n]*)?$',
+                re.MULTILINE,
+            )
+            key_match = key_pattern.search(section_text)
+            if not key_match:
+                return text
+
+            comment = key_match.group(2) or ""
+            if comment:
+                comment = "  " + comment.strip()
+            replacement = f'{key_match.group(1)} {new_val}{comment}'
+            new_section = section_text[:key_match.start()] + replacement + section_text[key_match.end():]
+            return text[:start] + new_section + text[end:]
+
+        if "llm_backend" in updates:
+            content = _replace_yaml_value(content, "llm", "backend", f'"{updates["llm_backend"]}"')
+        if "llm_mlx_model_name" in updates:
+            content = _replace_yaml_value(content, "llm", "mlx_model_name", f'"{updates["llm_mlx_model_name"]}"')
+        if "llm_temperature" in updates:
+            content = _replace_yaml_value(content, "llm", "temperature", str(updates["llm_temperature"]))
+        if "llm_mlx_max_tokens" in updates:
+            content = _replace_yaml_value(content, "llm", "mlx_max_tokens", str(updates["llm_mlx_max_tokens"]))
+        if "llm_skip_steps" in updates:
+            val = "true" if updates["llm_skip_steps"] else "false"
+            content = _replace_yaml_value(content, "pipeline", "skip_llm_steps", val)
+        if "stt_language" in updates:
+            content = _replace_yaml_value(content, "stt", "language", f'"{updates["stt_language"]}"')
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(f"config.yaml 저장 완료 (주석 보존). 변경 필드: {changed_fields}")
+    except OSError as e:
+        logger.exception(f"config.yaml 저장 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"설정 파일 저장에 실패했습니다: {e}",
+        ) from e
+
+    # === 런타임 config 갱신 ===
+    if "llm_backend" in updates:
+        new_llm = config.llm.model_copy(update={"backend": updates["llm_backend"]})
+        config = config.model_copy(update={"llm": new_llm})
+
+    if "llm_mlx_model_name" in updates:
+        new_llm = config.llm.model_copy(update={"mlx_model_name": updates["llm_mlx_model_name"]})
+        config = config.model_copy(update={"llm": new_llm})
+
+    if "llm_temperature" in updates:
+        new_llm = config.llm.model_copy(update={"temperature": updates["llm_temperature"]})
+        config = config.model_copy(update={"llm": new_llm})
+
+    if "llm_mlx_max_tokens" in updates:
+        new_llm = config.llm.model_copy(update={"mlx_max_tokens": updates["llm_mlx_max_tokens"]})
+        config = config.model_copy(update={"llm": new_llm})
+
+    if "llm_skip_steps" in updates:
+        new_pipeline = config.pipeline.model_copy(update={"skip_llm_steps": updates["llm_skip_steps"]})
+        config = config.model_copy(update={"pipeline": new_pipeline})
+
+    if "stt_language" in updates:
+        new_stt = config.stt.model_copy(update={"language": updates["stt_language"]})
+        config = config.model_copy(update={"stt": new_stt})
+
+    # app.state.config 갱신
+    request.app.state.config = config
+
+    # 응답 메시지 구성
+    message = "설정이 저장되었습니다."
+    if model_changed:
+        message += " 모델 변경은 다음 LLM 호출 시 적용됩니다."
+
+    return SettingsUpdateResponse(
+        settings=SettingsResponse(
+            llm_backend=config.llm.backend,
+            llm_mlx_model_name=config.llm.mlx_model_name,
+            llm_temperature=config.llm.temperature,
+            llm_mlx_max_tokens=config.llm.mlx_max_tokens,
+            llm_skip_steps=config.pipeline.skip_llm_steps,
+            stt_language=config.stt.language,
+            available_models=_AVAILABLE_MODELS,
+        ),
+        message=message,
+        changed_fields=changed_fields,
+    )

@@ -14,7 +14,7 @@ paths:
 # === STT 모델 설정 ===
 stt:
   model_name: "youngouk/whisper-medium-komixv2-mlx"  # 한국어 최적화 모델 (HuggingFace, 자동 다운로드)
-  language: "ko"                             # 전사 언어
+  language: "ko"  # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
   initial_prompt: null                        # 전사 컨텍스트 힌트 (komixv2 모델에서 환각 유발 확인, 비활성 유지)
@@ -30,13 +30,13 @@ diarization:
 
 # === LLM 설정 (EXAONE via Ollama) ===
 llm:
-  backend: "mlx"                              # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
+  backend: "mlx"  # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
   model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
-  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # MLX 모델명
+  mlx_model_name: "mlx-community/gemma-4-e2b-it-4bit"  # MLX 모델명
   mlx_max_tokens: 2000                       # MLX 최대 생성 토큰
   max_context_tokens: 8192                   # 컨텍스트 윈도우
-  temperature: 0.3                           # 생성 온도
+  temperature: 0.3  # 생성 온도
   correction_batch_size: 15                  # 보정 시 배치 크기 (발화 수, PERF: 8192 컨텍스트 윈도우 활용도 개선)
   request_timeout_seconds: 120               # 요청 타임아웃
 
@@ -92,7 +92,7 @@ pipeline:
   retry_max_count: 3                         # 최대 재시도 횟수
   min_disk_free_gb: 1.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
-  skip_llm_steps: true                       # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
+  skip_llm_steps: false  # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
   diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)
   step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화
 

@@ -14,13 +14,14 @@
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
 - **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
-- **AI 교정**: EXAONE 3.5 7.8B 로컬 LLM으로 전사 오류 교정 (Ollama 또는 MLX 백엔드 선택 가능)
+- **AI 교정**: EXAONE 3.5 또는 Gemma 4 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **시맨틱 검색**: ChromaDB + SQLite FTS5 하이브리드 검색
 - **AI 채팅**: 회의 내용 기반 질의응답
 - **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
 - **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
 - **macOS 메뉴바 앱**: rumps 기반 시스템 트레이 상주, 녹음 상태 실시간 표시
-- **웹 UI**: FastAPI + WebSocket 실시간 진행 상황 확인
+- **웹 UI**: macOS 네이티브 스타일 3-Column SPA (회의 목록 + 뷰어 + 검색 + AI 채팅 + 설정)
+- **설정 UI**: 웹에서 LLM 모델/Temperature/전사 언어 등 실시간 변경
 - **Zoom 감지**: Zoom 회의 시작/종료 자동 감지 (CptHost 프로세스 모니터링)
 - **폴더 감시**: 지정 폴더에 파일 추가 시 자동 처리
 - **서멀 관리**: 팬리스 MacBook Air 대응, 2-job + 쿨다운 패턴
@@ -51,11 +52,12 @@ sysctl -n machdep.cpu.brand_string
 echo "$(( $(sysctl -n hw.memsize) / 1073741824 ))GB"
 ```
 
-| 내 Mac | 권장 백엔드 | 이유 |
-|--------|-------------|------|
-| **M3/M4 + 16GB 이상** | `mlx` (권장) | 통합 메모리 네이티브, 10~30% 빠름, Ollama 설치 불필요 |
-| **M1/M2 + 16GB 이상** | `mlx` 또는 `ollama` | 둘 다 사용 가능 |
-| **M1/M2 + 8GB** | `ollama` | MLX in-process 로드 시 메모리 부족 위험 |
+| 내 Mac | 권장 설정 | 이유 |
+|--------|----------|------|
+| **M4 + 16GB** | MLX + EXAONE 또는 Gemma 4 E4B | 최적 성능, 둘 다 여유 있게 실행 |
+| **M3/M4 + 16GB 이상** | MLX + EXAONE 또는 Gemma 4 E4B | 통합 메모리 네이티브, Ollama 불필요 |
+| **M1/M2 + 16GB** | MLX + EXAONE | 검증된 성능 |
+| **M1/M2 + 8GB** | MLX + Gemma 4 E2B 또는 Ollama | E2B는 ~3GB로 메모리 절약 |
 
 ## 빠른 시작
 
@@ -118,29 +120,30 @@ bash scripts/install.sh
 - EXAONE 3.5 모델 다운로드
 - 데이터 디렉토리 생성 + 보안 설정
 
-### 4-1. LLM 백엔드 선택
+### 4-1. LLM 모델 선택
 
-위 "내 Mac에 맞는 LLM 백엔드 확인" 결과에 따라 택 1:
+**기본 설정(MLX + EXAONE)은 변경 없이 바로 사용 가능합니다.**
+최초 실행 시 HuggingFace에서 모델이 자동 다운로드됩니다 (~5GB).
 
-**옵션 A: Ollama 백엔드 (기본값)**
-```bash
-# Ollama 앱 설치 필요: https://ollama.com
-ollama pull exaone3.5:7.8b-instruct-q4_K_M
-# config.yaml 변경 불필요 (기본값이 ollama)
+| 모델 | `config.yaml` 설정 | 크기 | 특징 |
+|------|-------------------|------|------|
+| **EXAONE 3.5** (기본) | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` | ~5GB | 한국어 특화, 검증됨 |
+| **Gemma 4 E4B** | `mlx-community/gemma-4-e4b-it-4bit` | ~5.3GB | Google, 53% 빠름, 한국어 동급 |
+| **Gemma 4 E2B** | `mlx-community/gemma-4-e2b-it-4bit` | ~3GB | 경량, 8GB RAM 가능 |
+
+모델 변경은 `config.yaml`에서 한 줄만 바꾸면 됩니다:
+```yaml
+llm:
+  mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # ← 원하는 모델로 변경
 ```
 
-**옵션 B: MLX 백엔드 (M3/M4 + 16GB 이상 권장)**
-```bash
-# mlx-lm은 pip install 시 자동 설치됨
-# config.yaml에서 백엔드만 변경:
-sed -i '' 's/backend: "ollama"/backend: "mlx"/' config.yaml
+또는 웹 UI 설정 페이지(`http://127.0.0.1:8765/app/settings`)에서 드롭다운으로 변경할 수 있습니다.
 
-# 또는 환경변수로 설정 (config.yaml 변경 없이):
-export MT_LLM_BACKEND=mlx
-```
-
-> MLX 백엔드는 별도 서버 없이 파이썬 프로세스 내에서 모델을 직접 로드합니다.
-> 최초 실행 시 HuggingFace에서 모델이 자동 다운로드됩니다 (~5GB).
+> **Ollama 백엔드**를 사용하려면 [ollama.com](https://ollama.com)에서 앱을 설치한 후:
+> ```bash
+> ollama pull exaone3.5:7.8b-instruct-q4_K_M
+> ```
+> `config.yaml`에서 `llm.backend: "ollama"`로 변경하세요.
 
 ### 5. HuggingFace 토큰 설정 (화자 분리에 필요)
 
@@ -220,18 +223,61 @@ bash scripts/install.sh --check
 
 ## 사용법
 
-### 메뉴바 모드 (기본)
-
-`python main.py` 실행 시 macOS 메뉴바에 아이콘이 나타납니다.
-웹 브라우저에서 `http://127.0.0.1:8765` 으로 접속하여 사용할 수 있습니다.
-
-### 헤드리스 모드
+### 서버 실행
 
 ```bash
+# 메뉴바 + 웹 서버 (기본)
+python main.py
+
+# 헤드리스 모드 (서버만, SSH/서비스용)
 python main.py --no-menubar
 ```
 
-서버만 실행합니다. SSH 접속이나 서비스 등록 시 유용합니다.
+실행 후 **http://127.0.0.1:8765/app** 으로 접속합니다.
+
+### 웹 UI 구조
+
+3-Column macOS 네이티브 스타일 인터페이스:
+
+```
+┌──────────┬────────────────┬──────────────────────────────┐
+│ Nav Bar  │  회의 목록       │  콘텐츠 영역                   │
+│          │                │                              │
+│ 📋 회의록 │  2026-03-10 ●  │  회의 제목 / 전사문 / 요약       │
+│ 🔍 검색  │  2026-03-09 ●  │  또는 검색 결과 / AI 채팅       │
+│ 💬 채팅  │  ...           │                              │
+│ ⚙ 설정  │                │                              │
+│          │                │                    ☀/🌙      │
+│ 상태표시  │                │                              │
+└──────────┴────────────────┴──────────────────────────────┘
+```
+
+**회의 목록**: 좌측 패널에 날짜별 회의 목록. 상태 도트로 완료(초록)/처리중(파랑)/실패(빨강) 표시.
+
+**전사문 뷰어**: 회의 선택 시 참석자별 번호 배지 + 타임스탬프로 발화 표시. 전사문 내 검색 지원.
+
+**회의록 (AI 요약)**: 탭 전환으로 AI가 생성한 회의록 확인. "요약 생성" / "재생성" 버튼.
+
+**검색**: 전체 회의 내용에서 키워드 검색. 날짜/화자 필터. 결과 클릭 시 해당 발화로 이동.
+
+**AI 채팅**: 회의 내용 기반 질의응답. "지난 회의에서 결정된 일정이 뭐야?" 같은 질문 가능.
+
+**설정**: LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 즉시 적용.
+
+**다크/라이트 모드**: 우측 상단 토글로 전환. 시스템 설정 자동 감지 + 수동 오버라이드 가능.
+
+### 전사 파이프라인 (M4 16GB 기준 성능)
+
+| 단계 | 설명 | 소요 시간 (1시간 회의) |
+|------|------|---------------------|
+| 변환 | ffmpeg → 16kHz mono WAV | ~3초 |
+| 전사 | mlx-whisper (GPU) | ~3분 |
+| 화자분리 | pyannote (CPU) | ~5분 |
+| 병합 | 전사+화자 매칭 | ~1초 |
+| LLM 보정 | EXAONE/Gemma 4 | ~2분 |
+| 요약 | AI 회의록 생성 | ~30초 |
+
+> **총 ~11분** (1시간 회의 기준, M4 16GB). LLM 스킵 시 ~8분.
 
 ### Zoom 자동 녹음 + 전사
 
@@ -293,11 +339,10 @@ bash scripts/setup_launchagent.sh
 |------|------|--------|
 | `paths.base_dir` | 데이터 디렉토리 | `~/.meeting-transcriber` |
 | `stt.model_name` | Whisper 모델 | `whisper-medium-ko-zeroth` |
-| `llm.backend` | LLM 백엔드 (`"ollama"` 또는 `"mlx"`) | `"ollama"` |
-| `llm.model_name` | Ollama 모델명 | `exaone3.5:7.8b-instruct-q4_K_M` |
+| `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
 | `llm.mlx_model_name` | MLX 모델명 | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
-| `llm.host` | Ollama 주소 (Ollama 백엔드 시) | `http://127.0.0.1:11434` |
+| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `true` (최초 셋업 시), 설정에서 변경 가능 |
 | `server.port` | 웹 서버 포트 | `8765` |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |
@@ -313,8 +358,9 @@ bash scripts/setup_launchagent.sh
 |----------|------|
 | `MT_BASE_DIR` | 데이터 디렉토리 |
 | `MT_SERVER_PORT` | 서버 포트 |
-| `MT_LLM_BACKEND` | LLM 백엔드 (`ollama` 또는 `mlx`) |
-| `MT_LLM_HOST` | Ollama 호스트 |
+| `MT_LLM_BACKEND` | LLM 백엔드 (`mlx` 또는 `ollama`) |
+| `MT_LLM_MODEL` | MLX 모델명 오버라이드 |
+| `MT_LLM_HOST` | Ollama 호스트 (Ollama 사용 시) |
 | `HUGGINGFACE_TOKEN` | HuggingFace 토큰 |
 
 ## 프로젝트 구조
@@ -359,12 +405,11 @@ meeting-transcriber/
 │   └── websocket.py         # WebSocket 실시간 통신
 ├── ui/                      # 사용자 인터페이스
 │   ├── menubar.py           # macOS 메뉴바 (rumps)
-│   └── web/                 # 웹 UI
-│       ├── index.html       # 대시보드
-│       ├── viewer.html      # 회의록 뷰어
-│       ├── chat.html        # AI 채팅
-│       ├── style.css        # 스타일
-│       └── app.js           # 프론트엔드 JS
+│   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
+│       ├── index.html       # 3-Column SPA 셸
+│       ├── style.css        # macOS 네이티브 디자인 시스템
+│       ├── app.js           # 공통 유틸리티 (API, WebSocket)
+│       └── spa.js           # SPA 라우터 + 뷰 (Home/Viewer/Search/Chat/Settings)
 ├── security/                # 보안
 │   ├── secure_dir.py        # 디렉토리 보안 설정
 │   ├── lifecycle.py         # 데이터 수명주기 관리
@@ -383,7 +428,7 @@ meeting-transcriber/
 |------|------|
 | STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) (Apple MLX) |
 | 화자 분리 | [pyannote-audio](https://github.com/pyannote/pyannote-audio) 3.1 (CPU) |
-| LLM | [EXAONE 3.5](https://huggingface.co/LGAI-EXAONE) 7.8B Q4 via [Ollama](https://ollama.com) 또는 [MLX](https://github.com/ml-explore/mlx-examples) |
+| LLM | [EXAONE 3.5](https://huggingface.co/LGAI-EXAONE) 7.8B 또는 [Gemma 4](https://ai.google.dev/gemma) E4B/E2B via [MLX](https://github.com/ml-explore/mlx-examples) (기본) |
 | 임베딩 | [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (MPS) |
 | 벡터 DB | [ChromaDB](https://www.trychroma.com/) |
 | 키워드 검색 | SQLite FTS5 |
@@ -393,7 +438,8 @@ meeting-transcriber/
 ## 아키텍처 특징
 
 - **100% 오프라인**: 모든 AI 모델이 로컬에서 실행, 외부 API 호출 없음
-- **듀얼 LLM 백엔드**: Ollama (서버 모드) 또는 MLX (in-process) 중 하드웨어에 맞게 선택
+- **MLX 기본 백엔드**: EXAONE 3.5 / Gemma 4 중 선택, Ollama도 지원
+- **웹 UI 설정 변경**: LLM 모델/Temperature/전사 언어를 브라우저에서 실시간 변경
 - **Zoom 자동 녹음**: 회의 감지 → 녹음 → 전사까지 완전 자동화
 - **순차 모델 로드**: RAM 16GB 제한 내에서 피크 9.5GB 유지
 - **서멀 관리**: 팬리스 MacBook Air에서도 안정적 실행 (2-job 배치 + 3분 쿨다운)

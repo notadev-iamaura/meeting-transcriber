@@ -443,23 +443,42 @@ class Diarizer:
                     )
                 except TimeoutError as e:
                     raise DiarizationError(
-                        f"화자분리 타임아웃: {self._timeout_seconds}초 초과. "
-                        f"오디오 파일이 너무 크거나 모델이 응답하지 않습니다."
+                        f"화자분리 시간이 초과되었습니다 ({self._timeout_seconds}초). "
+                        f"오디오 파일이 너무 길 수 있습니다. 1시간 이하 파일을 권장합니다."
                     ) from e
         except (ModelNotAvailableError, TokenNotConfiguredError):
             raise
         except DiarizationError:
             raise
         except Exception as e:
-            raise DiarizationError(f"화자분리 처리 중 오류 발생: {audio_path} — {e}") from e
+            raise DiarizationError(f"화자분리 중 오류가 발생했습니다: {e}") from e
 
         # 결과 파싱
         segments = self._parse_annotation(annotation)
 
         if not segments:
-            raise EmptyAudioError(
-                f"화자분리 결과가 비어있습니다. 오디오에 음성이 없거나 인식 불가: {audio_path}"
-            )
+            # 오디오 길이를 확인하여 친절한 에러 메시지 제공
+            try:
+                import subprocess
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(audio_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                duration = float(probe.stdout.strip()) if probe.stdout.strip() else 0
+            except Exception:
+                duration = 0
+
+            if duration < 10:
+                raise EmptyAudioError(
+                    f"오디오가 너무 짧습니다 ({duration:.0f}초). "
+                    f"화자분리에는 최소 10초 이상의 음성이 필요합니다."
+                )
+            else:
+                raise EmptyAudioError(
+                    f"화자를 식별할 수 없습니다. "
+                    f"오디오에 명확한 음성이 포함되어 있는지 확인해주세요."
+                )
 
         # 화자 수 계산
         unique_speakers = set(seg.speaker for seg in segments)
