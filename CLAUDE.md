@@ -530,7 +530,7 @@ python main.py
 # 헤드리스 모드 (서버만)
 python main.py --no-menubar
 
-# 테스트 실행 (1231개)
+# 단위/통합 테스트 (1800+개, E2E 자동 제외)
 pytest tests/ -v
 
 # 빠른 테스트
@@ -538,6 +538,10 @@ pytest tests/ -x -q
 
 # 특정 모듈 테스트
 pytest tests/test_diarizer.py -v
+
+# Playwright E2E 테스트 (브라우저 기반, 약 24초, 별도 실행)
+# 전제: `pip install -e ".[dev]"` + `playwright install chromium`
+pytest -m e2e tests/test_e2e_edit_playwright.py -v
 
 # 린트
 python -m py_compile config.py

@@ -67,6 +67,10 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
+    # E2E (Playwright) — `pytest -m e2e` 로 명시 실행. chromium 바이너리는
+    # `playwright install chromium` 명령으로 별도 설치 필요.
+    "playwright>=1.58.0",
+    "pytest-playwright>=0.7.2",
 ]
 
 [project.urls]
@@ -89,6 +93,14 @@ include = ["core*", "steps*", "search*", "api*", "ui*", "security*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# e2e 마커가 달린 Playwright 테스트는 기본 실행에서 제외한다.
+# pytest-playwright 가 pytest-asyncio 의 auto 모드와 충돌하여
+# 함께 실행하면 async 테스트가 await 되지 않는 문제가 있기 때문이다.
+# 브라우저 E2E 는 별도로 실행: `pytest -m e2e tests/test_e2e_edit_playwright.py`
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: Playwright 기반 브라우저 E2E 테스트 (기본 실행에서 제외, `-m e2e` 로 명시 실행)",
+]
 
 # === 코드 품질 도구 ===
 
