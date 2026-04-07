@@ -33,6 +33,18 @@ class TestSTTModelRegistry:
         assert len(recommended) == 1
         assert recommended[0].id == "seastar-medium-4bit"
 
+    def test_label에_별표_추천_텍스트가_없어야_한다(self):
+        """회귀 방지: ⭐ 추천 배지는 프론트엔드 전용 — registry label에 포함되면 시각 중복 발생."""
+        from core.stt_model_registry import STT_MODELS
+
+        for spec in STT_MODELS:
+            assert "⭐" not in spec.label, (
+                f"{spec.id} label에 ⭐ 가 포함됨 — 프론트 배지와 중복: {spec.label}"
+            )
+            assert "추천" not in spec.label, (
+                f"{spec.id} label에 '추천' 텍스트가 포함됨 — is_recommended 플래그로만 처리: {spec.label}"
+            )
+
     def test_get_by_id로_모델_조회(self):
         from core.stt_model_registry import get_by_id
 

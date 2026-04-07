@@ -13,6 +13,7 @@
 ## 주요 기능
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
+- **STT 모델 선택기**: 웹 UI에서 한국어 fine-tune 모델 3종(komixv2 / seastar / ghost613)을 다운로드/활성화 — **CER 11.88% → 1.25%** (9배 향상)
 - **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
 - **AI 교정**: EXAONE 3.5 또는 Gemma 4 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **시맨틱 검색**: ChromaDB + SQLite FTS5 하이브리드 검색
@@ -21,7 +22,7 @@
 - **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
 - **macOS 메뉴바 앱**: rumps 기반 시스템 트레이 상주, 녹음 상태 실시간 표시
 - **웹 UI**: macOS 네이티브 스타일 3-Column SPA (회의 목록 + 뷰어 + 검색 + AI 채팅 + 설정)
-- **설정 UI**: 웹에서 LLM 모델/Temperature/전사 언어 등 실시간 변경
+- **설정 UI**: 웹에서 STT 모델/LLM 모델/Temperature/전사 언어 등 실시간 변경
 - **Zoom 감지**: Zoom 회의 시작/종료 자동 감지 (CptHost 프로세스 모니터링)
 - **폴더 감시**: 지정 폴더에 파일 추가 시 자동 처리
 - **서멀 관리**: 팬리스 MacBook Air 대응, 2-job + 쿨다운 패턴
@@ -262,9 +263,36 @@ python main.py --no-menubar
 
 **AI 채팅**: 회의 내용 기반 질의응답. "지난 회의에서 결정된 일정이 뭐야?" 같은 질문 가능.
 
-**설정**: LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 즉시 적용.
+**설정**: STT 모델 선택, LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 즉시 적용.
 
 **다크/라이트 모드**: 우측 상단 토글로 전환. 시스템 설정 자동 감지 + 수동 오버라이드 가능.
+
+### STT 모델 선택기 (음성 인식 모델)
+
+설정 페이지의 "음성 인식 모델 (STT)" 섹션에서 한국어 fine-tune 모델 3종을 GUI로 다운로드/활성화할 수 있습니다.
+
+| 모델 | CER | WER | RAM | 디스크 | 특징 |
+|------|-----|-----|-----|--------|------|
+| **komixv2** (기본) | 11.88% | 33.26% | 1.88GB | 1.5GB | Whisper Medium fp16, 변환 불필요 |
+| **seastar (4bit)** ⭐ 추천 | **1.25%** | **3.21%** | **1.26GB** | **831MB** | Zeroth Korean fine-tune, 최고 정확도 |
+| **ghost613 (4bit)** | 1.60% | 4.36% | 1.31GB | 884MB | Turbo + Zeroth fine-tune, 빠른 속도 |
+
+> **벤치마크 출처**: Zeroth Korean test set 30 샘플, 정밀 측정 (별도 프로세스 격리)
+>
+> 추천: **seastar 4bit**으로 변경 시 CER **9.5배** 정확도 향상 + 메모리 33% 절감.
+
+**사용법:**
+
+1. 설정 페이지 (`/app/settings`) → "음성 인식 모델 (STT)" 섹션으로 스크롤
+2. 원하는 모델의 `[다운로드]` 버튼 클릭 (HuggingFace 자동 다운로드 + 4bit 양자화)
+3. 다운로드 완료 후 `[활성화]` 클릭 → config.yaml 자동 갱신
+4. 다음 전사부터 새 모델 적용 (재시작 불필요)
+
+```yaml
+# 또는 config.yaml에서 직접 변경
+stt:
+  model_name: "/Users/{사용자}/.meeting-transcriber/stt_models/seastar-medium-ko-4bit"
+```
 
 ### 전사 파이프라인 (M4 16GB 기준 성능)
 
@@ -321,6 +349,22 @@ curl http://127.0.0.1:8765/api/recording/devices
 
 `~/.meeting-transcriber/audio_input/`에 오디오 파일을 넣으면 자동 전사됩니다.
 
+### STT 모델 API (CLI)
+
+```bash
+# 1. 모델 목록 + 상태 조회
+curl http://127.0.0.1:8765/api/stt-models | python -m json.tool
+
+# 2. 모델 다운로드 시작 (백그라운드, 양자화 자동 수행)
+curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download
+
+# 3. 다운로드 진행률 확인 (3초 간격 폴링 권장)
+curl http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download-status
+
+# 4. 활성 모델 변경 (config.yaml 자동 갱신)
+curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
+```
+
 ### 검색 및 채팅
 
 웹 UI에서 과거 회의 내용을 검색하거나, AI 채팅으로 질의할 수 있습니다.
@@ -338,7 +382,7 @@ bash scripts/setup_launchagent.sh
 | 설정 | 설명 | 기본값 |
 |------|------|--------|
 | `paths.base_dir` | 데이터 디렉토리 | `~/.meeting-transcriber` |
-| `stt.model_name` | Whisper 모델 | `whisper-medium-ko-zeroth` |
+| `stt.model_name` | Whisper 모델 (HuggingFace ID 또는 로컬 경로) | `youngouk/whisper-medium-komixv2-mlx` |
 | `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
 | `llm.mlx_model_name` | MLX 모델명 | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |

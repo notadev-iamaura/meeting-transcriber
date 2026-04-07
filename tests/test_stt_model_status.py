@@ -96,3 +96,28 @@ class TestGetActualSizeMb:
         from core.stt_model_status import get_actual_size_mb
 
         assert get_actual_size_mb(str(tmp_path / "none")) == 0.0
+
+    def test_HF_repo_id는_HF_캐시_크기_반환(self, tmp_path, monkeypatch):
+        """HF repo ID 형태의 경로는 ~/.cache/huggingface/hub 에서 크기 계산."""
+        from core.stt_model_status import get_actual_size_mb
+
+        # 가짜 HF 캐시 디렉토리 생성
+        fake_home = tmp_path
+        cache_dir = fake_home / ".cache" / "huggingface" / "hub" / "models--owner--repo"
+        snapshots = cache_dir / "snapshots" / "abcd1234"
+        snapshots.mkdir(parents=True)
+        # 2MB 파일
+        (snapshots / "weights.safetensors").write_bytes(b"x" * 2 * 1024 * 1024)
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+
+        size = get_actual_size_mb("owner/repo")
+        # 회귀 방지: HF repo ID 가 0.0 이 아닌 실제 캐시 크기를 반환해야 함
+        assert size > 1.5, f"HF 캐시 크기 계산 실패: {size}MB"
+
+    def test_HF_repo_id_캐시_없으면_0(self, tmp_path, monkeypatch):
+        """HF repo ID 가 캐시되지 않았으면 0.0 반환."""
+        from core.stt_model_status import get_actual_size_mb
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert get_actual_size_mb("owner/non-existent") == 0.0

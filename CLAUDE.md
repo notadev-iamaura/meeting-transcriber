@@ -111,7 +111,7 @@ python main.py --no-menubar  # Ctrl+C로 종료
 
 | 영역 | 기술 | 디바이스 | 비고 |
 |------|------|---------|------|
-| STT | mlx-whisper + `mlx-community/whisper-medium-mlx` | MPS(GPU) | Apple MLX 가속 |
+| STT | mlx-whisper + 한국어 fine-tune 모델 3종(GUI 선택) | MPS(GPU) | Apple MLX 가속, 웹 설정에서 다운로드/활성화 |
 | 화자분리 | pyannote-audio 3.1 | **CPU 강제** | MPS 버그 있음 |
 | LLM | EXAONE 3.5 7.8B 또는 Gemma 4 — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
@@ -172,6 +172,42 @@ llm:
 ollama pull exaone3.5:7.8b-instruct-q4_K_M
 ```
 
+### STT 모델 선택 가이드 (한국어 음성 인식)
+
+> **웹 UI에서 다운로드/활성화 가능** (`/app/settings` → "음성 인식 모델 (STT)")
+> 또는 `config.yaml`의 `stt.model_name`을 직접 수정.
+
+**지원 모델 (한국어 fine-tune 4bit 양자화):**
+
+| 모델 ID | 베이스 | CER | WER | RAM | 디스크 | 추천 |
+|--------|--------|-----|-----|-----|--------|------|
+| `komixv2` (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | 호환성 |
+| `seastar-medium-4bit` ⭐ | Medium + Zeroth fine-tune (4bit) | **1.25%** | **3.21%** | **1.26GB** | **831MB** | 정확도 최고 |
+| `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 884MB | 속도 우선 |
+
+**모델 변경 방법:**
+
+```bash
+# 1) GUI: http://127.0.0.1:8765/app/settings → "음성 인식 모델 (STT)" → 다운로드 → 활성화
+
+# 2) API
+curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download
+curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
+
+# 3) config.yaml 직접 수정
+# stt.model_name: "/Users/{user}/.meeting-transcriber/stt_models/seastar-medium-ko-4bit"
+```
+
+**구현 모듈:**
+
+- `core/stt_model_registry.py` — STTModelSpec + 3종 메타데이터
+- `core/stt_model_status.py` — 다운로드 상태 판정 (HF 캐시 + 로컬 경로)
+- `core/stt_model_downloader.py` — 백그라운드 다운로드 + mlx-examples convert.py 호출 + 4bit 양자화
+- `api/routes.py` — `/api/stt-models` 4개 엔드포인트
+
+> **양자화 의존성**: 한국어 fine-tune 모델 다운로드 시 `~/Projects/mlx-examples/whisper/convert.py`가 필요합니다.
+> 미설치 시 `git clone https://github.com/ml-explore/mlx-examples.git ~/Projects/mlx-examples`.
+
 ---
 
 ## 아키텍처
@@ -230,7 +266,10 @@ meeting-transcriber/
 │   ├── model_manager.py     # ModelLoadManager — 뮤텍스 기반 모델 수명 관리
 │   ├── job_queue.py         # SQLite 기반 작업 큐
 │   ├── thermal_manager.py   # 서멀 관리 (2-job 배치 + 쿨다운)
-│   └── watcher.py           # 폴더 감시 (watchdog)
+│   ├── watcher.py           # 폴더 감시 (watchdog)
+│   ├── stt_model_registry.py    # STT 모델 메타데이터 (komixv2/seastar/ghost613)
+│   ├── stt_model_status.py      # STT 모델 다운로드 상태 판정
+│   └── stt_model_downloader.py  # 백그라운드 다운로드 + 4bit 양자화
 │
 ├── steps/                   # 파이프라인 각 단계 (독립 모듈)
 │   ├── audio_converter.py   # ffmpeg 기반 WAV 변환

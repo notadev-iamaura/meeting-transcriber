@@ -261,6 +261,12 @@ class TestActivateSTTModel:
         body = resp.json()
         assert body["model_id"] == "seastar-medium-4bit"
         assert "seastar" in body["model_path"]
+        # 회귀 방지: previous_model_path 필드명 (이전 명칭은 previous_model_id 였음)
+        assert "previous_model_path" in body
+        assert body["previous_model_path"] == "youngouk/whisper-medium-komixv2-mlx"
+        # 한국어 안내 메시지 포함
+        assert "활성 모델" in body["message"]
+        assert "다음 전사" in body["message"]
 
         # config.yaml이 seastar 경로로 갱신되었는지 확인
         content = tmp_config.read_text(encoding="utf-8")
