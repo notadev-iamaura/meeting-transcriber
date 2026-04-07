@@ -3383,9 +3383,19 @@ button {
 
 /* 설정 뷰 컨테이너 */
 .settings-view {
-  max-width: 640px;
-  margin: 0 auto;
+  /* #content가 overflow:hidden 이므로 settings-view 자체가 스크롤 컨테이너 */
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
   padding: 32px 24px;
+}
+
+/* 설정 내부 콘텐츠는 중앙 정렬 + max-width 제한 */
+.settings-view > * {
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* 설정 헤더 */
