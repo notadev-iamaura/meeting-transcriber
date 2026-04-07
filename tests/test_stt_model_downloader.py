@@ -1,13 +1,12 @@
-"""STT 모델 다운로더 테스트 (TDD)
+"""STT 모델 다운로더 테스트
 
-STTModelDownloader 의 비동기 다운로드/양자화/검증 파이프라인을 검증한다.
-huggingface_hub 및 subprocess 호출은 모두 mock 처리한다.
+STTModelDownloader 의 비동기 HF 다운로드 + 검증 파이프라인을 검증한다.
+모든 지원 모델은 사전 양자화된 HF repo 를 사용하므로 로컬 양자화 경로는 없다.
+huggingface_hub 호출은 전부 mock 처리한다.
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -25,38 +24,10 @@ def tmp_models_dir(tmp_path):
 
 
 @pytest.fixture
-def patched_specs(tmp_models_dir, monkeypatch):
-    """STT_MODELS 의 로컬 경로를 tmp 디렉토리로 리다이렉트한다."""
-    from core import stt_model_registry
-    from core.stt_model_registry import STTModelSpec
-
-    original = stt_model_registry.STT_MODELS
-    patched: list[STTModelSpec] = []
-    for spec in original:
-        if spec.needs_quantization:
-            patched.append(
-                replace(
-                    spec,
-                    model_path=str(tmp_models_dir / spec.id),
-                )
-            )
-        else:
-            patched.append(spec)
-    monkeypatch.setattr(stt_model_registry, "STT_MODELS", patched)
-    return patched
-
-
-@pytest.fixture
-def downloader(tmp_models_dir, tmp_path, patched_specs):
+def downloader(tmp_models_dir):
     from core.stt_model_downloader import STTModelDownloader
 
-    fake_mlx_examples = tmp_path / "mlx-examples" / "whisper"
-    fake_mlx_examples.mkdir(parents=True)
-    (fake_mlx_examples / "convert.py").write_text("# fake\n")
-    return STTModelDownloader(
-        models_dir=tmp_models_dir,
-        mlx_examples_path=fake_mlx_examples,
-    )
+    return STTModelDownloader(models_dir=tmp_models_dir)
 
 
 # ============================================================
@@ -70,15 +41,9 @@ class TestSTTModelDownloader:
         async def fake_hf(spec, job):
             await asyncio.sleep(0.05)
 
-        async def fake_quant(spec, job):
-            # 검증 통과를 위해 가짜 산출물 생성
-            path = Path(spec.model_path).expanduser()
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "config.json").write_text("{}")
-            (path / "weights.safetensors").write_bytes(b"x" * 16)
-
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
-        monkeypatch.setattr(downloader, "_quantize", fake_quant)
+        # 검증도 모킹 (실제 HF 캐시 확인하지 않음)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
 
         job_id = await downloader.start_download("seastar-medium-4bit")
         assert job_id.startswith("stt-download-seastar-medium-4bit-")
@@ -96,14 +61,8 @@ class TestSTTModelDownloader:
         async def slow_hf(spec, job):
             await asyncio.sleep(0.3)
 
-        async def fake_quant(spec, job):
-            path = Path(spec.model_path).expanduser()
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "config.json").write_text("{}")
-            (path / "weights.safetensors").write_bytes(b"x")
-
         monkeypatch.setattr(downloader, "_hf_download", slow_hf)
-        monkeypatch.setattr(downloader, "_quantize", fake_quant)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
 
         await downloader.start_download("seastar-medium-4bit")
         with pytest.raises(DownloadConflictError):
@@ -117,14 +76,8 @@ class TestSTTModelDownloader:
         async def fake_hf(spec, job):
             pass
 
-        async def fake_quant(spec, job):
-            path = Path(spec.model_path).expanduser()
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "config.json").write_text("{}")
-            (path / "weights.safetensors").write_bytes(b"x" * 8)
-
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
-        monkeypatch.setattr(downloader, "_quantize", fake_quant)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
 
         await downloader.start_download("seastar-medium-4bit")
         await downloader.wait_for("seastar-medium-4bit")
@@ -150,101 +103,60 @@ class TestSTTModelDownloader:
         assert progress.status == ModelStatus.ERROR
         assert "네트워크 오류" in progress.error_message
 
-    async def test_양자화_실패시_ERROR(self, downloader, monkeypatch):
-        # ghost613 은 여전히 needs_quantization=True 이므로 양자화 경로 테스트에 사용.
-        # seastar 는 사전 양자화본으로 HF 배포되어 양자화 경로를 타지 않는다.
+    async def test_검증_실패시_ERROR(self, downloader, monkeypatch):
+        """HF 다운로드는 성공했지만 _verify 가 False 이면 ERROR."""
         from core.stt_model_status import ModelStatus
 
         async def fake_hf(spec, job):
             pass
 
-        async def failing_quant(spec, job):
-            raise RuntimeError("양자화 실패")
+        monkeypatch.setattr(downloader, "_hf_download", fake_hf)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: False)
+
+        await downloader.start_download("seastar-medium-4bit")
+        await downloader.wait_for("seastar-medium-4bit")
+
+        progress = downloader.get_progress("seastar-medium-4bit")
+        assert progress.status == ModelStatus.ERROR
+        assert "검증 실패" in progress.error_message
+
+    async def test_여러_모델_순차_다운로드(self, downloader, monkeypatch):
+        """첫 다운로드 완료 후 다른 모델 다운로드가 가능해야 한다."""
+        from core.stt_model_status import ModelStatus
+
+        async def fake_hf(spec, job):
+            pass
 
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
-        monkeypatch.setattr(downloader, "_quantize", failing_quant)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
+
+        await downloader.start_download("seastar-medium-4bit")
+        await downloader.wait_for("seastar-medium-4bit")
 
         await downloader.start_download("ghost613-turbo-4bit")
         await downloader.wait_for("ghost613-turbo-4bit")
 
-        progress = downloader.get_progress("ghost613-turbo-4bit")
-        assert progress.status == ModelStatus.ERROR
-        assert "양자화" in progress.error_message
+        assert downloader.get_progress("seastar-medium-4bit").status == ModelStatus.READY
+        assert downloader.get_progress("ghost613-turbo-4bit").status == ModelStatus.READY
 
-    async def test_needs_quantization_False는_양자화_스킵(
-        self, downloader, monkeypatch
-    ):
-        """komixv2는 needs_quantization=False 이므로 _quantize가 호출되지 않아야 한다."""
-        from core.stt_model_status import ModelStatus
-
-        hf_called = {"count": 0}
-        quant_called = {"count": 0}
-
-        async def fake_hf(spec, job):
-            hf_called["count"] += 1
-
-        async def fake_quant(spec, job):
-            quant_called["count"] += 1
-
-        # _verify는 HF 경로 기반 komixv2에 대해 True를 반환하도록 패치
-        monkeypatch.setattr(downloader, "_hf_download", fake_hf)
-        monkeypatch.setattr(downloader, "_quantize", fake_quant)
-        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
-
-        await downloader.start_download("komixv2")
-        await downloader.wait_for("komixv2")
-
-        progress = downloader.get_progress("komixv2")
-        assert progress.status == ModelStatus.READY
-        assert hf_called["count"] == 1
-        assert quant_called["count"] == 0
-
-    async def test_verify_weights_safetensors_존재_확인(
-        self, downloader, patched_specs
-    ):
-        """_verify 는 로컬 양자화 경로의 weights.safetensors + config.json 존재를 체크한다.
-
-        ghost613 은 needs_quantization=True 이므로 로컬 디렉토리 기반 검증을 사용한다.
-        seastar 는 HF 캐시 기반이라 이 테스트에 적합하지 않다.
-        """
-        from core.stt_model_registry import get_by_id
-
-        spec = get_by_id("ghost613-turbo-4bit")
-        assert not downloader._verify(spec)
-
-        path = Path(spec.model_path).expanduser()
-        path.mkdir(parents=True, exist_ok=True)
-        (path / "config.json").write_text("{}")
-        assert not downloader._verify(spec)  # weights 없음
-
-        (path / "weights.safetensors").write_bytes(b"x")
-        assert downloader._verify(spec)
-
-    async def test_진행률_0에서_100까지_단조증가(self, downloader, monkeypatch):
-        """진행률이 중간(>=50) 을 거쳐 100 으로 끝나야 한다.
-
-        needs_quantization=True 경로를 검증하기 위해 ghost613 사용.
-        """
+    async def test_진행률_0에서_100까지_증가(self, downloader, monkeypatch):
+        """진행률이 최종 100 으로 끝나야 한다."""
         observed: list[int] = []
 
         async def fake_hf(spec, job):
             observed.append(job.progress_percent)
 
-        async def fake_quant(spec, job):
-            observed.append(job.progress_percent)
-            path = Path(spec.model_path).expanduser()
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "config.json").write_text("{}")
-            (path / "weights.safetensors").write_bytes(b"x")
-
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
-        monkeypatch.setattr(downloader, "_quantize", fake_quant)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
 
-        await downloader.start_download("ghost613-turbo-4bit")
-        await downloader.wait_for("ghost613-turbo-4bit")
+        await downloader.start_download("seastar-medium-4bit")
+        await downloader.wait_for("seastar-medium-4bit")
 
-        progress = downloader.get_progress("ghost613-turbo-4bit")
+        progress = downloader.get_progress("seastar-medium-4bit")
         assert progress.progress_percent == 100
-        # _hf_download 진입 시점 < _quantize 진입 시점
-        assert observed[0] < observed[1]
-        assert observed[1] >= 50
+        # _hf_download 진입 시점에 이미 >= 10
+        assert observed and observed[0] >= 10
+
+    async def test_알_수_없는_모델은_ValueError(self, downloader):
+        with pytest.raises(ValueError, match="알 수 없는 STT 모델"):
+            await downloader.start_download("does-not-exist")

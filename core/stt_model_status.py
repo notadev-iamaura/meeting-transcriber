@@ -29,7 +29,6 @@ class ModelStatus(str, Enum):
 
     NOT_DOWNLOADED = "not_downloaded"
     DOWNLOADING = "downloading"
-    QUANTIZING = "quantizing"
     READY = "ready"
     ERROR = "error"
 
@@ -107,7 +106,10 @@ def get_model_status(spec: STTModelSpec) -> ModelStatus:
     확인 순서:
         1. 수동 임포트 디렉토리 (`{id}-manual/`) — 브라우저로 직접 받은 경우
         2. HF repo ID 이면 HF 캐시 확인
-        3. 로컬 경로 이면 weights.safetensors + config.json 확인
+        3. (하위 호환) 로컬 경로 이면 weights.safetensors + config.json 확인
+
+    모든 지원 모델은 HF repo ID 를 사용하지만, 하위 호환과 방어적 프로그래밍을
+    위해 로컬 경로 체크도 유지한다.
 
     Args:
         spec: STTModelSpec 메타데이터.
@@ -117,7 +119,7 @@ def get_model_status(spec: STTModelSpec) -> ModelStatus:
         ModelStatus.NOT_DOWNLOADED: 그 외 (손상된 상태 포함)
 
     Note:
-        DOWNLOADING/QUANTIZING/ERROR 상태는 본 함수가 판정하지 않는다.
+        DOWNLOADING/ERROR 상태는 본 함수가 판정하지 않는다.
         다운로더(STTModelDownloader)의 in-memory 상태와 결합해 상위 계층에서 계산한다.
     """
     # 1. 수동 임포트 우선 (사용자가 브라우저로 직접 받아 배치한 경우)
@@ -130,7 +132,7 @@ def get_model_status(spec: STTModelSpec) -> ModelStatus:
             return ModelStatus.READY
         return ModelStatus.NOT_DOWNLOADED
 
-    # 로컬 경로 기반 (예: ~/.meeting-transcriber/stt_models/...)
+    # 3. (하위 호환) 로컬 경로 — 현재 레지스트리의 모든 모델은 이 경로를 타지 않는다.
     path = Path(spec.model_path).expanduser()
     if not path.exists():
         return ModelStatus.NOT_DOWNLOADED

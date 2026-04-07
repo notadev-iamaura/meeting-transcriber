@@ -82,11 +82,28 @@ class TestSTTModelRegistry:
         assert spec.cer_percent == 1.25
         assert spec.wer_percent == 3.21
         # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드 (로컬 양자화 불필요)
-        assert spec.needs_quantization is False
         assert spec.hf_source == "youngouk/seastar-medium-ko-4bit-mlx"
         assert spec.model_path == "youngouk/seastar-medium-ko-4bit-mlx"
         assert spec.base_model == "medium"
         assert spec.is_recommended is True
+
+    def test_모든_모델은_사전_양자화_HF_배포(self):
+        """모든 지원 모델은 HF repo ID 형태의 model_path 를 가진다.
+
+        로컬 양자화 경로가 완전히 제거되었으므로 spec.model_path 는
+        모두 'owner/name' HF repo ID 형식이어야 한다.
+        """
+        from core.stt_model_registry import STT_MODELS
+
+        for spec in STT_MODELS:
+            # HF repo ID 형식: '/' 하나 포함, 로컬 경로 prefix 없음
+            assert "/" in spec.model_path, f"{spec.id}: model_path가 HF repo ID가 아님"
+            assert not spec.model_path.startswith(("/", "~", "./")), (
+                f"{spec.id}: 로컬 경로 사용 금지 (사전 양자화 HF repo 만 허용)"
+            )
+            assert spec.hf_source == spec.model_path, (
+                f"{spec.id}: hf_source와 model_path가 달라요"
+            )
 
     def test_spec은_frozen_dataclass여야_한다(self):
         """불변성 확인 — frozen=True."""

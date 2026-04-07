@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 class STTModelSpec:
     """STT 모델 하나의 정적 메타데이터.
 
+    모든 지원 모델은 HuggingFace 에 사전 양자화된 4bit 형태로 배포되므로
+    로컬 양자화 단계가 없다. `hf_source` 와 `model_path` 는 동일한 HF repo ID 를
+    가리키며, `mlx-whisper` 가 두 값 모두 로드할 수 있다.
+
     런타임 상태(다운로드 여부 등)는 포함하지 않는다 — core/stt_model_status 참조.
     frozen=True로 불변성을 보장해 전역 레지스트리의 안전한 공유가 가능하다.
     """
@@ -31,9 +35,8 @@ class STTModelSpec:
     id: str                       # 내부 식별자 (URL safe)
     label: str                    # UI 표시명
     description: str              # 한 줄 설명
-    hf_source: str                # HuggingFace repo ID
-    needs_quantization: bool      # True면 다운로드 후 4bit 양자화 필요
-    model_path: str               # 로컬 경로 또는 HF 경로 직접 사용
+    hf_source: str                # HuggingFace repo ID (사전 양자화된 mlx-whisper 호환 repo)
+    model_path: str               # mlx-whisper 에 전달할 경로 (= hf_source 와 동일)
     base_model: str               # "medium" | "large-v3-turbo"
     expected_size_mb: int         # 예상 디스크 크기 (MB)
     cer_percent: float            # Zeroth Korean test 측정 CER (%)
@@ -53,8 +56,7 @@ STT_MODELS: list[STTModelSpec] = [
         label="komixv2 (기본)",
         description="Whisper Medium 한국어 fine-tune, fp16 (변환 불필요)",
         hf_source="youngouk/whisper-medium-komixv2-mlx",
-        needs_quantization=False,
-        # komixv2는 HF 경로를 mlx-whisper가 직접 해석하므로 repo ID 그대로 둔다.
+        # mlx-whisper 가 HF repo ID 를 직접 해석한다.
         model_path="youngouk/whisper-medium-komixv2-mlx",
         base_model="medium",
         expected_size_mb=1500,
@@ -70,11 +72,9 @@ STT_MODELS: list[STTModelSpec] = [
         id="seastar-medium-4bit",
         label="seastar medium-ko-zeroth (4bit)",
         description="Whisper Medium + Zeroth Korean fine-tune, 4bit 양자화 — 최고 정확도",
-        # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드 (로컬 양자화 불필요).
-        # 원본 seastar105/whisper-medium-ko-zeroth를 mlx-examples convert.py로 양자화 후 재배포.
+        # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드.
+        # 원본 seastar105/whisper-medium-ko-zeroth 를 mlx-examples convert.py 로 양자화 후 재배포.
         hf_source="youngouk/seastar-medium-ko-4bit-mlx",
-        needs_quantization=False,
-        # komixv2와 동일 패턴: mlx-whisper가 HF repo ID를 직접 해석한다.
         model_path="youngouk/seastar-medium-ko-4bit-mlx",
         base_model="medium",
         expected_size_mb=420,
@@ -90,11 +90,12 @@ STT_MODELS: list[STTModelSpec] = [
         id="ghost613-turbo-4bit",
         label="ghost613 turbo-korean (4bit)",
         description="Whisper Large-v3-turbo + Zeroth Korean fine-tune, 4bit 양자화 — 빠른 속도",
-        hf_source="ghost613/whisper-large-v3-turbo-korean",
-        needs_quantization=True,
-        model_path="~/.meeting-transcriber/stt_models/ghost613-turbo-korean-4bit",
+        # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드.
+        # 원본 ghost613/whisper-large-v3-turbo-korean 을 mlx-examples convert.py 로 양자화 후 재배포.
+        hf_source="youngouk/ghost613-turbo-korean-4bit-mlx",
+        model_path="youngouk/ghost613-turbo-korean-4bit-mlx",
         base_model="large-v3-turbo",
-        expected_size_mb=884,
+        expected_size_mb=442,
         cer_percent=1.60,
         wer_percent=4.36,
         memory_gb=1.31,
@@ -132,32 +133,25 @@ def get_default() -> STTModelSpec:
 
 
 def get_hf_download_urls(spec: STTModelSpec) -> list[dict[str, str]]:
-    """HF 사전빌드 모델의 직접 다운로드 URL 목록을 반환한다.
+    """HF 사전 양자화 모델의 직접 다운로드 URL 목록을 반환한다.
 
-    네트워크·인증·방화벽 이슈로 `huggingface_hub.snapshot_download`가 실패할 때
+    네트워크·인증·방화벽 이슈로 `huggingface_hub.snapshot_download` 가 실패할 때
     사용자가 브라우저로 수동 다운로드할 수 있도록 원시 파일 URL을 노출한다.
 
-    HF는 `https://huggingface.co/{repo}/resolve/main/{filename}` 형식으로
+    HF 는 `https://huggingface.co/{repo}/resolve/main/{filename}` 형식으로
     파일을 직접 제공한다 (redirect → 실제 CDN URL).
 
     Args:
         spec: STTModelSpec 메타데이터.
 
     Returns:
-        [{"name": 파일명, "url": 다운로드 URL}, ...] 리스트.
-        spec.needs_quantization=True(로컬 양자화 필요 모델)이면 빈 리스트.
+        [{"name": 파일명, "url": 다운로드 URL}, ...] 리스트. 항상 2개 항목.
 
     Note:
-        반환되는 파일은 MLX whisper가 로드하는 데 필요한 최소 파일:
+        반환되는 파일은 MLX whisper 가 로드하는 데 필요한 최소 파일:
         - config.json: 모델 구성 (~1KB)
         - weights.safetensors: 4bit 양자화된 가중치 (수백 MB)
     """
-    if spec.needs_quantization:
-        # 로컬에서 양자화해야 하는 모델은 수동 다운로드로 해결 불가
-        # (원본 fp16을 받아도 사용자가 mlx-examples convert.py를 직접 돌려야 함)
-        return []
-
-    # HF repo ID 를 hf_source 에서 추출 (owner/name 형식)
     repo_id = spec.hf_source
     base_url = f"https://huggingface.co/{repo_id}/resolve/main"
     return [

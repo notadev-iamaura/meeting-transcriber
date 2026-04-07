@@ -63,11 +63,13 @@ def test_get_hf_download_urls_for_komixv2() -> None:
         assert "youngouk/whisper-medium-komixv2-mlx" in u["url"]
 
 
-def test_get_hf_download_urls_empty_for_quantization_needed() -> None:
-    """ghost613은 로컬 양자화가 필요하므로 수동 URL 미지원."""
+def test_get_hf_download_urls_for_ghost613() -> None:
+    """ghost613도 사전 양자화 HF repo 로 전환되어 URL 2개를 반환한다."""
     spec = get_by_id("ghost613-turbo-4bit")
     urls = get_hf_download_urls(spec)
-    assert urls == []
+    assert len(urls) == 2
+    for u in urls:
+        assert "youngouk/ghost613-turbo-korean-4bit-mlx" in u["url"]
 
 
 def test_get_manual_import_dir_uses_id(tmp_path: Path) -> None:
@@ -186,17 +188,17 @@ def test_manual_download_info_returns_urls(client: TestClient) -> None:
     assert "다운로드" in data["instructions"]
 
 
-def test_manual_download_info_unsupported_for_ghost613(
+def test_manual_download_info_ghost613_supported(
     client: TestClient,
 ) -> None:
-    """로컬 양자화 모델은 수동 다운로드 미지원."""
+    """ghost613도 사전 양자화 HF repo 로 전환되어 수동 다운로드 지원."""
     resp = client.get("/api/stt-models/ghost613-turbo-4bit/manual-download-info")
     assert resp.status_code == 200
     data = resp.json()
 
-    assert data["supported"] is False
-    assert data["files"] == []
-    assert "양자화" in data["instructions"]
+    assert data["supported"] is True
+    assert len(data["files"]) == 2
+    assert data["target_directory"].endswith("ghost613-turbo-4bit-manual")
 
 
 def test_manual_download_info_404_for_unknown_model(
@@ -271,18 +273,28 @@ def test_import_manual_missing_files(
     assert "weights.safetensors" in resp.json()["detail"]
 
 
-def test_import_manual_rejects_unsupported_model(
-    client: TestClient, tmp_path: Path
+def test_import_manual_ghost613_supported(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ghost613(로컬 양자화 필요)은 수동 가져오기 거부."""
+    """ghost613도 사전 양자화 HF repo 로 전환되어 수동 가져오기 지원."""
     source = tmp_path / "src"
     source.mkdir()
-    (source / "config.json").write_text("{}")
-    (source / "weights.safetensors").write_bytes(b"x")
+    (source / "config.json").write_text('{"n_mels": 128}')
+    (source / "weights.safetensors").write_bytes(b"ghost-weights" * 10)
+
+    target_base = tmp_path / "app-data"
+    monkeypatch.setattr(
+        "core.stt_model_registry.get_manual_import_dir",
+        lambda spec, base_dir=None: str(
+            target_base / "stt_models" / f"{spec.id}-manual"
+        ),
+    )
 
     resp = client.post(
         "/api/stt-models/ghost613-turbo-4bit/import-manual",
         json={"source_dir": str(source)},
     )
-    assert resp.status_code == 400
-    assert "지원하지 않아" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["model_id"] == "ghost613-turbo-4bit"
+    assert set(data["files_copied"]) == {"config.json", "weights.safetensors"}

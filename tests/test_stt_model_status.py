@@ -14,12 +14,12 @@ import pytest
 def base_spec():
     """테스트용 기본 STTModelSpec 인스턴스.
 
-    ghost613 은 여전히 로컬 경로 기반(needs_quantization=True)이라 이 테스트에 적합.
-    seastar 는 사전 양자화된 HF 레포로 이관되어 HF 캐시 기반이 되었다.
+    모든 모델이 HF repo ID 기반이므로 아무 모델이나 베이스로 쓸 수 있다.
+    각 테스트는 `dataclasses.replace` 로 model_path 를 임시 경로로 오버라이드한다.
     """
     from core.stt_model_registry import get_by_id
 
-    spec = get_by_id("ghost613-turbo-4bit")
+    spec = get_by_id("seastar-medium-4bit")
     assert spec is not None
     return spec
 

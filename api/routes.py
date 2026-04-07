@@ -2624,8 +2624,7 @@ async def activate_stt_model(
 # ---------------------------------------------------------------------------
 # 네트워크·방화벽·프록시 이슈로 huggingface_hub 자동 다운로드가 실패하는
 # 사용자를 위해, HF 직접 URL을 노출하고 로컬에서 받은 파일을 app이 인식할 수
-# 있는 위치로 가져오는 경로를 제공한다. 사전 양자화된(`needs_quantization=False`)
-# 모델에만 적용된다.
+# 있는 위치로 가져오는 경로를 제공한다. 모든 사전 양자화된 STT 모델이 대상이다.
 # ---------------------------------------------------------------------------
 
 
@@ -2682,8 +2681,6 @@ async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
 
     Raises:
         HTTPException 404: 알 수 없는 model_id
-        HTTPException 400: 해당 모델이 수동 다운로드를 지원하지 않음
-                           (needs_quantization=True 인 경우)
     """
     from core.stt_model_registry import get_hf_download_urls, get_manual_import_dir
 
@@ -2694,17 +2691,6 @@ async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
         )
 
     urls = get_hf_download_urls(spec)
-    if not urls:
-        # needs_quantization=True 인 모델은 수동 다운로드로 해결 불가
-        return STTManualDownloadInfo(
-            model_id=model_id,
-            label=spec.label,
-            supported=False,
-            instructions=(
-                "이 모델은 원본 fp16을 다운로드한 후 로컬에서 4bit 양자화가 필요해요. "
-                "자동 다운로드 버튼을 사용하거나, 사전 양자화된 배포를 기다려 주세요."
-            ),
-        )
 
     target_dir = get_manual_import_dir(spec)
     files = [
@@ -2747,19 +2733,12 @@ async def import_stt_manual(
     """
     import shutil
 
-    from core.stt_model_registry import get_hf_download_urls, get_manual_import_dir
+    from core.stt_model_registry import get_manual_import_dir
 
     spec = _stt_get_by_id(model_id)
     if spec is None:
         raise HTTPException(
             status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
-
-    # 수동 가져오기를 지원하는 모델인지 검증
-    if not get_hf_download_urls(spec):
-        raise HTTPException(
-            status_code=400,
-            detail="이 모델은 수동 가져오기를 지원하지 않아요 (로컬 양자화 필요).",
         )
 
     # source_dir 검증
