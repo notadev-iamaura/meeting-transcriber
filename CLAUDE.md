@@ -86,6 +86,8 @@ chmod 700 ~/.meeting-transcriber
 ### 수동 개입이 필요한 항목
 
 > AI 에이전트가 자동으로 완료할 수 없는 단계입니다. 사용자에게 안내하세요.
+> 네트워크·SSL·방화벽 문제가 생기면 **"🤖 AI 에이전트용: 네트워크·다운로드 장애 처리 원칙"
+> 섹션을 반드시 먼저 읽고** 우회 시도 금지 규칙을 지키세요.
 
 1. **Ollama 앱 설치**: https://ollama.com 에서 macOS 앱 다운로드 (brew 불가)
 2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 사용자가 직접:
@@ -94,16 +96,119 @@ chmod 700 ~/.meeting-transcriber
    - https://huggingface.co/pyannote/segmentation-3.0 → "Agree" 클릭
    - https://huggingface.co/settings/tokens → Read 토큰 발급
    - `export HUGGINGFACE_TOKEN=hf_xxxxx` 및 `export HF_TOKEN=hf_xxxxx` 설정
+   - ⚠️ 토큰 없이 우회 금지 — 게이트 모델은 약관 동의가 필수이며 에이전트가
+     대신 동의하거나 공개 미러를 찾아 사용하면 안 됩니다.
 
 ### 셋업 검증
 
 ```bash
-# 단위 테스트 (1231개)
+# 단위 테스트 (1700+개)
 pytest tests/ -x -q
 
 # 실행 테스트
 python main.py --no-menubar  # Ctrl+C로 종료
 ```
+
+---
+
+## 🤖 AI 에이전트용: 네트워크·다운로드 장애 처리 원칙
+
+> **다른 Claude Code 인스턴스가 이 프로젝트를 셋업하거나 STT 모델을 다운로드할 때
+> 반드시 이 규칙을 따르세요.** 이 섹션의 규칙은 사용자의 보안·시스템 안정성을 보호하며,
+> 우회 시도가 오히려 더 큰 문제를 일으킬 수 있습니다.
+
+### 절대 금지 — 에이전트가 스스로 하면 안 되는 것
+
+HuggingFace·`pip install`·네트워크 호출이 SSL/인증/방화벽/프록시 이유로 실패할 때,
+**다음 우회 시도는 절대 하지 마세요**:
+
+- ❌ `pip install --trusted-host` / `--index-url http://...` 같은 SSL 우회
+- ❌ `REQUESTS_CA_BUNDLE=""` / `PYTHONHTTPSVERIFY=0` 같은 환경변수 설정
+- ❌ `verify=False` / `ssl._create_unverified_context()` 같은 코드 수정
+- ❌ `/etc/hosts` 편집, DNS 변경, VPN 설정
+- ❌ `curl -k`, `wget --no-check-certificate` 같은 인증서 검증 스킵
+- ❌ HuggingFace 토큰·API 키를 사용자 몰래 추측·생성·재사용
+- ❌ 사용자 방화벽·코퍼릿 프록시 설정 수정
+
+**이유**: 대부분의 네트워크 실패는 사용자의 회사·학교 네트워크 정책, 국가 단위 차단,
+또는 잠깐의 서비스 장애 때문입니다. 에이전트가 우회를 시도하면 (1) 보안 정책 위반,
+(2) 맬웨어 설치 위험, (3) 디버깅 어려워진 상태로 진행되는 문제를 일으킵니다.
+
+### 대신 해야 할 것 — 브라우저 다운로드 안내
+
+자동 다운로드가 실패하면 **사용자에게 브라우저로 직접 받도록 안내**하세요.
+이 프로젝트는 이 흐름을 위한 API + UI를 이미 제공합니다.
+
+#### Python 패키지 설치 실패 시 (`pip install` SSL/네트워크 오류)
+
+1. 사용자에게 에러 전체를 보여주고 원인을 한국어로 설명
+2. `pip install` 은 건들지 말고, 사용자에게 다음을 권장:
+   - 회사 네트워크면 IT팀에 `pypi.org` / `files.pythonhosted.org` / `huggingface.co`
+     화이트리스트 요청
+   - 개인 네트워크면 모바일 핫스팟·다른 네트워크 시도
+   - 또는 [`uv`](https://github.com/astral-sh/uv) 같은 대체 패키지 매니저 사용
+3. 해결 안 되면 **원인을 명확히 문서화**하고 작업 중단, 사용자 판단 대기
+
+#### STT 모델 다운로드 실패 시 (3가지 모델 모두 동일)
+
+앱 내 자동 다운로드가 실패하면, **로컬 양자화를 시도하거나 SSL 우회하지 말고**
+브라우저 다운로드 경로를 이용:
+
+```bash
+# 1) API 로 수동 다운로드 정보 조회
+curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download-info | jq
+# 응답 예시:
+# {
+#   "supported": true,
+#   "files": [
+#     {"name": "config.json", "url": "https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx/resolve/main/config.json"},
+#     {"name": "weights.safetensors", "url": "https://huggingface.co/.../weights.safetensors"}
+#   ],
+#   "target_directory": "/Users/{user}/.meeting-transcriber/stt_models/seastar-medium-4bit-manual",
+#   "instructions": "..."
+# }
+```
+
+2) 에이전트는 사용자에게 **URL 2개를 그대로 보여주고** 다음과 같이 안내:
+   ```
+   자동 다운로드가 실패했어요. 아래 두 URL을 브라우저로 열어 파일을 받으신 후,
+   한 폴더(예: ~/Downloads/seastar)에 같이 저장해 주세요:
+
+   1. [config.json URL]
+   2. [weights.safetensors URL]
+
+   저장 후 다음 명령으로 가져오기를 할 수 있어요:
+     curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/import-manual \
+       -H "Content-Type: application/json" \
+       -d '{"source_dir": "/Users/{user}/Downloads/seastar"}'
+   ```
+
+3) 또는 GUI에서: `http://127.0.0.1:8765/app/settings` → 음성 인식 모델 → 해당 카드
+   → "▸ 브라우저로 직접 받기" 펼침 → 링크 클릭 → 다운로드 → 폴더 경로 입력 → "가져오기"
+
+4) **절대 금지**: `~/.meeting-transcriber/stt_models/` 아래에 직접 파일 생성/복사
+   하지 마세요. 반드시 `POST /api/stt-models/{id}/import-manual` 엔드포인트를 통해
+   가져와야 앱이 올바른 위치(`{id}-manual/`)에 배치하고 상태를 갱신합니다.
+
+#### `pip install` 자체가 완전히 불가능할 때
+
+의존성 설치 자체가 안 되면 앱을 실행할 수 없으므로:
+1. 문제 원인을 사용자에게 보고 (네트워크 타입, 에러 메시지, 시도한 방법)
+2. **작업 중단** — 추측으로 진행하지 말 것
+3. 사용자가 환경 문제를 해결한 뒤 재개
+
+### 수동 다운로드 엔드포인트 계약 요약
+
+| 엔드포인트 | 역할 |
+|---|---|
+| `GET /api/stt-models` | 전체 모델 목록 + 상태 (`ready` / `not_downloaded` / `downloading` / `error`) |
+| `POST /api/stt-models/{id}/download` | 자동 다운로드 시작 (HF snapshot_download) |
+| `GET /api/stt-models/{id}/manual-download-info` | HF 직접 URL 2개 + 타겟 폴더 경로 반환 |
+| `POST /api/stt-models/{id}/import-manual` | `{source_dir: "..."}` 받아서 파일 검증 후 복사 |
+| `POST /api/stt-models/{id}/activate` | `config.yaml` 의 `stt.model_name` 업데이트 |
+
+수동 임포트된 모델은 `get_effective_model_path()`가 자동으로 감지하여
+`{id}-manual/` 로컬 경로를 HF repo ID보다 우선 사용합니다.
 
 ---
 
