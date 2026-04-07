@@ -2500,6 +2500,55 @@ async def download_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     }
 
 
+@router.post("/stt-models/{model_id}/download-direct", status_code=202)
+async def download_stt_model_direct(
+    request: Request, model_id: str
+) -> dict[str, Any]:
+    """HF 직접 URL 로 STT 모델을 다운로드한다 (huggingface_hub 건너뜀).
+
+    기업 프록시·MITM SSL 검사·ISP 필터링 등으로 `huggingface_hub` 가 실패하는
+    환경에서 사용자가 명시적으로 선택하는 대체 경로. `urllib.request` 스트리밍
+    다운로드로 파일을 `{id}-manual/` 디렉토리에 저장한다.
+
+    일반 `/download` 엔드포인트도 실패 시 자동으로 direct URL 폴백을 시도하지만,
+    사용자가 "URL로 직접 받기" 버튼으로 이 경로를 직접 호출할 수도 있다.
+
+    Raises:
+        HTTPException 404: 알 수 없는 model_id
+        HTTPException 409: 이미 다른 모델 다운로드가 진행 중
+        HTTPException 503: 다운로더 미초기화
+    """
+    spec = _stt_get_by_id(model_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    downloader = getattr(request.app.state, "stt_downloader", None)
+    if downloader is None:
+        raise HTTPException(
+            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
+        )
+
+    try:
+        job_id = await downloader.start_download(model_id, prefer_direct=True)
+    except DownloadConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    logger.info(
+        "STT 모델 직접 URL 다운로드 요청 수락: %s (%s)", model_id, job_id
+    )
+    return {
+        "job_id": job_id,
+        "model_id": model_id,
+        "status": "downloading",
+        "message": "직접 URL로 다운로드를 시작합니다.",
+        "method": "direct_url",
+    }
+
+
 @router.get("/stt-models/{model_id}/download-status")
 async def get_stt_download_status(
     request: Request, model_id: str

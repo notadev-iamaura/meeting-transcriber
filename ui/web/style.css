@@ -4488,6 +4488,33 @@ button {
   color: var(--text-secondary);
 }
 
+/* 옵션 1: 앱이 URL로 직접 받기 — 권장 경로, 강조 배경 */
+.stt-direct-download-group {
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+
+.stt-direct-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.stt-direct-desc {
+  margin: 0 0 10px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.stt-direct-download-group .stt-action-btn {
+  width: 100%;
+}
+
 .stt-manual-urls {
   list-style: none;
   padding: 0;

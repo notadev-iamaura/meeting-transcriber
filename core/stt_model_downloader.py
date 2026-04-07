@@ -26,7 +26,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .stt_model_registry import STTModelSpec, get_by_id
+from .stt_model_registry import (
+    STTModelSpec,
+    get_by_id,
+    get_hf_download_urls,
+    get_manual_import_dir,
+)
 from .stt_model_status import ModelStatus, get_model_status
 
 logger = logging.getLogger(__name__)
@@ -77,11 +82,16 @@ class STTModelDownloader:
     # 공개 API
     # ------------------------------------------------------------
 
-    async def start_download(self, model_id: str) -> str:
+    async def start_download(
+        self, model_id: str, *, prefer_direct: bool = False
+    ) -> str:
         """다운로드를 백그라운드에서 시작하고 job_id를 반환한다.
 
         Args:
             model_id: STT_MODELS 에 등록된 모델 ID.
+            prefer_direct: True면 `huggingface_hub` 를 건너뛰고 HF 직접 URL 로만
+                다운로드한다. 사용자가 "URL로 직접 받기" 옵션을 명시적으로 선택했을 때
+                사용된다 (기업 프록시·SSL 검사 환경).
 
         Returns:
             job_id 문자열.
@@ -111,9 +121,14 @@ class STTModelDownloader:
             )
             self._jobs[model_id] = job
             self._tasks[model_id] = asyncio.create_task(
-                self._run_download(spec, job)
+                self._run_download(spec, job, prefer_direct=prefer_direct)
             )
-            logger.info("STT 모델 다운로드 시작: %s (%s)", model_id, job_id)
+            logger.info(
+                "STT 모델 다운로드 시작: %s (%s, prefer_direct=%s)",
+                model_id,
+                job_id,
+                prefer_direct,
+            )
 
         return job_id
 
@@ -136,30 +151,80 @@ class STTModelDownloader:
     # ------------------------------------------------------------
 
     async def _run_download(
-        self, spec: STTModelSpec, job: DownloadJob
+        self,
+        spec: STTModelSpec,
+        job: DownloadJob,
+        *,
+        prefer_direct: bool = False,
     ) -> None:
-        """HF 스냅샷 다운로드 → 검증 파이프라인을 순차 실행한다."""
-        try:
-            # 1단계: HF 스냅샷 다운로드
-            job.status = ModelStatus.DOWNLOADING
-            job.current_step = "downloading"
-            job.progress_percent = 10
-            await self._hf_download(spec, job)
-            job.progress_percent = 90
+        """다운로드 → 검증 파이프라인을 실행한다.
 
-            # 2단계: 검증
+        기본적으로 `huggingface_hub` 를 먼저 시도하고, 네트워크·SSL·인증 오류 등으로
+        실패하면 자동으로 HF 직접 URL 을 이용한 `urllib` 스트리밍 다운로드로
+        폴백한다. 두 방법 모두 실패하면 ERROR 상태로 종료한다.
+
+        Args:
+            spec: 다운로드할 모델 spec
+            job: 진행 상태가 갱신될 DownloadJob (in-place mutation)
+            prefer_direct: True면 `huggingface_hub` 를 건너뛰고 곧바로 직접 URL
+                다운로드를 시도한다. 사용자가 "URL로 직접 받기" 를 명시적으로
+                선택했을 때 사용된다.
+        """
+        job.status = ModelStatus.DOWNLOADING
+        job.progress_percent = 5
+        hf_error: Exception | None = None
+
+        if not prefer_direct:
+            try:
+                job.current_step = "downloading"
+                job.progress_percent = 10
+                await self._hf_download(spec, job)
+                job.progress_percent = 90
+                if self._verify(spec):
+                    job.status = ModelStatus.READY
+                    job.progress_percent = 100
+                    job.completed_at = datetime.now()
+                    logger.info("STT 모델 다운로드 완료 (huggingface_hub): %s", spec.id)
+                    return
+                # 다운로드는 성공했으나 검증 실패 → direct 폴백 시도
+                logger.warning(
+                    "huggingface_hub 다운로드 후 검증 실패, direct URL 폴백: %s",
+                    spec.id,
+                )
+            except Exception as exc:
+                hf_error = exc
+                logger.warning(
+                    "huggingface_hub 다운로드 실패, direct URL 폴백 시도: %s — %s",
+                    spec.id,
+                    exc,
+                )
+
+        # 직접 URL 다운로드 (폴백 또는 명시적 선택)
+        try:
+            job.current_step = "downloading_direct"
+            job.progress_percent = 10
+            await self._direct_url_download(spec, job)
             job.current_step = "verifying"
             job.progress_percent = 95
             if not self._verify(spec):
-                raise RuntimeError("모델 검증 실패: HF 캐시에 파일 없음")
-
+                raise RuntimeError(
+                    "모델 검증 실패: 다운로드된 파일이 올바르지 않아요"
+                )
             job.status = ModelStatus.READY
             job.progress_percent = 100
             job.completed_at = datetime.now()
-            logger.info("STT 모델 다운로드 완료: %s", spec.id)
+            method = "direct URL" if prefer_direct else "direct URL 폴백"
+            logger.info("STT 모델 다운로드 완료 (%s): %s", method, spec.id)
         except Exception as exc:
             job.status = ModelStatus.ERROR
-            job.error_message = str(exc)
+            # 두 방법 모두 실패했을 때 원인을 명확히 제공
+            if hf_error is not None:
+                job.error_message = (
+                    f"huggingface_hub 실패: {hf_error} / "
+                    f"직접 URL 다운로드도 실패: {exc}"
+                )
+            else:
+                job.error_message = str(exc)
             job.completed_at = datetime.now()
             logger.exception("STT 모델 다운로드 실패: %s", spec.id)
 
@@ -182,6 +247,102 @@ class STTModelDownloader:
             snapshot_download,
             repo_id=spec.hf_source,
         )
+
+    async def _direct_url_download(
+        self, spec: STTModelSpec, job: DownloadJob
+    ) -> None:
+        """HF 직접 URL 을 이용해 파일을 스트리밍 다운로드한다.
+
+        `huggingface_hub` 가 실패하는 환경(기업 프록시, MITM SSL 검사, ISP 필터링
+        등)에서 대체 경로로 사용된다. `urllib.request` 만 사용하므로 추가
+        의존성이 없다.
+
+        각 파일은 temp 파일(`.tmp`)로 먼저 받은 뒤 `os.replace` 로 원자적 이동하며,
+        저장 위치는 `get_manual_import_dir(spec)` 이다. 이렇게 하면
+        `get_model_status` 가 수동 임포트 경로에서 READY 를 감지하고, 활성화 시
+        `get_effective_model_path` 가 이 경로를 우선 사용한다.
+
+        Args:
+            spec: STTModelSpec
+            job: 진행률 업데이트 대상 DownloadJob (10% ~ 90% 범위)
+
+        Raises:
+            RuntimeError: 네트워크 오류, HTTP 에러, 디스크 쓰기 실패 등
+        """
+        import os
+        import urllib.error
+        import urllib.request
+        from pathlib import Path
+
+        urls = get_hf_download_urls(spec)
+        if not urls:
+            raise RuntimeError(
+                f"직접 다운로드 URL 을 찾을 수 없어요: {spec.id}"
+            )
+
+        target_dir = Path(get_manual_import_dir(spec))
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 진행률 범위를 파일 개수에 맞춰 할당 (10% → 90%)
+        total_span = 80
+        per_file = total_span // len(urls)
+
+        def _download_one(url: str, dest: Path, base_percent: int) -> None:
+            """단일 파일을 urllib 로 스트리밍 다운로드한다 (동기, 스레드에서 호출)."""
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            # 기존 임시 파일 정리
+            tmp.unlink(missing_ok=True)
+
+            req = urllib.request.Request(
+                url,
+                headers={
+                    # 일부 CDN 은 User-Agent 없는 요청을 차단한다
+                    "User-Agent": "meeting-transcriber/1.0 (+https://github.com/youngouk/meeting-transcriber)",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    # 리다이렉트는 urllib 가 자동 처리 (HF → CDN)
+                    total = int(resp.headers.get("Content-Length", "0") or "0")
+                    downloaded = 0
+                    chunk = 1024 * 256  # 256KB
+                    with open(tmp, "wb") as out:
+                        while True:
+                            buf = resp.read(chunk)
+                            if not buf:
+                                break
+                            out.write(buf)
+                            downloaded += len(buf)
+                            if total > 0:
+                                file_pct = downloaded / total
+                                job.progress_percent = min(
+                                    89,
+                                    base_percent + int(file_pct * per_file),
+                                )
+            except urllib.error.HTTPError as exc:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"HTTP {exc.code} {exc.reason}: {url}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"네트워크 오류: {exc.reason}") from exc
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"디스크 쓰기 실패: {exc}") from exc
+
+            # 원자적 이동
+            os.replace(str(tmp), str(dest))
+
+        for idx, file_info in enumerate(urls):
+            base_percent = 10 + (idx * per_file)
+            dest = target_dir / file_info["name"]
+            logger.info(
+                "direct URL 다운로드: %s → %s", file_info["url"], dest
+            )
+            await asyncio.to_thread(
+                _download_one, file_info["url"], dest, base_percent
+            )
 
     def _verify(self, spec: STTModelSpec) -> bool:
         """다운로드 직후 모델이 READY 상태인지 확인한다."""

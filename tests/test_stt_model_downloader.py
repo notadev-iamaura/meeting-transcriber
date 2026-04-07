@@ -88,20 +88,31 @@ class TestSTTModelDownloader:
         assert progress.completed_at is not None
         assert progress.error_message is None
 
-    async def test_HF_다운로드_실패시_ERROR(self, downloader, monkeypatch):
+    async def test_HF_실패시_direct_URL_폴백_후_성공(
+        self, downloader, monkeypatch
+    ):
+        """HF 다운로드 실패 시 direct URL 로 자동 폴백하여 성공해야 한다.
+
+        구체적인 폴백 시나리오는 test_stt_direct_download.py 에서 더 상세히 검증한다.
+        """
         from core.stt_model_status import ModelStatus
 
         async def failing_hf(spec, job):
             raise RuntimeError("네트워크 오류")
 
+        async def successful_direct(spec, job):
+            pass
+
         monkeypatch.setattr(downloader, "_hf_download", failing_hf)
+        monkeypatch.setattr(downloader, "_direct_url_download", successful_direct)
+        monkeypatch.setattr(downloader, "_verify", lambda spec: True)
 
         await downloader.start_download("seastar-medium-4bit")
         await downloader.wait_for("seastar-medium-4bit")
 
         progress = downloader.get_progress("seastar-medium-4bit")
-        assert progress.status == ModelStatus.ERROR
-        assert "네트워크 오류" in progress.error_message
+        # 폴백 덕분에 최종 상태는 READY
+        assert progress.status == ModelStatus.READY
 
     async def test_검증_실패시_ERROR(self, downloader, monkeypatch):
         """HF 다운로드는 성공했지만 _verify 가 False 이면 ERROR."""

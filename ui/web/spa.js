@@ -3595,6 +3595,42 @@
                 return;
             }
 
+            // 옵션 1: 앱이 URL 로 대신 받기 (가장 간단한 경로)
+            // huggingface_hub 를 건너뛰고 urllib 스트리밍으로 HF 직접 URL 다운로드.
+            // 기업 프록시·SSL MITM·ISP 필터 환경에서 자주 성공한다.
+            var directGroup = document.createElement("div");
+            directGroup.className = "stt-direct-download-group";
+
+            var directTitle = document.createElement("div");
+            directTitle.className = "stt-direct-title";
+            directTitle.textContent = "옵션 1 · 앱이 URL 로 대신 받기 (추천)";
+            directGroup.appendChild(directTitle);
+
+            var directDesc = document.createElement("p");
+            directDesc.className = "stt-direct-desc";
+            directDesc.textContent =
+                "앱이 HuggingFace 직접 URL로 파일을 받아 자동으로 배치해요. " +
+                "브라우저 왕복이나 폴더 경로 입력 없이 한 번 클릭으로 끝나요.";
+            directGroup.appendChild(directDesc);
+
+            var directBtn = document.createElement("button");
+            directBtn.type = "button";
+            directBtn.className = "stt-action-btn download";
+            directBtn.textContent = "앱이 URL로 받기";
+            directBtn.addEventListener("click", function () {
+                self._downloadModelDirect(modelId);
+            });
+            directGroup.appendChild(directBtn);
+
+            bodyEl.appendChild(directGroup);
+
+            // 옵션 2: 브라우저로 직접 받아서 폴더 가져오기
+            var manualTitle = document.createElement("div");
+            manualTitle.className = "stt-direct-title";
+            manualTitle.style.marginTop = "18px";
+            manualTitle.textContent = "옵션 2 · 브라우저로 직접 받기";
+            bodyEl.appendChild(manualTitle);
+
             // 안내 문구
             var help = document.createElement("p");
             help.className = "stt-manual-instructions";
@@ -3753,11 +3789,28 @@
      * ready 또는 error 상태가 되면 폴링을 중지한다.
      * @param {string} modelId 모델 id
      */
-    GeneralSettingsPanel.prototype._downloadModel = async function (modelId) {
+    /**
+     * HF 직접 URL 로 다운로드한다 (huggingface_hub 건너뜀).
+     * 수동 다운로드 섹션의 "앱이 URL로 받기" 버튼에서 호출한다.
+     * @param {string} modelId 모델 id
+     */
+    GeneralSettingsPanel.prototype._downloadModelDirect = function (modelId) {
+        return this._downloadModel(modelId, { direct: true });
+    };
+
+    GeneralSettingsPanel.prototype._downloadModel = async function (modelId, opts) {
         var self = this;
+        opts = opts || {};
+        var direct = opts.direct === true;
+        var endpoint = direct
+            ? "/stt-models/" + modelId + "/download-direct"
+            : "/stt-models/" + modelId + "/download";
+        var startMsg = direct
+            ? "URL 로 직접 다운로드를 시작해요…"
+            : "다운로드를 시작합니다…";
         try {
-            self._showSttStatus("다운로드를 시작합니다…", "info");
-            await App.apiPost("/stt-models/" + modelId + "/download", {});
+            self._showSttStatus(startMsg, "info");
+            await App.apiPost(endpoint, {});
             // 즉시 한 번 새로고침하여 진행률 바가 바로 표시되도록 함
             await self._loadSttModels();
 
