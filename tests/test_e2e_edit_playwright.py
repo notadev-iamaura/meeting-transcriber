@@ -619,6 +619,93 @@ class TestBulkReplaceAndVocabulary:
         expect(page.locator("#replaceError")).to_contain_text("같아")
 
 
+class TestSTTModelActivation:
+    """설정 페이지 STT 모델 활성화 UX 회귀 방지."""
+
+    def test_수동_임포트_후_활성화_버튼이_현재_사용_중_으로_변한다(
+        self, page: Page, test_base_dir: Path
+    ) -> None:
+        """회귀 방지: 수동 임포트된 seastar 를 활성화하면 UI 가
+        '활성화' 버튼 대신 '현재 사용 중' 라벨을 표시해야 한다.
+
+        버그 재현 절차:
+            1. 수동 임포트 디렉토리에 파일 배치 → 디스크는 READY
+            2. POST /activate → config.stt.model_name 에 로컬 경로 저장
+            3. 설정 페이지 새로고침
+            4. 이전: 3개 모델 모두 "활성화" 버튼 (is_active=false 버그)
+            5. 수정 후: seastar 카드만 "현재 사용 중" + .active 보더
+        """
+        import urllib.request
+
+        # 1. 수동 임포트 경로에 유효한 파일 배치
+        manual_dir = (
+            test_base_dir
+            / "stt_models"
+            / "seastar-medium-4bit-manual"
+        )
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        (manual_dir / "config.json").write_text('{"n_mels": 80}')
+        (manual_dir / "weights.safetensors").write_bytes(b"x" * 2048)
+
+        # 2. GET /api/stt-models 로 seastar 가 READY 인지 확인
+        with urllib.request.urlopen(
+            f"{BASE_URL}/api/stt-models", timeout=5
+        ) as resp:
+            data = json.loads(resp.read())
+        models = {m["id"]: m for m in data["models"]}
+        assert models["seastar-medium-4bit"]["status"] == "ready", (
+            f"디스크에 파일 배치했는데 READY 아님: {models['seastar-medium-4bit']}"
+        )
+
+        # 3. POST /activate 호출 (API 로 활성화 시뮬레이션)
+        req = urllib.request.Request(
+            f"{BASE_URL}/api/stt-models/seastar-medium-4bit/activate",
+            data=b"",
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+
+        # 4. 설정 페이지 열고 상태 확인
+        page.goto(
+            f"{BASE_URL}/app/settings", wait_until="networkidle"
+        )
+
+        # STT 모델 목록이 로드될 때까지 대기
+        page.wait_for_selector(".stt-model-card", timeout=10000)
+
+        # seastar 카드를 찾는다 (label 로 식별)
+        seastar_card = page.locator(".stt-model-card").filter(
+            has_text="seastar medium-ko-zeroth"
+        )
+        expect(seastar_card).to_be_visible()
+
+        # 핵심 검증: is_active=true 여야 하므로
+        # (a) 카드에 .active 클래스 (주황이 아닌 accent 보더)
+        expect(seastar_card).to_have_class(
+            __import__("re").compile(r".*\bactive\b.*")
+        )
+        # (b) "활성화" 버튼 대신 "현재 사용 중" 라벨 표시
+        expect(
+            seastar_card.locator(".stt-active-label")
+        ).to_be_visible()
+        expect(
+            seastar_card.locator(".stt-active-label")
+        ).to_contain_text("현재 사용 중")
+        # (c) 활성화 버튼이 없음
+        expect(
+            seastar_card.locator("button.stt-action-btn.activate")
+        ).to_have_count(0)
+
+        # 다른 모델은 여전히 활성화 버튼 (ready 상태일 때)
+        komixv2_card = page.locator(".stt-model-card").filter(
+            has_text="komixv2"
+        )
+        expect(komixv2_card).not_to_have_class(
+            __import__("re").compile(r".*\bactive\b.*")
+        )
+
+
 class TestFullEditingFlow:
     def test_종단간_시나리오_제목_요약_전사_용어집(
         self,

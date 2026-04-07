@@ -2910,18 +2910,44 @@ class STTModelsResponse(BaseModel):
     active_model_path: str
 
 
-def _is_active_stt_model(spec_path: str, active_path: str) -> bool:
-    """spec.model_path 와 config.stt.model_name 이 같은 모델을 가리키는지 판정한다.
+def _is_active_stt_model(spec: "STTModelSpec", active_path: str) -> bool:
+    """spec 이 현재 활성 STT 모델인지 판정한다.
 
-    spec.model_path 는 HF repo ID 또는 로컬 경로(tilde 포함)일 수 있으므로
-    두 형태를 모두 허용한다.
+    다음 세 경로 중 하나라도 `active_path` (config.stt.model_name) 와 일치하면
+    활성으로 본다:
+
+    1. `spec.model_path` (HF repo ID 또는 로컬 양자화 경로, tilde 가능)
+    2. `spec.model_path` 의 tilde 확장본
+    3. `get_effective_model_path(spec)` — 수동 임포트가 있으면 그 로컬 경로
+
+    수동 임포트 대응이 핵심 이유:
+        - 자동 다운로드 실패 → 사용자가 브라우저로 받아 import-manual
+        - 활성화 시 config.stt.model_name 에는 수동 임포트 로컬 경로가 저장됨
+        - 그러나 spec.model_path 는 여전히 HF repo ID 이므로 단순 비교하면
+          `is_active=False` 가 되어 UI 에 "활성화" 버튼이 계속 표시되는 버그
+          → 효과적 경로까지 함께 비교해 해결
     """
-    if spec_path == active_path:
-        return True
+    from core.stt_model_status import get_effective_model_path
+
+    candidates: list[str] = [spec.model_path]
     try:
-        return str(Path(spec_path).expanduser()) == active_path
-    except Exception:  # noqa: BLE001 — 안전한 fallback
-        return False
+        candidates.append(str(Path(spec.model_path).expanduser()))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        effective = get_effective_model_path(spec)
+        if effective not in candidates:
+            candidates.append(effective)
+        try:
+            expanded = str(Path(effective).expanduser())
+            if expanded not in candidates:
+                candidates.append(expanded)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    return active_path in candidates
 
 
 @router.get("/stt-models", response_model=STTModelsResponse)
@@ -2966,7 +2992,7 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
             job = None
             runtime_status = disk_status
 
-        is_active = _is_active_stt_model(spec.model_path, active_path)
+        is_active = _is_active_stt_model(spec, active_path)
         if is_active:
             active_id = spec.id
 

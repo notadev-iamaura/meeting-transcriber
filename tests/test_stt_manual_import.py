@@ -433,6 +433,117 @@ def test_clear_job_refuses_active_download(tmp_path: Path) -> None:
     )
 
 
+def test_manual_imported_model_is_active_after_activate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """회귀 방지: 수동 임포트된 모델을 활성화하면 /api/stt-models 가
+    해당 모델을 is_active=True 로 보고해야 한다.
+
+    버그 시나리오:
+        1. 자동 다운로드 실패 → 수동 import 로 파일 배치 (로컬 경로 생성)
+        2. PATCH/활성화 시 config.stt.model_name 에 로컬 경로가 저장됨
+        3. list_stt_models 가 spec.model_path (HF repo ID) 와 active_path
+           (로컬 경로) 를 비교 → 불일치 → is_active=False
+        4. UI 가 "활성화" 버튼을 계속 표시하여 사용자가 혼란
+
+    수정:
+        _is_active_stt_model 이 get_effective_model_path(spec) 까지 비교 대상에
+        포함하도록 변경.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from core.stt_model_registry import get_by_id
+    from fastapi import FastAPI
+
+    # 수동 임포트 경로에 유효한 파일 배치 → 디스크 READY
+    manual_dir = tmp_path / "app-data" / "stt_models" / "seastar-medium-4bit-manual"
+    manual_dir.mkdir(parents=True)
+    (manual_dir / "config.json").write_text("{}")
+    (manual_dir / "weights.safetensors").write_bytes(b"x" * 100)
+
+    def _fake_manual_dir(spec, base_dir=None):
+        return str(
+            tmp_path / "app-data" / "stt_models" / f"{spec.id}-manual"
+        )
+
+    # 세 모듈 모두 동일하게 패치 (import 시점에 각자 바인딩되므로)
+    monkeypatch.setattr(
+        "core.stt_model_registry.get_manual_import_dir", _fake_manual_dir
+    )
+    monkeypatch.setattr(
+        "core.stt_model_status.get_manual_import_dir", _fake_manual_dir
+    )
+    monkeypatch.setattr(
+        "core.stt_model_downloader.get_manual_import_dir", _fake_manual_dir
+    )
+
+    # config.stt.model_name 에 수동 임포트 절대 경로가 저장된 상태 시뮬레이션
+    # (실제 activate 엔드포인트가 get_effective_model_path 로 이 값을 쓴다)
+    active_path_on_disk = str(manual_dir)
+    config = SimpleNamespace(
+        stt=SimpleNamespace(model_name=active_path_on_disk)
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.config = config
+    app.state.stt_downloader = None  # downloader 없어도 동작해야 함
+    client = TestClient(app)
+
+    resp = client.get("/api/stt-models")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # 수동 임포트된 seastar 가 is_active=True 여야 한다
+    models = {m["id"]: m for m in body["models"]}
+    assert models["seastar-medium-4bit"]["is_active"] is True, (
+        "수동 임포트 경로가 active_path 인데 is_active=False 로 잘못 표시됨. "
+        f"응답: {models['seastar-medium-4bit']}"
+    )
+    # 다른 모델은 활성 아님
+    assert models["komixv2"]["is_active"] is False
+    assert models["ghost613-turbo-4bit"]["is_active"] is False
+    # 응답 전역의 active_model_id 도 seastar
+    assert body["active_model_id"] == "seastar-medium-4bit"
+
+
+def test_hf_cache_model_is_active_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """회귀 방지: HF repo ID 를 config 에 그대로 저장한 경우도 is_active 판정."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    # 수동 임포트 없음 → spec.model_path (HF repo ID) 가 effective path
+    monkeypatch.setattr(
+        "core.stt_model_registry.get_manual_import_dir",
+        lambda spec, base_dir=None: str(tmp_path / f"none-{spec.id}"),
+    )
+    monkeypatch.setattr(
+        "core.stt_model_status.get_manual_import_dir",
+        lambda spec, base_dir=None: str(tmp_path / f"none-{spec.id}"),
+    )
+
+    config = SimpleNamespace(
+        stt=SimpleNamespace(
+            model_name="youngouk/whisper-medium-komixv2-mlx"
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.config = config
+    app.state.stt_downloader = None
+    client = TestClient(app)
+
+    resp = client.get("/api/stt-models")
+    models = {m["id"]: m for m in resp.json()["models"]}
+    assert models["komixv2"]["is_active"] is True
+    assert models["seastar-medium-4bit"]["is_active"] is False
+
+
 def test_clear_job_noop_when_no_job(tmp_path: Path) -> None:
     """job 이 없어도 안전하게 True 반환 (멱등)."""
     from core.stt_model_downloader import STTModelDownloader
