@@ -321,6 +321,11 @@ class ZoomDetector:
 
         실행 중인 폴링 태스크를 취소하고 정리한다.
         이미 중지된 상태에서 호출해도 에러 없이 무시한다.
+
+        주의: `_is_meeting_active` 와 이벤트도 함께 리셋한다. 이렇게 해야
+        stop() 후 같은 인스턴스로 start() 를 재호출할 때 _handle_state_change
+        가 단락되지 않고 시작 콜백이 정상 발화된다 (회귀 방지).
+        본 메서드는 종료 콜백을 발화하지 않는다 — 단순 cleanup 이다.
         """
         if not self._is_running:
             logger.debug("Zoom 감지기가 이미 중지 상태입니다.")
@@ -333,6 +338,11 @@ class ZoomDetector:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
             self._poll_task = None
+
+        # 다음 start() 호출 시 단락 방지를 위해 내부 상태 초기화
+        self._is_meeting_active = False
+        self.meeting_started_event.clear()
+        self.meeting_ended_event.clear()
 
         logger.info("Zoom 감지기 중지")
 

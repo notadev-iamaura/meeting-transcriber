@@ -440,6 +440,101 @@ class TestStartStop:
         await detector.stop()
 
     @pytest.mark.asyncio
+    async def test_시작_시_async_콜백도_정상_호출된다(
+        self, detector: ZoomDetector
+    ) -> None:
+        """async 콜백 (api/server.py 의 _on_zoom_meeting_change 와 동일 형태) 도
+        start() 안에서 정상 await 되는지 검증.
+
+        실 환경에서 등록되는 콜백은 async 이므로 sync 콜백만 검증하면 부족하다.
+        _notify_callbacks 의 sync/async 분기 양쪽을 모두 회귀 방지 대상으로 둔다.
+        """
+        async_calls: list[bool] = []
+
+        async def async_cb(is_active: bool) -> None:
+            async_calls.append(is_active)
+
+        detector.on_meeting_change(async_cb)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await detector.start()
+
+        assert async_calls == [True], (
+            f"async 콜백이 발화되지 않음: {async_calls}"
+        )
+
+        await detector.stop()
+
+    @pytest.mark.asyncio
+    async def test_시작_시_콜백_예외가_start를_막지_않는다(
+        self, detector: ZoomDetector
+    ) -> None:
+        """콜백 안에서 예외가 발생해도 start() 가 정상 완료되고
+        polling 태스크가 생성되어야 한다 (실 환경에서 recorder 시작 실패 시나리오).
+        """
+
+        async def failing_cb(is_active: bool) -> None:
+            raise RuntimeError("recorder.start_recording 시뮬 실패")
+
+        detector.on_meeting_change(failing_cb)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            # 콜백 예외가 발생해도 start() 자체는 성공해야 함
+            await detector.start()
+
+        # 상태와 polling 태스크가 정상 생성됐는지 확인
+        assert detector.is_meeting_active is True
+        assert detector.is_running is True
+        assert detector._poll_task is not None
+        assert not detector._poll_task.done()
+
+        await detector.stop()
+
+    @pytest.mark.asyncio
+    async def test_시작_시_recorder_와의_통합_플로우(
+        self, detector: ZoomDetector
+    ) -> None:
+        """api/server.py 의 _on_zoom_meeting_change 와 동일한 시그니처의
+        async 콜백이 ZoomDetector.start() 에서 한 번 발화되고, recorder mock 의
+        start_recording 이 정확히 1회 호출되는지 검증한다.
+
+        이 테스트가 통과하면 lifespan 안에서:
+            recorder = AudioRecorder(...)
+            zoom_detector.on_meeting_change(_on_zoom_meeting_change)  # async
+            await zoom_detector.start()
+        호출만으로 자동 녹음이 트리거됨을 보장할 수 있다.
+        """
+        recorder_mock = AsyncMock()
+        recorder_mock.start_recording = AsyncMock()
+        recorder_mock.stop_recording = AsyncMock()
+
+        async def _on_zoom_meeting_change(is_active: bool) -> None:
+            if is_active:
+                await recorder_mock.start_recording()
+            else:
+                await recorder_mock.stop_recording()
+
+        detector.on_meeting_change(_on_zoom_meeting_change)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await detector.start()
+
+        # 정확히 1회 호출 (start() 안에서) - polling 첫 사이클은 단락되어야 함
+        recorder_mock.start_recording.assert_awaited_once()
+        recorder_mock.stop_recording.assert_not_awaited()
+
+        await detector.stop()
+
+    @pytest.mark.asyncio
     async def test_시작_시_미팅_없으면_콜백_호출_안함(
         self, detector: ZoomDetector
     ) -> None:
@@ -463,6 +558,45 @@ class TestStartStop:
         assert detector.meeting_ended_event.is_set()
 
         await detector.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_후_재시작_시_콜백이_다시_호출된다(
+        self, detector: ZoomDetector
+    ) -> None:
+        """회귀 방지: stop() 후 같은 detector 인스턴스로 start() 를 재호출하면
+        시작 콜백이 다시 정상 발화되어야 한다.
+
+        잠재 버그:
+            stop() 이 _is_meeting_active 를 리셋하지 않으면, 재시작 시점에
+            _handle_state_change(True) 가 단락되어 콜백 미호출.
+            (사용자 보고 버그와 동일 패턴 — 다른 시나리오)
+        """
+        calls: list[bool] = []
+
+        async def cb(active: bool) -> None:
+            calls.append(active)
+
+        detector.on_meeting_change(cb)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await detector.start()
+            await detector.stop()
+            await detector.start()
+
+        # 첫 start() + 재시작 → 콜백이 두 번 호출돼야 함
+        assert calls == [True, True], (
+            f"stop()→start() 재시작 시 시작 콜백이 발화되지 않음: {calls}"
+        )
+        # stop 후 상태가 리셋됐는지 확인
+        assert detector.is_meeting_active is True  # 재시작 후 다시 True
+
+        await detector.stop()
+        # 마지막 stop 후 상태 리셋 확인
+        assert detector.is_meeting_active is False
+        assert not detector.meeting_started_event.is_set()
 
     @pytest.mark.asyncio
     async def test_시작_시_프로세스_확인_실패_계속_진행(self, detector: ZoomDetector) -> None:
