@@ -2010,7 +2010,10 @@ button {
 .viewer-action-btn.transcribe { color: var(--accent); border-color: var(--accent); }
 .viewer-action-btn.retry { color: var(--warning); border-color: var(--warning); }
 .viewer-action-btn.delete { color: var(--error); border-color: var(--error); }
-.viewer-action-btn.summarize { color: var(--completed); border-color: var(--completed); }
+.viewer-action-btn.summarize { color: var(--success, #34C759); border-color: var(--success, #34C759); }
+.viewer-action-btn.copy { color: var(--text-secondary); }
+.viewer-action-btn.copy.copied { color: var(--success, #34C759); border-color: var(--success, #34C759); }
+.viewer-action-btn.download-txt { color: var(--text-secondary); }
 
 
 /* --- 12-1. 회의 정보 헤더 --- */
@@ -3467,6 +3470,93 @@ button {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+/* (?) 도움말 버튼 + 툴팁 — 비개발자용 한 줄 설명 */
+.setting-control-with-help {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.setting-control-with-help .setting-select {
+  flex: 1;
+  max-width: 280px;
+}
+
+.setting-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  user-select: none;
+  position: relative;
+  border: 0.5px solid var(--border);
+  transition: all var(--transition);
+  flex-shrink: 0;
+}
+
+.setting-help:hover,
+.setting-help:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* 툴팁 (data-tooltip 속성 기반) */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: normal;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 12px;
+  background: var(--text-primary);
+  color: var(--bg-canvas);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  box-shadow: var(--shadow);
+  z-index: 100;
+  pointer-events: none;
+  text-align: center;
+}
+
+[data-tooltip]:hover::before,
+[data-tooltip]:focus-visible::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--text-primary);
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* 메트릭 툴팁 — 작은 텍스트 위쪽에 표시 */
+.stt-model-metrics .metric[data-tooltip] {
+  cursor: help;
 }
 
 /* macOS 스타일 토글 스위치 (34px x 20px) */

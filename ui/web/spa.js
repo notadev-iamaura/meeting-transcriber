@@ -1797,6 +1797,8 @@
             els.metaDate.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(App.formatDate(data.created_at)) + '</span>';
 
             // 액션 버튼 렌더링 (전사 시작, 재시도, 요약 생성, 삭제)
+            // _loadTranscript 완료 후 다시 호출되어 복사/다운로드 버튼이 갱신됨
+            self._lastMeetingData = data;
             self._renderActions(data);
 
         } catch (e) {
@@ -1853,6 +1855,27 @@
             actionsEl.appendChild(summarizeBtn);
         }
 
+        // 전사문 복사/다운로드 버튼 (완료된 회의이며 전사문이 로드된 경우)
+        if (data.status === "completed" && self._allUtterances && self._allUtterances.length > 0) {
+            var copyBtn = document.createElement("button");
+            copyBtn.className = "viewer-action-btn copy";
+            copyBtn.innerHTML = Icons.copy + ' 전사문 복사';
+            copyBtn.setAttribute("aria-label", "전사문을 클립보드로 복사");
+            copyBtn.addEventListener("click", function () {
+                self._copyTranscript(copyBtn);
+            });
+            actionsEl.appendChild(copyBtn);
+
+            var downloadBtn = document.createElement("button");
+            downloadBtn.className = "viewer-action-btn download-txt";
+            downloadBtn.innerHTML = Icons.doc + ' .txt 다운로드';
+            downloadBtn.setAttribute("aria-label", "전사문을 텍스트 파일로 다운로드");
+            downloadBtn.addEventListener("click", function () {
+                self._downloadTranscript();
+            });
+            actionsEl.appendChild(downloadBtn);
+        }
+
         // 삭제 버튼 (완료/실패/녹음완료 시)
         if (data.status === "completed" || data.status === "failed" || data.status === "recorded") {
             var deleteBtn = document.createElement("button");
@@ -1862,6 +1885,107 @@
                 self._deleteMeeting(data.meeting_id);
             });
             actionsEl.appendChild(deleteBtn);
+        }
+    };
+
+    /**
+     * 전사문을 일반 텍스트 형식으로 빌드한다.
+     * 형식: "[참석자 N] HH:MM:SS  텍스트" 줄 단위.
+     * @returns {string} 다운로드/복사용 plain text
+     */
+    ViewerView.prototype._buildTranscriptText = function () {
+        var self = this;
+        if (!self._allUtterances || self._allUtterances.length === 0) {
+            return "";
+        }
+
+        // 화자 → 참석자 N 매핑 (전사 뷰와 동일한 번호 부여)
+        var speakerNumbers = {};
+        var count = 0;
+        self._allUtterances.forEach(function (u) {
+            if (!(u.speaker in speakerNumbers)) {
+                count++;
+                speakerNumbers[u.speaker] = count;
+            }
+        });
+
+        function getLabel(speaker) {
+            if (speaker === "UNKNOWN") return "참석자 ?";
+            return "참석자 " + (speakerNumbers[speaker] || "?");
+        }
+
+        // 헤더 + 본문
+        var header = [
+            "회의 ID: " + self._meetingId,
+            "추출 일시: " + new Date().toISOString(),
+            "화자 수: " + count + "명",
+            "발화 수: " + self._allUtterances.length + "건",
+            "─────────────────────────────────────────",
+            "",
+        ].join("\n");
+
+        var lines = self._allUtterances.map(function (u) {
+            var label = getLabel(u.speaker);
+            var time = App.formatTime(u.start);
+            return "[" + label + "] " + time + "  " + (u.text || "");
+        });
+
+        return header + lines.join("\n") + "\n";
+    };
+
+    /**
+     * 전사문을 클립보드로 복사한다.
+     * 복사 후 버튼에 일시적으로 "복사됨" 표시.
+     * @param {HTMLElement} btn - 클릭된 복사 버튼
+     */
+    ViewerView.prototype._copyTranscript = function (btn) {
+        var self = this;
+        var text = self._buildTranscriptText();
+        if (!text) {
+            errorBanner.show("복사할 전사문이 없습니다.");
+            return;
+        }
+
+        var originalHtml = btn.innerHTML;
+        App.copyToClipboard(text).then(function (ok) {
+            if (ok) {
+                btn.innerHTML = Icons.check + ' 복사됨';
+                btn.classList.add("copied");
+                setTimeout(function () {
+                    btn.innerHTML = originalHtml;
+                    btn.classList.remove("copied");
+                }, 2000);
+            } else {
+                errorBanner.show("클립보드 복사에 실패했습니다.");
+            }
+        });
+    };
+
+    /**
+     * 전사문을 .txt 파일로 다운로드한다.
+     * 파일명: {meeting_id}_transcript.txt
+     */
+    ViewerView.prototype._downloadTranscript = function () {
+        var self = this;
+        var text = self._buildTranscriptText();
+        if (!text) {
+            errorBanner.show("다운로드할 전사문이 없습니다.");
+            return;
+        }
+
+        try {
+            var blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = self._meetingId + "_transcript.txt";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            // 메모리 해제
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        } catch (e) {
+            errorBanner.show("파일 다운로드 실패: " + e.message);
         }
     };
 
@@ -1968,6 +2092,11 @@
             // 메타 정보 업데이트
             els.metaSpeakers.innerHTML = Icons.person + ' <span>화자 ' + App.escapeHtml(String(data.num_speakers || 0)) + '명</span>';
             els.metaUtterances.innerHTML = Icons.chat + ' <span>발화 ' + App.escapeHtml(String(data.total_utterances || 0)) + '건</span>';
+
+            // 전사문 로드 후 액션 버튼 재렌더 (복사/다운로드 버튼이 _allUtterances 길이에 의존)
+            if (self._lastMeetingData) {
+                self._renderActions(self._lastMeetingData);
+            }
 
             // 탭과 검색바 표시
             els.tabNav.style.display = "flex";
@@ -2965,7 +3094,11 @@
             '    <div class="settings-group">',
             '      <div class="setting-row">',
             '        <label class="setting-label" for="settingsModel">모델</label>',
-            '        <select class="setting-select" id="settingsModel"></select>',
+            '        <div class="setting-control-with-help">',
+            '          <select class="setting-select" id="settingsModel"></select>',
+            '          <span class="setting-help" id="settingsModelHelp" tabindex="0" role="button" aria-label="현재 선택된 모델 설명 보기"',
+            '                data-tooltip="모델을 선택하면 설명이 여기에 표시됩니다.">?</span>',
+            '        </div>',
             '      </div>',
             '      <div class="setting-row">',
             '        <label class="setting-label" for="settingsBackend">백엔드</label>',
@@ -3026,6 +3159,7 @@
 
         this._els = {
             model: document.getElementById("settingsModel"),
+            modelHelp: document.getElementById("settingsModelHelp"),
             backend: document.getElementById("settingsBackend"),
             temp: document.getElementById("settingsTemp"),
             tempValue: document.getElementById("settingsTempValue"),
@@ -3036,6 +3170,8 @@
             sttModels: document.getElementById("settingsSttModels"),
             sttStatus: document.getElementById("settingsSttStatus"),
         };
+        // 모델별 description 캐시 (툴팁 갱신용)
+        this._modelDescriptions = {};
         // STT 모델 폴링 타이머 (다운로드 중일 때 3초 간격 상태 갱신)
         this._sttPollTimers = [];
         // 다운로드 중인 모델 id (있으면 다른 카드의 다운로드 버튼 비활성화)
@@ -3051,6 +3187,13 @@
         els.temp.addEventListener("input", onTempInput);
         self._listeners.push({ el: els.temp, type: "input", fn: onTempInput });
 
+        // LLM 모델 변경 시 (?) 툴팁 description 갱신
+        var onModelChange = function () {
+            self._updateModelHelp();
+        };
+        els.model.addEventListener("change", onModelChange);
+        self._listeners.push({ el: els.model, type: "change", fn: onModelChange });
+
         var onSave = function () {
             self._saveSettings();
         };
@@ -3062,10 +3205,17 @@
     };
 
     GeneralSettingsPanel.prototype._loadSettings = async function () {
+        var self = this;
         var els = this._els;
         try {
             var data = await App.apiRequest("/settings");
             if (data.available_models && data.available_models.length > 0) {
+                // 모델 description 캐시 (툴팁 갱신용)
+                self._modelDescriptions = {};
+                data.available_models.forEach(function (m) {
+                    self._modelDescriptions[m.id] = m.description || "";
+                });
+
                 els.model.innerHTML = "";
                 data.available_models.forEach(function (m) {
                     var opt = document.createElement("option");
@@ -3075,6 +3225,7 @@
                 });
             }
             if (data.llm_mlx_model_name) els.model.value = data.llm_mlx_model_name;
+            self._updateModelHelp();
             if (data.llm_backend) els.backend.value = data.llm_backend;
             if (data.llm_temperature !== undefined && data.llm_temperature !== null) {
                 els.temp.value = data.llm_temperature;
@@ -3084,6 +3235,21 @@
             if (data.stt_language) els.lang.value = data.stt_language;
         } catch (err) {
             errorBanner.show("설정 불러오기 실패: " + (err.message || err));
+        }
+    };
+
+    /**
+     * 현재 선택된 LLM 모델의 설명을 (?) 툴팁에 반영한다.
+     */
+    GeneralSettingsPanel.prototype._updateModelHelp = function () {
+        var els = this._els;
+        if (!els.modelHelp || !this._modelDescriptions) return;
+        var currentId = els.model.value;
+        var desc = this._modelDescriptions[currentId];
+        if (desc) {
+            els.modelHelp.setAttribute("data-tooltip", desc);
+        } else {
+            els.modelHelp.setAttribute("data-tooltip", "선택된 모델의 설명이 없습니다.");
         }
     };
 
@@ -3219,6 +3385,18 @@
             name.textContent = m.label || m.id;
             header.appendChild(name);
 
+            // (?) 도움말 — description을 한 줄 요약으로 표시
+            if (m.description) {
+                var help = document.createElement("span");
+                help.className = "setting-help";
+                help.tabIndex = 0;
+                help.setAttribute("role", "button");
+                help.setAttribute("aria-label", (m.label || m.id) + " 모델 설명 보기");
+                help.setAttribute("data-tooltip", m.description);
+                help.textContent = "?";
+                header.appendChild(help);
+            }
+
             if (m.is_recommended) {
                 var rec = document.createElement("span");
                 rec.className = "stt-model-badge recommended";
@@ -3232,23 +3410,41 @@
                 header.appendChild(act);
             }
 
-            // 설명
+            // 설명 (카드 본문) — 헤더 (?) 와 동일 내용을 더 자세히 노출
             var desc = document.createElement("div");
             desc.className = "stt-model-desc";
             desc.textContent = m.description || "";
 
             // 메트릭: CER / WER / 크기 / 메모리 (XSS 방지: textContent 기반 조립)
+            // 각 라벨에 비개발자용 1줄 설명 툴팁 첨부
             var metrics = document.createElement("div");
             metrics.className = "stt-model-metrics";
             var metricPairs = [
-                { label: "CER", value: (m.cer_percent != null ? m.cer_percent + "%" : "-") },
-                { label: "WER", value: (m.wer_percent != null ? m.wer_percent + "%" : "-") },
-                { label: "크기", value: (m.expected_size_mb != null ? m.expected_size_mb + "MB" : "-") },
-                { label: "RAM", value: (m.memory_gb != null ? m.memory_gb + "GB" : "-") },
+                {
+                    label: "CER",
+                    value: (m.cer_percent != null ? m.cer_percent + "%" : "-"),
+                    tooltip: "글자 오류율 — 100글자 중 몇 글자가 틀렸는지. 낮을수록 정확합니다.",
+                },
+                {
+                    label: "WER",
+                    value: (m.wer_percent != null ? m.wer_percent + "%" : "-"),
+                    tooltip: "단어 오류율 — 100단어 중 몇 단어가 틀렸는지. 낮을수록 정확합니다.",
+                },
+                {
+                    label: "크기",
+                    value: (m.expected_size_mb != null ? m.expected_size_mb + "MB" : "-"),
+                    tooltip: "디스크에 저장되는 모델 파일 크기입니다.",
+                },
+                {
+                    label: "RAM",
+                    value: (m.memory_gb != null ? m.memory_gb + "GB" : "-"),
+                    tooltip: "전사 실행 중 사용하는 메모리 사용량입니다. 16GB 맥북에서 다른 앱과 함께 쓸 때 참고하세요.",
+                },
             ];
             metricPairs.forEach(function (pair) {
                 var span = document.createElement("span");
                 span.className = "metric";
+                span.setAttribute("data-tooltip", pair.tooltip);
                 var strong = document.createElement("strong");
                 strong.textContent = pair.label;
                 span.appendChild(strong);

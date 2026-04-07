@@ -1639,16 +1639,19 @@ _AVAILABLE_MODELS = [
         "id": "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
         "label": "EXAONE 3.5 7.8B (한국어 특화)",
         "size": "~5GB",
+        "description": "LG AI Research가 한국어에 특화시킨 모델로, 회의록 보정·요약에 검증된 안정적인 선택입니다.",
     },
     {
         "id": "mlx-community/gemma-4-e4b-it-4bit",
         "label": "Gemma 4 E4B (다국어, 빠름)",
         "size": "~5.3GB",
+        "description": "Google이 만든 최신 경량 모델로, EXAONE보다 약 50% 빠르며 다국어를 골고루 잘 처리합니다.",
     },
     {
         "id": "mlx-community/gemma-4-e2b-it-4bit",
         "label": "Gemma 4 E2B (경량)",
         "size": "~3GB",
+        "description": "Gemma 4 의 가벼운 버전으로, 8GB RAM 환경에서도 안정적으로 동작합니다.",
     },
 ]
 
