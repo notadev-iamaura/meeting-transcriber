@@ -1722,6 +1722,51 @@ def _get_config_path() -> Path:
     return Path(__file__).parent.parent / "config.yaml"
 
 
+def _replace_yaml_value(text: str, section: str, key: str, new_val: str) -> str:
+    """YAML 텍스트에서 특정 섹션의 키 값을 교체한다 (주석 보존).
+
+    정규식 기반으로 섹션을 찾고 해당 섹션 내에서 키의 값 부분만 교체한다.
+    라인 끝의 주석(`# ...`)은 그대로 유지된다.
+
+    Args:
+        text: 원본 YAML 텍스트
+        section: 최상위 섹션명 (예: "stt", "llm")
+        key: 교체할 키 (예: "model_name")
+        new_val: 새 값 (문자열일 경우 호출자가 직접 따옴표를 포함시켜 전달)
+
+    Returns:
+        값이 교체된 YAML 텍스트. 섹션/키를 찾지 못하면 원본 반환.
+    """
+    section_pattern = re.compile(rf'^{re.escape(section)}:', re.MULTILINE)
+    section_match = section_pattern.search(text)
+    if not section_match:
+        return text
+
+    start = section_match.end()
+    next_section = re.search(r'^\S', text[start:], re.MULTILINE)
+    end = start + next_section.start() if next_section else len(text)
+
+    section_text = text[start:end]
+    key_pattern = re.compile(
+        rf'^(  {re.escape(key)}:)\s*[^\n#]*(#[^\n]*)?$',
+        re.MULTILINE,
+    )
+    key_match = key_pattern.search(section_text)
+    if not key_match:
+        return text
+
+    comment = key_match.group(2) or ""
+    if comment:
+        comment = "  " + comment.strip()
+    replacement = f'{key_match.group(1)} {new_val}{comment}'
+    new_section = (
+        section_text[: key_match.start()]
+        + replacement
+        + section_text[key_match.end():]
+    )
+    return text[:start] + new_section + text[end:]
+
+
 @router.get("/settings", response_model=SettingsResponse)
 async def get_settings(request: Request) -> SettingsResponse:
     """현재 시스템 설정을 반환한다.
@@ -1880,39 +1925,7 @@ async def update_settings(
         with open(config_path, encoding="utf-8") as f:
             content = f.read()
 
-        # 정규식 기반 값 교체 (섹션 컨텍스트를 고려한 정확한 매칭)
-        import re
-
-        def _replace_yaml_value(text: str, section: str, key: str, new_val: str) -> str:
-            """YAML 파일에서 특정 섹션의 키 값을 교체한다 (주석 보존)."""
-            # 섹션 시작 위치 찾기
-            section_pattern = re.compile(rf'^{re.escape(section)}:', re.MULTILINE)
-            section_match = section_pattern.search(text)
-            if not section_match:
-                return text
-
-            # 섹션 내에서 키 찾기 (다음 섹션 시작 전까지만)
-            start = section_match.end()
-            next_section = re.search(r'^\S', text[start:], re.MULTILINE)
-            end = start + next_section.start() if next_section else len(text)
-
-            section_text = text[start:end]
-            # 키의 값 부분만 교체 (주석 보존)
-            key_pattern = re.compile(
-                rf'^(  {re.escape(key)}:)\s*[^\n#]*(#[^\n]*)?$',
-                re.MULTILINE,
-            )
-            key_match = key_pattern.search(section_text)
-            if not key_match:
-                return text
-
-            comment = key_match.group(2) or ""
-            if comment:
-                comment = "  " + comment.strip()
-            replacement = f'{key_match.group(1)} {new_val}{comment}'
-            new_section = section_text[:key_match.start()] + replacement + section_text[key_match.end():]
-            return text[:start] + new_section + text[end:]
-
+        # 정규식 기반 값 교체 (모듈 레벨 _replace_yaml_value 사용 — 주석 보존)
         if "llm_backend" in updates:
             content = _replace_yaml_value(content, "llm", "backend", f'"{updates["llm_backend"]}"')
         if "llm_mlx_model_name" in updates:
@@ -2594,7 +2607,7 @@ async def activate_stt_model(
 
     return {
         "model_id": model_id,
-        "previous_model_id": previous_model,
+        "previous_model_path": previous_model,
         "model_path": new_path,
         "message": "활성 모델이 변경되었습니다. 다음 전사부터 적용됩니다.",
     }

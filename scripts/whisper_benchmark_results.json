@@ -1,0 +1,202 @@
+[
+  {
+    "label": "A. komixv2 (현재, MLX fp16)",
+    "path": "youngouk/whisper-medium-komixv2-mlx",
+    "needs_convert": false,
+    "disk_size_mb": 0.0,
+    "mem_delta_gb": 1.73,
+    "mem_peak_gb": 14.77,
+    "cer_percent": 34.3,
+    "wer_percent": 52.63,
+    "total_time_s": 5.0,
+    "total_audio_s": 64.25,
+    "rtf": 0.078,
+    "transcripts": [
+      {
+        "index": 1,
+        "reference": "몬터규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다",
+        "hypothesis": "몬토규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다.",
+        "time_s": 2.29,
+        "audio_s": 10.45
+      },
+      {
+        "index": 2,
+        "reference": "차 문이 종잇장처럼 얇지 않으니 문 두께 스물 센티미터를 빼면 실제 승 하차 여유 공간은 스물 센티미터라는 계산이 나옵니다",
+        "hypothesis": "",
+        "time_s": 0.33,
+        "audio_s": 20.45
+      },
+      {
+        "index": 3,
+        "reference": "지난해 이들 크루즈관광객의 평균 체류기간은 오 쩜 구 사 시간",
+        "hypothesis": "지난해 이들 크루즈 관광객의 평균 체류기간은 5.94시간",
+        "time_s": 0.65,
+        "audio_s": 8.54
+      },
+      {
+        "index": 4,
+        "reference": "그리고 이 나무는 태즈메이니아 남부 지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다",
+        "hypothesis": "그리고 이 나무는 태즈메인 이하 남부 지역에 부는 남부의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다.",
+        "time_s": 1.11,
+        "audio_s": 16.64
+      },
+      {
+        "index": 5,
+        "reference": "평소 오전 아홉 시 에서 오후 일곱 시까지 일하면 하루 이 만원 정도를 번다",
+        "hypothesis": "평소 오전 9시에서 오후 7시까지 일하면 하루 2만원 정도를 번다.",
+        "time_s": 0.62,
+        "audio_s": 8.16
+      }
+    ]
+  },
+  {
+    "label": "B. whisper-large-v3-turbo (mlx-community, fp16)",
+    "path": "mlx-community/whisper-large-v3-turbo",
+    "needs_convert": false,
+    "disk_size_mb": 0.0,
+    "mem_delta_gb": 0.4,
+    "mem_peak_gb": 13.6,
+    "cer_percent": 37.55,
+    "wer_percent": 61.84,
+    "total_time_s": 5.17,
+    "total_audio_s": 64.25,
+    "rtf": 0.08,
+    "transcripts": [
+      {
+        "index": 1,
+        "reference": "몬터규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다",
+        "hypothesis": "몬토규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다.",
+        "time_s": 2.31,
+        "audio_s": 10.45
+      },
+      {
+        "index": 2,
+        "reference": "차 문이 종잇장처럼 얇지 않으니 문 두께 스물 센티미터를 빼면 실제 승 하차 여유 공간은 스물 센티미터라는 계산이 나옵니다",
+        "hypothesis": "창처럼 얕지 않으니 두 문 두께 20cm를 빼면 실제 승차 여유 공간은 20cm라는 계산이 나옵니다. 또 말씀하셔가지고. 아직 있지지가 않아요. 계속 지금 녹음되고 있는 거예요. 조용히 하면.",
+        "time_s": 0.84,
+        "audio_s": 20.45
+      },
+      {
+        "index": 3,
+        "reference": "지난해 이들 크루즈관광객의 평균 체류기간은 오 쩜 구 사 시간",
+        "hypothesis": "지난해 이들 크루즈 관광객의 평균 체류 기간은 5.94 시간",
+        "time_s": 0.62,
+        "audio_s": 8.54
+      },
+      {
+        "index": 4,
+        "reference": "그리고 이 나무는 태즈메이니아 남부 지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다",
+        "hypothesis": "그리고 이 나무는 테즈메이니아 남부지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간지방의 안개가 많은 환경에서도 무성하게 자랍니다.",
+        "time_s": 0.77,
+        "audio_s": 16.64
+      },
+      {
+        "index": 5,
+        "reference": "평소 오전 아홉 시 에서 오후 일곱 시까지 일하면 하루 이 만원 정도를 번다",
+        "hypothesis": "평소 오전 9시에서 오후 7시까지 일하면 하루 2만원 정도를 번다.",
+        "time_s": 0.62,
+        "audio_s": 8.16
+      }
+    ]
+  },
+  {
+    "label": "C. whisper-large-v3-turbo-q4 (mlx-community, 4bit 사전)",
+    "path": "mlx-community/whisper-large-v3-turbo-q4",
+    "needs_convert": false,
+    "disk_size_mb": 0.0,
+    "mem_delta_gb": 2.32,
+    "mem_peak_gb": 14.22,
+    "cer_percent": 38.63,
+    "wer_percent": 63.16,
+    "total_time_s": 15.51,
+    "total_audio_s": 64.25,
+    "rtf": 0.241,
+    "transcripts": [
+      {
+        "index": 1,
+        "reference": "몬터규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다",
+        "hypothesis": "몬토규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다.",
+        "time_s": 13.0,
+        "audio_s": 10.45
+      },
+      {
+        "index": 2,
+        "reference": "차 문이 종잇장처럼 얇지 않으니 문 두께 스물 센티미터를 빼면 실제 승 하차 여유 공간은 스물 센티미터라는 계산이 나옵니다",
+        "hypothesis": "상처럼 얕지 않으니 두 분 두께 20cm를 빼면 실제 승차 여유 공간은 20cm라는 계산이 나옵니다. 또 말씀하셔가지고. 아직 있지지가 않아요. 계속 지금 녹음되고 있는 거예요. 조용히 하면.",
+        "time_s": 0.69,
+        "audio_s": 20.45
+      },
+      {
+        "index": 3,
+        "reference": "지난해 이들 크루즈관광객의 평균 체류기간은 오 쩜 구 사 시간",
+        "hypothesis": "지난해 이들 크루즈 관광객의 평균 체류 기간은 5.94 시간",
+        "time_s": 0.58,
+        "audio_s": 8.54
+      },
+      {
+        "index": 4,
+        "reference": "그리고 이 나무는 태즈메이니아 남부 지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다",
+        "hypothesis": "그리고 이 나무는 테즈메인이아 남부지역의 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간지방의 안개가 많은 환경에서도 무성하게 자랍니다.",
+        "time_s": 0.66,
+        "audio_s": 16.64
+      },
+      {
+        "index": 5,
+        "reference": "평소 오전 아홉 시 에서 오후 일곱 시까지 일하면 하루 이 만원 정도를 번다",
+        "hypothesis": "평소 오전 9시에서 오후 7시까지 일하면 하루 2만원 정도를 번다.",
+        "time_s": 0.58,
+        "audio_s": 8.16
+      }
+    ]
+  },
+  {
+    "label": "D. ghost613 turbo-korean → 4bit 직접 양자화",
+    "path": "/Users/youngouksong/models/turbo-korean-4bit",
+    "needs_convert": true,
+    "disk_size_mb": 884.0,
+    "mem_delta_gb": 1.49,
+    "mem_peak_gb": 13.51,
+    "cer_percent": 4.69,
+    "wer_percent": 9.21,
+    "total_time_s": 3.16,
+    "total_audio_s": 64.25,
+    "rtf": 0.049,
+    "transcripts": [
+      {
+        "index": 1,
+        "reference": "몬터규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다",
+        "hypothesis": "몬터규는 자녀들이 사랑을 제대로 못 받고 크면 매우 심각한 결과가 초래된다는 결론을 내렸습니다",
+        "time_s": 0.74,
+        "audio_s": 10.45
+      },
+      {
+        "index": 2,
+        "reference": "차 문이 종잇장처럼 얇지 않으니 문 두께 스물 센티미터를 빼면 실제 승 하차 여유 공간은 스물 센티미터라는 계산이 나옵니다",
+        "hypothesis": "일정처럼 얇지 않으니 두 문 두께 스물 센티미터를 빼면 실제 승차 여유 공간은 스물 센티미터라는 계단이 나옵니다",
+        "time_s": 0.62,
+        "audio_s": 20.45
+      },
+      {
+        "index": 3,
+        "reference": "지난해 이들 크루즈관광객의 평균 체류기간은 오 쩜 구 사 시간",
+        "hypothesis": "지난해 이들 크루즈관광객의 평균 체류기간은 오 쩜 구 사 시간",
+        "time_s": 0.58,
+        "audio_s": 8.54
+      },
+      {
+        "index": 4,
+        "reference": "그리고 이 나무는 태즈메이니아 남부 지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다",
+        "hypothesis": "그리고 이 나무는 태즈메이니아 남부 지역에 부는 남극의 바람을 맞으면서도 또한 해안에 위치한 산간 지방의 안개가 많은 환경에서도 무성하게 자랍니다",
+        "time_s": 0.64,
+        "audio_s": 16.64
+      },
+      {
+        "index": 5,
+        "reference": "평소 오전 아홉 시 에서 오후 일곱 시까지 일하면 하루 이 만원 정도를 번다",
+        "hypothesis": "평소 오전 아홉 시 에서 오후 일곱 시까지 일하면 하루 이 만원 정도를 번다",
+        "time_s": 0.59,
+        "audio_s": 8.16
+      }
+    ]
+  }
+]

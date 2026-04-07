@@ -221,6 +221,17 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if pipeline_manager is None or thermal_manager is None:
             logger.warning("PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화")
 
+    # 11. STTModelDownloader 초기화 (STT 모델 선택기 지원)
+    try:
+        from core.stt_model_downloader import STTModelDownloader
+
+        stt_models_dir = config.paths.resolved_base_dir / "stt_models"
+        app.state.stt_downloader = STTModelDownloader(models_dir=stt_models_dir)
+        logger.info(f"STTModelDownloader 초기화 완료 — {stt_models_dir}")
+    except Exception as e:
+        app.state.stt_downloader = None
+        logger.warning(f"STTModelDownloader 초기화 실패: {e}")
+
     logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
 
     yield  # 앱 실행
