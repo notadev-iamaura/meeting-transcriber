@@ -2575,8 +2575,11 @@ async def activate_stt_model(
         )
 
     previous_model = config.stt.model_name
-    # 로컬 경로는 expanduser 로 해석해 저장, HF repo ID 는 그대로 유지
-    spec_path = spec.model_path
+    # get_effective_model_path: 수동 임포트가 있으면 그 로컬 경로 우선,
+    # 없으면 spec.model_path (HF repo ID 또는 로컬 양자화 경로) 사용
+    from core.stt_model_status import get_effective_model_path
+
+    spec_path = get_effective_model_path(spec)
     if spec_path.startswith(("~", "/", "./", "../")):
         new_path = str(Path(spec_path).expanduser())
     else:
@@ -2614,3 +2617,199 @@ async def activate_stt_model(
         "model_path": new_path,
         "message": "활성 모델이 변경되었습니다. 다음 전사부터 적용됩니다.",
     }
+
+
+# ---------------------------------------------------------------------------
+# 수동 다운로드 / 가져오기 엔드포인트
+# ---------------------------------------------------------------------------
+# 네트워크·방화벽·프록시 이슈로 huggingface_hub 자동 다운로드가 실패하는
+# 사용자를 위해, HF 직접 URL을 노출하고 로컬에서 받은 파일을 app이 인식할 수
+# 있는 위치로 가져오는 경로를 제공한다. 사전 양자화된(`needs_quantization=False`)
+# 모델에만 적용된다.
+# ---------------------------------------------------------------------------
+
+
+class STTManualDownloadFile(BaseModel):
+    """수동 다운로드 파일 하나의 URL 정보."""
+
+    name: str
+    url: str
+    size_bytes: Optional[int] = None
+
+
+class STTManualDownloadInfo(BaseModel):
+    """GET /api/stt-models/{id}/manual-download-info 응답."""
+
+    model_id: str
+    label: str
+    supported: bool
+    files: list[STTManualDownloadFile] = Field(default_factory=list)
+    target_directory: str = ""
+    instructions: str = ""
+
+
+class STTImportRequest(BaseModel):
+    """POST /api/stt-models/{id}/import-manual 요청 본문."""
+
+    source_dir: str = Field(
+        ...,
+        description=(
+            "사용자가 다운로드한 파일들이 있는 로컬 디렉토리 절대 경로. "
+            "해당 디렉토리 안에 config.json 과 weights.safetensors 파일이 있어야 한다."
+        ),
+    )
+
+
+class STTImportResponse(BaseModel):
+    """POST /api/stt-models/{id}/import-manual 응답."""
+
+    model_id: str
+    imported_dir: str
+    files_copied: list[str]
+    message: str
+
+
+@router.get(
+    "/stt-models/{model_id}/manual-download-info",
+    response_model=STTManualDownloadInfo,
+)
+async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
+    """수동 다운로드용 HF 직접 URL 목록과 타겟 폴더 경로를 반환한다.
+
+    사용자는 응답에 포함된 `files[*].url` 을 브라우저로 직접 열어
+    각 파일을 받은 뒤, `target_directory` 에 저장하면 된다.
+    이후 `POST /api/stt-models/{id}/import-manual` 로 가져오기를 수행한다.
+
+    Raises:
+        HTTPException 404: 알 수 없는 model_id
+        HTTPException 400: 해당 모델이 수동 다운로드를 지원하지 않음
+                           (needs_quantization=True 인 경우)
+    """
+    from core.stt_model_registry import get_hf_download_urls, get_manual_import_dir
+
+    spec = _stt_get_by_id(model_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    urls = get_hf_download_urls(spec)
+    if not urls:
+        # needs_quantization=True 인 모델은 수동 다운로드로 해결 불가
+        return STTManualDownloadInfo(
+            model_id=model_id,
+            label=spec.label,
+            supported=False,
+            instructions=(
+                "이 모델은 원본 fp16을 다운로드한 후 로컬에서 4bit 양자화가 필요해요. "
+                "자동 다운로드 버튼을 사용하거나, 사전 양자화된 배포를 기다려 주세요."
+            ),
+        )
+
+    target_dir = get_manual_import_dir(spec)
+    files = [
+        STTManualDownloadFile(name=u["name"], url=u["url"]) for u in urls
+    ]
+
+    return STTManualDownloadInfo(
+        model_id=model_id,
+        label=spec.label,
+        supported=True,
+        files=files,
+        target_directory=target_dir,
+        instructions=(
+            "1) 아래 파일들을 브라우저로 각각 다운로드하세요.\n"
+            f"2) 다운로드한 파일 2개를 한 폴더에 모으세요 (예: ~/Downloads/{spec.id}/).\n"
+            "3) '가져오기' 버튼을 누르고 해당 폴더 경로를 입력하면 앱이 자동으로 "
+            f"{target_dir} 로 복사합니다.\n"
+            "4) 이후 '활성화' 버튼으로 이 모델을 사용할 수 있어요."
+        ),
+    )
+
+
+@router.post(
+    "/stt-models/{model_id}/import-manual",
+    response_model=STTImportResponse,
+)
+async def import_stt_manual(
+    model_id: str, body: STTImportRequest
+) -> STTImportResponse:
+    """사용자가 브라우저로 받은 모델 파일을 앱 내부 경로로 복사한다.
+
+    body.source_dir 안에 있는 config.json, weights.safetensors 를
+    `~/.meeting-transcriber/stt_models/{id}-manual/` 로 복사한다.
+    복사 완료 후 해당 모델은 READY 상태가 되며 활성화 가능하다.
+
+    Raises:
+        HTTPException 404: 알 수 없는 model_id
+        HTTPException 400: source_dir 없음·필수 파일 누락·수동 가져오기 미지원
+        HTTPException 500: 파일 복사 실패
+    """
+    import shutil
+
+    from core.stt_model_registry import get_hf_download_urls, get_manual_import_dir
+
+    spec = _stt_get_by_id(model_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    # 수동 가져오기를 지원하는 모델인지 검증
+    if not get_hf_download_urls(spec):
+        raise HTTPException(
+            status_code=400,
+            detail="이 모델은 수동 가져오기를 지원하지 않아요 (로컬 양자화 필요).",
+        )
+
+    # source_dir 검증
+    source = Path(body.source_dir).expanduser().resolve()
+    if not source.exists() or not source.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"폴더를 찾을 수 없어요: {body.source_dir}",
+        )
+
+    required = ["config.json", "weights.safetensors"]
+    missing = [name for name in required if not (source / name).is_file()]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"다음 파일이 폴더에 없어요: {', '.join(missing)}. "
+                "HuggingFace에서 받은 두 파일을 모두 같은 폴더에 넣어 주세요."
+            ),
+        )
+
+    # 타겟 디렉토리 생성 후 원자적 복사 (임시 경로 → rename)
+    target_dir = Path(get_manual_import_dir(spec))
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    try:
+        for name in required:
+            src_file = source / name
+            dst_file = target_dir / name
+            tmp_file = target_dir / (name + ".tmp")
+            shutil.copy2(str(src_file), str(tmp_file))
+            tmp_file.replace(dst_file)
+            copied.append(name)
+        logger.info(
+            "STT 모델 수동 가져오기 완료: %s ← %s", target_dir, source
+        )
+    except OSError as exc:
+        logger.exception("STT 모델 수동 가져오기 실패: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"파일 복사에 실패했어요: {exc}",
+        ) from exc
+
+    return STTImportResponse(
+        model_id=model_id,
+        imported_dir=str(target_dir),
+        files_copied=copied,
+        message=(
+            f"모델 파일 {len(copied)}개를 가져왔어요. "
+            "이제 '활성화' 버튼으로 이 모델을 사용할 수 있어요."
+        ),
+    )

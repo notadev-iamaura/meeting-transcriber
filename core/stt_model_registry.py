@@ -129,3 +129,57 @@ def get_default() -> STTModelSpec:
         StopIteration: 기본 모델이 정의되어 있지 않을 때 (설정 오류).
     """
     return next(m for m in STT_MODELS if m.is_default)
+
+
+def get_hf_download_urls(spec: STTModelSpec) -> list[dict[str, str]]:
+    """HF 사전빌드 모델의 직접 다운로드 URL 목록을 반환한다.
+
+    네트워크·인증·방화벽 이슈로 `huggingface_hub.snapshot_download`가 실패할 때
+    사용자가 브라우저로 수동 다운로드할 수 있도록 원시 파일 URL을 노출한다.
+
+    HF는 `https://huggingface.co/{repo}/resolve/main/{filename}` 형식으로
+    파일을 직접 제공한다 (redirect → 실제 CDN URL).
+
+    Args:
+        spec: STTModelSpec 메타데이터.
+
+    Returns:
+        [{"name": 파일명, "url": 다운로드 URL}, ...] 리스트.
+        spec.needs_quantization=True(로컬 양자화 필요 모델)이면 빈 리스트.
+
+    Note:
+        반환되는 파일은 MLX whisper가 로드하는 데 필요한 최소 파일:
+        - config.json: 모델 구성 (~1KB)
+        - weights.safetensors: 4bit 양자화된 가중치 (수백 MB)
+    """
+    if spec.needs_quantization:
+        # 로컬에서 양자화해야 하는 모델은 수동 다운로드로 해결 불가
+        # (원본 fp16을 받아도 사용자가 mlx-examples convert.py를 직접 돌려야 함)
+        return []
+
+    # HF repo ID 를 hf_source 에서 추출 (owner/name 형식)
+    repo_id = spec.hf_source
+    base_url = f"https://huggingface.co/{repo_id}/resolve/main"
+    return [
+        {"name": "config.json", "url": f"{base_url}/config.json"},
+        {"name": "weights.safetensors", "url": f"{base_url}/weights.safetensors"},
+    ]
+
+
+def get_manual_import_dir(spec: STTModelSpec, base_dir: str | None = None) -> str:
+    """수동 임포트된 모델이 저장되는 로컬 디렉토리 경로를 반환한다.
+
+    사용자가 브라우저로 다운로드한 파일을 이 경로에 복사하면,
+    `get_model_status`가 READY로 판정하고 활성화 시 HF 캐시 대신 이 경로를 사용한다.
+
+    Args:
+        spec: STTModelSpec 메타데이터.
+        base_dir: base 경로 override (None이면 ~/.meeting-transcriber).
+
+    Returns:
+        절대 경로 문자열. 디렉토리 자동 생성은 하지 않는다.
+    """
+    from pathlib import Path
+
+    root = Path(base_dir).expanduser() if base_dir else Path("~/.meeting-transcriber").expanduser()
+    return str(root / "stt_models" / f"{spec.id}-manual")

@@ -3517,6 +3517,15 @@
             card.appendChild(metrics);
             card.appendChild(actions);
 
+            // 수동 다운로드 펼침 섹션 — 네트워크 이슈로 자동 다운로드가 안 되는 사용자용
+            // 다운로드 중이거나 이미 ready 상태가 아닐 때만 노출
+            if (m.status === "not_downloaded" || m.status === "error") {
+                var manualSection = self._buildManualDownloadSection(m);
+                if (manualSection) {
+                    card.appendChild(manualSection);
+                }
+            }
+
             // 에러 메시지 (있으면 카드 하단에)
             if (m.error_message) {
                 var errEl = document.createElement("div");
@@ -3528,6 +3537,193 @@
 
             container.appendChild(card);
         });
+    };
+
+    /**
+     * 수동 다운로드 펼침 섹션을 생성한다.
+     * HF 직접 URL 목록 + 복사 버튼 + 폴더 경로 입력 + 가져오기 버튼.
+     * needs_quantization=True 모델은 supported=false 로 안내만 표시.
+     * @param {Object} m 모델 정보
+     * @returns {HTMLElement|null}
+     */
+    GeneralSettingsPanel.prototype._buildManualDownloadSection = function (m) {
+        var self = this;
+        var details = document.createElement("details");
+        details.className = "stt-manual-download";
+
+        var summary = document.createElement("summary");
+        summary.textContent = "브라우저로 직접 받기";
+        details.appendChild(summary);
+
+        var body = document.createElement("div");
+        body.className = "stt-manual-body";
+        body.innerHTML = '<div class="stt-manual-loading">정보 불러오는 중…</div>';
+        details.appendChild(body);
+
+        // details가 열릴 때 처음 한 번만 데이터 로드 (lazy)
+        var loaded = false;
+        details.addEventListener("toggle", function () {
+            if (!details.open || loaded) return;
+            loaded = true;
+            self._loadManualDownloadInfo(m.id, body);
+        });
+
+        return details;
+    };
+
+    /**
+     * /api/stt-models/{id}/manual-download-info 를 호출해 UI 에 렌더링한다.
+     * @param {string} modelId
+     * @param {HTMLElement} bodyEl 렌더 대상 컨테이너
+     */
+    GeneralSettingsPanel.prototype._loadManualDownloadInfo = async function (
+        modelId,
+        bodyEl
+    ) {
+        var self = this;
+        try {
+            var info = await App.apiRequest(
+                "/stt-models/" + encodeURIComponent(modelId) + "/manual-download-info"
+            );
+            bodyEl.innerHTML = "";
+
+            if (!info.supported) {
+                var msg = document.createElement("p");
+                msg.className = "stt-manual-unsupported";
+                msg.textContent = info.instructions || "이 모델은 수동 다운로드를 지원하지 않아요.";
+                bodyEl.appendChild(msg);
+                return;
+            }
+
+            // 안내 문구
+            var help = document.createElement("p");
+            help.className = "stt-manual-instructions";
+            help.style.whiteSpace = "pre-line";
+            help.textContent = info.instructions;
+            bodyEl.appendChild(help);
+
+            // URL 목록
+            var urlList = document.createElement("ul");
+            urlList.className = "stt-manual-urls";
+            info.files.forEach(function (f) {
+                var li = document.createElement("li");
+
+                var nameSpan = document.createElement("code");
+                nameSpan.className = "stt-manual-file-name";
+                nameSpan.textContent = f.name;
+                li.appendChild(nameSpan);
+
+                var link = document.createElement("a");
+                link.href = f.url;
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+                link.className = "stt-manual-link";
+                link.textContent = "브라우저로 열기 ↗";
+                li.appendChild(link);
+
+                var copyBtn = document.createElement("button");
+                copyBtn.type = "button";
+                copyBtn.className = "btn-icon";
+                copyBtn.textContent = "URL 복사";
+                copyBtn.addEventListener("click", function () {
+                    navigator.clipboard.writeText(f.url).then(function () {
+                        copyBtn.textContent = "복사됨 ✓";
+                        setTimeout(function () {
+                            copyBtn.textContent = "URL 복사";
+                        }, 1500);
+                    });
+                });
+                li.appendChild(copyBtn);
+
+                urlList.appendChild(li);
+            });
+            bodyEl.appendChild(urlList);
+
+            // 타겟 디렉토리 표시
+            var targetInfo = document.createElement("div");
+            targetInfo.className = "stt-manual-target";
+            targetInfo.innerHTML =
+                '<strong>복사될 위치:</strong> <code>' +
+                App.escapeHtml(info.target_directory) +
+                "</code>";
+            bodyEl.appendChild(targetInfo);
+
+            // 폴더 경로 입력 + 가져오기 버튼
+            var importGroup = document.createElement("div");
+            importGroup.className = "stt-manual-import-group";
+
+            var label = document.createElement("label");
+            label.className = "stt-manual-label";
+            label.textContent = "다운로드한 폴더 경로";
+            importGroup.appendChild(label);
+
+            var pathInput = document.createElement("input");
+            pathInput.type = "text";
+            pathInput.className = "stt-manual-path-input";
+            pathInput.placeholder = "예: /Users/yourname/Downloads/" + modelId;
+            importGroup.appendChild(pathInput);
+
+            var importBtn = document.createElement("button");
+            importBtn.type = "button";
+            importBtn.className = "stt-action-btn activate";
+            importBtn.textContent = "가져오기";
+            importBtn.addEventListener("click", function () {
+                self._importManualModel(modelId, pathInput.value, bodyEl);
+            });
+            importGroup.appendChild(importBtn);
+
+            bodyEl.appendChild(importGroup);
+        } catch (err) {
+            bodyEl.innerHTML = "";
+            var errEl = document.createElement("div");
+            errEl.className = "stt-manual-error";
+            errEl.textContent = "정보를 불러오지 못했어요: " + (err.message || err);
+            bodyEl.appendChild(errEl);
+        }
+    };
+
+    /**
+     * 수동 가져오기 엔드포인트 호출.
+     * @param {string} modelId
+     * @param {string} sourceDir 사용자 폴더 경로
+     * @param {HTMLElement} bodyEl 결과 표시 컨테이너
+     */
+    GeneralSettingsPanel.prototype._importManualModel = async function (
+        modelId,
+        sourceDir,
+        bodyEl
+    ) {
+        var self = this;
+        sourceDir = (sourceDir || "").trim();
+        if (!sourceDir) {
+            self._showSttStatus("폴더 경로를 입력해 주세요.", "error");
+            return;
+        }
+
+        self._showSttStatus("가져오는 중…", "info");
+        try {
+            var resp = await fetch(
+                "/api/stt-models/" + encodeURIComponent(modelId) + "/import-manual",
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ source_dir: sourceDir }),
+                }
+            );
+            if (!resp.ok) {
+                var errData = await resp.json().catch(function () { return {}; });
+                throw new Error(errData.detail || "HTTP " + resp.status);
+            }
+            var data = await resp.json();
+            self._showSttStatus(data.message || "가져오기 완료", "success");
+            // 모델 목록 리로드 → 상태가 ready 로 바뀌어 '활성화' 버튼 노출됨
+            self._loadSttModels();
+        } catch (err) {
+            self._showSttStatus(
+                "가져오기 실패: " + (err.message || String(err)),
+                "error"
+            );
+        }
     };
 
     /**

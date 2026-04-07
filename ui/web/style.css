@@ -4429,3 +4429,147 @@ button {
     padding: 12px;
   }
 }
+
+/* =========================================================================
+   STT 수동 다운로드 섹션 — 네트워크 이슈 사용자용 브라우저 URL + 가져오기
+   ========================================================================= */
+
+.stt-manual-download {
+  margin-top: 12px;
+  padding: 8px 0 0 0;
+  border-top: 1px dashed var(--border);
+}
+
+.stt-manual-download > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+
+.stt-manual-download > summary::-webkit-details-marker { display: none; }
+
+.stt-manual-download > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.stt-manual-download[open] > summary::before {
+  content: "▾ ";
+}
+
+.stt-manual-download > summary:hover {
+  color: var(--text-primary);
+}
+
+.stt-manual-body {
+  padding: 10px 4px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.stt-manual-loading,
+.stt-manual-error,
+.stt-manual-unsupported {
+  padding: 8px 0;
+  color: var(--text-secondary);
+}
+
+.stt-manual-error {
+  color: var(--error);
+}
+
+.stt-manual-instructions {
+  margin: 0 0 12px 0;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.stt-manual-urls {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stt-manual-urls li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.stt-manual-file-name {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  min-width: 140px;
+}
+
+.stt-manual-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12px;
+  flex: 1;
+}
+
+.stt-manual-link:hover {
+  text-decoration: underline;
+}
+
+.stt-manual-target {
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.stt-manual-target code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--text-primary);
+}
+
+.stt-manual-import-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stt-manual-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.stt-manual-path-input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.stt-manual-path-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.stt-manual-import-group .stt-action-btn {
+  align-self: flex-end;
+  margin-top: 4px;
+}

@@ -16,7 +16,7 @@ import logging
 from enum import Enum
 from pathlib import Path
 
-from .stt_model_registry import STTModelSpec
+from .stt_model_registry import STTModelSpec, get_manual_import_dir
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +59,72 @@ def _check_hf_cache(repo_id: str) -> bool:
         return False
 
 
-def get_model_status(spec: STTModelSpec) -> ModelStatus:
-    """모델의 다운로드 상태를 확인한다.
+def _check_manual_import(spec: STTModelSpec) -> bool:
+    """수동 임포트 디렉토리에 유효한 모델이 존재하는지 확인한다.
+
+    사용자가 HF CDN 대신 브라우저로 직접 다운로드한 파일을
+    `~/.meeting-transcriber/stt_models/{id}-manual/` 에 복사해 두었을 때
+    해당 경로를 READY 로 판정한다.
+
+    Returns:
+        True: weights.safetensors + config.json 모두 존재
+        False: 디렉토리 없음 또는 필수 파일 누락
+    """
+    from pathlib import Path
+
+    manual_dir = Path(get_manual_import_dir(spec))
+    if not manual_dir.exists():
+        return False
+    weights = manual_dir / "weights.safetensors"
+    config = manual_dir / "config.json"
+    return weights.exists() and config.exists()
+
+
+def get_effective_model_path(spec: STTModelSpec) -> str:
+    """활성화·전사 시 실제로 사용할 모델 경로를 반환한다.
+
+    우선순위:
+        1. 수동 임포트 디렉토리가 유효하면 그 경로
+        2. 아니면 spec.model_path (HF repo ID 또는 로컬 양자화 경로)
+
+    mlx-whisper의 `path_or_hf_repo=` 인자는 로컬 경로와 HF repo ID를
+    모두 받아들이므로 둘 다 이 한 값을 사용한다.
 
     Args:
         spec: STTModelSpec 메타데이터.
 
     Returns:
-        ModelStatus.READY: 사용 가능 상태 (로컬 또는 HF 캐시)
+        모델 로드에 사용할 경로 문자열.
+    """
+    if _check_manual_import(spec):
+        return get_manual_import_dir(spec)
+    return spec.model_path
+
+
+def get_model_status(spec: STTModelSpec) -> ModelStatus:
+    """모델의 다운로드 상태를 확인한다.
+
+    확인 순서:
+        1. 수동 임포트 디렉토리 (`{id}-manual/`) — 브라우저로 직접 받은 경우
+        2. HF repo ID 이면 HF 캐시 확인
+        3. 로컬 경로 이면 weights.safetensors + config.json 확인
+
+    Args:
+        spec: STTModelSpec 메타데이터.
+
+    Returns:
+        ModelStatus.READY: 사용 가능 상태
         ModelStatus.NOT_DOWNLOADED: 그 외 (손상된 상태 포함)
 
     Note:
         DOWNLOADING/QUANTIZING/ERROR 상태는 본 함수가 판정하지 않는다.
         다운로더(STTModelDownloader)의 in-memory 상태와 결합해 상위 계층에서 계산한다.
     """
-    # HF repo ID 형태면 HF 캐시만 확인
+    # 1. 수동 임포트 우선 (사용자가 브라우저로 직접 받아 배치한 경우)
+    if _check_manual_import(spec):
+        return ModelStatus.READY
+
+    # 2. HF repo ID 형태면 HF 캐시 확인
     if _is_hf_repo_id(spec.model_path):
         if _check_hf_cache(spec.model_path):
             return ModelStatus.READY
