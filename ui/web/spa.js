@@ -1465,9 +1465,16 @@
                     if (summary.markdown) {
                         clearInterval(pollTimer);
                         btn.classList.remove("loading");
-                        els.summaryContent.innerHTML = App.renderMarkdown(summary.markdown);
+                        // _renderSummaryView 를 거쳐야 편집/재생성 툴바가 다시 그려지고
+                        // _currentSummaryMd / _summaryDirty 가 올바르게 갱신된다.
+                        // (이전 버그: innerHTML 직접 덮어쓰기 → 툴바 사라지고 dirty 추적 깨짐)
+                        self._currentSummaryMd = summary.markdown;
+                        self._summaryDirty = false;
                         els.summaryEmpty.style.display = "none";
-                        btn.style.display = "none";
+                        if (els.summarizeBtn) els.summarizeBtn.style.display = "none";
+                        self._renderSummaryView(summary.markdown);
+                        // 처리 로그도 갱신 (요약 단계 elapsed 가 추가됨)
+                        self._loadPipelineLog();
                         return;
                     }
                 } catch (ignore) {
@@ -2543,19 +2550,17 @@
      * @param {HTMLElement} btn - 클릭된 버튼 요소
      */
     ViewerView.prototype._summarizeMeeting = async function (meetingId, btn) {
-        var originalText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "요약 중...";
-        btn.classList.add("loading");
-
-        try {
-            await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/summarize", {});
-        } catch (e) {
-            errorBanner.show("요약 요청 실패: " + e.message);
-            btn.disabled = false;
-            btn.textContent = originalText;
-            btn.classList.remove("loading");
+        // 액션바 버튼에서 호출됨. 실제 폴링/갱신 로직은 _requestSummarize 와 통일.
+        // 폴링 도중 사용자가 요약 탭을 보도록 자동 전환.
+        var els = this._els;
+        if (els.tabNav) {
+            els.tabNav.style.display = "flex";
+            var sumTab = document.getElementById("viewerTabSummary");
+            if (sumTab) sumTab.click();
         }
+        // 액션 버튼은 _loadMeetingInfo 가 다시 렌더하므로 별도 복원 불필요.
+        // _requestSummarize 가 summarizeBtn 또는 toolbar 의 재생성 버튼을 사용한다.
+        await this._requestSummarize(false);
     };
 
     /**
