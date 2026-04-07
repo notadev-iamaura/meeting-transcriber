@@ -32,6 +32,7 @@ from core.llm_backend import (
     create_backend,
 )
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.user_settings import build_chat_system_prompt
 from search.hybrid_search import (
     HybridSearchEngine,
     SearchResponse,
@@ -366,6 +367,8 @@ class ChatEngine:
         # Chat 설정 캐시
         self._chat_config: ChatConfig = self._config.chat
         self._max_history_pairs = self._chat_config.max_history_pairs
+        # config.yaml의 값은 폴백 용도. 정상 경로에서는 _get_system_prompt()가
+        # core.user_settings에서 최신 사용자 편집본을 매 호출마다 로드한다.
         self._system_prompt = self._chat_config.system_prompt
 
         # LLM 설정 캐시 (컨텍스트 윈도우는 truncation에 사용)
@@ -430,6 +433,22 @@ class ChatEngine:
             LLMConnectionError: 백엔드 연결 실패 시
         """
         return create_backend(self._config.llm)
+
+    def _get_system_prompt(self) -> str:
+        """사용자가 편집한 채팅 시스템 프롬프트를 로드한다.
+
+        매 chat() 호출마다 실행되지만 core.user_settings의 mtime 캐시 덕에
+        파일이 변경되지 않는 한 디스크 I/O는 발생하지 않는다.
+        저장소 로드 실패 시 config.yaml의 폴백 값을 사용한다.
+
+        Returns:
+            시스템 프롬프트 문자열
+        """
+        try:
+            return build_chat_system_prompt()
+        except Exception as e:
+            logger.warning(f"채팅 프롬프트 로드 실패, 폴백 사용: {e}")
+            return self._system_prompt
 
     def _call_llm_chat(
         self,
@@ -605,9 +624,12 @@ class ChatEngine:
         session = self.get_session(session_id)
         history_messages = session.to_ollama_messages()
 
+        # 사용자 편집본 프롬프트 로드 (요청 단위 캐싱)
+        system_prompt = self._get_system_prompt()
+
         # 컨텍스트 윈도우 절단
         user_prompt = self._truncate_context(
-            system_prompt=self._system_prompt,
+            system_prompt=system_prompt,
             history_messages=history_messages,
             user_prompt=user_prompt,
             max_tokens=self._max_context_tokens,
@@ -615,7 +637,7 @@ class ChatEngine:
 
         # Ollama messages 구성
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": system_prompt},
         ]
         messages.extend(history_messages)
         messages.append({"role": "user", "content": user_prompt})
@@ -737,15 +759,18 @@ class ChatEngine:
         session = self.get_session(session_id)
         history_messages = session.to_ollama_messages()
 
+        # 사용자 편집본 프롬프트 로드 (요청 단위 캐싱)
+        system_prompt = self._get_system_prompt()
+
         user_prompt = self._truncate_context(
-            system_prompt=self._system_prompt,
+            system_prompt=system_prompt,
             history_messages=history_messages,
             user_prompt=user_prompt,
             max_tokens=self._max_context_tokens,
         )
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": system_prompt},
         ]
         messages.extend(history_messages)
         messages.append({"role": "user", "content": user_prompt})

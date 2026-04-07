@@ -55,6 +55,8 @@ dependencies = [
     # 오디오 처리
     "soundfile>=0.12.0",
     "numpy>=1.24.0",
+    # 파일 락 (사용자 설정 동시성 제어)
+    "filelock>=3.13",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +82,9 @@ py-modules = ["main", "config"]
 
 [tool.setuptools.packages.find]
 include = ["core*", "steps*", "search*", "api*", "ui*", "security*"]
+
+[tool.setuptools.package-data]
+"core.defaults" = ["*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

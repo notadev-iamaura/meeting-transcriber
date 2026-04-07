@@ -3636,3 +3636,696 @@ button {
     flex: 1;
   }
 }
+
+
+/* =========================================================================
+   설정 페이지 — 탭 / 프롬프트 편집 / 용어집 관리
+   PR4: 사용자 편집 가능한 프롬프트 & 고유명사 용어집 UI
+   ========================================================================= */
+
+/* --- Segmented control (상위 탭: 일반/프롬프트/용어집) --- */
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  max-width: 640px;
+  margin: 0 auto 20px;
+  padding: 3px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.settings-tab {
+  flex: 1;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.settings-tab:hover {
+  color: var(--text-primary);
+}
+
+.settings-tab.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-panel-host {
+  /* 하위 패널이 들어가는 컨테이너 — 특별한 스타일 불필요 */
+}
+
+/* --- Secondary / Destructive 버튼 --- */
+.btn-secondary {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-text-destructive {
+  background: transparent;
+  border: none;
+  color: #ff3b30;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 7px 0;
+}
+
+.btn-text-destructive:hover {
+  text-decoration: underline;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn-text-destructive { color: #ff453a; }
+}
+[data-theme="dark"] .btn-text-destructive { color: #ff453a; }
+
+/* --- 프롬프트 편집 패널 --- */
+.prompts-panel {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.prompt-subtabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  padding: 2px;
+  background: var(--bg-secondary);
+  border-radius: 7px;
+  width: fit-content;
+}
+
+.prompt-subtab {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.prompt-subtab:hover { color: var(--text-primary); }
+
+.prompt-subtab.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.prompt-subtab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* .settings-section 토큰을 상속하되 프롬프트 에디터 전용 패딩으로 재정의.
+   .settings-section.prompt-editor-card 선택자는 .settings-section보다 명시도가 높아 !important 불필요. */
+.settings-section.prompt-editor-card {
+  padding: 16px 18px;
+}
+
+.prompt-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.prompt-editor-desc {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 520px;
+}
+
+.prompt-dirty-indicator {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  white-space: nowrap;
+}
+
+.prompt-dirty-indicator.active {
+  opacity: 1;
+}
+
+.prompt-textarea {
+  width: 100%;
+  min-height: 320px;
+  max-height: 60vh;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  box-sizing: border-box;
+  tab-size: 2;
+}
+
+.prompt-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  .prompt-textarea:focus {
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2);
+  }
+}
+
+.prompt-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-meta .over-limit {
+  color: #ff3b30;
+}
+
+/* .settings-actions.prompt-actions 명시도로 기본 .settings-actions 의 flex-end 를 덮어쓴다. */
+.settings-actions.prompt-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  max-width: 720px;
+}
+
+.prompt-actions-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* --- 용어집 패널 --- */
+.vocabulary-panel {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.vocab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.vocab-desc {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 480px;
+}
+
+.vocab-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.vocab-search {
+  flex: 1;
+  max-width: 280px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.vocab-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.vocab-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.vocab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vocab-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+
+.vocab-card:hover {
+  background: var(--bg-secondary);
+}
+
+.vocab-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.vocab-term {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.vocab-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.vocab-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.vocab-card:hover .vocab-chip {
+  background: var(--bg-primary);
+}
+
+.vocab-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.vocab-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-icon {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.btn-icon:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.btn-icon-destructive:hover {
+  color: #ff3b30;
+}
+
+.vocab-empty {
+  padding: 60px 20px;
+  text-align: center;
+}
+
+.vocab-empty-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.vocab-empty-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* --- Modal --- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 1;
+  transition: opacity 0.2s ease;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal-content {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 18px 0;
+  color: var(--text-primary);
+}
+
+.modal-field {
+  margin-bottom: 14px;
+}
+
+.modal-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.modal-hint {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.modal-error {
+  min-height: 16px;
+  font-size: 12px;
+  color: #ff3b30;
+  margin-top: 6px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* ============================================================
+   STT 모델 카드 UI (Phase 6)
+   설정 > 일반 탭의 "음성 인식 모델 (STT)" 섹션에서 사용
+   ============================================================ */
+
+.settings-section-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: -4px 0 12px 0;
+  line-height: 1.5;
+}
+
+.stt-models {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stt-models-loading,
+.stt-models-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 12px;
+  text-align: center;
+}
+
+.stt-models-error {
+  font-size: 12px;
+  color: var(--error);
+  padding: 12px;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.stt-model-card {
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--bg-input);
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+
+.stt-model-card.active {
+  border-color: var(--accent);
+  background: rgba(0, 122, 255, 0.06);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.stt-model-card.recommended {
+  border-color: var(--warning);
+}
+
+.stt-model-card.recommended.active {
+  /* 활성이 우선. 추천이어도 activ이면 accent 보더 */
+  border-color: var(--accent);
+}
+
+.stt-model-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.stt-model-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.stt-model-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.stt-model-badge.recommended {
+  background: rgba(255, 149, 0, 0.15);
+  color: var(--warning);
+}
+
+.stt-model-badge.active {
+  background: rgba(0, 122, 255, 0.15);
+  color: var(--accent);
+}
+
+.stt-model-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.stt-model-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.stt-model-metrics .metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.stt-model-metrics .metric strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.stt-model-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.stt-action-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 0.5px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: opacity var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.stt-action-btn.download {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+
+.stt-action-btn.activate {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.stt-action-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.stt-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.stt-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.stt-active-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.stt-model-progress {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.stt-model-error {
+  font-size: 11px;
+  color: var(--error);
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 4px;
+}
+
+.stt-models-status {
+  margin-top: 10px;
+  font-size: 12px;
+  min-height: 16px;
+  color: var(--text-secondary);
+}
+
+.stt-models-status.success {
+  color: #34c759;
+}
+
+.stt-models-status.error {
+  color: var(--error);
+}
+
+/* 좁은 화면 대응: 메트릭/액션이 카드 폭 안에서 자연스럽게 줄바꿈 */
+@media (max-width: 520px) {
+  .stt-model-metrics {
+    gap: 10px;
+  }
+  .stt-model-card {
+    padding: 12px;
+  }
+}

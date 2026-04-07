@@ -1983,3 +1983,618 @@ async def update_settings(
         message=message,
         changed_fields=changed_fields,
     )
+
+
+# =========================================================================
+# 사용자 편집 가능 프롬프트 & 용어집 엔드포인트
+# =========================================================================
+# core/user_settings.py를 통해 프롬프트(보정/요약/채팅)와 고유명사 용어집을
+# 동적으로 관리한다. 기존 /api/settings와 달리 config.yaml을 수정하지 않고
+# ~/.meeting-transcriber/user_data/ 아래 JSON 파일로 영속화한다.
+# =========================================================================
+
+from core import user_settings as _user_settings  # noqa: E402
+from core.user_settings import (  # noqa: E402
+    PromptEntry,
+    PromptsData,
+    UserSettingsError,
+    UserSettingsIOError,
+    UserSettingsLockError,
+    UserSettingsValidationError,
+    VocabularyData,
+    VocabularyTerm,
+)
+
+
+# --- 요청/응답 스키마 ---
+
+
+class PromptEntryPayload(BaseModel):
+    """프롬프트 항목 요청/응답 페이로드."""
+
+    system_prompt: str = Field(..., min_length=20, max_length=8000)
+    updated_at: str | None = None
+
+
+class PromptsPayload(BaseModel):
+    """프롬프트 전체 응답 페이로드."""
+
+    schema_version: int = 1
+    corrector: PromptEntryPayload
+    summarizer: PromptEntryPayload
+    chat: PromptEntryPayload
+    updated_at: str | None = None
+
+
+class PromptsResponse(BaseModel):
+    """GET /api/prompts 응답."""
+
+    prompts: PromptsPayload
+
+
+class PromptsUpdateRequest(BaseModel):
+    """PUT /api/prompts 요청 (부분 업데이트 지원)."""
+
+    corrector: PromptEntryPayload | None = None
+    summarizer: PromptEntryPayload | None = None
+    chat: PromptEntryPayload | None = None
+
+
+class VocabularyTermPayload(BaseModel):
+    """용어 항목 응답 페이로드."""
+
+    id: str
+    term: str
+    aliases: list[str] = Field(default_factory=list)
+    category: str | None = None
+    note: str | None = None
+    enabled: bool = True
+    created_at: str | None = None
+
+
+class VocabularyResponse(BaseModel):
+    """GET /api/vocabulary 응답."""
+
+    terms: list[VocabularyTermPayload]
+    total: int
+    schema_version: int = 1
+
+
+class VocabularyAddRequest(BaseModel):
+    """POST /api/vocabulary/terms 요청."""
+
+    term: str = Field(..., min_length=1, max_length=100)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    category: str | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+
+
+class VocabularyUpdateRequest(BaseModel):
+    """PUT /api/vocabulary/terms/{id} 요청 (부분 업데이트)."""
+
+    term: str | None = Field(default=None, min_length=1, max_length=100)
+    aliases: list[str] | None = Field(default=None, max_length=20)
+    category: str | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+
+
+# --- 변환 헬퍼 ---
+
+
+def _prompts_to_payload(data: PromptsData) -> PromptsPayload:
+    """PromptsData → API 응답 페이로드로 변환한다."""
+    raw = data.model_dump(mode="json")
+    return PromptsPayload(
+        schema_version=raw["schema_version"],
+        corrector=PromptEntryPayload(**raw["corrector"]),
+        summarizer=PromptEntryPayload(**raw["summarizer"]),
+        chat=PromptEntryPayload(**raw["chat"]),
+        updated_at=raw.get("updated_at"),
+    )
+
+
+def _term_to_payload(term: VocabularyTerm) -> VocabularyTermPayload:
+    """VocabularyTerm → API 응답 페이로드로 변환한다."""
+    return VocabularyTermPayload(**term.model_dump(mode="json"))
+
+
+def _map_user_settings_error(exc: UserSettingsError) -> HTTPException:
+    """저장소 예외를 HTTPException으로 매핑한다.
+
+    Args:
+        exc: UserSettingsError 인스턴스
+
+    Returns:
+        적절한 상태 코드와 한국어 메시지가 담긴 HTTPException
+    """
+    if isinstance(exc, UserSettingsValidationError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, UserSettingsLockError):
+        return HTTPException(
+            status_code=503, detail=f"{exc}. 잠시 후 다시 시도해 주세요."
+        )
+    if isinstance(exc, UserSettingsIOError):
+        return HTTPException(status_code=500, detail=str(exc))
+    return HTTPException(status_code=500, detail=f"내부 저장소 오류: {exc}")
+
+
+# --- 프롬프트 엔드포인트 ---
+
+
+@router.get("/prompts", response_model=PromptsResponse)
+async def get_prompts() -> PromptsResponse:
+    """현재 저장된 프롬프트 3종(보정/요약/채팅)을 조회한다.
+
+    Returns:
+        PromptsResponse
+
+    Raises:
+        HTTPException: I/O 실패(500)
+    """
+    try:
+        data = _user_settings.load_prompts()
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return PromptsResponse(prompts=_prompts_to_payload(data))
+
+
+@router.put("/prompts", response_model=PromptsResponse)
+async def update_prompts(body: PromptsUpdateRequest) -> PromptsResponse:
+    """프롬프트를 부분 업데이트한다 (전달된 필드만 반영).
+
+    Args:
+        body: 변경할 프롬프트 (선택적 필드)
+
+    Returns:
+        업데이트된 PromptsResponse
+
+    Raises:
+        HTTPException: 검증 실패(400), 락 타임아웃(503), I/O 실패(500)
+    """
+    try:
+        current = _user_settings.load_prompts()
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+
+    updates: dict[str, Any] = {}
+    if body.corrector is not None:
+        updates["corrector"] = PromptEntry(
+            system_prompt=body.corrector.system_prompt
+        )
+    if body.summarizer is not None:
+        updates["summarizer"] = PromptEntry(
+            system_prompt=body.summarizer.system_prompt
+        )
+    if body.chat is not None:
+        updates["chat"] = PromptEntry(system_prompt=body.chat.system_prompt)
+
+    if not updates:
+        return PromptsResponse(prompts=_prompts_to_payload(current))
+
+    try:
+        merged = current.model_copy(update=updates)
+        saved = _user_settings.save_prompts(merged)
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"프롬프트 검증 실패: {e}") from e
+
+    logger.info("프롬프트 업데이트: %s", ", ".join(sorted(updates.keys())))
+    return PromptsResponse(prompts=_prompts_to_payload(saved))
+
+
+@router.post("/prompts/reset", response_model=PromptsResponse)
+async def reset_prompts() -> PromptsResponse:
+    """프롬프트를 공장 기본값으로 복원한다.
+
+    Returns:
+        복원된 PromptsResponse
+
+    Raises:
+        HTTPException: I/O 실패(500)
+    """
+    try:
+        data = _user_settings.reset_prompts_to_default()
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return PromptsResponse(prompts=_prompts_to_payload(data))
+
+
+# --- 용어집 엔드포인트 ---
+
+
+@router.get("/vocabulary", response_model=VocabularyResponse)
+async def get_vocabulary() -> VocabularyResponse:
+    """전체 용어집을 조회한다.
+
+    Returns:
+        VocabularyResponse
+    """
+    try:
+        data = _user_settings.load_vocabulary()
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return VocabularyResponse(
+        terms=[_term_to_payload(t) for t in data.terms],
+        total=len(data.terms),
+        schema_version=data.schema_version,
+    )
+
+
+@router.post(
+    "/vocabulary/terms",
+    response_model=VocabularyTermPayload,
+    status_code=201,
+)
+async def add_vocabulary_term_endpoint(
+    body: VocabularyAddRequest,
+) -> VocabularyTermPayload:
+    """용어를 추가한다 (ULID는 서버가 생성).
+
+    Args:
+        body: 추가할 용어 정보
+
+    Returns:
+        생성된 VocabularyTermPayload
+
+    Raises:
+        HTTPException: 중복·최대 개수 초과·검증 실패(400), 저장 실패(500)
+    """
+    try:
+        new_term = _user_settings.add_vocabulary_term(
+            term=body.term,
+            aliases=body.aliases,
+            category=body.category,
+            note=body.note,
+            enabled=body.enabled,
+        )
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return _term_to_payload(new_term)
+
+
+@router.put("/vocabulary/terms/{term_id}", response_model=VocabularyTermPayload)
+async def update_vocabulary_term_endpoint(
+    term_id: str,
+    body: VocabularyUpdateRequest,
+) -> VocabularyTermPayload:
+    """용어를 부분 업데이트한다.
+
+    Args:
+        term_id: 대상 용어의 ULID
+        body: 변경할 필드 (선택적)
+
+    Returns:
+        업데이트된 VocabularyTermPayload
+
+    Raises:
+        HTTPException: 대상 없음/중복/검증 실패(400), 저장 실패(500)
+    """
+    try:
+        updated = _user_settings.update_vocabulary_term(
+            term_id=term_id,
+            term=body.term,
+            aliases=body.aliases,
+            category=body.category,
+            note=body.note,
+            enabled=body.enabled,
+        )
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return _term_to_payload(updated)
+
+
+@router.delete("/vocabulary/terms/{term_id}", status_code=204)
+async def delete_vocabulary_term_endpoint(term_id: str) -> None:
+    """용어를 삭제한다.
+
+    Args:
+        term_id: 삭제할 용어의 ULID
+
+    Raises:
+        HTTPException: 대상 없음(400), 저장 실패(500)
+    """
+    try:
+        _user_settings.delete_vocabulary_term(term_id)
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+
+
+@router.post("/vocabulary/reset", response_model=VocabularyResponse)
+async def reset_vocabulary_endpoint() -> VocabularyResponse:
+    """용어집을 공장 기본값(빈 목록)으로 복원한다.
+
+    Returns:
+        복원된 VocabularyResponse
+    """
+    try:
+        data = _user_settings.reset_vocabulary_to_default()
+    except UserSettingsError as e:
+        raise _map_user_settings_error(e) from e
+    return VocabularyResponse(
+        terms=[_term_to_payload(t) for t in data.terms],
+        total=len(data.terms),
+        schema_version=data.schema_version,
+    )
+
+
+# ============================================================
+# STT 모델 선택기 API (Phase 4)
+# ============================================================
+
+# 모듈 레벨 임포트 — 테스트에서 monkeypatch 하기 쉽도록 이름을 고정한다.
+from core.stt_model_registry import STT_MODELS, get_by_id as _stt_get_by_id  # noqa: E402
+from core.stt_model_status import (  # noqa: E402
+    ModelStatus,
+    get_actual_size_mb,
+    get_model_status,
+)
+from core.stt_model_downloader import DownloadConflictError  # noqa: E402
+
+
+class STTModelInfo(BaseModel):
+    """STT 모델 한 건의 정적 메타데이터 + 런타임 상태."""
+
+    id: str
+    label: str
+    description: str
+    base_model: str
+    expected_size_mb: int
+    actual_size_mb: Optional[float] = None
+    cer_percent: float
+    wer_percent: float
+    memory_gb: float
+    rtf: float
+    license: str
+    is_default: bool
+    is_recommended: bool
+    status: str
+    is_active: bool
+    download_progress: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class STTModelsResponse(BaseModel):
+    """GET /api/stt-models 응답 스키마."""
+
+    models: list[STTModelInfo]
+    active_model_id: str
+    active_model_path: str
+
+
+def _is_active_stt_model(spec_path: str, active_path: str) -> bool:
+    """spec.model_path 와 config.stt.model_name 이 같은 모델을 가리키는지 판정한다.
+
+    spec.model_path 는 HF repo ID 또는 로컬 경로(tilde 포함)일 수 있으므로
+    두 형태를 모두 허용한다.
+    """
+    if spec_path == active_path:
+        return True
+    try:
+        return str(Path(spec_path).expanduser()) == active_path
+    except Exception:  # noqa: BLE001 — 안전한 fallback
+        return False
+
+
+@router.get("/stt-models", response_model=STTModelsResponse)
+async def list_stt_models(request: Request) -> STTModelsResponse:
+    """STT 모델 레지스트리의 3개 모델과 동적 상태를 반환한다.
+
+    각 모델에 대해 다운로드 여부(READY/NOT_DOWNLOADED)를 확인하고,
+    현재 진행 중인 다운로드가 있으면 진행률을 오버레이한다.
+    config.stt.model_name 과 일치하는 모델에 is_active=True 플래그를 설정한다.
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
+        )
+
+    downloader = getattr(request.app.state, "stt_downloader", None)
+    active_path = config.stt.model_name
+
+    models: list[STTModelInfo] = []
+    active_id: Optional[str] = None
+
+    for spec in STT_MODELS:
+        # 1차: 디스크/HF 캐시 기반 상태
+        disk_status = get_model_status(spec)
+        # 2차: 진행 중 작업이 있으면 그 상태로 오버라이드
+        job = downloader.get_progress(spec.id) if downloader is not None else None
+        runtime_status = job.status if job is not None else disk_status
+
+        is_active = _is_active_stt_model(spec.model_path, active_path)
+        if is_active:
+            active_id = spec.id
+
+        actual_size: Optional[float] = None
+        if disk_status == ModelStatus.READY:
+            try:
+                actual_size = get_actual_size_mb(spec.model_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("실제 모델 크기 계산 실패 (%s): %s", spec.id, exc)
+
+        models.append(
+            STTModelInfo(
+                id=spec.id,
+                label=spec.label,
+                description=spec.description,
+                base_model=spec.base_model,
+                expected_size_mb=spec.expected_size_mb,
+                actual_size_mb=actual_size,
+                cer_percent=spec.cer_percent,
+                wer_percent=spec.wer_percent,
+                memory_gb=spec.memory_gb,
+                rtf=spec.rtf,
+                license=spec.license,
+                is_default=spec.is_default,
+                is_recommended=spec.is_recommended,
+                status=runtime_status.value,
+                is_active=is_active,
+                download_progress=job.progress_percent if job is not None else None,
+                error_message=job.error_message if job is not None else None,
+            )
+        )
+
+    return STTModelsResponse(
+        models=models,
+        active_model_id=active_id or "",
+        active_model_path=active_path,
+    )
+
+
+@router.post("/stt-models/{model_id}/download", status_code=202)
+async def download_stt_model(request: Request, model_id: str) -> dict[str, Any]:
+    """지정한 STT 모델의 다운로드를 백그라운드에서 시작한다.
+
+    Raises:
+        HTTPException 404: 알 수 없는 model_id
+        HTTPException 409: 이미 다른 모델 다운로드가 진행 중
+        HTTPException 503: 다운로더 미초기화
+    """
+    # 보안: model_id 화이트리스트 검증 (레지스트리에 등록된 ID만 허용)
+    spec = _stt_get_by_id(model_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    downloader = getattr(request.app.state, "stt_downloader", None)
+    if downloader is None:
+        raise HTTPException(
+            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
+        )
+
+    try:
+        job_id = await downloader.start_download(model_id)
+    except DownloadConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        # 다운로더 내부의 레지스트리 재검증에서 실패 (이론상 도달 불가)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    logger.info("STT 모델 다운로드 요청 수락: %s (%s)", model_id, job_id)
+    return {
+        "job_id": job_id,
+        "model_id": model_id,
+        "status": "downloading",
+        "message": "다운로드를 시작합니다.",
+    }
+
+
+@router.get("/stt-models/{model_id}/download-status")
+async def get_stt_download_status(
+    request: Request, model_id: str
+) -> dict[str, Any]:
+    """STT 모델 다운로드 작업의 진행 상태를 반환한다.
+
+    Raises:
+        HTTPException 404: 해당 model_id 의 작업이 없음
+        HTTPException 503: 다운로더 미초기화
+    """
+    # 화이트리스트 검증 (알 수 없는 ID로 downloader 내부 상태를 노출하지 않음)
+    if _stt_get_by_id(model_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    downloader = getattr(request.app.state, "stt_downloader", None)
+    if downloader is None:
+        raise HTTPException(
+            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
+        )
+
+    job = downloader.get_progress(model_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404, detail="다운로드 작업을 찾을 수 없습니다."
+        )
+
+    return {
+        "model_id": model_id,
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "progress_percent": job.progress_percent,
+        "current_step": job.current_step,
+        "started_at": job.started_at.isoformat(),
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "error_message": job.error_message,
+    }
+
+
+@router.post("/stt-models/{model_id}/activate")
+async def activate_stt_model(
+    request: Request, model_id: str
+) -> dict[str, Any]:
+    """활성 STT 모델을 변경하고 config.yaml 을 업데이트한다.
+
+    모델은 반드시 READY 상태여야 하며, config.yaml 의 stt.model_name 필드를
+    주석을 보존하며 교체한 뒤 런타임 config 도 갱신한다.
+
+    Raises:
+        HTTPException 404: 알 수 없는 model_id
+        HTTPException 400: 모델이 READY 상태가 아님
+        HTTPException 500: config.yaml 저장 실패
+        HTTPException 503: 서버 설정 미초기화
+    """
+    spec = _stt_get_by_id(model_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
+        )
+
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
+        )
+
+    # 다운로드 완료 상태 검증
+    if get_model_status(spec) != ModelStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail="모델이 다운로드되지 않았습니다. 먼저 다운로드하세요.",
+        )
+
+    previous_model = config.stt.model_name
+    # 로컬 경로는 expanduser 로 해석해 저장, HF repo ID 는 그대로 유지
+    spec_path = spec.model_path
+    if spec_path.startswith(("~", "/", "./", "../")):
+        new_path = str(Path(spec_path).expanduser())
+    else:
+        new_path = spec_path
+
+    # config.yaml 업데이트 (주석 보존)
+    config_path = _get_config_path()
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            content = f.read()
+        content = _replace_yaml_value(
+            content, "stt", "model_name", f'"{new_path}"'
+        )
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(
+            "활성 STT 모델 변경: %s → %s (config.yaml 저장)",
+            previous_model,
+            new_path,
+        )
+    except OSError as exc:
+        logger.exception("config.yaml 저장 실패: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"설정 파일 저장에 실패했습니다: {exc}",
+        ) from exc
+
+    # 런타임 config 갱신
+    new_stt = config.stt.model_copy(update={"model_name": new_path})
+    request.app.state.config = config.model_copy(update={"stt": new_stt})
+
+    return {
+        "model_id": model_id,
+        "previous_model_id": previous_model,
+        "model_path": new_path,
+        "message": "활성 모델이 변경되었습니다. 다음 전사부터 적용됩니다.",
+    }

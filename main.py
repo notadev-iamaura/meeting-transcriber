@@ -369,6 +369,14 @@ def main(argv: list[str] | None = None) -> None:
     # 4. 데이터 디렉토리 초기화
     ensure_data_directories(config)
 
+    # 4-1. 사용자 설정 초기화 (프롬프트/용어집 JSON 파일 생성)
+    try:
+        from core.user_settings import init_user_settings
+
+        init_user_settings()
+    except Exception as e:
+        logger.warning(f"사용자 설정 초기화 실패 (진행 계속): {e}")
+
     # 시그널 핸들러 등록 (모든 모드에서 SIGTERM 처리)
     _setup_signal_handlers()
 

@@ -189,10 +189,10 @@
                 },
             },
             {
-                // /app/settings
-                pattern: /^\/app\/settings$/,
-                handler: function () {
-                    return new SettingsView();
+                // /app/settings 및 /app/settings/{tab} (tab: general|prompts|vocabulary)
+                pattern: /^\/app\/settings(?:\/(general|prompts|vocabulary))?$/,
+                handler: function (match) {
+                    return new SettingsView({ initialTab: match[1] || "general" });
                 },
             },
             {
@@ -221,10 +221,10 @@
             // 콘텐츠 영역 초기화
             _contentEl.innerHTML = "";
 
-            // list-panel chat-mode 처리 (채팅 뷰에서는 CSS로 숨김)
+            // list-panel chat-mode 처리 (채팅/설정 뷰에서는 CSS로 숨김)
             var listPanel = document.getElementById("list-panel");
             if (listPanel) {
-                if (pathname === "/app/chat" || pathname === "/app/settings") {
+                if (pathname === "/app/chat" || pathname.indexOf("/app/settings") === 0) {
                     listPanel.classList.add("chat-mode");
                 } else {
                     listPanel.classList.remove("chat-mode");
@@ -275,12 +275,19 @@
 
         /**
          * 지정 경로로 내비게이션한다.
+         * 현재 뷰가 canLeave()를 노출하고 false를 반환하면 이동을 취소한다.
          * @param {string} path - 이동할 경로
          */
         function navigate(path) {
             // 현재 URL과 동일하면 무시 (경로 + 쿼리 스트링 모두 비교)
             var current = window.location.pathname + window.location.search;
             if (current === path) return;
+            // 편집 중 이탈 가드
+            if (_currentView && typeof _currentView.canLeave === "function") {
+                if (_currentView.canLeave() === false) {
+                    return;
+                }
+            }
             history.pushState(null, "", path);
             resolve(path);
         }
@@ -2779,106 +2786,244 @@
 
 
     // =================================================================
-    // === SettingsView (설정 페이지, /app/settings) ===
+    // === SettingsView — 설정 셸 + 3개 탭 (일반 / 프롬프트 / 용어집) ===
+    // =================================================================
+    //
+    // 구조:
+    //   SettingsView (셸)
+    //     ├─ 헤더 + segmented control (탭)
+    //     └─ 활성 패널 렌더링 영역
+    //          ├─ GeneralPanel      (기존 config.yaml 조회/수정)
+    //          ├─ PromptsPanel      (/api/prompts)
+    //          └─ VocabularyPanel   (/api/vocabulary)
+    //
+    // 각 패널은 독립된 생명주기: _render / _bind / isDirty / destroy.
+    // 탭 전환 시 현재 패널이 dirty 이면 confirm 으로 이탈 확인.
+    // 페이지 레벨 이탈은 Router.navigate의 canLeave 훅에서 처리.
     // =================================================================
 
     /**
-     * 설정 뷰: config.yaml 값을 조회/수정하는 macOS 시스템 환경설정 스타일 UI.
-     * GET /api/settings 로 현재 설정을 불러오고,
-     * PUT /api/settings 로 변경사항을 저장한다.
+     * 설정 셸 뷰. 탭으로 하위 패널을 스위칭한다.
+     * @param {{initialTab: string}} opts
      * @constructor
      */
-    function SettingsView() {
+    function SettingsView(opts) {
         var self = this;
+        self._opts = opts || { initialTab: "general" };
+        self._currentPanel = null;
+        self._currentTab = null;
+        self._render();
+        self._showTab(self._opts.initialTab || "general");
+        document.title = "설정 — 회의록";
+
+        // 브라우저 탭 닫기/새로고침 가드: 편집 중이면 네이티브 경고 표시
+        self._beforeUnloadHandler = function (e) {
+            if (
+                self._currentPanel &&
+                typeof self._currentPanel.isDirty === "function" &&
+                self._currentPanel.isDirty()
+            ) {
+                e.preventDefault();
+                // 최신 브라우저는 커스텀 메시지 무시하고 기본 경고만 표시
+                e.returnValue = "";
+                return "";
+            }
+        };
+        window.addEventListener("beforeunload", self._beforeUnloadHandler);
+    }
+
+    SettingsView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        contentEl.innerHTML = [
+            '<div class="settings-view">',
+            '  <div class="settings-header">',
+            '    <h2 class="settings-title">설정</h2>',
+            '  </div>',
+            '  <div class="settings-tabs" role="tablist" aria-label="설정 카테고리">',
+            '    <button type="button" class="settings-tab" data-tab="general" role="tab">일반</button>',
+            '    <button type="button" class="settings-tab" data-tab="prompts" role="tab">프롬프트</button>',
+            '    <button type="button" class="settings-tab" data-tab="vocabulary" role="tab">용어집</button>',
+            '  </div>',
+            '  <div class="settings-panel-host" id="settingsPanelHost" role="tabpanel"></div>',
+            '</div>',
+        ].join("\n");
+
+        var self = this;
+        var tabs = contentEl.querySelectorAll(".settings-tab");
+        Array.prototype.forEach.call(tabs, function (btn) {
+            btn.addEventListener("click", function () {
+                self._showTab(btn.getAttribute("data-tab"));
+            });
+        });
+    };
+
+    SettingsView.prototype._showTab = function (name) {
+        if (this._currentTab === name) return;
+
+        // 현재 패널이 dirty이면 이탈 확인
+        if (
+            this._currentPanel &&
+            typeof this._currentPanel.isDirty === "function" &&
+            this._currentPanel.isDirty()
+        ) {
+            var ok = window.confirm(
+                "저장하지 않은 변경사항이 있어요. 이동하시겠어요?"
+            );
+            if (!ok) return;
+        }
+
+        // 기존 패널 정리
+        if (this._currentPanel && typeof this._currentPanel.destroy === "function") {
+            this._currentPanel.destroy();
+        }
+        this._currentPanel = null;
+
+        // 탭 버튼 활성 상태
+        var tabs = document.querySelectorAll(".settings-tab");
+        Array.prototype.forEach.call(tabs, function (btn) {
+            var isActive = btn.getAttribute("data-tab") === name;
+            btn.classList.toggle("active", isActive);
+            btn.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+
+        // URL 동기화 (general 은 기본 경로)
+        var targetPath = name === "general" ? "/app/settings" : "/app/settings/" + name;
+        if (window.location.pathname !== targetPath) {
+            history.replaceState(null, "", targetPath);
+        }
+
+        var host = document.getElementById("settingsPanelHost");
+        host.innerHTML = "";
+
+        // 패널 생성
+        if (name === "general") {
+            this._currentPanel = new GeneralSettingsPanel(host);
+        } else if (name === "prompts") {
+            this._currentPanel = new PromptsSettingsPanel(host);
+        } else if (name === "vocabulary") {
+            this._currentPanel = new VocabularySettingsPanel(host);
+        } else {
+            this._currentPanel = new GeneralSettingsPanel(host);
+            name = "general";
+        }
+        this._currentTab = name;
+    };
+
+    SettingsView.prototype.canLeave = function () {
+        if (
+            this._currentPanel &&
+            typeof this._currentPanel.isDirty === "function" &&
+            this._currentPanel.isDirty()
+        ) {
+            return window.confirm(
+                "저장하지 않은 변경사항이 있어요. 떠나시겠어요?"
+            );
+        }
+        return true;
+    };
+
+    SettingsView.prototype.destroy = function () {
+        if (this._currentPanel && typeof this._currentPanel.destroy === "function") {
+            this._currentPanel.destroy();
+        }
+        this._currentPanel = null;
+        if (this._beforeUnloadHandler) {
+            window.removeEventListener("beforeunload", this._beforeUnloadHandler);
+            this._beforeUnloadHandler = null;
+        }
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+        document.title = "회의록";
+    };
+
+
+    // =================================================================
+    // === GeneralSettingsPanel (기존 /api/settings) ===
+    // =================================================================
+
+    /**
+     * 일반 설정 패널: LLM 모델, 백엔드, 온도, STT 언어 등 config.yaml 기반 설정.
+     * 기존 SettingsView의 본문을 그대로 옮겨온 것.
+     * @param {HTMLElement} host
+     * @constructor
+     */
+    function GeneralSettingsPanel(host) {
+        var self = this;
+        self._host = host;
         self._els = {};
-        self._settings = null;
         self._listeners = [];
         self._render();
         self._bind();
         self._loadSettings();
     }
 
-    /**
-     * 설정 UI를 렌더링한다.
-     * macOS 시스템 환경설정 스타일 레이아웃.
-     */
-    SettingsView.prototype._render = function () {
-        var contentEl = Router.getContentEl();
-        var html = [
-            '<div class="settings-view">',
-            '  <div class="settings-header">',
-            '    <h2 class="settings-title">설정</h2>',
-            '  </div>',
-            '  <div class="settings-content">',
-
-            // LLM 모델 섹션
-            '    <section class="settings-section">',
-            '      <h3 class="settings-section-title">LLM 모델</h3>',
-            '      <div class="settings-group">',
-            '        <div class="setting-row">',
-            '          <label class="setting-label" for="settingsModel">모델</label>',
-            '          <select class="setting-select" id="settingsModel"></select>',
-            '        </div>',
-            '        <div class="setting-row">',
-            '          <label class="setting-label" for="settingsBackend">백엔드</label>',
-            '          <select class="setting-select" id="settingsBackend">',
-            '            <option value="mlx">MLX (기본, in-process)</option>',
-            '            <option value="ollama">Ollama (외부 서버)</option>',
-            '          </select>',
-            '        </div>',
-            '        <div class="setting-row">',
-            '          <label class="setting-label" for="settingsTemp">Temperature</label>',
-            '          <div class="setting-slider-group">',
-            '            <input type="range" class="setting-slider" id="settingsTemp" min="0" max="2" step="0.1">',
-            '            <span class="setting-slider-value" id="settingsTempValue">0.3</span>',
-            '          </div>',
+    GeneralSettingsPanel.prototype._render = function () {
+        this._host.innerHTML = [
+            '<div class="settings-content">',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">LLM 모델</h3>',
+            '    <div class="settings-group">',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsModel">모델</label>',
+            '        <select class="setting-select" id="settingsModel"></select>',
+            '      </div>',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsBackend">백엔드</label>',
+            '        <select class="setting-select" id="settingsBackend">',
+            '          <option value="mlx">MLX (기본, in-process)</option>',
+            '          <option value="ollama">Ollama (외부 서버)</option>',
+            '        </select>',
+            '      </div>',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsTemp">Temperature</label>',
+            '        <div class="setting-slider-group">',
+            '          <input type="range" class="setting-slider" id="settingsTemp" min="0" max="2" step="0.1">',
+            '          <span class="setting-slider-value" id="settingsTempValue">0.3</span>',
             '        </div>',
             '      </div>',
-            '    </section>',
-
-            // 파이프라인 섹션
-            '    <section class="settings-section">',
-            '      <h3 class="settings-section-title">파이프라인</h3>',
-            '      <div class="settings-group">',
-            '        <div class="setting-row">',
-            '          <label class="setting-label" for="settingsSkipLlm">LLM 보정/요약 스킵</label>',
-            '          <label class="setting-toggle">',
-            '            <input type="checkbox" id="settingsSkipLlm">',
-            '            <span class="toggle-track"><span class="toggle-thumb"></span></span>',
-            '          </label>',
-            '        </div>',
-            '      </div>',
-            '    </section>',
-
-            // STT 섹션
-            '    <section class="settings-section">',
-            '      <h3 class="settings-section-title">음성 인식</h3>',
-            '      <div class="settings-group">',
-            '        <div class="setting-row">',
-            '          <label class="setting-label" for="settingsLang">전사 언어</label>',
-            '          <select class="setting-select" id="settingsLang">',
-            '            <option value="ko">한국어</option>',
-            '            <option value="en">English</option>',
-            '            <option value="ja">日本語</option>',
-            '            <option value="zh">中文</option>',
-            '          </select>',
-            '        </div>',
-            '      </div>',
-            '    </section>',
-
-            // 저장 버튼
-            '    <div class="settings-actions">',
-            '      <button class="settings-save-btn" id="settingsSaveBtn">변경사항 저장</button>',
-            '      <span class="settings-save-status" id="settingsSaveStatus"></span>',
             '    </div>',
-
+            '  </section>',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">파이프라인</h3>',
+            '    <div class="settings-group">',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsSkipLlm">LLM 보정/요약 스킵</label>',
+            '        <label class="setting-toggle">',
+            '          <input type="checkbox" id="settingsSkipLlm">',
+            '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+            '        </label>',
+            '      </div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">음성 인식</h3>',
+            '    <div class="settings-group">',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsLang">전사 언어</label>',
+            '        <select class="setting-select" id="settingsLang">',
+            '          <option value="ko">한국어</option>',
+            '          <option value="en">English</option>',
+            '          <option value="ja">日本語</option>',
+            '          <option value="zh">中文</option>',
+            '        </select>',
+            '      </div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">음성 인식 모델 (STT)</h3>',
+            '    <p class="settings-section-desc">한국어 회의 전사에 사용할 모델을 선택하세요. 다운로드 완료 후 활성화하면 다음 전사부터 적용돼요.</p>',
+            '    <div class="stt-models" id="settingsSttModels" aria-live="polite">',
+            '      <div class="stt-models-loading">불러오는 중…</div>',
+            '    </div>',
+            '    <div class="stt-models-status" id="settingsSttStatus" role="status" aria-live="polite"></div>',
+            '  </section>',
+            '  <div class="settings-actions">',
+            '    <button class="settings-save-btn" id="settingsSaveBtn">변경사항 저장</button>',
+            '    <span class="settings-save-status" id="settingsSaveStatus"></span>',
             '  </div>',
             '</div>',
         ].join("\n");
 
-        contentEl.innerHTML = html;
-
-        // 엘리먼트 참조 캐싱
         this._els = {
             model: document.getElementById("settingsModel"),
             backend: document.getElementById("settingsBackend"),
@@ -2888,46 +3033,38 @@
             lang: document.getElementById("settingsLang"),
             saveBtn: document.getElementById("settingsSaveBtn"),
             saveStatus: document.getElementById("settingsSaveStatus"),
+            sttModels: document.getElementById("settingsSttModels"),
+            sttStatus: document.getElementById("settingsSttStatus"),
         };
-
-        // 페이지 타이틀 업데이트
-        document.title = "설정 — 회의록";
+        // STT 모델 폴링 타이머 (다운로드 중일 때 3초 간격 상태 갱신)
+        this._sttPollTimers = [];
+        // 다운로드 중인 모델 id (있으면 다른 카드의 다운로드 버튼 비활성화)
+        this._sttDownloadingId = null;
     };
 
-    /**
-     * 이벤트 리스너를 바인딩한다.
-     */
-    SettingsView.prototype._bind = function () {
+    GeneralSettingsPanel.prototype._bind = function () {
         var self = this;
         var els = self._els;
-
-        // Temperature 슬라이더 실시간 값 표시
         var onTempInput = function () {
             els.tempValue.textContent = els.temp.value;
         };
         els.temp.addEventListener("input", onTempInput);
         self._listeners.push({ el: els.temp, type: "input", fn: onTempInput });
 
-        // 저장 버튼 클릭
         var onSave = function () {
             self._saveSettings();
         };
         els.saveBtn.addEventListener("click", onSave);
         self._listeners.push({ el: els.saveBtn, type: "click", fn: onSave });
+
+        // STT 모델 목록 로드
+        self._loadSttModels();
     };
 
-    /**
-     * GET /api/settings 로 현재 설정을 불러와 폼에 반영한다.
-     */
-    SettingsView.prototype._loadSettings = async function () {
-        var self = this;
-        var els = self._els;
-
+    GeneralSettingsPanel.prototype._loadSettings = async function () {
+        var els = this._els;
         try {
             var data = await App.apiRequest("/settings");
-            self._settings = data;
-
-            // 모델 드롭다운 채우기 (available_models: [{id, label, size}])
             if (data.available_models && data.available_models.length > 0) {
                 els.model.innerHTML = "";
                 data.available_models.forEach(function (m) {
@@ -2937,8 +3074,6 @@
                     els.model.appendChild(opt);
                 });
             }
-
-            // 현재 값 세팅 (API 필드명: llm_* 접두사 사용)
             if (data.llm_mlx_model_name) els.model.value = data.llm_mlx_model_name;
             if (data.llm_backend) els.backend.value = data.llm_backend;
             if (data.llm_temperature !== undefined && data.llm_temperature !== null) {
@@ -2947,22 +3082,15 @@
             }
             els.skipLlm.checked = !!data.llm_skip_steps;
             if (data.stt_language) els.lang.value = data.stt_language;
-
         } catch (err) {
             errorBanner.show("설정 불러오기 실패: " + (err.message || err));
         }
     };
 
-    /**
-     * 폼 값을 수집하여 PUT /api/settings 로 저장한다.
-     */
-    SettingsView.prototype._saveSettings = async function () {
-        var self = this;
-        var els = self._els;
-
-        // 저장 중 상태 표시
+    GeneralSettingsPanel.prototype._saveSettings = async function () {
+        var els = this._els;
         els.saveBtn.disabled = true;
-        els.saveBtn.textContent = "저장 중...";
+        els.saveBtn.textContent = "저장 중…";
         els.saveStatus.textContent = "";
 
         var payload = {
@@ -2979,22 +3107,16 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-
             if (!resp.ok) {
                 var errData = await resp.json().catch(function () { return {}; });
                 throw new Error(errData.detail || "HTTP " + resp.status);
             }
-
-            // 성공 표시
             els.saveStatus.textContent = "저장 완료";
             els.saveStatus.className = "settings-save-status success";
-
-            // 3초 후 상태 메시지 숨김
             setTimeout(function () {
                 els.saveStatus.textContent = "";
                 els.saveStatus.className = "settings-save-status";
             }, 3000);
-
         } catch (err) {
             els.saveStatus.textContent = "저장 실패: " + App.escapeHtml(err.message || String(err));
             els.saveStatus.className = "settings-save-status error";
@@ -3004,22 +3126,929 @@
         }
     };
 
-    /**
-     * 뷰를 정리한다.
-     */
-    SettingsView.prototype.destroy = function () {
-        // 이벤트 리스너 해제
-        this._listeners.forEach(function (entry) {
-            entry.el.removeEventListener(entry.type, entry.fn);
+    GeneralSettingsPanel.prototype.isDirty = function () {
+        // 일반 설정은 명시적 저장 버튼 패턴이라 dirty 추적을 하지 않는다.
+        return false;
+    };
+
+    GeneralSettingsPanel.prototype.destroy = function () {
+        this._listeners.forEach(function (e) {
+            e.el.removeEventListener(e.type, e.fn);
         });
         this._listeners = [];
+        // STT 폴링 타이머 정리 (메모리 누수 방지)
+        if (this._sttPollTimers) {
+            this._sttPollTimers.forEach(function (t) { clearInterval(t); });
+            this._sttPollTimers = [];
+        }
+        this._sttDownloadingId = null;
+    };
 
-        // settings-mode 제거 (리스트 패널 복원)
-        var listPanel = document.getElementById("list-panel");
-        if (listPanel) listPanel.classList.remove("chat-mode");
+    // =================================================================
+    // === STT 모델 관리 메서드 (Phase 6) ===
+    // =================================================================
 
-        // 페이지 타이틀 복원
-        document.title = "회의록";
+    /**
+     * STT 모델 목록을 API에서 가져와 카드로 렌더링한다.
+     * 폴링 루프에서도 호출되며, 실패 시 에러 배너 + 컨테이너에 에러 표시.
+     */
+    GeneralSettingsPanel.prototype._loadSttModels = async function () {
+        var self = this;
+        if (!self._els || !self._els.sttModels) return;
+        try {
+            var data = await App.apiRequest("/stt-models");
+            self._renderSttModels((data && data.models) || []);
+        } catch (err) {
+            // API 미구현 상태(404)에서도 전체 설정 페이지가 무너지지 않도록 graceful degradation
+            var msg = (err && err.message) ? err.message : String(err);
+            self._els.sttModels.innerHTML = "";
+            var errDiv = document.createElement("div");
+            errDiv.className = "stt-models-error";
+            errDiv.textContent = "STT 모델 목록을 불러오지 못했어요: " + msg;
+            self._els.sttModels.appendChild(errDiv);
+            // 재시도 버튼
+            var retryBtn = document.createElement("button");
+            retryBtn.type = "button";
+            retryBtn.className = "stt-action-btn";
+            retryBtn.textContent = "다시 시도";
+            retryBtn.setAttribute("aria-label", "STT 모델 목록 다시 불러오기");
+            retryBtn.addEventListener("click", function () { self._loadSttModels(); });
+            self._els.sttModels.appendChild(retryBtn);
+        }
+    };
+
+    /**
+     * 모델 배열을 카드 UI로 렌더링한다.
+     * 각 카드: 헤더(이름+배지), 설명, 메트릭, 액션(다운로드/활성화/진행률).
+     * @param {Array} models /api/stt-models 응답의 models 배열
+     */
+    GeneralSettingsPanel.prototype._renderSttModels = function (models) {
+        var self = this;
+        var container = self._els.sttModels;
+        container.innerHTML = "";
+
+        if (!models || models.length === 0) {
+            var empty = document.createElement("div");
+            empty.className = "stt-models-empty";
+            empty.textContent = "사용할 수 있는 STT 모델이 없어요.";
+            container.appendChild(empty);
+            return;
+        }
+
+        // 다운로드 중인 모델이 있는지 스캔 (다른 카드의 다운로드 버튼 비활성화용)
+        var downloadingId = null;
+        models.forEach(function (m) {
+            if (m.status === "downloading" || m.status === "quantizing") {
+                downloadingId = m.id;
+            }
+        });
+        self._sttDownloadingId = downloadingId;
+
+        models.forEach(function (m) {
+            var card = document.createElement("div");
+            card.className = "stt-model-card";
+            if (m.is_active) card.classList.add("active");
+            if (m.is_recommended) card.classList.add("recommended");
+
+            // 헤더: 이름 + 배지 (추천/활성)
+            var header = document.createElement("div");
+            header.className = "stt-model-header";
+
+            var name = document.createElement("div");
+            name.className = "stt-model-name";
+            name.textContent = m.label || m.id;
+            header.appendChild(name);
+
+            if (m.is_recommended) {
+                var rec = document.createElement("span");
+                rec.className = "stt-model-badge recommended";
+                rec.textContent = "⭐ 추천";
+                header.appendChild(rec);
+            }
+            if (m.is_active) {
+                var act = document.createElement("span");
+                act.className = "stt-model-badge active";
+                act.textContent = "● 활성";
+                header.appendChild(act);
+            }
+
+            // 설명
+            var desc = document.createElement("div");
+            desc.className = "stt-model-desc";
+            desc.textContent = m.description || "";
+
+            // 메트릭: CER / WER / 크기 / 메모리 (XSS 방지: textContent 기반 조립)
+            var metrics = document.createElement("div");
+            metrics.className = "stt-model-metrics";
+            var metricPairs = [
+                { label: "CER", value: (m.cer_percent != null ? m.cer_percent + "%" : "-") },
+                { label: "WER", value: (m.wer_percent != null ? m.wer_percent + "%" : "-") },
+                { label: "크기", value: (m.expected_size_mb != null ? m.expected_size_mb + "MB" : "-") },
+                { label: "RAM", value: (m.memory_gb != null ? m.memory_gb + "GB" : "-") },
+            ];
+            metricPairs.forEach(function (pair) {
+                var span = document.createElement("span");
+                span.className = "metric";
+                var strong = document.createElement("strong");
+                strong.textContent = pair.label;
+                span.appendChild(strong);
+                span.appendChild(document.createTextNode(" " + pair.value));
+                metrics.appendChild(span);
+            });
+
+            // 액션 영역
+            var actions = document.createElement("div");
+            actions.className = "stt-model-actions";
+
+            if (m.status === "not_downloaded" || m.status === "error") {
+                var dlBtn = document.createElement("button");
+                dlBtn.type = "button";
+                dlBtn.className = "stt-action-btn download";
+                dlBtn.textContent = m.status === "error" ? "다시 다운로드" : "다운로드";
+                dlBtn.setAttribute("aria-label", (m.label || m.id) + " 모델 다운로드");
+                // 다른 모델이 다운로드 중이면 비활성화
+                if (downloadingId && downloadingId !== m.id) {
+                    dlBtn.disabled = true;
+                    dlBtn.title = "다른 모델을 다운로드 중이에요";
+                }
+                dlBtn.addEventListener("click", function () {
+                    self._downloadModel(m.id);
+                });
+                actions.appendChild(dlBtn);
+            } else if (m.status === "downloading" || m.status === "quantizing") {
+                var progress = document.createElement("div");
+                progress.className = "stt-model-progress";
+                var pct = (m.download_progress && typeof m.download_progress.progress_percent === "number")
+                    ? m.download_progress.progress_percent
+                    : (typeof m.download_progress === "number" ? m.download_progress : 0);
+                var stepLabel = m.status === "downloading" ? "다운로드 중" : "양자화 중";
+                var pText = document.createElement("div");
+                pText.className = "progress-text";
+                pText.textContent = stepLabel + " " + pct + "%";
+                var pBar = document.createElement("div");
+                pBar.className = "progress-bar";
+                pBar.setAttribute("role", "progressbar");
+                pBar.setAttribute("aria-valuenow", String(pct));
+                pBar.setAttribute("aria-valuemin", "0");
+                pBar.setAttribute("aria-valuemax", "100");
+                var pFill = document.createElement("div");
+                pFill.className = "progress-fill";
+                pFill.style.width = pct + "%";
+                pBar.appendChild(pFill);
+                progress.appendChild(pText);
+                progress.appendChild(pBar);
+                actions.appendChild(progress);
+            } else if (m.status === "ready" && !m.is_active) {
+                var actBtn = document.createElement("button");
+                actBtn.type = "button";
+                actBtn.className = "stt-action-btn activate";
+                actBtn.textContent = "활성화";
+                actBtn.setAttribute("aria-label", (m.label || m.id) + " 모델 활성화");
+                actBtn.addEventListener("click", function () {
+                    self._activateModel(m.id);
+                });
+                actions.appendChild(actBtn);
+            } else if (m.is_active) {
+                // 이미 활성 — 별도 버튼 없음 (헤더 배지로 표시)
+                var activeLabel = document.createElement("span");
+                activeLabel.className = "stt-active-label";
+                activeLabel.textContent = "현재 사용 중";
+                actions.appendChild(activeLabel);
+            }
+
+            card.appendChild(header);
+            card.appendChild(desc);
+            card.appendChild(metrics);
+            card.appendChild(actions);
+
+            // 에러 메시지 (있으면 카드 하단에)
+            if (m.error_message) {
+                var errEl = document.createElement("div");
+                errEl.className = "stt-model-error";
+                errEl.setAttribute("role", "alert");
+                errEl.textContent = "오류: " + m.error_message;
+                card.appendChild(errEl);
+            }
+
+            container.appendChild(card);
+        });
+    };
+
+    /**
+     * 인라인 상태 메시지를 표시한다 (토스트 대체).
+     * @param {string} msg 표시할 메시지
+     * @param {string} kind "info" | "success" | "error"
+     */
+    GeneralSettingsPanel.prototype._showSttStatus = function (msg, kind) {
+        var el = this._els && this._els.sttStatus;
+        if (!el) return;
+        el.textContent = msg;
+        el.className = "stt-models-status " + (kind || "info");
+        // success/info는 3초 후 자동 숨김, error는 유지
+        if (kind !== "error") {
+            var self = this;
+            setTimeout(function () {
+                if (self._els && self._els.sttStatus && self._els.sttStatus.textContent === msg) {
+                    self._els.sttStatus.textContent = "";
+                    self._els.sttStatus.className = "stt-models-status";
+                }
+            }, 3000);
+        }
+    };
+
+    /**
+     * 특정 모델 다운로드를 시작하고, 3초 간격으로 상태를 폴링한다.
+     * ready 또는 error 상태가 되면 폴링을 중지한다.
+     * @param {string} modelId 모델 id
+     */
+    GeneralSettingsPanel.prototype._downloadModel = async function (modelId) {
+        var self = this;
+        try {
+            self._showSttStatus("다운로드를 시작합니다…", "info");
+            await App.apiPost("/stt-models/" + modelId + "/download", {});
+            // 즉시 한 번 새로고침하여 진행률 바가 바로 표시되도록 함
+            await self._loadSttModels();
+
+            // 3초 간격 폴링 시작
+            var pollTimer = setInterval(async function () {
+                try {
+                    var data = await App.apiRequest("/stt-models");
+                    self._renderSttModels((data && data.models) || []);
+                    // 해당 모델의 현재 상태 확인
+                    var target = null;
+                    (data.models || []).forEach(function (m) {
+                        if (m.id === modelId) target = m;
+                    });
+                    if (!target) {
+                        clearInterval(pollTimer);
+                        return;
+                    }
+                    if (target.status === "ready") {
+                        clearInterval(pollTimer);
+                        self._showSttStatus("다운로드 완료: " + (target.label || modelId), "success");
+                    } else if (target.status === "error" || target.error_message) {
+                        clearInterval(pollTimer);
+                        self._showSttStatus(
+                            "다운로드 실패: " + (target.error_message || "알 수 없는 오류"),
+                            "error"
+                        );
+                    }
+                } catch (pollErr) {
+                    // 폴링 중 네트워크 일시 오류는 그냥 다음 주기로 넘김
+                }
+            }, 3000);
+            self._sttPollTimers.push(pollTimer);
+        } catch (err) {
+            var msg = (err && err.message) ? err.message : String(err);
+            self._showSttStatus("다운로드 시작 실패: " + msg, "error");
+        }
+    };
+
+    /**
+     * 특정 모델을 활성화한다. 성공 시 즉시 목록을 새로고침한다.
+     * @param {string} modelId 모델 id
+     */
+    GeneralSettingsPanel.prototype._activateModel = async function (modelId) {
+        var self = this;
+        try {
+            var resp = await App.apiPost("/stt-models/" + modelId + "/activate", {});
+            await self._loadSttModels();
+            var msg = (resp && resp.message)
+                ? resp.message
+                : "활성 모델이 변경되었어요. 다음 전사부터 적용돼요.";
+            self._showSttStatus(msg, "success");
+        } catch (err) {
+            var m = (err && err.message) ? err.message : String(err);
+            self._showSttStatus("활성화 실패: " + m, "error");
+        }
+    };
+
+
+    // =================================================================
+    // === PromptsSettingsPanel — 3개 프롬프트 편집 (보정/요약/채팅) ===
+    // =================================================================
+
+    /**
+     * 프롬프트 편집 패널.
+     * Segmented control 로 3개 프롬프트 탭 전환, textarea + 변경 감지 dot +
+     * 글자수 카운터 + 저장/되돌리기 버튼 구성.
+     * @param {HTMLElement} host
+     * @constructor
+     */
+    function PromptsSettingsPanel(host) {
+        var self = this;
+        self._host = host;
+        self._els = {};
+        self._listeners = [];
+        // 프롬프트 3종 현재 저장된 값
+        self._initial = { corrector: "", summarizer: "", chat: "" };
+        // 현재 편집 값 (dirty 비교용)
+        self._current = { corrector: "", summarizer: "", chat: "" };
+        // 현재 활성 탭
+        self._activeKind = "corrector";
+        // 기본값 (reset 버튼용)
+        self._defaults = null;
+        // 키보드 핸들러 (destroy에서 해제)
+        self._keydownHandler = null;
+        self._render();
+        self._bind();
+        self._load();
+    }
+
+    PromptsSettingsPanel.prototype._LABELS = {
+        corrector: {
+            title: "보정 프롬프트",
+            desc: "STT 결과의 오타·문법·오인식을 교정할 때 사용해요. '[번호]' 출력 포맷 지시를 반드시 포함해야 해요.",
+        },
+        summarizer: {
+            title: "요약 프롬프트",
+            desc: "회의 전사문을 마크다운 회의록으로 요약할 때 사용해요.",
+        },
+        chat: {
+            title: "채팅 프롬프트",
+            desc: "회의록을 검색해 답변하는 AI 채팅에 사용해요.",
+        },
+    };
+
+    PromptsSettingsPanel.prototype._render = function () {
+        this._host.innerHTML = [
+            '<div class="settings-content prompts-panel">',
+            '  <div class="prompt-subtabs" role="tablist" aria-label="프롬프트 종류">',
+            '    <button type="button" class="prompt-subtab active" data-kind="corrector" role="tab" aria-selected="true">보정</button>',
+            '    <button type="button" class="prompt-subtab" data-kind="summarizer" role="tab" aria-selected="false">요약</button>',
+            '    <button type="button" class="prompt-subtab" data-kind="chat" role="tab" aria-selected="false">채팅</button>',
+            '  </div>',
+            '  <section class="settings-section prompt-editor-card">',
+            '    <div class="prompt-editor-header">',
+            '      <div>',
+            '        <h3 class="settings-section-title" id="promptTitle">보정 프롬프트</h3>',
+            '        <p class="prompt-editor-desc" id="promptDesc"></p>',
+            '      </div>',
+            '      <span class="prompt-dirty-indicator" id="promptDirtyDot" aria-live="polite"></span>',
+            '    </div>',
+            '    <textarea class="prompt-textarea" id="promptTextarea" spellcheck="false" aria-labelledby="promptTitle"></textarea>',
+            '    <div class="prompt-meta">',
+            '      <span id="promptCounter">0 / 8,000자</span>',
+            '      <span id="promptSaveStatus" class="settings-save-status"></span>',
+            '    </div>',
+            '  </section>',
+            '  <div class="settings-actions prompt-actions">',
+            '    <button type="button" class="btn-text-destructive" id="promptResetBtn">기본값으로 되돌리기</button>',
+            '    <div class="prompt-actions-right">',
+            '      <button type="button" class="btn-secondary" id="promptRevertBtn" disabled>되돌리기</button>',
+            '      <button type="button" class="settings-save-btn" id="promptSaveBtn" disabled>저장</button>',
+            '    </div>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+
+        this._els = {
+            subtabs: this._host.querySelectorAll(".prompt-subtab"),
+            title: document.getElementById("promptTitle"),
+            desc: document.getElementById("promptDesc"),
+            textarea: document.getElementById("promptTextarea"),
+            counter: document.getElementById("promptCounter"),
+            dirtyDot: document.getElementById("promptDirtyDot"),
+            saveStatus: document.getElementById("promptSaveStatus"),
+            saveBtn: document.getElementById("promptSaveBtn"),
+            revertBtn: document.getElementById("promptRevertBtn"),
+            resetBtn: document.getElementById("promptResetBtn"),
+        };
+    };
+
+    PromptsSettingsPanel.prototype._bind = function () {
+        var self = this;
+        var els = self._els;
+
+        // 서브탭 클릭
+        Array.prototype.forEach.call(els.subtabs, function (btn) {
+            var onClick = function () {
+                self._switchKind(btn.getAttribute("data-kind"));
+            };
+            btn.addEventListener("click", onClick);
+            self._listeners.push({ el: btn, type: "click", fn: onClick });
+        });
+
+        // textarea 입력
+        var onInput = function () {
+            self._current[self._activeKind] = els.textarea.value;
+            self._updateMeta();
+        };
+        els.textarea.addEventListener("input", onInput);
+        self._listeners.push({ el: els.textarea, type: "input", fn: onInput });
+
+        // 저장 버튼
+        var onSave = function () {
+            self._save();
+        };
+        els.saveBtn.addEventListener("click", onSave);
+        self._listeners.push({ el: els.saveBtn, type: "click", fn: onSave });
+
+        // 되돌리기 (편집 되돌림)
+        var onRevert = function () {
+            self._current[self._activeKind] = self._initial[self._activeKind];
+            els.textarea.value = self._initial[self._activeKind];
+            self._updateMeta();
+        };
+        els.revertBtn.addEventListener("click", onRevert);
+        self._listeners.push({ el: els.revertBtn, type: "click", fn: onRevert });
+
+        // 기본값으로 되돌리기
+        var onReset = function () {
+            self._resetCurrent();
+        };
+        els.resetBtn.addEventListener("click", onReset);
+        self._listeners.push({ el: els.resetBtn, type: "click", fn: onReset });
+
+        // Cmd+S / Ctrl+S 단축키
+        self._keydownHandler = function (e) {
+            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                if (self.isDirty()) {
+                    e.preventDefault();
+                    self._save();
+                }
+            }
+        };
+        document.addEventListener("keydown", self._keydownHandler);
+    };
+
+    PromptsSettingsPanel.prototype._load = async function () {
+        var self = this;
+        try {
+            var data = await App.apiRequest("/prompts");
+            var p = data.prompts || data;
+            self._initial.corrector = p.corrector.system_prompt;
+            self._initial.summarizer = p.summarizer.system_prompt;
+            self._initial.chat = p.chat.system_prompt;
+            self._current = {
+                corrector: self._initial.corrector,
+                summarizer: self._initial.summarizer,
+                chat: self._initial.chat,
+            };
+            self._showKind(self._activeKind);
+        } catch (err) {
+            errorBanner.show("프롬프트 불러오기 실패: " + (err.message || err));
+        }
+    };
+
+    PromptsSettingsPanel.prototype._switchKind = function (kind) {
+        if (this._activeKind === kind) return;
+        this._activeKind = kind;
+        // 서브탭 활성 상태 업데이트
+        Array.prototype.forEach.call(this._els.subtabs, function (btn) {
+            var isActive = btn.getAttribute("data-kind") === kind;
+            btn.classList.toggle("active", isActive);
+            btn.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+        this._showKind(kind);
+    };
+
+    PromptsSettingsPanel.prototype._showKind = function (kind) {
+        var els = this._els;
+        var label = this._LABELS[kind];
+        els.title.textContent = label.title;
+        els.desc.textContent = label.desc;
+        els.textarea.value = this._current[kind] || "";
+        this._updateMeta();
+    };
+
+    PromptsSettingsPanel.prototype._updateMeta = function () {
+        var els = this._els;
+        var text = els.textarea.value || "";
+        var len = text.length;
+        var max = 8000;
+        var isOver = len > max;
+        els.counter.textContent = len.toLocaleString() + " / " + max.toLocaleString() + "자";
+        els.counter.classList.toggle("over-limit", isOver);
+
+        var dirty = this._current[this._activeKind] !== this._initial[this._activeKind];
+        els.dirtyDot.classList.toggle("active", dirty);
+        els.dirtyDot.textContent = dirty ? "· 변경됨" : "";
+
+        // 저장 버튼: dirty 이고 길이 제한 안 넘고 최소 길이 이상일 때만 활성
+        var canSave = dirty && !isOver && len >= 20;
+        els.saveBtn.disabled = !canSave;
+        els.revertBtn.disabled = !dirty;
+    };
+
+    PromptsSettingsPanel.prototype._save = async function () {
+        var self = this;
+        var els = self._els;
+        var kind = self._activeKind;
+
+        els.saveBtn.disabled = true;
+        els.saveBtn.textContent = "저장 중…";
+        els.saveStatus.textContent = "";
+        els.saveStatus.className = "settings-save-status";
+
+        var body = {};
+        body[kind] = { system_prompt: self._current[kind] };
+
+        try {
+            var resp = await fetch("/api/prompts", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            if (!resp.ok) {
+                var errData = await resp.json().catch(function () { return {}; });
+                var msg = errData.detail || "HTTP " + resp.status;
+                if (typeof msg !== "string") msg = JSON.stringify(msg);
+                throw new Error(msg);
+            }
+            var data = await resp.json();
+            var p = data.prompts || data;
+            self._initial.corrector = p.corrector.system_prompt;
+            self._initial.summarizer = p.summarizer.system_prompt;
+            self._initial.chat = p.chat.system_prompt;
+            // 활성 탭의 current 는 유지 (사용자가 계속 편집 가능)
+            self._current[kind] = self._initial[kind];
+            els.textarea.value = self._initial[kind];
+            self._updateMeta();
+
+            els.saveStatus.textContent = "저장되었어요";
+            els.saveStatus.className = "settings-save-status success";
+            setTimeout(function () {
+                els.saveStatus.textContent = "";
+                els.saveStatus.className = "settings-save-status";
+            }, 2000);
+        } catch (err) {
+            els.saveStatus.textContent = "저장 실패: " + (err.message || String(err));
+            els.saveStatus.className = "settings-save-status error";
+        } finally {
+            els.saveBtn.textContent = "저장";
+            self._updateMeta();
+        }
+    };
+
+    PromptsSettingsPanel.prototype._resetCurrent = async function () {
+        var ok = window.confirm(
+            "기본 프롬프트로 되돌릴까요? 현재 저장된 프롬프트 3개(보정/요약/채팅)가 모두 기본값으로 복원돼요."
+        );
+        if (!ok) return;
+
+        var self = this;
+        var els = self._els;
+        els.resetBtn.disabled = true;
+        try {
+            var resp = await fetch("/api/prompts/reset", { method: "POST" });
+            if (!resp.ok) {
+                var errData = await resp.json().catch(function () { return {}; });
+                throw new Error(errData.detail || "HTTP " + resp.status);
+            }
+            var data = await resp.json();
+            var p = data.prompts || data;
+            self._initial.corrector = p.corrector.system_prompt;
+            self._initial.summarizer = p.summarizer.system_prompt;
+            self._initial.chat = p.chat.system_prompt;
+            self._current = {
+                corrector: self._initial.corrector,
+                summarizer: self._initial.summarizer,
+                chat: self._initial.chat,
+            };
+            self._showKind(self._activeKind);
+            els.saveStatus.textContent = "기본값으로 복원되었어요";
+            els.saveStatus.className = "settings-save-status success";
+            setTimeout(function () {
+                els.saveStatus.textContent = "";
+                els.saveStatus.className = "settings-save-status";
+            }, 2000);
+        } catch (err) {
+            els.saveStatus.textContent = "복원 실패: " + (err.message || String(err));
+            els.saveStatus.className = "settings-save-status error";
+        } finally {
+            els.resetBtn.disabled = false;
+        }
+    };
+
+    PromptsSettingsPanel.prototype.isDirty = function () {
+        return (
+            this._current.corrector !== this._initial.corrector ||
+            this._current.summarizer !== this._initial.summarizer ||
+            this._current.chat !== this._initial.chat
+        );
+    };
+
+    PromptsSettingsPanel.prototype.destroy = function () {
+        this._listeners.forEach(function (e) {
+            e.el.removeEventListener(e.type, e.fn);
+        });
+        this._listeners = [];
+        if (this._keydownHandler) {
+            document.removeEventListener("keydown", this._keydownHandler);
+            this._keydownHandler = null;
+        }
+    };
+
+
+    // =================================================================
+    // === VocabularySettingsPanel — 용어집 CRUD ===
+    // =================================================================
+
+    /**
+     * 용어집 관리 패널.
+     * 카드 리스트 + 검색 + 인라인 편집 모달 + 기본값 복원.
+     * @param {HTMLElement} host
+     * @constructor
+     */
+    function VocabularySettingsPanel(host) {
+        var self = this;
+        self._host = host;
+        self._els = {};
+        self._listeners = [];
+        self._terms = [];
+        self._filterQuery = "";
+        self._editingId = null;
+        self._render();
+        self._bind();
+        self._load();
+    }
+
+    VocabularySettingsPanel.prototype._render = function () {
+        this._host.innerHTML = [
+            '<div class="settings-content vocabulary-panel">',
+            '  <section class="settings-section">',
+            '    <div class="vocab-header">',
+            '      <div>',
+            '        <h3 class="settings-section-title">고유명사 용어집</h3>',
+            '        <p class="vocab-desc">STT가 자주 잘못 인식하는 이름이나 전문용어를 등록하면 보정 단계에서 자동으로 교정해요.</p>',
+            '      </div>',
+            '      <button type="button" class="settings-save-btn" id="vocabAddBtn">＋ 용어 추가</button>',
+            '    </div>',
+            '    <div class="vocab-toolbar">',
+            '      <input type="text" class="vocab-search" id="vocabSearch" placeholder="용어·별칭·메모 검색" />',
+            '      <span class="vocab-count" id="vocabCount">0개 항목</span>',
+            '    </div>',
+            '    <div class="vocab-list" id="vocabList"></div>',
+            '  </section>',
+            '</div>',
+            '<div class="modal-overlay hidden" id="vocabModal" role="dialog" aria-modal="true" aria-labelledby="vocabModalTitle">',
+            '  <div class="modal-content">',
+            '    <h3 class="modal-title" id="vocabModalTitle">용어 추가</h3>',
+            '    <div class="modal-field">',
+            '      <label class="modal-label" for="vocabFieldTerm">정답 표기 *</label>',
+            '      <input type="text" class="modal-input" id="vocabFieldTerm" maxlength="100" placeholder="예: FastAPI" />',
+            '    </div>',
+            '    <div class="modal-field">',
+            '      <label class="modal-label" for="vocabFieldAliases">별칭 (쉼표로 구분)</label>',
+            '      <input type="text" class="modal-input" id="vocabFieldAliases" placeholder="예: 패스트api, 패스트에이피아이" />',
+            '      <p class="modal-hint">STT가 잘못 들을 법한 표기를 쉼표로 구분해 입력해요.</p>',
+            '    </div>',
+            '    <div class="modal-field">',
+            '      <label class="modal-label" for="vocabFieldNote">메모 (선택)</label>',
+            '      <input type="text" class="modal-input" id="vocabFieldNote" maxlength="500" placeholder="예: 디자이너 이름" />',
+            '    </div>',
+            '    <div class="modal-error" id="vocabModalError"></div>',
+            '    <div class="modal-actions">',
+            '      <button type="button" class="btn-secondary" id="vocabModalCancel">취소</button>',
+            '      <button type="button" class="settings-save-btn" id="vocabModalSave">저장</button>',
+            '    </div>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+
+        this._els = {
+            addBtn: document.getElementById("vocabAddBtn"),
+            search: document.getElementById("vocabSearch"),
+            count: document.getElementById("vocabCount"),
+            list: document.getElementById("vocabList"),
+            modal: document.getElementById("vocabModal"),
+            modalTitle: document.getElementById("vocabModalTitle"),
+            fieldTerm: document.getElementById("vocabFieldTerm"),
+            fieldAliases: document.getElementById("vocabFieldAliases"),
+            fieldNote: document.getElementById("vocabFieldNote"),
+            modalError: document.getElementById("vocabModalError"),
+            modalSave: document.getElementById("vocabModalSave"),
+            modalCancel: document.getElementById("vocabModalCancel"),
+        };
+    };
+
+    VocabularySettingsPanel.prototype._bind = function () {
+        var self = this;
+        var els = self._els;
+
+        var onAdd = function () { self._openModal(null); };
+        els.addBtn.addEventListener("click", onAdd);
+        self._listeners.push({ el: els.addBtn, type: "click", fn: onAdd });
+
+        var onSearch = function () {
+            self._filterQuery = els.search.value.trim().toLowerCase();
+            self._renderList();
+        };
+        els.search.addEventListener("input", onSearch);
+        self._listeners.push({ el: els.search, type: "input", fn: onSearch });
+
+        var onModalSave = function () { self._submitModal(); };
+        els.modalSave.addEventListener("click", onModalSave);
+        self._listeners.push({ el: els.modalSave, type: "click", fn: onModalSave });
+
+        var onModalCancel = function () { self._closeModal(); };
+        els.modalCancel.addEventListener("click", onModalCancel);
+        self._listeners.push({ el: els.modalCancel, type: "click", fn: onModalCancel });
+
+        // 모달 오버레이 클릭으로 닫기
+        var onOverlayClick = function (e) {
+            if (e.target === els.modal) self._closeModal();
+        };
+        els.modal.addEventListener("click", onOverlayClick);
+        self._listeners.push({ el: els.modal, type: "click", fn: onOverlayClick });
+
+        // Esc 로 모달 닫기
+        self._escHandler = function (e) {
+            if (e.key === "Escape" && !els.modal.classList.contains("hidden")) {
+                self._closeModal();
+            }
+        };
+        document.addEventListener("keydown", self._escHandler);
+
+        // 카드 버튼 이벤트 위임 (편집/삭제) — 리스트 레벨에 한 번만 부착.
+        // 재렌더 시에도 동일 핸들러가 재사용되어 리스너 누수가 없다.
+        var onListClick = function (e) {
+            var target = e.target;
+            if (!target || typeof target.getAttribute !== "function") return;
+            var action = target.getAttribute("data-action");
+            if (!action) return;
+            var id = target.getAttribute("data-id");
+            if (!id) return;
+            if (action === "edit") {
+                var term = self._terms.find(function (t) { return t.id === id; });
+                if (term) self._openModal(term);
+            } else if (action === "delete") {
+                self._deleteTerm(id);
+            }
+        };
+        els.list.addEventListener("click", onListClick);
+        self._listeners.push({ el: els.list, type: "click", fn: onListClick });
+    };
+
+    VocabularySettingsPanel.prototype._load = async function () {
+        var self = this;
+        try {
+            var data = await App.apiRequest("/vocabulary");
+            self._terms = data.terms || [];
+            self._renderList();
+        } catch (err) {
+            errorBanner.show("용어집 불러오기 실패: " + (err.message || err));
+        }
+    };
+
+    VocabularySettingsPanel.prototype._renderList = function () {
+        var els = this._els;
+        var query = this._filterQuery;
+        var filtered = this._terms;
+        if (query) {
+            filtered = this._terms.filter(function (t) {
+                var hay = (t.term || "") + " " + (t.aliases || []).join(" ") + " " + (t.note || "");
+                return hay.toLowerCase().indexOf(query) !== -1;
+            });
+        }
+
+        els.count.textContent = filtered.length.toLocaleString() + "개 항목";
+
+        if (filtered.length === 0) {
+            if (this._terms.length === 0) {
+                els.list.innerHTML = [
+                    '<div class="vocab-empty">',
+                    '  <div class="vocab-empty-title">아직 등록된 용어가 없어요</div>',
+                    '  <div class="vocab-empty-desc">자주 잘못 인식되는 이름·전문용어를 추가하면 AI가 자동으로 교정해 드려요.</div>',
+                    '</div>',
+                ].join("\n");
+            } else {
+                els.list.innerHTML = '<div class="vocab-empty"><div class="vocab-empty-desc">검색 결과가 없어요.</div></div>';
+            }
+            return;
+        }
+
+        var self = this;
+        var html = filtered.map(function (t) {
+            var aliases = (t.aliases || [])
+                .map(function (a) {
+                    return '<span class="vocab-chip">' + App.escapeHtml(a) + "</span>";
+                })
+                .join(" ");
+            var note = t.note
+                ? '<div class="vocab-note">' + App.escapeHtml(t.note) + "</div>"
+                : "";
+            return [
+                '<div class="vocab-card" data-id="' + App.escapeHtml(t.id) + '">',
+                '  <div class="vocab-card-main">',
+                '    <div class="vocab-term">' + App.escapeHtml(t.term) + "</div>",
+                aliases ? '<div class="vocab-aliases">' + aliases + "</div>" : "",
+                note,
+                "  </div>",
+                '  <div class="vocab-card-actions">',
+                '    <button type="button" class="btn-icon" data-action="edit" data-id="' + App.escapeHtml(t.id) + '" aria-label="편집">편집</button>',
+                '    <button type="button" class="btn-icon btn-icon-destructive" data-action="delete" data-id="' + App.escapeHtml(t.id) + '" aria-label="삭제">삭제</button>',
+                "  </div>",
+                "</div>",
+            ].join("");
+        }).join("");
+        els.list.innerHTML = html;
+        // 이벤트 위임은 _bind()에서 els.list에 한 번만 부착했으므로
+        // 재렌더할 때 리스너를 다시 붙일 필요가 없다.
+    };
+
+    VocabularySettingsPanel.prototype._openModal = function (term) {
+        var els = this._els;
+        this._editingId = term ? term.id : null;
+        els.modalTitle.textContent = term ? "용어 편집" : "용어 추가";
+        els.fieldTerm.value = term ? term.term : "";
+        els.fieldAliases.value = term && term.aliases ? term.aliases.join(", ") : "";
+        els.fieldNote.value = term && term.note ? term.note : "";
+        els.modalError.textContent = "";
+        els.modal.classList.remove("hidden");
+        setTimeout(function () { els.fieldTerm.focus(); }, 0);
+    };
+
+    VocabularySettingsPanel.prototype._closeModal = function () {
+        this._els.modal.classList.add("hidden");
+        this._editingId = null;
+    };
+
+    VocabularySettingsPanel.prototype._submitModal = async function () {
+        var self = this;
+        var els = self._els;
+        var term = els.fieldTerm.value.trim();
+        var aliasesRaw = els.fieldAliases.value || "";
+        var aliases = aliasesRaw
+            .split(",")
+            .map(function (s) { return s.trim(); })
+            .filter(function (s) { return s.length > 0; });
+        var note = els.fieldNote.value.trim() || null;
+
+        if (!term) {
+            els.modalError.textContent = "정답 표기를 입력해 주세요.";
+            return;
+        }
+
+        els.modalError.textContent = "";
+        els.modalSave.disabled = true;
+        els.modalSave.textContent = "저장 중…";
+
+        try {
+            var resp;
+            if (self._editingId) {
+                resp = await fetch(
+                    "/api/vocabulary/terms/" + encodeURIComponent(self._editingId),
+                    {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ term: term, aliases: aliases, note: note }),
+                    }
+                );
+            } else {
+                resp = await fetch("/api/vocabulary/terms", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ term: term, aliases: aliases, note: note }),
+                });
+            }
+            if (!resp.ok) {
+                var errData = await resp.json().catch(function () { return {}; });
+                throw new Error(errData.detail || "HTTP " + resp.status);
+            }
+            self._closeModal();
+            await self._load();
+        } catch (err) {
+            els.modalError.textContent = err.message || String(err);
+        } finally {
+            els.modalSave.disabled = false;
+            els.modalSave.textContent = "저장";
+        }
+    };
+
+    VocabularySettingsPanel.prototype._deleteTerm = async function (id) {
+        var term = this._terms.find(function (t) { return t.id === id; });
+        var name = term ? term.term : id;
+        if (!window.confirm('"' + name + '" 용어를 삭제할까요?')) return;
+        try {
+            var resp = await fetch("/api/vocabulary/terms/" + encodeURIComponent(id), {
+                method: "DELETE",
+            });
+            if (!resp.ok && resp.status !== 204) {
+                var errData = await resp.json().catch(function () { return {}; });
+                throw new Error(errData.detail || "HTTP " + resp.status);
+            }
+            await this._load();
+        } catch (err) {
+            errorBanner.show("삭제 실패: " + (err.message || err));
+        }
+    };
+
+    VocabularySettingsPanel.prototype.isDirty = function () {
+        // CRUD 기반이라 뷰 레벨 dirty는 없음 (모달 편집 중에도 저장 전엔 persist 안 됨)
+        return false;
+    };
+
+    VocabularySettingsPanel.prototype.destroy = function () {
+        this._listeners.forEach(function (e) {
+            e.el.removeEventListener(e.type, e.fn);
+        });
+        this._listeners = [];
+        if (this._escHandler) {
+            document.removeEventListener("keydown", this._escHandler);
+            this._escHandler = null;
+        }
     };
 
 

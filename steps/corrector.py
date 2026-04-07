@@ -31,12 +31,15 @@ from core.llm_backend import (
     create_backend,
 )
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.user_settings import build_corrector_snapshot
 from steps.merger import MergedResult, MergedUtterance
 
 logger = logging.getLogger(__name__)
 
-# 보정 시스템 프롬프트
-_SYSTEM_PROMPT = """당신은 한국어 회의 전사문 보정 전문가입니다.
+# 폴백 시스템 프롬프트 (사용자 설정 저장소 로드 실패 시에만 사용)
+# 정상 경로에서는 core.user_settings.build_corrector_snapshot()이 반환하는
+# 최종 프롬프트(사용자 편집본 + 용어집 주입)를 사용한다.
+_FALLBACK_SYSTEM_PROMPT = """당신은 한국어 회의 전사문 보정 전문가입니다.
 음성인식(STT) 결과에서 발생하는 오타, 문법 오류, 단어 오인식을 보정합니다.
 
 규칙:
@@ -304,6 +307,7 @@ class Corrector:
         self,
         backend: LLMBackend,
         batch: list[MergedUtterance],
+        system_prompt: str,
     ) -> tuple[list[CorrectedUtterance], int, int]:
         """발화 배치를 보정한다.
 
@@ -314,6 +318,7 @@ class Corrector:
         Args:
             backend: LLM 백엔드 인스턴스
             batch: 보정할 발화 배치
+            system_prompt: 이 회의에 사용할 시스템 프롬프트 (잡 단위 스냅샷)
 
         Returns:
             (보정된 발화 목록, 보정된 수, 실패한 수) 튜플
@@ -327,7 +332,7 @@ class Corrector:
             try:
                 response_text = backend.chat(
                     messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},
                     ],
                 )
@@ -425,6 +430,20 @@ class Corrector:
 
         logger.info(f"보정 시작: 발화 {len(merged.utterances)}개, 배치 크기 {self._batch_size}")
 
+        # 잡 단위 프롬프트 스냅샷: 회의 처리 시작 시점에 1회 빌드하여
+        # 처리 도중 사용자가 설정을 수정해도 진행 중인 회의는 일관성을 유지한다.
+        # 저장소 로드 실패 시 폴백 상수 사용 (graceful degradation).
+        try:
+            snapshot = build_corrector_snapshot()
+            system_prompt = snapshot.system_prompt
+            logger.info(
+                f"보정 스냅샷 빌드 완료: 프롬프트 {len(system_prompt)}자, "
+                f"활성 용어 {snapshot.vocab_term_count}개"
+            )
+        except Exception as e:
+            logger.warning(f"프롬프트 스냅샷 빌드 실패, 폴백 사용: {e}")
+            system_prompt = _FALLBACK_SYSTEM_PROMPT
+
         # 배치 분할
         batches: list[list[MergedUtterance]] = []
         for i in range(0, len(merged.utterances), self._batch_size):
@@ -449,7 +468,7 @@ class Corrector:
 
                     # 별도 스레드에서 실행 (동기 호출이 블로킹이므로)
                     corrected, batch_corrected, batch_failed = await asyncio.to_thread(
-                        self._correct_batch, backend, batch
+                        self._correct_batch, backend, batch, system_prompt
                     )
 
                     total_corrected += batch_corrected
