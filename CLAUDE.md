@@ -374,7 +374,7 @@ meeting-transcriber/
 │   ├── watcher.py           # 폴더 감시 (watchdog)
 │   ├── stt_model_registry.py    # STT 모델 메타데이터 (komixv2/seastar/ghost613)
 │   ├── stt_model_status.py      # STT 모델 다운로드 상태 판정
-│   └── stt_model_downloader.py  # 백그라운드 다운로드 + 4bit 양자화
+│   └── stt_model_downloader.py  # 백그라운드 HF snapshot_download + 검증 (사전 양자화 모델 대상)
 │
 ├── steps/                   # 파이프라인 각 단계 (독립 모듈)
 │   ├── audio_converter.py   # ffmpeg 기반 WAV 변환

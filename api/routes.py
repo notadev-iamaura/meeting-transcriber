@@ -1123,55 +1123,10 @@ async def get_summary(
 # ===========================================================================
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """텍스트 파일을 원자적으로 덮어쓴다 (.bak 백업 포함).
-
-    path 부모 디렉토리가 없으면 생성한다. 기존 파일이 있으면 .bak 로 복사 후
-    temp → rename 순서로 교체한다.
-    """
-    import shutil
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        backup = path.with_suffix(path.suffix + ".bak")
-        try:
-            shutil.copy2(path, backup)
-        except OSError as exc:
-            logger.warning(f"백업 생성 실패 (진행 계속): {exc}")
-
-    tmp: Optional[str] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as tf:
-            tf.write(content)
-            tf.flush()
-            import os as _os
-
-            _os.fsync(tf.fileno())
-            tmp = tf.name
-        import os as _os2
-
-        _os2.replace(tmp, path)
-        tmp = None
-    finally:
-        if tmp is not None:
-            try:
-                Path(tmp).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """JSON 파일을 원자적으로 덮어쓴다 (.bak 백업 포함)."""
-    content = json.dumps(data, ensure_ascii=False, indent=2)
-    _atomic_write_text(path, content)
+# 원자적 파일 쓰기 헬퍼 — core/io_utils.py 의 공용 구현을 사용한다.
+# 기존 두 곳에 분산되어 있던 패턴을 통합하기 위해 thin alias 로 유지.
+from core.io_utils import atomic_write_json as _atomic_write_json  # noqa: E402
+from core.io_utils import atomic_write_text as _atomic_write_text  # noqa: E402
 
 
 # === 요약 편집 ===
@@ -2163,6 +2118,10 @@ _ALLOWED_MLX_MODELS = {
     "mlx-community/gemma-4-e2b-it-4bit",
 }
 
+# BCP-47 언어 코드 화이트리스트 패턴 (보안: YAML 인젝션 차단)
+# 예: "ko", "en", "en-US", "zh-Hant", "ja-JP-x-keb"
+_STT_LANGUAGE_PATTERN = re.compile(r"^[a-zA-Z]{2,8}(-[a-zA-Z0-9]{2,8})*$")
+
 # 프론트엔드 드롭다운용 모델 프리셋 (읽기 전용)
 _AVAILABLE_MODELS = [
     {
@@ -2409,10 +2368,17 @@ async def update_settings(
 
     if "stt_language" in updates:
         lang = updates["stt_language"]
-        if not lang or len(lang) > 10:
+        # 보안: BCP-47 형식만 허용. 따옴표·개행·#·콜론 등이 들어가면
+        # _replace_yaml_value 가 그대로 config.yaml 에 삽입해 YAML 파일이
+        # 손상될 수 있음 (예: "en\": y\n#" 같은 입력으로 부팅 불가).
+        # 따라서 알파벳 + 선택적 BCP-47 서브태그(`-`로 분리)만 허용한다.
+        if not lang or not _STT_LANGUAGE_PATTERN.match(lang):
             raise HTTPException(
                 status_code=400,
-                detail="stt_language가 유효하지 않습니다.",
+                detail=(
+                    "stt_language 는 BCP-47 언어 코드 형식만 허용됩니다 "
+                    "(예: ko, en, en-US, zh-Hant)."
+                ),
             )
 
     # === config.yaml 파일 업데이트 ===
@@ -2473,9 +2439,9 @@ async def update_settings(
         if "stt_language" in updates:
             content = _replace_yaml_value(content, "stt", "language", f'"{updates["stt_language"]}"')
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        logger.info(f"config.yaml 저장 완료 (주석 보존). 변경 필드: {changed_fields}")
+        # 원자적 쓰기 + .bak 백업 (도중 죽어도 config.yaml 손상 방지)
+        await asyncio.to_thread(_atomic_write_text, config_path, content)
+        logger.info(f"config.yaml 저장 완료 (원자적, 주석 보존). 변경 필드: {changed_fields}")
     except OSError as e:
         logger.exception(f"config.yaml 저장 실패: {e}")
         raise HTTPException(
@@ -3205,7 +3171,7 @@ async def activate_stt_model(
     else:
         new_path = spec_path
 
-    # config.yaml 업데이트 (주석 보존)
+    # config.yaml 업데이트 (주석 보존, 원자적 쓰기 + .bak 백업)
     config_path = _get_config_path()
     try:
         with open(config_path, encoding="utf-8") as f:
@@ -3213,10 +3179,10 @@ async def activate_stt_model(
         content = _replace_yaml_value(
             content, "stt", "model_name", f'"{new_path}"'
         )
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        # 도중 죽어도 config.yaml 손상 방지 — _atomic_write_text 가 .bak 자동 생성
+        await asyncio.to_thread(_atomic_write_text, config_path, content)
         logger.info(
-            "활성 STT 모델 변경: %s → %s (config.yaml 저장)",
+            "활성 STT 모델 변경: %s → %s (config.yaml 원자적 저장)",
             previous_model,
             new_path,
         )

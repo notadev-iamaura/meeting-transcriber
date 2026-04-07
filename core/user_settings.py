@@ -378,8 +378,9 @@ def _corrupt_path(path: Path) -> Path:
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """JSON 데이터를 원자적으로 파일에 기록한다.
 
-    동일 디렉토리 내 임시 파일에 쓰고 fsync 후 os.replace로 교체한다.
-    POSIX에서 os.replace는 원자적 연산이 보장된다.
+    공용 헬퍼 `core.io_utils.atomic_write_json` 으로 위임한다.
+    이 모듈의 내부 호출자(`_save_generic` 등)와의 하위 호환을 위해 thin wrapper 로 유지.
+    `backup=False` 인 이유: 백업 책임은 `_save_generic` 에 있다 (호출 전 .bak 복사 수행).
 
     Args:
         path: 최종 대상 경로
@@ -388,32 +389,9 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     Raises:
         OSError: 쓰기 실패 (권한, 디스크 풀 등)
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from .io_utils import atomic_write_json
 
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as tf:
-            json.dump(data, tf, ensure_ascii=False, indent=2)
-            tf.flush()
-            os.fsync(tf.fileno())
-            tmp_name = tf.name
-
-        os.replace(tmp_name, path)
-        tmp_name = None
-    finally:
-        # 성공 시 tmp_name은 None. 실패 시 임시 파일 정리.
-        if tmp_name is not None:
-            try:
-                Path(tmp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
+    atomic_write_json(path, data, backup=False)
 
 
 # === 기본값 로드 ===

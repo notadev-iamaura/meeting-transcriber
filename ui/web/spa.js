@@ -161,6 +161,7 @@
     var Router = (function () {
         var _currentView = null;  // 현재 활성 뷰 인스턴스
         var _contentEl = null;    // #content 엘리먼트
+        var _currentPath = "/app"; // 현재 활성 경로 (popstate 가드용)
 
         /**
          * 라우트 정의 목록.
@@ -255,9 +256,19 @@
         function init() {
             _contentEl = document.getElementById("content");
 
-            // 뒤로가기/앞으로가기 처리
+            // 뒤로가기/앞으로가기 처리 — 편집 중이면 canLeave 가드로 차단
             window.addEventListener("popstate", function () {
                 var fullPath = window.location.pathname + window.location.search;
+                if (
+                    _currentView &&
+                    typeof _currentView.canLeave === "function" &&
+                    _currentView.canLeave() === false
+                ) {
+                    // URL 을 이전 위치로 되돌림 (사용자 편집 보존)
+                    history.pushState(null, "", _currentPath);
+                    return;
+                }
+                _currentPath = fullPath;
                 resolve(fullPath);
             });
 
@@ -270,6 +281,7 @@
                 path = "/app";
             }
 
+            _currentPath = path + window.location.search;
             resolve(path);
         }
 
@@ -289,6 +301,7 @@
                 }
             }
             history.pushState(null, "", path);
+            _currentPath = path;
             resolve(path);
         }
 
@@ -1900,18 +1913,34 @@
         var applyBtn = document.getElementById("replaceApplyBtn");
         var cancelBtn = document.getElementById("replaceCancelBtn");
 
-        var close = function () { overlay.remove(); };
+        // close 안에서 escHandler 도 함께 해제 — 어떤 경로로 닫혀도 leak 없음
+        var escHandler;  // 아래에서 정의 후 close 가 참조
+        var close = function () {
+            overlay.remove();
+            if (escHandler) {
+                document.removeEventListener("keydown", escHandler);
+                escHandler = null;
+            }
+        };
         cancelBtn.addEventListener("click", close);
         overlay.addEventListener("click", function (e) {
             if (e.target === overlay) close();
         });
-        var escHandler = function (e) {
-            if (e.key === "Escape") {
-                close();
-                document.removeEventListener("keydown", escHandler);
-            }
+        escHandler = function (e) {
+            if (e.key === "Escape") close();
         };
         document.addEventListener("keydown", escHandler);
+
+        // Enter 키 → 적용 (find/replace input 에서)
+        var enterHandler = function (e) {
+            if (e.isComposing || e.shiftKey) return;
+            if (e.key === "Enter") {
+                e.preventDefault();
+                applyBtn.click();
+            }
+        };
+        findInput.addEventListener("keydown", enterHandler);
+        replaceInput.addEventListener("keydown", enterHandler);
 
         applyBtn.addEventListener("click", async function () {
             var find = findInput.value.trim();
@@ -1947,8 +1976,7 @@
                     throw new Error(err.detail || "HTTP " + resp.status);
                 }
                 var data = await resp.json();
-                close();
-                document.removeEventListener("keydown", escHandler);
+                close();  // escHandler 도 close() 가 함께 해제
                 // 성공 메시지
                 var msg = data.changes + "건을 바꿨어요 (" + data.updated_utterances + "개 발화)";
                 if (data.vocabulary_action === "term_created") {
@@ -2122,24 +2150,39 @@
         titleEl.appendChild(hint);
 
         var saved = false;
+        var saving = false;  // 저장 in-flight 가드
         var cancelEdit = function () {
-            if (saved) return;
+            if (saved || saving) return;
             saved = true;
             self._renderMeetingTitle(data);
         };
-        var doSave = function () {
-            if (saved) return;
-            saved = true;
+        var doSave = async function () {
+            if (saved || saving) return;
             var next = input.value.trim();
             // 값이 기존과 동일하면 저장 스킵
             if (next === currentTitle) {
+                saved = true;
                 self._renderMeetingTitle(data);
                 return;
             }
-            self._saveTitle(next);
+            saving = true;
+            input.disabled = true;
+            hint.textContent = "저장 중…";
+            var ok = await self._saveTitle(next);
+            saving = false;
+            if (ok) {
+                saved = true;
+                // _renderMeetingTitle 은 _saveTitle 안에서 이미 호출됨
+            } else {
+                // 실패 — 편집 모드 유지하고 사용자가 재시도할 수 있도록 input 복원
+                input.disabled = false;
+                hint.textContent = "저장 실패. Enter 로 재시도, Esc 로 취소";
+                input.focus();
+            }
         };
 
         input.addEventListener("keydown", function (e) {
+            if (e.isComposing) return;  // IME 조합 중에는 무시
             if (e.key === "Enter") {
                 e.preventDefault();
                 doSave();
@@ -2148,9 +2191,14 @@
                 cancelEdit();
             }
         });
+        // blur 시 자동 저장 — 단, 저장 중이면 race 방지
         input.addEventListener("blur", function () {
-            // blur 시에는 저장 (Esc로 명시적 취소만 취소 처리)
-            doSave();
+            // 약간의 지연 후 doSave (다른 이벤트 핸들러 완료 대기)
+            setTimeout(function () {
+                if (!saved && !saving && input.isConnected) {
+                    doSave();
+                }
+            }, 100);
         });
 
         setTimeout(function () {
@@ -2161,10 +2209,20 @@
 
     /**
      * PATCH /api/meetings/{id} 로 제목을 저장한다.
+     *
+     * 실패 시 사용자가 입력한 텍스트를 잃지 않도록 편집 모드를 유지하고
+     * 인라인 에러를 표시한다 (이전에는 _renderMeetingTitle 로 원본 복원해서
+     * 사용자 입력이 사라지는 데이터 손실 버그가 있었음).
+     *
      * @param {string} title - 새 제목 (빈 문자열이면 초기화)
+     * @returns {Promise<boolean>} 성공 여부 (호출자가 편집 모드를 닫을지 결정)
      */
     ViewerView.prototype._saveTitle = async function (title) {
         var self = this;
+        // 뷰가 이미 destroy 되었으면 (사용자가 다른 회의로 이동) 조용히 abort
+        if (!self._els || !self._els.meetingTitle || !self._els.meetingTitle.isConnected) {
+            return false;
+        }
         try {
             var resp = await fetch(
                 "/api/meetings/" + encodeURIComponent(self._meetingId),
@@ -2181,14 +2239,13 @@
             var data = await resp.json();
             self._lastMeetingData = data;
             self._renderMeetingTitle(data);
-            // 사이드바 목록도 갱신 (날짜 기반이 아닌 새 title 반영)
             if (typeof ListPanel !== "undefined" && ListPanel.loadMeetings) {
                 ListPanel.loadMeetings();
             }
+            return true;
         } catch (e) {
             errorBanner.show("제목 저장 실패: " + (e.message || String(e)));
-            // 실패 시 원래 값으로 복원
-            self._renderMeetingTitle(self._lastMeetingData || {});
+            return false;
         }
     };
 
@@ -2666,7 +2723,9 @@
             }
 
             // 현재 마크다운 보관 (편집 시 기준값)
+            // dirty 플래그도 리셋 — 서버의 진실을 받았으므로 깨끗한 상태
             self._currentSummaryMd = data.markdown;
+            self._summaryDirty = false;
             self._renderSummaryView(data.markdown);
 
             // 요약 생성 버튼 숨기기
@@ -2771,6 +2830,11 @@
         saveBtn.className = "btn-regenerate";
         saveBtn.textContent = "저장";
         saveBtn.addEventListener("click", async function () {
+            // 변경 없으면 저장 스킵 + dirty 마킹도 안 함 (회귀 방지)
+            if (textarea.value === (self._currentSummaryMd || "")) {
+                self._renderSummaryView(self._currentSummaryMd || "");
+                return;
+            }
             saveBtn.disabled = true;
             saveBtn.textContent = "저장 중…";
             try {
@@ -2790,6 +2854,7 @@
                 }
                 var data = await resp.json();
                 self._currentSummaryMd = data.markdown;
+                // 사용자가 직접 편집해 저장한 상태 — 재생성 시 confirm 필요
                 self._summaryDirty = true;
                 self._renderSummaryView(data.markdown);
             } catch (e) {
@@ -5008,6 +5073,20 @@
     document.addEventListener("keydown", function (e) {
         // Cmd+K → 검색 뷰로 이동
         if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+            // 편집 컨텍스트(input/textarea/contenteditable) 에서는 가로채지 않음.
+            // 사용자가 프롬프트/요약/전사 편집 중 Cmd+K 를 눌러 편집 내용이
+            // 사라지는 데이터 손실 방지.
+            var t = e.target;
+            if (t) {
+                var tag = (t.tagName || "").toUpperCase();
+                if (
+                    tag === "INPUT" ||
+                    tag === "TEXTAREA" ||
+                    t.isContentEditable
+                ) {
+                    return;
+                }
+            }
             e.preventDefault();
             Router.navigate("/app/search");
             // 검색 입력에 포커스

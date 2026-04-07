@@ -271,27 +271,35 @@ python main.py --no-menubar
 
 설정 페이지의 "음성 인식 모델 (STT)" 섹션에서 한국어 fine-tune 모델 3종을 GUI로 다운로드/활성화할 수 있습니다.
 
-| 모델 | CER | WER | RAM | 디스크 | 특징 |
-|------|-----|-----|-----|--------|------|
-| **komixv2** (기본) | 11.88% | 33.26% | 1.88GB | 1.5GB | Whisper Medium fp16, 변환 불필요 |
-| **seastar (4bit)** ⭐ 추천 | **1.25%** | **3.21%** | **1.26GB** | **831MB** | Zeroth Korean fine-tune, 최고 정확도 |
-| **ghost613 (4bit)** | 1.60% | 4.36% | 1.31GB | 884MB | Turbo + Zeroth fine-tune, 빠른 속도 |
+| 모델 | CER | WER | RAM | 디스크 | HuggingFace |
+|------|-----|-----|-----|--------|-------------|
+| **komixv2** (기본) | 11.88% | 33.26% | 1.88GB | 1.5GB | [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx) |
+| **seastar (4bit)** ⭐ 추천 | **1.25%** | **3.21%** | **1.26GB** | **420MB** | [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx) |
+| **ghost613 (4bit)** | 1.60% | 4.36% | 1.31GB | 442MB | [`youngouk/ghost613-turbo-korean-4bit-mlx`](https://huggingface.co/youngouk/ghost613-turbo-korean-4bit-mlx) |
 
 > **벤치마크 출처**: Zeroth Korean test set 30 샘플, 정밀 측정 (별도 프로세스 격리)
 >
 > 추천: **seastar 4bit**으로 변경 시 CER **9.5배** 정확도 향상 + 메모리 33% 절감.
+>
+> 모든 모델은 사전 양자화된 형태로 HuggingFace 에 배포되어 있어 다운로드 1회로 끝납니다.
+> 로컬 양자화·`mlx-examples`·`convert.py` 같은 추가 단계가 필요 없습니다.
 
 **사용법:**
 
 1. 설정 페이지 (`/app/settings`) → "음성 인식 모델 (STT)" 섹션으로 스크롤
-2. 원하는 모델의 `[다운로드]` 버튼 클릭 (HuggingFace 자동 다운로드 + 4bit 양자화)
+2. 원하는 모델의 `[다운로드]` 버튼 클릭 (HuggingFace 에서 사전 양자화된 4bit 모델을 직접 다운로드)
 3. 다운로드 완료 후 `[활성화]` 클릭 → config.yaml 자동 갱신
 4. 다음 전사부터 새 모델 적용 (재시작 불필요)
 
+자동 다운로드가 SSL/방화벽 등 네트워크 이슈로 실패하면 카드의 "▸ 브라우저로 직접 받기" 섹션을
+열어 (a) "앱이 URL로 받기" 버튼으로 단순 HTTPS GET 폴백을 시도하거나, (b) URL을 복사해 브라우저로
+받은 뒤 "가져오기" 버튼으로 임포트할 수 있습니다.
+
 ```yaml
-# 또는 config.yaml에서 직접 변경
+# 또는 config.yaml 에서 직접 변경 (HuggingFace repo ID 사용)
 stt:
-  model_name: "/Users/{사용자}/.meeting-transcriber/stt_models/seastar-medium-ko-4bit"
+  model_name: "youngouk/seastar-medium-ko-4bit-mlx"
+# 수동으로 가져온 경우에는 로컬 경로 사용 (예: ~/.meeting-transcriber/stt_models/seastar-medium-4bit-manual)
 ```
 
 ### 전사 파이프라인 (M4 16GB 기준 성능)
@@ -355,8 +363,11 @@ curl http://127.0.0.1:8765/api/recording/devices
 # 1. 모델 목록 + 상태 조회
 curl http://127.0.0.1:8765/api/stt-models | python -m json.tool
 
-# 2. 모델 다운로드 시작 (백그라운드, 양자화 자동 수행)
+# 2. 모델 다운로드 시작 (백그라운드, 사전 양자화된 HF repo 에서 snapshot_download)
 curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download
+
+# 2-b. 자동 다운로드가 SSL/방화벽으로 실패할 때 — HTTP 직접 GET 폴백
+curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download-direct
 
 # 3. 다운로드 진행률 확인 (3초 간격 폴링 권장)
 curl http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download-status
