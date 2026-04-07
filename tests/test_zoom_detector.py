@@ -402,6 +402,69 @@ class TestStartStop:
         await detector.stop()
 
     @pytest.mark.asyncio
+    async def test_시작_시_이미_미팅_중이면_시작_콜백이_호출된다(
+        self, detector: ZoomDetector
+    ) -> None:
+        """회귀 방지: 앱 시작 시 Zoom 회의가 이미 진행 중이면
+        on_meeting_change 콜백이 is_active=True 로 호출되어야 한다.
+
+        버그 시나리오:
+            1. Zoom 회의 진행 중 사용자가 앱 실행
+            2. ZoomDetector.start() 가 _is_meeting_active=True 만 설정하고
+               _notify_callbacks 를 호출하지 않음
+            3. _poll_loop 의 _handle_state_change 도 단락 (현재 상태와 일치) →
+               콜백 영원히 호출 안 됨
+            4. 결과: 자동 녹음이 시작되지 않고, Zoom 종료 시 "녹음 중이 아님" 경고
+        """
+        callback_calls: list[bool] = []
+
+        def on_change(is_active: bool) -> None:
+            callback_calls.append(is_active)
+
+        detector.on_meeting_change(on_change)
+
+        # Zoom 프로세스가 이미 실행 중인 상태 시뮬레이션
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await detector.start()
+
+        # 폴링 첫 사이클이 단락되기 전에 콜백이 발화돼야 한다 (start() 내부에서)
+        assert callback_calls == [True], (
+            f"start() 시점에 미팅 시작 콜백이 호출되지 않음. 호출 기록: {callback_calls}"
+        )
+        assert detector.is_meeting_active is True
+        assert detector.meeting_started_event.is_set()
+
+        await detector.stop()
+
+    @pytest.mark.asyncio
+    async def test_시작_시_미팅_없으면_콜백_호출_안함(
+        self, detector: ZoomDetector
+    ) -> None:
+        """대칭 검증: 초기에 미팅이 없으면 콜백이 호출되지 않는다 (False→False 전이 없음)."""
+        callback_calls: list[bool] = []
+
+        def on_change(is_active: bool) -> None:
+            callback_calls.append(is_active)
+
+        detector.on_meeting_change(on_change)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=1)  # pgrep not found
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await detector.start()
+
+        assert callback_calls == [], (
+            f"미팅 없는 초기 상태에서 콜백이 호출되면 안 됨: {callback_calls}"
+        )
+        assert detector.meeting_ended_event.is_set()
+
+        await detector.stop()
+
+    @pytest.mark.asyncio
     async def test_시작_시_프로세스_확인_실패_계속_진행(self, detector: ZoomDetector) -> None:
         """초기 프로세스 확인 실패해도 감지기가 시작되는지 검증."""
         call_count = 0

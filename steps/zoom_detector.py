@@ -290,13 +290,20 @@ class ZoomDetector:
         self._is_running = True
 
         # 초기 상태 확인
+        # 회귀 방지: 앱 시작 시 Zoom 회의가 이미 진행 중이면 _handle_state_change 로
+        # 시작 콜백을 발화해야 자동 녹음이 트리거된다. 단순히 _is_meeting_active 를
+        # 직접 True 로 설정하면 폴링 루프의 단락(if is_active == self._is_meeting_active)
+        # 때문에 콜백이 영원히 호출되지 않는 버그가 있었다.
         try:
             initial_active = await self._check_zoom_process()
-            self._is_meeting_active = initial_active
             if initial_active:
-                self.meeting_started_event.set()
-                logger.info("초기 상태: Zoom 미팅 진행 중")
+                # 기본값 self._is_meeting_active=False 와 다르므로 _handle_state_change 가
+                # 시작 콜백(_notify_callbacks(True)) 을 호출한다.
+                logger.info("초기 상태: Zoom 미팅 진행 중 (시작 콜백 호출)")
+                await self._handle_state_change(True)
             else:
+                # 초기에 활성 아님 → 상태 전이 없으므로 콜백 미호출이 정상.
+                # 다만 종료 이벤트는 명시적으로 설정해 대기 중인 코드가 즉시 진행되도록 한다.
                 self.meeting_ended_event.set()
                 logger.info("초기 상태: Zoom 미팅 없음")
         except ProcessCheckError as e:
