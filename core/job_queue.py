@@ -90,6 +90,8 @@ class Job:
     error_message: str = ""
     created_at: str = ""
     updated_at: str = ""
+    # 사용자 정의 제목 (빈 문자열이면 프론트엔드가 meeting_id 기반 타임스탬프 폴백 사용)
+    title: str = ""
 
 
 # === 에러 계층 ===
@@ -175,6 +177,8 @@ class JobQueue:
     """
 
     # 테이블 생성 SQL
+    # 주의: title 은 마이그레이션을 통해 추가되므로 여기의 CREATE 문에도 포함.
+    # 기존 DB 는 initialize() 의 _ensure_schema_migrations() 에서 ALTER TABLE 로 추가된다.
     _CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,7 +189,8 @@ class JobQueue:
         max_retries INTEGER NOT NULL DEFAULT 3,
         error_message TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT ''
     )
     """
 
@@ -249,6 +254,7 @@ class JobQueue:
             with self._write_lock:
                 self._conn.execute(self._CREATE_TABLE_SQL)
                 self._conn.execute(self._CREATE_INDEX_SQL)
+                self._ensure_schema_migrations()
                 self._conn.commit()
 
             logger.info(f"JobQueue DB 초기화 완료: {self._db_path}")
@@ -281,6 +287,25 @@ class JobQueue:
         """현재 시각을 ISO 형식 문자열로 반환한다."""
         return datetime.now().isoformat()
 
+    def _ensure_schema_migrations(self) -> None:
+        """기존 DB 스키마를 최신 형태로 마이그레이션한다.
+
+        SQLite는 DROP COLUMN 지원이 제한적이므로, 새 컬럼 추가는 ALTER TABLE ADD COLUMN
+        방식으로만 수행한다. PRAGMA table_info 로 현재 컬럼을 확인하고 누락분만 추가한다.
+
+        마이그레이션 목록:
+            - v1: title TEXT NOT NULL DEFAULT '' (사용자 정의 회의 제목)
+        """
+        conn = self._ensure_connection()
+        cursor = conn.execute("PRAGMA table_info(jobs)")
+        existing_columns = {row["name"] for row in cursor.fetchall()}
+
+        if "title" not in existing_columns:
+            logger.info("JobQueue 마이그레이션: jobs.title 컬럼 추가")
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
 
@@ -290,6 +315,12 @@ class JobQueue:
         Returns:
             Job 인스턴스
         """
+        # 마이그레이션 전 DB 를 읽을 가능성에 대비해 title 은 방어적으로 조회
+        try:
+            title = row["title"]
+        except (KeyError, IndexError):
+            title = ""
+
         return Job(
             id=row["id"],
             meeting_id=row["meeting_id"],
@@ -300,6 +331,7 @@ class JobQueue:
             error_message=row["error_message"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            title=title or "",
         )
 
     def add_job(
@@ -424,6 +456,55 @@ class JobQueue:
         rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
 
         return [self._row_to_job(row) for row in rows]
+
+    def update_title(self, meeting_id: str, title: str) -> Job:
+        """회의의 사용자 정의 제목을 업데이트한다.
+
+        빈 문자열("")을 저장하면 기본값 표시(프론트엔드가 meeting_id 기반
+        타임스탬프를 사용)로 돌아간다. 이 메서드는 상태 전이 규칙과 무관하다.
+
+        Args:
+            meeting_id: 회의 식별자
+            title: 새 제목 (최대 200자, 앞뒤 공백 제거됨)
+
+        Returns:
+            업데이트된 Job 인스턴스
+
+        Raises:
+            JobNotFoundError: meeting_id 로 작업을 찾을 수 없을 때
+            JobQueueError: title 이 너무 길거나 DB 오류 시
+        """
+        conn = self._ensure_connection()
+
+        # 정제 + 검증
+        cleaned = (title or "").strip()
+        if len(cleaned) > 200:
+            raise JobQueueError(
+                f"제목이 너무 깁니다 ({len(cleaned)}자, 최대 200자)"
+            )
+
+        # 대상 작업 조회
+        job = self.get_job_by_meeting_id(meeting_id)
+        if job is None:
+            raise JobNotFoundError(0)  # meeting_id 전용 에러 타입이 없으므로 0 사용
+
+        now = self._now_iso()
+
+        with self._write_lock:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET title = ?, updated_at = ?
+                WHERE meeting_id = ?
+                """,
+                (cleaned, now, meeting_id),
+            )
+            conn.commit()
+
+        logger.info(
+            "제목 업데이트: meeting_id=%s, title=%r", meeting_id, cleaned
+        )
+        return self.get_job_by_meeting_id(meeting_id)  # type: ignore[return-value]
 
     def update_status(
         self,

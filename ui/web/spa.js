@@ -586,10 +586,10 @@
                 var textContainer = document.createElement("div");
                 textContainer.className = "meeting-item-text";
 
-                // 제목: 날짜 기반
+                // 제목: 사용자 정의 title 우선, 없으면 날짜 기반 폴백
                 var titleEl = document.createElement("div");
                 titleEl.className = "meeting-item-title";
-                titleEl.textContent = _extractTitle(meeting.meeting_id, meeting.created_at);
+                titleEl.textContent = App.extractMeetingTitle(meeting);
 
                 // 요약 프리뷰 1줄
                 var previewEl = document.createElement("div");
@@ -1684,6 +1684,7 @@
             // 텍스트
             var textEl = document.createElement("div");
             textEl.className = "utterance-text";
+            textEl.title = "더블클릭하여 편집";
 
             if (query) {
                 var htmlContent = App.highlightText(u.text, query);
@@ -1696,6 +1697,13 @@
             } else {
                 textEl.textContent = u.text;
             }
+
+            // 더블클릭 → 인라인 편집 모드
+            // (단일 클릭은 텍스트 선택과 충돌하므로 더블클릭 사용)
+            var utteranceIndex = utterances.indexOf(u);
+            textEl.addEventListener("dblclick", function () {
+                self._beginEditUtterance(utteranceIndex, textEl);
+            });
 
             content.appendChild(header);
             content.appendChild(textEl);
@@ -1732,6 +1740,239 @@
             els.searchPrev.style.display = "none";
             els.searchNext.style.display = "none";
         }
+    };
+
+    /**
+     * 특정 발화를 인라인 편집 모드로 전환한다 (더블클릭 핸들러).
+     * @param {number} index - self._allUtterances 배열 내 인덱스
+     * @param {HTMLElement} textEl - 현재 텍스트를 보여주는 element
+     */
+    ViewerView.prototype._beginEditUtterance = function (index, textEl) {
+        var self = this;
+        if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
+        if (textEl.classList.contains("editing")) return;
+
+        var originalText = self._allUtterances[index].text;
+        textEl.classList.add("editing");
+        textEl.innerHTML = "";
+
+        var textarea = document.createElement("textarea");
+        textarea.className = "utterance-textarea";
+        textarea.value = originalText;
+        textarea.rows = Math.max(2, Math.ceil(originalText.length / 60));
+        textEl.appendChild(textarea);
+
+        var actions = document.createElement("div");
+        actions.className = "utterance-edit-actions";
+        var cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn-icon";
+        cancelBtn.textContent = "취소";
+        var saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.className = "btn-icon btn-icon-primary";
+        saveBtn.textContent = "저장";
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        textEl.appendChild(actions);
+
+        var done = false;
+        var restore = function () {
+            if (done) return;
+            done = true;
+            self._renderTimeline(self._allUtterances, self._currentQuery || "");
+        };
+        cancelBtn.addEventListener("click", restore);
+        saveBtn.addEventListener("click", function () {
+            if (done) return;
+            var next = textarea.value;
+            if (next === originalText) {
+                restore();
+                return;
+            }
+            done = true;
+            self._allUtterances[index] = Object.assign({}, self._allUtterances[index], {
+                text: next,
+                was_corrected: true,
+            });
+            self._saveTranscript();
+        });
+        textarea.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                restore();
+            } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                saveBtn.click();
+            }
+        });
+
+        setTimeout(function () {
+            textarea.focus();
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        }, 0);
+    };
+
+    /**
+     * 현재 self._allUtterances 를 서버에 PUT 한다 (인라인 편집 후 또는 bulk replace 후).
+     */
+    ViewerView.prototype._saveTranscript = async function () {
+        var self = this;
+        try {
+            var payload = {
+                utterances: self._allUtterances.map(function (u) {
+                    return {
+                        text: u.text,
+                        original_text: u.original_text || u.text,
+                        speaker: u.speaker,
+                        start: u.start,
+                        end: u.end,
+                        was_corrected: !!u.was_corrected,
+                    };
+                }),
+            };
+            var resp = await fetch(
+                "/api/meetings/" +
+                    encodeURIComponent(self._meetingId) +
+                    "/transcript",
+                {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                }
+            );
+            if (!resp.ok) {
+                var err = await resp.json().catch(function () { return {}; });
+                throw new Error(err.detail || "HTTP " + resp.status);
+            }
+            var data = await resp.json();
+            self._allUtterances = data.utterances || [];
+            self._renderTimeline(self._allUtterances, self._currentQuery || "");
+        } catch (e) {
+            errorBanner.show("전사문 저장 실패: " + (e.message || e));
+            // 실패 시 서버에서 재로드
+            self._loadTranscript();
+        }
+    };
+
+    /**
+     * "모두 바꾸기" 모달을 연다.
+     */
+    ViewerView.prototype._openReplaceModal = function () {
+        var self = this;
+        // 기존 모달 제거
+        var existing = document.getElementById("transcriptReplaceModal");
+        if (existing) existing.remove();
+
+        var overlay = document.createElement("div");
+        overlay.id = "transcriptReplaceModal";
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = [
+            '<div class="modal-content">',
+            '  <h3 class="modal-title">전사문 모두 바꾸기</h3>',
+            '  <div class="modal-field">',
+            '    <label class="modal-label" for="replaceFind">찾을 말 (오인식된 표기)</label>',
+            '    <input type="text" class="modal-input" id="replaceFind" placeholder="예: 파이선" />',
+            '  </div>',
+            '  <div class="modal-field">',
+            '    <label class="modal-label" for="replaceReplace">바꿀 말 (정답)</label>',
+            '    <input type="text" class="modal-input" id="replaceReplace" placeholder="예: FastAPI" />',
+            '  </div>',
+            '  <div class="modal-field">',
+            '    <label class="checkbox-label">',
+            '      <input type="checkbox" id="replaceAddVocab" checked />',
+            '      <span>용어집에도 추가 (다음부터 AI 보정에 자동 반영)</span>',
+            '    </label>',
+            '  </div>',
+            '  <div class="modal-error" id="replaceError"></div>',
+            '  <div class="modal-actions">',
+            '    <button type="button" class="btn-secondary" id="replaceCancelBtn">취소</button>',
+            '    <button type="button" class="settings-save-btn" id="replaceApplyBtn">적용</button>',
+            '  </div>',
+            '</div>',
+        ].join("");
+        document.body.appendChild(overlay);
+
+        var findInput = document.getElementById("replaceFind");
+        var replaceInput = document.getElementById("replaceReplace");
+        var addVocabCb = document.getElementById("replaceAddVocab");
+        var errorEl = document.getElementById("replaceError");
+        var applyBtn = document.getElementById("replaceApplyBtn");
+        var cancelBtn = document.getElementById("replaceCancelBtn");
+
+        var close = function () { overlay.remove(); };
+        cancelBtn.addEventListener("click", close);
+        overlay.addEventListener("click", function (e) {
+            if (e.target === overlay) close();
+        });
+        var escHandler = function (e) {
+            if (e.key === "Escape") {
+                close();
+                document.removeEventListener("keydown", escHandler);
+            }
+        };
+        document.addEventListener("keydown", escHandler);
+
+        applyBtn.addEventListener("click", async function () {
+            var find = findInput.value.trim();
+            var replace = replaceInput.value.trim();
+            if (!find || !replace) {
+                errorEl.textContent = "찾을 말과 바꿀 말을 모두 입력해 주세요.";
+                return;
+            }
+            if (find === replace) {
+                errorEl.textContent = "찾을 말과 바꿀 말이 같아요.";
+                return;
+            }
+            errorEl.textContent = "";
+            applyBtn.disabled = true;
+            applyBtn.textContent = "적용 중…";
+            try {
+                var resp = await fetch(
+                    "/api/meetings/" +
+                        encodeURIComponent(self._meetingId) +
+                        "/transcript/replace",
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            find: find,
+                            replace: replace,
+                            add_to_vocabulary: addVocabCb.checked,
+                        }),
+                    }
+                );
+                if (!resp.ok) {
+                    var err = await resp.json().catch(function () { return {}; });
+                    throw new Error(err.detail || "HTTP " + resp.status);
+                }
+                var data = await resp.json();
+                close();
+                document.removeEventListener("keydown", escHandler);
+                // 성공 메시지
+                var msg = data.changes + "건을 바꿨어요 (" + data.updated_utterances + "개 발화)";
+                if (data.vocabulary_action === "term_created") {
+                    msg += " · 용어집에 '" + replace + "' 신규 등록";
+                } else if (data.vocabulary_action === "alias_added") {
+                    msg += " · '" + replace + "' 용어에 별칭 추가";
+                } else if (data.vocabulary_action === "alias_already_exists") {
+                    msg += " · 용어집에 이미 등록되어 있음";
+                } else if (data.vocabulary_action === "failed") {
+                    msg += " · 용어집 등록은 실패했어요";
+                }
+                // 잠깐 alert 대신 에러배너에 info 성격으로 표시 (toast 구현이 없으면)
+                errorBanner.show(msg);
+                // 전사문 재로드
+                self._loadTranscript();
+            } catch (e) {
+                errorEl.textContent = e.message || String(e);
+                applyBtn.disabled = false;
+                applyBtn.textContent = "적용";
+            }
+        });
+
+        // 포커스
+        setTimeout(function () { findInput.focus(); }, 0);
     };
 
     /**
@@ -1788,7 +2029,9 @@
             var data = await App.apiRequest("/meetings/" + encodeURIComponent(self._meetingId));
 
             els.meetingInfo.style.display = "block";
-            App.safeText(els.meetingTitle, data.meeting_id);
+            // 사용자 정의 title 우선, 없으면 타임스탬프 폴백
+            self._lastMeetingData = data;
+            self._renderMeetingTitle(data);
 
             els.meetingStatus.className = "viewer-status " + data.status;
             App.safeText(els.meetingStatus, App.getStatusLabel(data.status));
@@ -1807,6 +2050,145 @@
             } else {
                 errorBanner.show("회의 정보 로드 실패: " + e.message);
             }
+        }
+    };
+
+    /**
+     * 제목 표시 + 편집 버튼을 렌더링한다.
+     * 클릭 또는 편집 버튼 → 인라인 input, Enter/Blur 저장, Esc 취소.
+     * @param {Object} data - /meetings/{id} 응답
+     */
+    ViewerView.prototype._renderMeetingTitle = function (data) {
+        var self = this;
+        var els = self._els;
+        var titleEl = els.meetingTitle;
+        if (!titleEl) return;
+
+        titleEl.innerHTML = "";
+        titleEl.classList.remove("editing");
+
+        var displayTitle = App.extractMeetingTitle(data);
+        var titleSpan = document.createElement("span");
+        titleSpan.className = "viewer-title-text";
+        titleSpan.textContent = displayTitle;
+        titleSpan.title = "클릭하여 제목 편집";
+        titleSpan.addEventListener("click", function () {
+            self._beginEditTitle(data);
+        });
+        titleEl.appendChild(titleSpan);
+
+        var editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "viewer-title-edit-btn";
+        editBtn.setAttribute("aria-label", "제목 편집");
+        editBtn.title = "제목 편집";
+        editBtn.textContent = "✎";
+        editBtn.addEventListener("click", function () {
+            self._beginEditTitle(data);
+        });
+        titleEl.appendChild(editBtn);
+
+        // 페이지 타이틀도 갱신
+        document.title = displayTitle + " — 전사문 뷰어";
+    };
+
+    /**
+     * 제목 인라인 편집 모드로 전환한다.
+     * @param {Object} data - 현재 회의 데이터
+     */
+    ViewerView.prototype._beginEditTitle = function (data) {
+        var self = this;
+        var titleEl = self._els.meetingTitle;
+        if (!titleEl || titleEl.classList.contains("editing")) return;
+
+        titleEl.classList.add("editing");
+        titleEl.innerHTML = "";
+
+        var currentTitle = (data && data.title && data.title.trim()) || "";
+        var placeholder = App.extractMeetingTitle(data);
+
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "viewer-title-input";
+        input.value = currentTitle;
+        input.placeholder = placeholder;
+        input.maxLength = 200;
+        input.setAttribute("aria-label", "회의 제목");
+        titleEl.appendChild(input);
+
+        var hint = document.createElement("span");
+        hint.className = "viewer-title-hint";
+        hint.textContent = "Enter로 저장 · Esc로 취소";
+        titleEl.appendChild(hint);
+
+        var saved = false;
+        var cancelEdit = function () {
+            if (saved) return;
+            saved = true;
+            self._renderMeetingTitle(data);
+        };
+        var doSave = function () {
+            if (saved) return;
+            saved = true;
+            var next = input.value.trim();
+            // 값이 기존과 동일하면 저장 스킵
+            if (next === currentTitle) {
+                self._renderMeetingTitle(data);
+                return;
+            }
+            self._saveTitle(next);
+        };
+
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                doSave();
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancelEdit();
+            }
+        });
+        input.addEventListener("blur", function () {
+            // blur 시에는 저장 (Esc로 명시적 취소만 취소 처리)
+            doSave();
+        });
+
+        setTimeout(function () {
+            input.focus();
+            input.select();
+        }, 0);
+    };
+
+    /**
+     * PATCH /api/meetings/{id} 로 제목을 저장한다.
+     * @param {string} title - 새 제목 (빈 문자열이면 초기화)
+     */
+    ViewerView.prototype._saveTitle = async function (title) {
+        var self = this;
+        try {
+            var resp = await fetch(
+                "/api/meetings/" + encodeURIComponent(self._meetingId),
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title: title }),
+                }
+            );
+            if (!resp.ok) {
+                var err = await resp.json().catch(function () { return {}; });
+                throw new Error(err.detail || "HTTP " + resp.status);
+            }
+            var data = await resp.json();
+            self._lastMeetingData = data;
+            self._renderMeetingTitle(data);
+            // 사이드바 목록도 갱신 (날짜 기반이 아닌 새 title 반영)
+            if (typeof ListPanel !== "undefined" && ListPanel.loadMeetings) {
+                ListPanel.loadMeetings();
+            }
+        } catch (e) {
+            errorBanner.show("제목 저장 실패: " + (e.message || String(e)));
+            // 실패 시 원래 값으로 복원
+            self._renderMeetingTitle(self._lastMeetingData || {});
         }
     };
 
@@ -1855,7 +2237,7 @@
             actionsEl.appendChild(summarizeBtn);
         }
 
-        // 전사문 복사/다운로드 버튼 (완료된 회의이며 전사문이 로드된 경우)
+        // 전사문 복사/다운로드 + 모두 바꾸기 버튼 (완료된 회의이며 전사문 로드된 경우)
         if (data.status === "completed" && self._allUtterances && self._allUtterances.length > 0) {
             var copyBtn = document.createElement("button");
             copyBtn.className = "viewer-action-btn copy";
@@ -1874,6 +2256,21 @@
                 self._downloadTranscript();
             });
             actionsEl.appendChild(downloadBtn);
+
+            // 모두 바꾸기 (find/replace + 용어집 자동 등록)
+            var replaceBtn = document.createElement("button");
+            replaceBtn.className = "viewer-action-btn replace";
+            replaceBtn.innerHTML = "↻ 모두 바꾸기";
+            replaceBtn.setAttribute(
+                "aria-label",
+                "전사문에서 특정 패턴을 찾아 모두 치환하고 용어집에 추가"
+            );
+            replaceBtn.title =
+                "오인식 패턴을 한 번에 치환하고 용어집에도 자동 등록해요 (발화 더블클릭으로 개별 편집도 가능)";
+            replaceBtn.addEventListener("click", function () {
+                self._openReplaceModal();
+            });
+            actionsEl.appendChild(replaceBtn);
         }
 
         // 삭제 버튼 (완료/실패/녹음완료 시)
@@ -2268,20 +2665,9 @@
                 return;
             }
 
-            // 마크다운 렌더링 + 재생성 버튼
-            els.summaryContent.innerHTML = App.renderMarkdown(data.markdown);
-
-            // 재생성 버튼 추가
-            var regenerateDiv = document.createElement("div");
-            regenerateDiv.className = "summary-regenerate";
-            var regenerateBtn = document.createElement("button");
-            regenerateBtn.className = "btn-regenerate";
-            regenerateBtn.innerHTML = Icons.gear + ' 요약 재생성';
-            regenerateBtn.addEventListener("click", function () {
-                self._requestSummarize(true);
-            });
-            regenerateDiv.appendChild(regenerateBtn);
-            els.summaryContent.appendChild(regenerateDiv);
+            // 현재 마크다운 보관 (편집 시 기준값)
+            self._currentSummaryMd = data.markdown;
+            self._renderSummaryView(data.markdown);
 
             // 요약 생성 버튼 숨기기
             els.summarizeBtn.style.display = "none";
@@ -2300,6 +2686,124 @@
         } finally {
             els.summaryLoading.classList.remove("visible");
         }
+    };
+
+    /**
+     * 요약 뷰 모드 (마크다운 렌더링 + 편집/재생성 버튼) 를 그린다.
+     * @param {string} markdown
+     */
+    ViewerView.prototype._renderSummaryView = function (markdown) {
+        var self = this;
+        var els = self._els;
+
+        els.summaryContent.innerHTML = "";
+
+        // 툴바: [편집] [재생성]
+        var toolbar = document.createElement("div");
+        toolbar.className = "summary-toolbar";
+
+        var editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "btn-secondary";
+        editBtn.innerHTML = "✎ 편집";
+        editBtn.addEventListener("click", function () {
+            self._beginEditSummary();
+        });
+        toolbar.appendChild(editBtn);
+
+        var regenerateBtn = document.createElement("button");
+        regenerateBtn.type = "button";
+        regenerateBtn.className = "btn-regenerate";
+        regenerateBtn.innerHTML = Icons.gear + " 요약 재생성";
+        regenerateBtn.addEventListener("click", function () {
+            if (self._summaryDirty) {
+                if (!window.confirm(
+                    "직접 편집한 내용이 있어요. 재생성하면 편집본이 사라지고 " +
+                    "AI 출력으로 덮어쓰여요 (.bak 에 백업). 계속할까요?"
+                )) return;
+            }
+            self._requestSummarize(true);
+        });
+        toolbar.appendChild(regenerateBtn);
+
+        els.summaryContent.appendChild(toolbar);
+
+        // 렌더된 마크다운
+        var rendered = document.createElement("div");
+        rendered.className = "summary-rendered";
+        rendered.innerHTML = App.renderMarkdown(markdown);
+        els.summaryContent.appendChild(rendered);
+    };
+
+    /**
+     * 요약 편집 모드로 전환한다 (textarea + 저장/취소).
+     */
+    ViewerView.prototype._beginEditSummary = function () {
+        var self = this;
+        var els = self._els;
+        var markdown = self._currentSummaryMd || "";
+
+        els.summaryContent.innerHTML = "";
+
+        var editor = document.createElement("div");
+        editor.className = "summary-editor";
+
+        var textarea = document.createElement("textarea");
+        textarea.className = "summary-textarea";
+        textarea.value = markdown;
+        textarea.spellcheck = false;
+        editor.appendChild(textarea);
+
+        var toolbar = document.createElement("div");
+        toolbar.className = "summary-edit-actions";
+
+        var cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn-secondary";
+        cancelBtn.textContent = "취소";
+        cancelBtn.addEventListener("click", function () {
+            self._renderSummaryView(self._currentSummaryMd || "");
+        });
+        toolbar.appendChild(cancelBtn);
+
+        var saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.className = "btn-regenerate";
+        saveBtn.textContent = "저장";
+        saveBtn.addEventListener("click", async function () {
+            saveBtn.disabled = true;
+            saveBtn.textContent = "저장 중…";
+            try {
+                var resp = await fetch(
+                    "/api/meetings/" +
+                        encodeURIComponent(self._meetingId) +
+                        "/summary",
+                    {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ markdown: textarea.value }),
+                    }
+                );
+                if (!resp.ok) {
+                    var err = await resp.json().catch(function () { return {}; });
+                    throw new Error(err.detail || "HTTP " + resp.status);
+                }
+                var data = await resp.json();
+                self._currentSummaryMd = data.markdown;
+                self._summaryDirty = true;
+                self._renderSummaryView(data.markdown);
+            } catch (e) {
+                errorBanner.show("회의록 저장 실패: " + (e.message || e));
+                saveBtn.disabled = false;
+                saveBtn.textContent = "저장";
+            }
+        });
+        toolbar.appendChild(saveBtn);
+
+        editor.appendChild(toolbar);
+        els.summaryContent.appendChild(editor);
+
+        setTimeout(function () { textarea.focus(); }, 0);
     };
 
     /**

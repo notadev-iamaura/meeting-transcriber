@@ -600,6 +600,34 @@
         return fragment;
     }
 
+    /**
+     * 회의 표시용 제목을 반환한다.
+     * 사용자 정의 title 이 있으면 그대로, 없으면 meeting_id 의 타임스탬프를 파싱.
+     * @param {Object} meeting - { meeting_id, created_at, title }
+     * @returns {string} 표시용 제목
+     */
+    function extractMeetingTitle(meeting) {
+        if (!meeting) return "-";
+        // 사용자 정의 title 우선
+        if (meeting.title && meeting.title.trim()) {
+            return meeting.title.trim();
+        }
+        // meeting_YYYYMMDD_HHMMSS 패턴 매칭
+        var mid = meeting.meeting_id || "";
+        var match = mid.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+        if (match) {
+            return (
+                match[1] + "-" + match[2] + "-" + match[3] + " " +
+                match[4] + ":" + match[5]
+            );
+        }
+        // 폴백: created_at
+        if (meeting.created_at) {
+            return formatDate(meeting.created_at);
+        }
+        return mid || "-";
+    }
+
     window.MeetingApp = {
         // 상수
         API_BASE: API_BASE,
@@ -619,6 +647,7 @@
         highlightText: highlightText,
         copyToClipboard: copyToClipboard,
         createSkeletonCards: createSkeletonCards,
+        extractMeetingTitle: extractMeetingTitle,
 
         // API 요청
         apiRequest: apiRequest,

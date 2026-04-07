@@ -4515,6 +4515,191 @@ button {
   width: 100%;
 }
 
+/* =========================================================================
+   회의 제목 / 요약 / 전사 편집 UI
+   ========================================================================= */
+
+/* 제목 영역 (뷰어 헤더) — 편집 버튼과 인라인 input */
+.viewer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.viewer-title-text {
+  cursor: text;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-title-text:hover {
+  background: var(--bg-hover);
+}
+
+.viewer-title-edit-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.viewer-title:hover .viewer-title-edit-btn {
+  opacity: 1;
+}
+
+.viewer-title-edit-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.viewer-title.editing {
+  gap: 8px;
+}
+
+.viewer-title-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 700;
+  font-family: inherit;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.viewer-title-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ----- 요약 편집 ----- */
+
+.summary-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.summary-rendered {
+  /* 기존 summary-content 와 동일한 마크다운 출력 스타일 재사용 */
+}
+
+.summary-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.summary-textarea {
+  width: 100%;
+  min-height: 400px;
+  max-height: 70vh;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  box-sizing: border-box;
+  tab-size: 2;
+}
+
+.summary-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.summary-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ----- 전사 발화 인라인 편집 ----- */
+
+.utterance-text.editing {
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.utterance-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  box-sizing: border-box;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
+}
+
+.utterance-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-icon-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-icon-primary:hover {
+  background: var(--accent);
+  opacity: 0.9;
+}
+
+/* ----- 모두 바꾸기 모달 추가 스타일 ----- */
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* viewer-action-btn.replace — 기존 버튼 시리즈와 동일 톤 */
+.viewer-action-btn.replace {
+  /* 기본 viewer-action-btn 스타일을 상속 */
+}
+
 .stt-manual-urls {
   list-style: none;
   padding: 0;

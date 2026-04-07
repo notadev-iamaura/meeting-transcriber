@@ -173,6 +173,7 @@ class MeetingItem(BaseModel):
         error_message: 에러 메시지
         created_at: 생성 시각
         updated_at: 수정 시각
+        title: 사용자 정의 제목 (빈 문자열이면 프론트가 타임스탬프 폴백)
     """
 
     id: int
@@ -183,6 +184,7 @@ class MeetingItem(BaseModel):
     error_message: str = ""
     created_at: str = ""
     updated_at: str = ""
+    title: str = ""
 
 
 class MeetingsResponse(BaseModel):
@@ -584,6 +586,7 @@ async def get_meetings(
                 error_message=job.error_message,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
+                title=getattr(job, "title", "") or "",
             )
             for job in paged_jobs
         ]
@@ -642,6 +645,7 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
             error_message=job.error_message,
             created_at=job.created_at,
             updated_at=job.updated_at,
+            title=getattr(job, "title", "") or "",
         )
     except HTTPException:
         raise
@@ -650,6 +654,81 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
         raise HTTPException(
             status_code=500,
             detail=f"회의 상세 조회 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+class MeetingPatchRequest(BaseModel):
+    """PATCH /api/meetings/{meeting_id} 요청 본문 (부분 업데이트)."""
+
+    title: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="사용자 정의 제목 (빈 문자열이면 자동 타임스탬프 복귀)",
+    )
+
+
+@router.patch("/meetings/{meeting_id}", response_model=MeetingItem)
+async def patch_meeting(
+    request: Request,
+    meeting_id: str,
+    body: MeetingPatchRequest,
+) -> MeetingItem:
+    """회의 메타데이터를 부분 업데이트한다. 현재는 title 만 지원.
+
+    빈 문자열을 보내면 title 이 초기화되어 프론트엔드가 자동 타임스탬프 제목으로
+    돌아간다. 다른 필드(status, audio_path 등)는 이 엔드포인트로 수정할 수 없다.
+
+    Raises:
+        HTTPException 400: 유효하지 않은 meeting_id 또는 title 길이 초과
+        HTTPException 404: 회의 없음
+        HTTPException 503: JobQueue 미초기화
+    """
+    _validate_meeting_id(meeting_id)
+    queue = _get_job_queue(request)
+
+    try:
+        # 기존 라우트들과 동일 패턴: queue.queue 로 raw JobQueue 접근
+        raw_queue = getattr(queue, "queue", queue)
+        job = await asyncio.to_thread(
+            raw_queue.get_job_by_meeting_id, meeting_id
+        )
+        if job is None:
+            raise HTTPException(
+                status_code=404, detail=f"회의를 찾을 수 없습니다: {meeting_id}"
+            )
+
+        if body.title is not None:
+            try:
+                job = await asyncio.to_thread(
+                    raw_queue.update_title, meeting_id, body.title
+                )
+            except Exception as exc:  # JobQueueError 또는 기타 검증 오류
+                from core.job_queue import JobQueueError as _JQErr
+
+                if isinstance(exc, _JQErr):
+                    raise HTTPException(
+                        status_code=400, detail=str(exc)
+                    ) from exc
+                raise
+
+        return MeetingItem(
+            id=job.id,
+            meeting_id=job.meeting_id,
+            audio_path=job.audio_path,
+            status=job.status,
+            retry_count=job.retry_count,
+            error_message=job.error_message,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            title=getattr(job, "title", "") or "",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"회의 메타데이터 업데이트 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의 메타데이터 업데이트 중 오류가 발생했습니다: {e}",
         ) from e
 
 
@@ -701,6 +780,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
             error_message=updated_job.error_message,
             created_at=updated_job.created_at,
             updated_at=updated_job.updated_at,
+            title=getattr(updated_job, "title", "") or "",
         )
     except HTTPException:
         raise
@@ -772,6 +852,7 @@ async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
             error_message=updated_job.error_message,
             created_at=updated_job.created_at,
             updated_at=updated_job.updated_at,
+            title=getattr(updated_job, "title", "") or "",
         )
     except HTTPException:
         raise
@@ -1026,6 +1107,455 @@ async def get_summary(
             status_code=500,
             detail=f"회의록 조회 중 오류가 발생했습니다: {e}",
         ) from e
+
+
+# ===========================================================================
+# 회의록 / 전사문 편집 엔드포인트
+# ===========================================================================
+# 사용자가 AI 생성 결과물을 수동으로 수정하거나, 자주 틀리는 전사 패턴을
+# 한 번에 치환하면서 용어집에도 자동 등록할 수 있도록 지원한다.
+#
+# 저장 원칙:
+#   - 기존 파일(meeting_minutes.md, correct.json)을 직접 덮어쓴다.
+#   - 원자적 쓰기: {파일}.tmp 에 쓰고 os.replace 로 교체
+#   - 직전 버전은 {파일}.bak 으로 백업 (복구용)
+#   - force 재생성 시에도 .bak 로 보존되어 수동 편집을 복구할 수 있다.
+# ===========================================================================
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """텍스트 파일을 원자적으로 덮어쓴다 (.bak 백업 포함).
+
+    path 부모 디렉토리가 없으면 생성한다. 기존 파일이 있으면 .bak 로 복사 후
+    temp → rename 순서로 교체한다.
+    """
+    import shutil
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_suffix(path.suffix + ".bak")
+        try:
+            shutil.copy2(path, backup)
+        except OSError as exc:
+            logger.warning(f"백업 생성 실패 (진행 계속): {exc}")
+
+    tmp: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as tf:
+            tf.write(content)
+            tf.flush()
+            import os as _os
+
+            _os.fsync(tf.fileno())
+            tmp = tf.name
+        import os as _os2
+
+        _os2.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """JSON 파일을 원자적으로 덮어쓴다 (.bak 백업 포함)."""
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    _atomic_write_text(path, content)
+
+
+# === 요약 편집 ===
+
+
+class SummaryUpdateRequest(BaseModel):
+    """PUT /api/meetings/{meeting_id}/summary 요청."""
+
+    markdown: str = Field(
+        ...,
+        min_length=1,
+        max_length=200000,
+        description="수정된 회의록 마크다운 본문",
+    )
+
+
+@router.put(
+    "/meetings/{meeting_id}/summary",
+    response_model=SummaryResponse,
+)
+async def update_summary(
+    request: Request,
+    meeting_id: str,
+    body: SummaryUpdateRequest,
+) -> SummaryResponse:
+    """사용자가 편집한 회의록(마크다운) 본문을 저장한다.
+
+    기존 `meeting_minutes.md` (없으면 `summary.md`) 파일을 덮어쓰고,
+    직전 버전을 `.bak` 로 백업한다. 이후 `GET /summary` 는 수정본을 반환한다.
+
+    주의: `POST /summarize?force=true` 로 AI 재생성 시 현재 수정본은 .bak 로만
+    남고 다시 AI 출력으로 대체된다. 프론트엔드에서 재생성 전 경고를 표시하세요.
+
+    Raises:
+        HTTPException 400: 유효하지 않은 meeting_id
+        HTTPException 404: 회의 디렉토리 없음
+        HTTPException 500: 파일 쓰기 실패
+    """
+    _validate_meeting_id(meeting_id)
+    outputs_dir = _get_outputs_dir(request)
+    meeting_dir = outputs_dir / meeting_id
+
+    if not meeting_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"회의 출력 폴더를 찾을 수 없습니다: {meeting_id}",
+        )
+
+    # 기존 파일 결정: meeting_minutes.md 우선, 없으면 summary.md
+    minutes_md = meeting_dir / "meeting_minutes.md"
+    summary_md = meeting_dir / "summary.md"
+    if minutes_md.exists():
+        target = minutes_md
+    elif summary_md.exists():
+        target = summary_md
+    else:
+        # 둘 다 없으면 meeting_minutes.md 로 새로 생성
+        target = minutes_md
+
+    try:
+        await asyncio.to_thread(_atomic_write_text, target, body.markdown)
+        # JSON 캐시 무효화 (다음 GET 에서 수정본 반영되도록)
+        _json_cache.invalidate(target)
+    except OSError as exc:
+        logger.exception(f"회의록 저장 실패: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"회의록 저장 중 오류가 발생했습니다: {exc}",
+        ) from exc
+
+    logger.info(
+        "회의록 수동 편집 저장: meeting_id=%s, path=%s, length=%d",
+        meeting_id,
+        target.name,
+        len(body.markdown),
+    )
+    return SummaryResponse(
+        markdown=body.markdown,
+        meeting_id=meeting_id,
+        num_speakers=0,
+        speakers=[],
+        num_utterances=0,
+        created_at="",
+    )
+
+
+# === 전사문 편집 ===
+
+
+class TranscriptUtterancePatch(BaseModel):
+    """전사문 수정 시 단일 발화 스키마.
+
+    기존 구조와 호환: speaker, start, end, text 등 필수 필드.
+    """
+
+    text: str = Field(..., max_length=10000)
+    original_text: str = ""
+    speaker: str = "UNKNOWN"
+    start: float = 0.0
+    end: float = 0.0
+    was_corrected: bool = False
+
+
+class TranscriptUpdateRequest(BaseModel):
+    """PUT /api/meetings/{meeting_id}/transcript 요청."""
+
+    utterances: list[TranscriptUtterancePatch] = Field(..., min_length=1)
+
+
+class TranscriptReplaceRequest(BaseModel):
+    """POST /api/meetings/{meeting_id}/transcript/replace 요청."""
+
+    find: str = Field(
+        ..., min_length=1, max_length=500, description="치환 대상 패턴 (정확 매칭)"
+    )
+    replace: str = Field(
+        ..., min_length=1, max_length=500, description="치환 후 문자열"
+    )
+    add_to_vocabulary: bool = Field(
+        default=False,
+        description="True면 자동으로 용어집에 등록 (replace=term, find=alias)",
+    )
+
+
+class TranscriptReplaceResponse(BaseModel):
+    """POST /api/meetings/{meeting_id}/transcript/replace 응답."""
+
+    changes: int = 0
+    updated_utterances: int = 0
+    vocabulary_action: Optional[str] = None
+    vocabulary_term_id: Optional[str] = None
+
+
+def _find_transcript_file(
+    config: Any, meeting_id: str
+) -> tuple[Optional[Path], str]:
+    """전사 편집 대상 파일을 찾는다.
+
+    편집 시에는 readonly 폴백(merge.json)을 사용하지 않고,
+    correct.json(우선) 또는 corrected.json 만 대상으로 한다.
+
+    Returns:
+        (파일 경로, 'output'|'checkpoint') 튜플, 없으면 (None, "")
+    """
+    outputs_dir = config.paths.resolved_outputs_dir
+    checkpoints_dir = config.paths.resolved_checkpoints_dir
+
+    # 1순위: outputs/{id}/corrected.json
+    corrected = outputs_dir / meeting_id / "corrected.json"
+    if corrected.is_file():
+        return corrected, "output"
+
+    # 2순위: checkpoints/{id}/correct.json
+    checkpoint = checkpoints_dir / meeting_id / "correct.json"
+    if checkpoint.is_file():
+        return checkpoint, "checkpoint"
+
+    return None, ""
+
+
+@router.put(
+    "/meetings/{meeting_id}/transcript",
+    response_model=TranscriptResponse,
+)
+async def update_transcript(
+    request: Request,
+    meeting_id: str,
+    body: TranscriptUpdateRequest,
+) -> TranscriptResponse:
+    """사용자가 편집한 전사문 전체(발화 목록)를 저장한다.
+
+    Raises:
+        HTTPException 400: 유효하지 않은 meeting_id
+        HTTPException 404: 편집 가능한 전사 파일 없음
+        HTTPException 500: 파일 쓰기 실패
+    """
+    _validate_meeting_id(meeting_id)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
+        )
+
+    target, _ = _find_transcript_file(config, meeting_id)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id} (먼저 파이프라인을 실행하세요)",
+        )
+
+    try:
+        # 기존 데이터 로드 (num_speakers 등 메타 필드 보존)
+        def _load() -> dict[str, Any]:
+            with open(target, encoding="utf-8") as f:
+                return json.load(f)
+
+        existing = await asyncio.to_thread(_load)
+
+        # 발화 목록 교체
+        new_utterances = [u.model_dump() for u in body.utterances]
+        existing["utterances"] = new_utterances
+
+        # 화자 수 재계산
+        speakers = sorted({u["speaker"] for u in new_utterances if u["speaker"] != "UNKNOWN"})
+        existing["num_speakers"] = len(speakers)
+
+        await asyncio.to_thread(_atomic_write_json, target, existing)
+        _json_cache.invalidate(target)
+    except OSError as exc:
+        logger.exception(f"전사문 저장 실패: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"전사문 저장 중 오류가 발생했습니다: {exc}",
+        ) from exc
+
+    logger.info(
+        "전사문 수동 편집 저장: meeting_id=%s, utterances=%d",
+        meeting_id,
+        len(new_utterances),
+    )
+
+    return TranscriptResponse(
+        utterances=[
+            TranscriptUtteranceItem(
+                text=u["text"],
+                original_text=u.get("original_text", u["text"]),
+                speaker=u["speaker"],
+                start=u["start"],
+                end=u["end"],
+                was_corrected=u.get("was_corrected", False),
+            )
+            for u in new_utterances
+        ],
+        meeting_id=meeting_id,
+        num_speakers=existing.get("num_speakers", 0),
+        speakers=speakers,
+        total_utterances=len(new_utterances),
+    )
+
+
+@router.post(
+    "/meetings/{meeting_id}/transcript/replace",
+    response_model=TranscriptReplaceResponse,
+)
+async def replace_transcript_pattern(
+    request: Request,
+    meeting_id: str,
+    body: TranscriptReplaceRequest,
+) -> TranscriptReplaceResponse:
+    """전사문에서 특정 패턴을 모두 찾아 치환한다.
+
+    자주 틀리는 오인식(예: '파이선' → 'FastAPI')을 한 번에 수정하고,
+    옵션으로 용어집에 자동 등록하여 앞으로의 보정에 반영되게 한다.
+
+    동작:
+        1. 편집 대상 전사 파일(correct.json 또는 corrected.json) 로드
+        2. 각 발화의 text 에서 `find` 를 `replace` 로 문자열 치환 (대소문자 구분)
+        3. 변경된 발화의 `was_corrected=True` 로 마크
+        4. `add_to_vocabulary=True` 면 `core.user_settings.add_vocabulary_term` 또는
+           기존 동일 term 의 aliases 에 find 추가
+        5. 원자적 파일 저장 + 결과 요약 반환
+
+    Raises:
+        HTTPException 400: 유효하지 않은 meeting_id 또는 빈 find/replace
+        HTTPException 404: 편집 가능한 전사 파일 없음
+        HTTPException 500: 파일 쓰기 실패
+    """
+    _validate_meeting_id(meeting_id)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
+        )
+
+    if body.find == body.replace:
+        raise HTTPException(
+            status_code=400,
+            detail="find와 replace가 같습니다. 다른 값을 입력해 주세요.",
+        )
+
+    target, _ = _find_transcript_file(config, meeting_id)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id}",
+        )
+
+    try:
+        def _load() -> dict[str, Any]:
+            with open(target, encoding="utf-8") as f:
+                return json.load(f)
+
+        existing = await asyncio.to_thread(_load)
+        utterances = existing.get("utterances", [])
+
+        total_changes = 0
+        updated_count = 0
+        for u in utterances:
+            text = u.get("text", "")
+            if body.find in text:
+                new_text = text.replace(body.find, body.replace)
+                change_count = text.count(body.find)
+                total_changes += change_count
+                updated_count += 1
+                u["text"] = new_text
+                u["was_corrected"] = True
+
+        if total_changes == 0:
+            return TranscriptReplaceResponse(
+                changes=0,
+                updated_utterances=0,
+                vocabulary_action=None,
+                vocabulary_term_id=None,
+            )
+
+        existing["utterances"] = utterances
+        await asyncio.to_thread(_atomic_write_json, target, existing)
+        _json_cache.invalidate(target)
+
+        # 용어집 자동 등록
+        vocab_action: Optional[str] = None
+        vocab_term_id: Optional[str] = None
+        if body.add_to_vocabulary:
+            try:
+                from core import user_settings as _us
+
+                vocab = _us.load_vocabulary(force_reload=True)
+                # 기존에 같은 term 이 있으면 alias 에 find 추가
+                existing_term = None
+                for t in vocab.terms:
+                    if t.term.strip().lower() == body.replace.strip().lower():
+                        existing_term = t
+                        break
+
+                if existing_term is not None:
+                    if body.find not in existing_term.aliases:
+                        new_aliases = list(existing_term.aliases) + [body.find]
+                        _us.update_vocabulary_term(
+                            term_id=existing_term.id, aliases=new_aliases
+                        )
+                        vocab_action = "alias_added"
+                    else:
+                        vocab_action = "alias_already_exists"
+                    vocab_term_id = existing_term.id
+                else:
+                    new_term = _us.add_vocabulary_term(
+                        term=body.replace,
+                        aliases=[body.find],
+                        note=f"'{meeting_id}' 전사 편집에서 자동 등록",
+                    )
+                    vocab_action = "term_created"
+                    vocab_term_id = new_term.id
+                logger.info(
+                    "용어집 자동 등록: action=%s, term=%s, alias=%s",
+                    vocab_action,
+                    body.replace,
+                    body.find,
+                )
+            except Exception as exc:
+                # 용어집 등록 실패는 전사 수정 자체를 실패시키지 않는다
+                logger.warning(f"용어집 자동 등록 실패 (전사 수정은 유지): {exc}")
+                vocab_action = "failed"
+
+    except OSError as exc:
+        logger.exception(f"전사문 치환 실패: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"전사문 치환 중 오류가 발생했습니다: {exc}",
+        ) from exc
+
+    logger.info(
+        "전사문 패턴 치환: meeting_id=%s, find=%r, replace=%r, changes=%d",
+        meeting_id,
+        body.find,
+        body.replace,
+        total_changes,
+    )
+
+    return TranscriptReplaceResponse(
+        changes=total_changes,
+        updated_utterances=updated_count,
+        vocabulary_action=vocab_action,
+        vocabulary_term_id=vocab_term_id,
+    )
 
 
 @router.post("/search", response_model=SearchResponse)
