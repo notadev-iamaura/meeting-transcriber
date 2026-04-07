@@ -501,14 +501,15 @@ class TestStartStop:
         self, detector: ZoomDetector
     ) -> None:
         """api/server.py 의 _on_zoom_meeting_change 와 동일한 시그니처의
-        async 콜백이 ZoomDetector.start() 에서 한 번 발화되고, recorder mock 의
-        start_recording 이 정확히 1회 호출되는지 검증한다.
+        async 콜백이 ZoomDetector.start() 에서 한 번 발화되고, 이후 폴링
+        사이클에서는 단락되어 중복 호출되지 않는지 확인한다.
 
         이 테스트가 통과하면 lifespan 안에서:
             recorder = AudioRecorder(...)
             zoom_detector.on_meeting_change(_on_zoom_meeting_change)  # async
             await zoom_detector.start()
-        호출만으로 자동 녹음이 트리거됨을 보장할 수 있다.
+        호출만으로 자동 녹음이 트리거되고, 폴링이 stop_recording 을 잘못
+        호출하지 않음을 보장할 수 있다.
         """
         recorder_mock = AsyncMock()
         recorder_mock.start_recording = AsyncMock()
@@ -523,16 +524,19 @@ class TestStartStop:
         detector.on_meeting_change(_on_zoom_meeting_change)
 
         mock_proc = AsyncMock()
-        mock_proc.wait = AsyncMock(return_value=0)
+        mock_proc.wait = AsyncMock(return_value=0)  # Zoom 활성 시뮬레이션 유지
 
+        # patch 컨텍스트를 폴링이 충분히 돌 때까지 유지하여
+        # "단락 보장" 을 실측 검증한다 (start() 만으로는 폴링이 거의 안 돔).
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             await detector.start()
+            # 폴링이 최소 2~3 사이클 돌도록 대기 (poll_interval=1 → 2.5초면 충분)
+            await asyncio.sleep(2.5)
+            await detector.stop()
 
-        # 정확히 1회 호출 (start() 안에서) - polling 첫 사이클은 단락되어야 함
+        # 단 1회만 호출 — 폴링 사이클들은 모두 단락되어야 함
         recorder_mock.start_recording.assert_awaited_once()
         recorder_mock.stop_recording.assert_not_awaited()
-
-        await detector.stop()
 
     @pytest.mark.asyncio
     async def test_시작_시_미팅_없으면_콜백_호출_안함(
@@ -558,6 +562,54 @@ class TestStartStop:
         assert detector.meeting_ended_event.is_set()
 
         await detector.stop()
+
+    @pytest.mark.asyncio
+    async def test_시작_시_활성_후_종료_시_정확한_콜백_시퀀스(
+        self, detector: ZoomDetector
+    ) -> None:
+        """앱 시작 시 Zoom 활성 → 잠시 후 Zoom 종료 시나리오:
+        시작 콜백 1회 + 종료 콜백 1회가 정확한 순서로 발화돼야 한다.
+
+        이 테스트는 사용자 보고 버그의 가장 핵심 시나리오를 검증한다:
+            1. Zoom 진행 중 앱 시작 → 녹음 시작
+            2. Zoom 종료 → 녹음 정지
+
+        버그 상태에서는 1 단계가 누락되어 [False] 만 호출됐었다.
+        Fix 후에는 [True, False] 가 정확한 순서로 호출되어야 한다.
+        """
+        events: list[bool] = []
+
+        async def cb(active: bool) -> None:
+            events.append(active)
+
+        detector.on_meeting_change(cb)
+
+        # 1단계: Zoom 활성 상태에서 start
+        mock_active = AsyncMock()
+        mock_active.wait = AsyncMock(return_value=0)
+        mock_inactive = AsyncMock()
+        mock_inactive.wait = AsyncMock(return_value=1)
+
+        # 첫 호출(start 안의 _check_zoom_process) → 활성
+        # 이후 폴링 호출들 → 비활성 (Zoom 종료 시뮬레이션)
+        call_count = {"n": 0}
+
+        def _create_subprocess(*args, **kwargs):
+            call_count["n"] += 1
+            return mock_active if call_count["n"] == 1 else mock_inactive
+
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_create_subprocess
+        ):
+            await detector.start()
+            # 폴링이 비활성을 감지하도록 대기
+            await asyncio.sleep(2.5)
+            await detector.stop()
+
+        # 정확한 시퀀스: 시작(True) → 종료(False)
+        assert events == [True, False], (
+            f"콜백 시퀀스가 예상과 다름. 예상: [True, False], 실제: {events}"
+        )
 
     @pytest.mark.asyncio
     async def test_stop_후_재시작_시_콜백이_다시_호출된다(
