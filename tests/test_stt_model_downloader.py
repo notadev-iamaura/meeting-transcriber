@@ -151,6 +151,8 @@ class TestSTTModelDownloader:
         assert "네트워크 오류" in progress.error_message
 
     async def test_양자화_실패시_ERROR(self, downloader, monkeypatch):
+        # ghost613 은 여전히 needs_quantization=True 이므로 양자화 경로 테스트에 사용.
+        # seastar 는 사전 양자화본으로 HF 배포되어 양자화 경로를 타지 않는다.
         from core.stt_model_status import ModelStatus
 
         async def fake_hf(spec, job):
@@ -162,10 +164,10 @@ class TestSTTModelDownloader:
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
         monkeypatch.setattr(downloader, "_quantize", failing_quant)
 
-        await downloader.start_download("seastar-medium-4bit")
-        await downloader.wait_for("seastar-medium-4bit")
+        await downloader.start_download("ghost613-turbo-4bit")
+        await downloader.wait_for("ghost613-turbo-4bit")
 
-        progress = downloader.get_progress("seastar-medium-4bit")
+        progress = downloader.get_progress("ghost613-turbo-4bit")
         assert progress.status == ModelStatus.ERROR
         assert "양자화" in progress.error_message
 
@@ -200,10 +202,14 @@ class TestSTTModelDownloader:
     async def test_verify_weights_safetensors_존재_확인(
         self, downloader, patched_specs
     ):
-        """_verify 는 weights.safetensors + config.json 존재를 체크한다."""
+        """_verify 는 로컬 양자화 경로의 weights.safetensors + config.json 존재를 체크한다.
+
+        ghost613 은 needs_quantization=True 이므로 로컬 디렉토리 기반 검증을 사용한다.
+        seastar 는 HF 캐시 기반이라 이 테스트에 적합하지 않다.
+        """
         from core.stt_model_registry import get_by_id
 
-        spec = get_by_id("seastar-medium-4bit")
+        spec = get_by_id("ghost613-turbo-4bit")
         assert not downloader._verify(spec)
 
         path = Path(spec.model_path).expanduser()
@@ -215,7 +221,10 @@ class TestSTTModelDownloader:
         assert downloader._verify(spec)
 
     async def test_진행률_0에서_100까지_단조증가(self, downloader, monkeypatch):
-        """진행률이 중간(>=50) 을 거쳐 100 으로 끝나야 한다."""
+        """진행률이 중간(>=50) 을 거쳐 100 으로 끝나야 한다.
+
+        needs_quantization=True 경로를 검증하기 위해 ghost613 사용.
+        """
         observed: list[int] = []
 
         async def fake_hf(spec, job):
@@ -231,10 +240,10 @@ class TestSTTModelDownloader:
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
         monkeypatch.setattr(downloader, "_quantize", fake_quant)
 
-        await downloader.start_download("seastar-medium-4bit")
-        await downloader.wait_for("seastar-medium-4bit")
+        await downloader.start_download("ghost613-turbo-4bit")
+        await downloader.wait_for("ghost613-turbo-4bit")
 
-        progress = downloader.get_progress("seastar-medium-4bit")
+        progress = downloader.get_progress("ghost613-turbo-4bit")
         assert progress.progress_percent == 100
         # _hf_download 진입 시점 < _quantize 진입 시점
         assert observed[0] < observed[1]

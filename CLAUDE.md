@@ -177,13 +177,13 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 > **웹 UI에서 다운로드/활성화 가능** (`/app/settings` → "음성 인식 모델 (STT)")
 > 또는 `config.yaml`의 `stt.model_name`을 직접 수정.
 
-**지원 모델 (한국어 fine-tune 4bit 양자화):**
+**지원 모델 (한국어 fine-tune):**
 
-| 모델 ID | 베이스 | CER | WER | RAM | 디스크 | 추천 |
-|--------|--------|-----|-----|-----|--------|------|
-| `komixv2` (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | 호환성 |
-| `seastar-medium-4bit` ⭐ | Medium + Zeroth fine-tune (4bit) | **1.25%** | **3.21%** | **1.26GB** | **831MB** | 정확도 최고 |
-| `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 884MB | 속도 우선 |
+| 모델 ID | 베이스 | CER | WER | RAM | 디스크 | 배포 | 추천 |
+|--------|--------|-----|-----|-----|--------|------|------|
+| `komixv2` (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | HF 사전빌드 | 호환성 |
+| `seastar-medium-4bit` ⭐ | Medium + Zeroth fine-tune (4bit) | **1.25%** | **3.21%** | **1.26GB** | **420MB** | HF 사전빌드 | 정확도 최고 |
+| `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 884MB | 로컬 양자화 | 속도 우선 |
 
 **모델 변경 방법:**
 
@@ -195,18 +195,22 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download
 curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 
 # 3) config.yaml 직접 수정
-# stt.model_name: "/Users/{user}/.meeting-transcriber/stt_models/seastar-medium-ko-4bit"
+# stt.model_name: "youngouk/seastar-medium-ko-4bit-mlx"   # HF repo 직접 사용
 ```
 
 **구현 모듈:**
 
 - `core/stt_model_registry.py` — STTModelSpec + 3종 메타데이터
 - `core/stt_model_status.py` — 다운로드 상태 판정 (HF 캐시 + 로컬 경로)
-- `core/stt_model_downloader.py` — 백그라운드 다운로드 + mlx-examples convert.py 호출 + 4bit 양자화
+- `core/stt_model_downloader.py` — 백그라운드 다운로드 (+ 선택적 4bit 양자화)
 - `api/routes.py` — `/api/stt-models` 4개 엔드포인트
 
-> **양자화 의존성**: 한국어 fine-tune 모델 다운로드 시 `~/Projects/mlx-examples/whisper/convert.py`가 필요합니다.
-> 미설치 시 `git clone https://github.com/ml-explore/mlx-examples.git ~/Projects/mlx-examples`.
+**배포 전략:**
+
+- **HF 사전빌드** (`komixv2`, `seastar-medium-4bit`): 저자가 양자화·업로드한 결과물을 HuggingFace에서 직접 받음. 사용자 환경에 추가 의존성 없음, 다운로드 1회로 완료.
+  - `komixv2` → [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx)
+  - `seastar-medium-4bit` → [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx)
+- **로컬 양자화** (`ghost613-turbo-4bit`): 원본 fp16을 HF에서 받아 로컬에서 4bit 양자화. `~/Projects/mlx-examples/whisper/convert.py` 필요 (`git clone https://github.com/ml-explore/mlx-examples.git ~/Projects/mlx-examples`). 향후 사전빌드 배포로 전환 예정.
 
 ---
 

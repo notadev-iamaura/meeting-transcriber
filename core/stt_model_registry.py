@@ -70,11 +70,14 @@ STT_MODELS: list[STTModelSpec] = [
         id="seastar-medium-4bit",
         label="seastar medium-ko-zeroth (4bit)",
         description="Whisper Medium + Zeroth Korean fine-tune, 4bit 양자화 — 최고 정확도",
-        hf_source="seastar105/whisper-medium-ko-zeroth",
-        needs_quantization=True,
-        model_path="~/.meeting-transcriber/stt_models/seastar-medium-ko-4bit",
+        # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드 (로컬 양자화 불필요).
+        # 원본 seastar105/whisper-medium-ko-zeroth를 mlx-examples convert.py로 양자화 후 재배포.
+        hf_source="youngouk/seastar-medium-ko-4bit-mlx",
+        needs_quantization=False,
+        # komixv2와 동일 패턴: mlx-whisper가 HF repo ID를 직접 해석한다.
+        model_path="youngouk/seastar-medium-ko-4bit-mlx",
         base_model="medium",
-        expected_size_mb=831,
+        expected_size_mb=420,
         cer_percent=1.25,
         wer_percent=3.21,
         memory_gb=1.26,

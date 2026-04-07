@@ -81,7 +81,10 @@ class TestSTTModelRegistry:
         assert spec is not None
         assert spec.cer_percent == 1.25
         assert spec.wer_percent == 3.21
-        assert spec.needs_quantization is True
+        # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드 (로컬 양자화 불필요)
+        assert spec.needs_quantization is False
+        assert spec.hf_source == "youngouk/seastar-medium-ko-4bit-mlx"
+        assert spec.model_path == "youngouk/seastar-medium-ko-4bit-mlx"
         assert spec.base_model == "medium"
         assert spec.is_recommended is True
 
