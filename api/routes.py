@@ -2951,6 +2951,21 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
         job = downloader.get_progress(spec.id) if downloader is not None else None
         runtime_status = job.status if job is not None else disk_status
 
+        # 방어 로직: 디스크가 READY 이고 runtime 이 ERROR 이면 stale 한 에러 job.
+        # 사용자가 수동 다운로드·가져오기로 파일을 배치했으나 이전 자동 다운로드의
+        # 에러 job 이 in-memory 에 남아있는 경우 (앱 재시작 없이도 복구되도록).
+        if (
+            disk_status == ModelStatus.READY
+            and runtime_status == ModelStatus.ERROR
+            and downloader is not None
+        ):
+            logger.info(
+                "stale ERROR job 제거 (디스크는 READY): %s", spec.id
+            )
+            downloader.clear_job(spec.id)
+            job = None
+            runtime_status = disk_status
+
         is_active = _is_active_stt_model(spec.model_path, active_path)
         if is_active:
             active_id = spec.id
@@ -3297,7 +3312,7 @@ async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
     response_model=STTImportResponse,
 )
 async def import_stt_manual(
-    model_id: str, body: STTImportRequest
+    request: Request, model_id: str, body: STTImportRequest
 ) -> STTImportResponse:
     """사용자가 브라우저로 받은 모델 파일을 앱 내부 경로로 복사한다.
 
@@ -3361,6 +3376,19 @@ async def import_stt_manual(
             status_code=500,
             detail=f"파일 복사에 실패했어요: {exc}",
         ) from exc
+
+    # stale 한 downloader job 상태 초기화.
+    # 이전 자동 다운로드가 SSL/네트워크 오류로 실패해 ERROR 상태로 남아 있었다면,
+    # 수동 가져오기가 성공한 지금 그 에러 상태를 제거해야 /api/stt-models 응답이
+    # 디스크 기준(READY) 으로 정상 표시된다. 앱 재시작 없이도 복구되도록 한다.
+    downloader = getattr(request.app.state, "stt_downloader", None)
+    if downloader is not None:
+        try:
+            downloader.clear_job(model_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "수동 가져오기 후 stale job 정리 실패 (무시): %s", exc
+            )
 
     return STTImportResponse(
         model_id=model_id,

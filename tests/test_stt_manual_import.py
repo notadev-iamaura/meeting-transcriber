@@ -273,6 +273,175 @@ def test_import_manual_missing_files(
     assert "weights.safetensors" in resp.json()["detail"]
 
 
+def test_import_manual_clears_stale_error_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """회귀 방지: 자동 다운로드 실패 (ERROR job) → 수동 가져오기 성공 →
+    downloader 의 stale ERROR job 이 제거되고 /api/stt-models 가 READY 를 반환해야 한다.
+
+    증상:
+        1. 자동 다운로드가 SSL 오류로 실패 → downloader._jobs[id].status = ERROR
+        2. 사용자가 수동 가져오기로 파일 배치 → 디스크는 READY
+        3. 그러나 API 가 runtime_status (ERROR) 를 그대로 반환했음 (버그)
+
+    수정:
+        - import_stt_manual 성공 직후 downloader.clear_job(model_id) 호출
+        - 추가 방어: list_stt_models 에서도 disk=READY + runtime=ERROR 면
+          stale 로 판단해 clear_job 호출 후 READY 반환
+    """
+    from unittest.mock import MagicMock
+
+    from core.stt_model_downloader import DownloadJob, STTModelDownloader
+    from core.stt_model_status import ModelStatus
+    from fastapi import FastAPI
+
+    # 소스 폴더 + 타겟 격리
+    source = tmp_path / "downloads" / "seastar"
+    source.mkdir(parents=True)
+    (source / "config.json").write_text('{"n_mels": 80}')
+    (source / "weights.safetensors").write_bytes(b"fake" * 100)
+
+    target_base = tmp_path / "app-data"
+    monkeypatch.setattr(
+        "core.stt_model_registry.get_manual_import_dir",
+        lambda spec, base_dir=None: str(
+            target_base / "stt_models" / f"{spec.id}-manual"
+        ),
+    )
+
+    # 실제 downloader 인스턴스에 stale ERROR job 주입
+    downloader = STTModelDownloader(models_dir=tmp_path / "dl")
+    stale_job = DownloadJob(
+        job_id="stale-1",
+        model_id="seastar-medium-4bit",
+        status=ModelStatus.ERROR,
+        progress_percent=0,
+        current_step="error",
+        error_message="SSL 오류: CERTIFICATE_VERIFY_FAILED",
+    )
+    downloader._jobs["seastar-medium-4bit"] = stale_job
+
+    # FastAPI 앱 + stt_downloader 연결
+    app = FastAPI()
+    app.include_router(router)
+    app.state.stt_downloader = downloader
+    app.state.config = MagicMock()
+    app.state.config.stt.model_name = "youngouk/whisper-medium-komixv2-mlx"
+    client = TestClient(app)
+
+    # 사전 상태: 버그 재현 — stale ERROR 가 API 응답에 반영됨
+    pre_resp = client.get("/api/stt-models")
+    pre_models = {m["id"]: m for m in pre_resp.json()["models"]}
+    assert (
+        pre_models["seastar-medium-4bit"]["status"] == "error"
+        or pre_models["seastar-medium-4bit"]["status"] == "ready"
+    )  # 방어 로직 발동 전이면 error, 발동 후면 ready
+
+    # 수동 가져오기 수행
+    resp = client.post(
+        "/api/stt-models/seastar-medium-4bit/import-manual",
+        json={"source_dir": str(source)},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # 사후 검증: downloader 의 stale job 이 제거됨
+    assert downloader.get_progress("seastar-medium-4bit") is None, (
+        "import 성공 후 stale ERROR job 이 제거되지 않음"
+    )
+
+    # API 재호출 시 READY 반환
+    post_resp = client.get("/api/stt-models")
+    post_models = {m["id"]: m for m in post_resp.json()["models"]}
+    assert post_models["seastar-medium-4bit"]["status"] == "ready"
+    assert post_models["seastar-medium-4bit"]["error_message"] is None
+
+
+def test_list_stt_models_clears_stale_error_on_disk_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """방어 로직 단독 테스트: API 가 stale ERROR job 을 자동 정리한다.
+
+    import-manual 호출 없이도, GET /api/stt-models 한 번이면
+    disk=READY + runtime=ERROR 상황이 READY 로 자동 보정되어야 한다.
+    """
+    from unittest.mock import MagicMock
+
+    from core.stt_model_downloader import DownloadJob, STTModelDownloader
+    from core.stt_model_status import ModelStatus
+    from fastapi import FastAPI
+
+    # 수동 임포트 디렉토리에 파일 직접 배치 (디스크는 READY)
+    manual_dir = tmp_path / "seastar-medium-4bit-manual"
+    manual_dir.mkdir(parents=True)
+    (manual_dir / "config.json").write_text("{}")
+    (manual_dir / "weights.safetensors").write_bytes(b"x" * 100)
+
+    monkeypatch.setattr(
+        "core.stt_model_status.get_manual_import_dir",
+        lambda spec, base_dir=None: str(manual_dir)
+        if spec.id == "seastar-medium-4bit"
+        else str(tmp_path / f"{spec.id}-none"),
+    )
+
+    # stale ERROR job 주입
+    downloader = STTModelDownloader(models_dir=tmp_path / "dl")
+    downloader._jobs["seastar-medium-4bit"] = DownloadJob(
+        job_id="stale-2",
+        model_id="seastar-medium-4bit",
+        status=ModelStatus.ERROR,
+        progress_percent=0,
+        current_step="error",
+        error_message="stale",
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.stt_downloader = downloader
+    app.state.config = MagicMock()
+    app.state.config.stt.model_name = "youngouk/whisper-medium-komixv2-mlx"
+    client = TestClient(app)
+
+    resp = client.get("/api/stt-models")
+    models = {m["id"]: m for m in resp.json()["models"]}
+
+    # API 가 자동으로 stale job 을 정리하고 READY 로 보고
+    assert models["seastar-medium-4bit"]["status"] == "ready"
+    # 다음 호출을 위해 downloader 에서도 제거됐어야 함
+    assert downloader.get_progress("seastar-medium-4bit") is None
+
+
+def test_clear_job_refuses_active_download(tmp_path: Path) -> None:
+    """진행 중인 DOWNLOADING job 은 clear_job 이 거부해야 한다."""
+    from core.stt_model_downloader import DownloadJob, STTModelDownloader
+    from core.stt_model_status import ModelStatus
+
+    downloader = STTModelDownloader(models_dir=tmp_path)
+    downloader._jobs["seastar-medium-4bit"] = DownloadJob(
+        job_id="active-1",
+        model_id="seastar-medium-4bit",
+        status=ModelStatus.DOWNLOADING,
+        progress_percent=40,
+        current_step="downloading",
+    )
+
+    result = downloader.clear_job("seastar-medium-4bit")
+    assert result is False
+    # job 이 그대로 유지되어야 함
+    assert (
+        downloader.get_progress("seastar-medium-4bit").status
+        == ModelStatus.DOWNLOADING
+    )
+
+
+def test_clear_job_noop_when_no_job(tmp_path: Path) -> None:
+    """job 이 없어도 안전하게 True 반환 (멱등)."""
+    from core.stt_model_downloader import STTModelDownloader
+
+    downloader = STTModelDownloader(models_dir=tmp_path)
+    assert downloader.clear_job("seastar-medium-4bit") is True
+    assert downloader.clear_job("seastar-medium-4bit") is True  # 두 번째도 OK
+
+
 def test_import_manual_ghost613_supported(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

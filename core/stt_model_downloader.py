@@ -136,6 +136,45 @@ class STTModelDownloader:
         """현재 진행 중이거나 최근 완료된 작업의 상태를 반환한다."""
         return self._jobs.get(model_id)
 
+    def clear_job(self, model_id: str) -> bool:
+        """특정 모델의 완료/에러 작업 상태를 in-memory 에서 제거한다.
+
+        사용 시나리오:
+            1. 자동 다운로드가 SSL/네트워크 오류로 실패 → job.status = ERROR
+            2. 사용자가 수동 다운로드 + 가져오기(import) 로 파일 배치 → 디스크는 READY
+            3. 그러나 downloader 의 in-memory job 이 여전히 ERROR 를 반환 →
+               /api/stt-models 응답이 runtime_status(ERROR) 로 표시됨
+            4. 이 메서드로 stale 한 에러 job 을 지우면 API 가 disk_status(READY)
+               를 반환하게 된다.
+
+        진행 중(DOWNLOADING)인 작업은 안전하게 제거할 수 없으므로 false 를 반환.
+
+        Args:
+            model_id: 제거할 작업의 모델 ID
+
+        Returns:
+            True: 제거 성공 (또는 해당 job 이 원래 없었음)
+            False: 진행 중이라 제거하지 않음
+        """
+        job = self._jobs.get(model_id)
+        if job is not None and job.status == ModelStatus.DOWNLOADING:
+            logger.warning(
+                "clear_job 거부: 진행 중인 작업 (%s, status=%s)",
+                model_id,
+                job.status,
+            )
+            return False
+
+        self._jobs.pop(model_id, None)
+        # 관련 태스크 참조도 정리 (태스크는 이미 완료된 상태여야 함)
+        task = self._tasks.pop(model_id, None)
+        if task is not None and not task.done():
+            logger.warning(
+                "clear_job: 아직 완료되지 않은 태스크 발견 (%s)", model_id
+            )
+        logger.info("STT 다운로드 작업 상태 초기화: %s", model_id)
+        return True
+
     async def wait_for(self, model_id: str) -> None:
         """백그라운드 태스크가 끝날 때까지 대기한다 (테스트/동기 호출용)."""
         task = self._tasks.get(model_id)
