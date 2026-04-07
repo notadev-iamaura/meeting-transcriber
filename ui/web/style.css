@@ -1205,6 +1205,151 @@ button {
   background: var(--error);
 }
 
+
+/* --- 11-1b. 글로벌 리소스 바 (모든 탭 공통, 우측 상단 fixed) --- */
+
+.global-resource-bar {
+  position: fixed;
+  top: 8px;
+  right: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  font-size: 11px;
+  color: var(--text-secondary);
+  z-index: 100;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  pointer-events: none;
+}
+
+.global-resource-bar .grb-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.global-resource-bar .grb-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.global-resource-bar .grb-bar-bg {
+  width: 60px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.global-resource-bar .grb-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.global-resource-bar .grb-bar-fill.warning { background: var(--warning); }
+.global-resource-bar .grb-bar-fill.danger { background: var(--error); }
+
+.global-resource-bar .grb-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+}
+
+.global-resource-bar .grb-model {
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.global-resource-bar .grb-model:empty {
+  display: none;
+}
+
+
+/* --- 11-1c. 처리 로그 패널 (뷰어 내부) --- */
+
+.viewer-log-panel {
+  margin: 16px 0;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.viewer-log-panel summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.viewer-log-panel summary::-webkit-details-marker { display: none; }
+
+.viewer-log-panel summary::before {
+  content: "▸";
+  margin-right: 6px;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.viewer-log-panel[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.viewer-log-panel .log-total {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.viewer-log-panel .log-table {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px 16px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-log-panel .log-row {
+  display: contents;
+}
+
+.viewer-log-panel .log-step {
+  color: var(--text-primary);
+}
+
+.viewer-log-panel .log-elapsed {
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.viewer-log-panel .log-status {
+  text-align: right;
+  font-size: 10px;
+}
+
+.viewer-log-panel .log-status.success { color: var(--success); }
+.viewer-log-panel .log-status.failed { color: var(--error); }
+.viewer-log-panel .log-status.skipped { color: var(--text-muted); }
+
 .resource-model {
   font-size: 10px;
   color: var(--text-muted);

@@ -868,6 +868,140 @@ async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
         ) from e
 
 
+@router.post("/meetings/{meeting_id}/re-transcribe")
+async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
+    """기존 전사 결과를 폐기하고 처음부터 다시 전사한다.
+
+    completed/failed 상태의 작업을 대상으로:
+        1. 체크포인트 디렉토리 전체 삭제 (pipeline_state.json 포함)
+        2. 출력 디렉토리의 corrected.json/summary.md 삭제 (오디오는 보존)
+        3. job 상태를 queued 로 강제 전환 (retry_count 0 으로 리셋)
+        4. ChromaDB/FTS5 의 stale 청크는 embedder 단계에서 멱등 삭제
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 재전사할 회의 고유 식별자
+
+    Returns:
+        MeetingItem: 업데이트된 회의 정보 (status=queued)
+
+    Raises:
+        HTTPException: 회의를 찾을 수 없을 때 (404), 재전사 불가 상태 (409)
+    """
+    import shutil
+
+    from core.job_queue import InvalidTransitionError, JobNotFoundError
+
+    queue = _get_job_queue(request)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="설정이 초기화되지 않았습니다.")
+
+    try:
+        job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        # 1) 체크포인트 디렉토리 삭제
+        checkpoints_dir = config.paths.resolved_checkpoints_dir / meeting_id
+        if checkpoints_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, checkpoints_dir)
+            logger.info(f"재전사: 체크포인트 삭제 — {checkpoints_dir}")
+
+        # 2) 출력 파일 삭제 (오디오/녹음본은 보존)
+        outputs_meeting_dir = config.paths.resolved_outputs_dir / meeting_id
+        if outputs_meeting_dir.exists():
+            for fname in ("corrected.json", "summary.md"):
+                fpath = outputs_meeting_dir / fname
+                if fpath.exists():
+                    try:
+                        await asyncio.to_thread(fpath.unlink)
+                    except OSError as exc:
+                        logger.warning(f"재전사: {fname} 삭제 실패: {exc}")
+
+        # 3) job 상태 강제 리셋
+        updated_job = await asyncio.to_thread(
+            queue.queue.reset_for_retranscribe, job.id
+        )
+
+        logger.info(f"재전사 요청: {meeting_id} (job_id={job.id})")
+
+        return MeetingItem(
+            id=updated_job.id,
+            meeting_id=updated_job.meeting_id,
+            audio_path=updated_job.audio_path,
+            status=updated_job.status,
+            retry_count=updated_job.retry_count,
+            error_message=updated_job.error_message,
+            created_at=updated_job.created_at,
+            updated_at=updated_job.updated_at,
+            title=getattr(updated_job, "title", "") or "",
+        )
+    except HTTPException:
+        raise
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"재전사 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"재전사 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.get("/meetings/{meeting_id}/pipeline-state")
+async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any]:
+    """파이프라인 실행 상태 (단계별 소요시간 포함) 를 반환한다.
+
+    `~/.meeting-transcriber/checkpoints/{meeting_id}/pipeline_state.json` 을 그대로 반환한다.
+    프론트엔드 로그 탭에서 단계별 elapsed_seconds 와 총 소요시간을 표시한다.
+
+    Args:
+        request: FastAPI Request 객체
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        PipelineState 직렬화 dict + total_elapsed_seconds (편의 필드)
+
+    Raises:
+        HTTPException: pipeline_state.json 이 없을 때 (404)
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="설정이 초기화되지 않았습니다.")
+
+    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
+    if not state_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"파이프라인 상태 파일이 없습니다: {meeting_id}",
+        )
+
+    try:
+        data = await asyncio.to_thread(
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError) as e:
+        logger.exception(f"pipeline_state.json 읽기 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"파이프라인 상태를 읽을 수 없습니다: {e}",
+        ) from e
+
+    # 편의: 총 소요시간 계산 (step_results 의 elapsed_seconds 합산)
+    step_results = data.get("step_results", []) or []
+    total_elapsed = sum(
+        float(step.get("elapsed_seconds") or 0.0) for step in step_results
+    )
+    data["total_elapsed_seconds"] = round(total_elapsed, 2)
+    return data
+
+
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     """회의를 삭제한다.

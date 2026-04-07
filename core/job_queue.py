@@ -630,6 +630,52 @@ class JobQueue:
 
         return self.get_job(job_id)
 
+    def reset_for_retranscribe(self, job_id: int) -> Job:
+        """완료/실패한 작업을 재전사 대상으로 초기화한다.
+
+        표준 상태 전이 규칙(VALID_TRANSITIONS)을 우회하여
+        completed/failed 상태의 작업을 강제로 queued 로 되돌린다.
+        retry_count 와 error_message 도 리셋한다.
+
+        주의: 이 메서드는 체크포인트/출력 파일을 삭제하지 않는다.
+        호출자가 파일 정리 책임을 가진다 (api/routes.py::re_transcribe_meeting).
+
+        Args:
+            job_id: 재전사할 작업 ID
+
+        Returns:
+            업데이트된 Job 인스턴스
+
+        Raises:
+            JobNotFoundError: 작업이 없을 때
+            InvalidTransitionError: completed/failed 가 아닐 때
+        """
+        conn = self._ensure_connection()
+        job = self.get_job(job_id)
+
+        allowed = {JobStatus.COMPLETED.value, JobStatus.FAILED.value}
+        if job.status not in allowed:
+            raise InvalidTransitionError(
+                job_id,
+                job.status,
+                JobStatus.QUEUED.value,
+            )
+
+        now = self._now_iso()
+        with self._write_lock:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, retry_count = 0, error_message = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (JobStatus.QUEUED.value, now, job_id),
+            )
+            conn.commit()
+
+        logger.info(f"재전사 초기화: id={job_id} ({job.status} → queued)")
+        return self.get_job(job_id)
+
     def retry_all_failed(self) -> list[int]:
         """재시도 가능한 모든 실패 작업을 재시도한다.
 

@@ -708,14 +708,8 @@
      * @constructor
      */
     function EmptyView() {
-        this._resourceTimer = null;
+        // 리소스 모니터는 GlobalResourceBar 가 모든 탭에서 표시하므로 EmptyView 자체에서는 렌더하지 않음.
         this._render();
-        this._loadResources();
-        // 5초마다 리소스 갱신
-        var self = this;
-        this._resourceTimer = setInterval(function () {
-            self._loadResources();
-        }, 5000);
     }
 
     /**
@@ -727,31 +721,6 @@
         contentEl.innerHTML = "";
 
         var html = [
-            // 리소스 모니터 섹션
-            '<div class="resource-monitor">',
-            '  <div class="section-title">시스템 상태</div>',
-            '  <div class="resource-bars">',
-            '    <div class="resource-item">',
-            '      <div class="resource-label">',
-            '        <span>RAM</span>',
-            '        <span class="resource-value" id="res-ram-text">--</span>',
-            '      </div>',
-            '      <div class="resource-bar-bg">',
-            '        <div class="resource-bar-fill" id="res-ram-bar" style="width:0%"></div>',
-            '      </div>',
-            '    </div>',
-            '    <div class="resource-item">',
-            '      <div class="resource-label">',
-            '        <span>CPU</span>',
-            '        <span class="resource-value" id="res-cpu-text">--</span>',
-            '      </div>',
-            '      <div class="resource-bar-bg">',
-            '        <div class="resource-bar-fill" id="res-cpu-bar" style="width:0%"></div>',
-            '      </div>',
-            '    </div>',
-            '  </div>',
-            '  <div class="resource-model" id="res-model-text"></div>',
-            '</div>',
             // 메인 안내 영역
             '<div class="empty-view">',
             '  <div class="empty-view-icon">' + Icons.clipboard + '</div>',
@@ -777,47 +746,6 @@
                 self._batchSummarize(batchBtn);
             });
         }
-    };
-
-    /**
-     * 시스템 리소스 정보를 조회하여 UI에 반영한다.
-     * GET /api/system/resources
-     */
-    EmptyView.prototype._loadResources = function () {
-        App.apiRequest("/system/resources")
-            .then(function (data) {
-                // RAM 바
-                var ramBar = document.getElementById("res-ram-bar");
-                var ramText = document.getElementById("res-ram-text");
-                if (ramBar && ramText) {
-                    var ramPct = data.ram_percent || 0;
-                    ramBar.style.width = ramPct + "%";
-                    ramBar.className = "resource-bar-fill" +
-                        (ramPct > 85 ? " danger" : ramPct > 70 ? " warning" : "");
-                    ramText.textContent =
-                        data.ram_used_gb + " / " + data.ram_total_gb + " GB (" + ramPct + "%)";
-                }
-                // CPU 바
-                var cpuBar = document.getElementById("res-cpu-bar");
-                var cpuText = document.getElementById("res-cpu-text");
-                if (cpuBar && cpuText) {
-                    var cpuPct = data.cpu_percent || 0;
-                    cpuBar.style.width = cpuPct + "%";
-                    cpuBar.className = "resource-bar-fill" +
-                        (cpuPct > 85 ? " danger" : cpuPct > 70 ? " warning" : "");
-                    cpuText.textContent = cpuPct + "%";
-                }
-                // 로드된 모델
-                var modelText = document.getElementById("res-model-text");
-                if (modelText) {
-                    modelText.textContent = data.loaded_model
-                        ? "로드된 모델: " + data.loaded_model
-                        : "";
-                }
-            })
-            .catch(function () {
-                // 리소스 조회 실패 시 무시 (서버 미시작 등)
-            });
     };
 
     /**
@@ -849,14 +777,9 @@
     };
 
     /**
-     * 뷰를 정리한다. 리소스 모니터 타이머를 해제한다.
+     * 뷰를 정리한다. (리소스 모니터는 GlobalResourceBar 가 관리)
      */
-    EmptyView.prototype.destroy = function () {
-        if (this._resourceTimer) {
-            clearInterval(this._resourceTimer);
-            this._resourceTimer = null;
-        }
-    };
+    EmptyView.prototype.destroy = function () {};
 
 
     // =================================================================
@@ -1232,6 +1155,10 @@
             '  </div>',
             '  <div class="speaker-legend" id="viewerSpeakerLegend"></div>',
             '  <div class="viewer-actions" id="viewerActions"></div>',
+            '  <details class="viewer-log-panel" id="viewerLogPanel" style="display:none;">',
+            '    <summary>처리 로그 <span class="log-total" id="viewerLogTotal"></span></summary>',
+            '    <div class="log-table" id="viewerLogTable"></div>',
+            '  </details>',
             '</div>',
 
             // 탭 네비게이션
@@ -1317,6 +1244,9 @@
             metaUtterances: document.getElementById("viewerMetaUtterances"),
             speakerLegend: document.getElementById("viewerSpeakerLegend"),
             viewerActions: document.getElementById("viewerActions"),
+            logPanel: document.getElementById("viewerLogPanel"),
+            logTotal: document.getElementById("viewerLogTotal"),
+            logTable: document.getElementById("viewerLogTable"),
             tabNav: document.getElementById("viewerTabNav"),
             timeline: document.getElementById("viewerTimeline"),
             transcriptLoading: document.getElementById("viewerTranscriptLoading"),
@@ -2072,6 +2002,9 @@
             self._lastMeetingData = data;
             self._renderActions(data);
 
+            // 처리 로그 (단계별 소요시간) 로드 — completed/failed 일 때만 의미가 있음
+            self._loadPipelineLog();
+
         } catch (e) {
             if (e.status === 404) {
                 errorBanner.show("회의를 찾을 수 없습니다: " + self._meetingId);
@@ -2281,6 +2214,18 @@
             actionsEl.appendChild(retryBtn);
         }
 
+        // 재전사 버튼 (완료/실패 회의를 처음부터 다시 전사)
+        if (data.status === "completed" || data.status === "failed") {
+            var reBtn = document.createElement("button");
+            reBtn.className = "viewer-action-btn retry";
+            reBtn.innerHTML = "↻ 재전사";
+            reBtn.title = "기존 전사 결과를 폐기하고 처음부터 다시 전사합니다";
+            reBtn.addEventListener("click", function () {
+                self._reTranscribeMeeting(data.meeting_id, reBtn);
+            });
+            actionsEl.appendChild(reBtn);
+        }
+
         // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
         var skippedSteps = data.skipped_steps || [];
         var hasSummarizeSkipped = skippedSteps.indexOf("summarize") >= 0;
@@ -2476,6 +2421,103 @@
         } catch (e) {
             errorBanner.show("재시도 실패: " + e.message);
         }
+    };
+
+    /**
+     * 기존 전사 결과를 폐기하고 처음부터 다시 전사한다.
+     * 사용자 확인 후 POST /meetings/{id}/re-transcribe 호출.
+     * @param {string} meetingId
+     * @param {HTMLElement} btn
+     */
+    ViewerView.prototype._reTranscribeMeeting = async function (meetingId, btn) {
+        if (!confirm(
+            "기존 전사 결과(전사문/요약/체크포인트)를 모두 폐기하고\n" +
+            "처음부터 다시 전사합니다. 계속하시겠습니까?"
+        )) {
+            return;
+        }
+        var originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = "재전사 요청 중...";
+        try {
+            await App.apiPost(
+                "/meetings/" + encodeURIComponent(meetingId) + "/re-transcribe",
+                {}
+            );
+            this._loadMeetingInfo();
+            ListPanel.loadMeetings();
+        } catch (e) {
+            errorBanner.show("재전사 실패: " + e.message);
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    };
+
+    /**
+     * 파이프라인 처리 로그 (단계별 소요시간) 를 로드하여 표시한다.
+     * GET /meetings/{id}/pipeline-state
+     */
+    ViewerView.prototype._loadPipelineLog = async function () {
+        var self = this;
+        var els = self._els;
+        if (!els.logPanel || !els.logTable || !els.logTotal) return;
+        try {
+            var data = await App.apiRequest(
+                "/meetings/" + encodeURIComponent(self._meetingId) + "/pipeline-state"
+            );
+            var steps = data.step_results || [];
+            if (!steps.length) {
+                els.logPanel.style.display = "none";
+                return;
+            }
+            var total = data.total_elapsed_seconds || 0;
+            els.logTotal.textContent = "(총 " + self._formatElapsed(total) + ")";
+
+            // 단계 라벨 매핑 (PIPELINE_STEPS 기반)
+            var labelMap = {};
+            PIPELINE_STEPS.forEach(function (s) { labelMap[s.key] = s.label; });
+
+            var skipped = data.skipped_steps || [];
+            var rows = steps.map(function (s) {
+                var label = labelMap[s.step] || s.step;
+                var statusClass = s.success ? "success" : "failed";
+                var statusText = s.success ? "✓" : "✗";
+                if (skipped.indexOf(s.step) >= 0) {
+                    statusClass = "skipped";
+                    statusText = "skip";
+                }
+                return [
+                    '<div class="log-row">',
+                    '  <div class="log-step">' + App.escapeHtml(label) + '</div>',
+                    '  <div class="log-elapsed">' + self._formatElapsed(s.elapsed_seconds || 0) + '</div>',
+                    '  <div class="log-status ' + statusClass + '">' + statusText + '</div>',
+                    '</div>',
+                ].join("");
+            });
+            els.logTable.innerHTML = rows.join("");
+            els.logPanel.style.display = "block";
+        } catch (e) {
+            // pipeline_state.json 이 없는 회의(녹음만 완료, 미전사 등)는 정상 — 패널 숨김
+            els.logPanel.style.display = "none";
+        }
+    };
+
+    /**
+     * 초 단위 시간을 사람이 읽기 좋은 형식으로 변환한다.
+     * @param {number} sec - 초
+     * @returns {string} 예: "12.3초", "1분 5초", "1시간 23분"
+     */
+    ViewerView.prototype._formatElapsed = function (sec) {
+        sec = Math.round(sec);
+        if (sec < 60) return sec + "초";
+        if (sec < 3600) {
+            var m = Math.floor(sec / 60);
+            var s = sec % 60;
+            return s ? (m + "분 " + s + "초") : (m + "분");
+        }
+        var h = Math.floor(sec / 3600);
+        var mm = Math.floor((sec % 3600) / 60);
+        return mm ? (h + "시간 " + mm + "분") : (h + "시간");
     };
 
     /**
@@ -5067,6 +5109,92 @@
 
 
     // =================================================================
+    // === 글로벌 리소스 모니터 (모든 뷰 공통 상단) ===
+    // =================================================================
+
+    /**
+     * 모든 탭에서 항상 표시되는 RAM/CPU/모델 상태 바.
+     * body 우측 상단에 fixed 로 부착되며, 5초마다 /api/system/resources 폴링.
+     * 단일 인스턴스로 충분하므로 IIFE 가 아닌 모듈 객체로 노출한다.
+     */
+    var GlobalResourceBar = (function () {
+        var _timer = null;
+        var _el = null;
+
+        function _ensureDom() {
+            if (_el) return _el;
+            _el = document.createElement("div");
+            _el.id = "globalResourceBar";
+            _el.className = "global-resource-bar";
+            _el.setAttribute("role", "status");
+            _el.setAttribute("aria-live", "polite");
+            _el.innerHTML = [
+                '<div class="grb-item">',
+                '  <span class="grb-label">RAM</span>',
+                '  <div class="grb-bar-bg"><div class="grb-bar-fill" id="grb-ram-bar"></div></div>',
+                '  <span class="grb-value" id="grb-ram-text">--</span>',
+                '</div>',
+                '<div class="grb-item">',
+                '  <span class="grb-label">CPU</span>',
+                '  <div class="grb-bar-bg"><div class="grb-bar-fill" id="grb-cpu-bar"></div></div>',
+                '  <span class="grb-value" id="grb-cpu-text">--</span>',
+                '</div>',
+                '<div class="grb-model" id="grb-model-text" title="현재 로드된 모델"></div>',
+            ].join("");
+            document.body.appendChild(_el);
+            return _el;
+        }
+
+        function _refresh() {
+            App.apiRequest("/system/resources")
+                .then(function (data) {
+                    var ramBar = document.getElementById("grb-ram-bar");
+                    var ramText = document.getElementById("grb-ram-text");
+                    if (ramBar && ramText) {
+                        var ramPct = data.ram_percent || 0;
+                        ramBar.style.width = ramPct + "%";
+                        ramBar.className = "grb-bar-fill" +
+                            (ramPct > 85 ? " danger" : ramPct > 70 ? " warning" : "");
+                        ramText.textContent = data.ram_used_gb + "/" + data.ram_total_gb + "G";
+                    }
+                    var cpuBar = document.getElementById("grb-cpu-bar");
+                    var cpuText = document.getElementById("grb-cpu-text");
+                    if (cpuBar && cpuText) {
+                        var cpuPct = data.cpu_percent || 0;
+                        cpuBar.style.width = cpuPct + "%";
+                        cpuBar.className = "grb-bar-fill" +
+                            (cpuPct > 85 ? " danger" : cpuPct > 70 ? " warning" : "");
+                        cpuText.textContent = cpuPct + "%";
+                    }
+                    var modelText = document.getElementById("grb-model-text");
+                    if (modelText) {
+                        modelText.textContent = data.loaded_model || "";
+                    }
+                })
+                .catch(function () {
+                    // 서버 미시작 등은 무시
+                });
+        }
+
+        function start() {
+            _ensureDom();
+            _refresh();
+            if (_timer) clearInterval(_timer);
+            _timer = setInterval(_refresh, 5000);
+        }
+
+        function stop() {
+            if (_timer) {
+                clearInterval(_timer);
+                _timer = null;
+            }
+        }
+
+        return { start: start, stop: stop, refresh: _refresh };
+    })();
+
+
+    // =================================================================
     // === 키보드 단축키 (글로벌) ===
     // =================================================================
 
@@ -5129,6 +5257,9 @@
 
     // 라우터 초기화 (현재 경로에 맞는 뷰 렌더링)
     Router.init();
+
+    // 글로벌 리소스 모니터 시작 (모든 탭 공통 상단 표시)
+    GlobalResourceBar.start();
 
     // 테마 토글 초기화
     (function initThemeToggle() {
