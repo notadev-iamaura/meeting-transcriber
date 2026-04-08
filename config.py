@@ -126,8 +126,12 @@ class HallucinationFilterConfig(BaseModel):
         description="평균 로그 확률 임계값 (미만 시 저신뢰도)",
     )
     no_speech_threshold: float = Field(
-        default=0.6, ge=0.0, le=1.0,
-        description="무음 확률 임계값 (초과 시 무음 세그먼트 제거)",
+        default=0.9, ge=0.0, le=1.0,
+        description=(
+            "무음 확률 임계값 (초과 시 무음 세그먼트 제거). "
+            "0.6은 너무 공격적이라 실제 발화도 대량 삭제되는 문제가 있어 0.9로 상향. "
+            "더 공격적으로 환각을 제거하려면 0.8, 보수적으로는 0.95 이상을 사용한다."
+        ),
     )
     repetition_threshold: int = Field(
         default=3, ge=2, le=10,

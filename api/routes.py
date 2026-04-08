@@ -2414,6 +2414,11 @@ class SettingsResponse(BaseModel):
     llm_mlx_max_tokens: int = 2000
     llm_skip_steps: bool = True
     stt_language: str = "ko"
+    # 환각 필터 (hallucination_filter)
+    hf_enabled: bool = True
+    hf_no_speech_threshold: float = 0.9
+    hf_compression_ratio_threshold: float = 2.4
+    hf_repetition_threshold: int = 3
     available_models: list[dict] = Field(default_factory=lambda: _AVAILABLE_MODELS)
 
 
@@ -2437,6 +2442,11 @@ class SettingsUpdateRequest(BaseModel):
     llm_mlx_max_tokens: Optional[int] = None
     llm_skip_steps: Optional[bool] = None
     stt_language: Optional[str] = None
+    # 환각 필터
+    hf_enabled: Optional[bool] = None
+    hf_no_speech_threshold: Optional[float] = None
+    hf_compression_ratio_threshold: Optional[float] = None
+    hf_repetition_threshold: Optional[int] = None
 
 
 class SettingsUpdateResponse(BaseModel):
@@ -2536,6 +2546,10 @@ async def get_settings(request: Request) -> SettingsResponse:
         llm_mlx_max_tokens=config.llm.mlx_max_tokens,
         llm_skip_steps=config.pipeline.skip_llm_steps,
         stt_language=config.stt.language,
+        hf_enabled=config.hallucination_filter.enabled,
+        hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
+        hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
+        hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
         available_models=_AVAILABLE_MODELS,
     )
 
@@ -2578,6 +2592,10 @@ async def update_settings(
                 llm_mlx_max_tokens=config.llm.mlx_max_tokens,
                 llm_skip_steps=config.pipeline.skip_llm_steps,
                 stt_language=config.stt.language,
+                hf_enabled=config.hallucination_filter.enabled,
+                hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
+                hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
+                hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
                 available_models=_AVAILABLE_MODELS,
             ),
             message="변경할 설정이 없습니다.",
@@ -2629,6 +2647,29 @@ async def update_settings(
                 ),
             )
 
+    # 환각 필터 파라미터 검증 (Pydantic Field 의 ge/le 와 동일 범위)
+    if "hf_no_speech_threshold" in updates:
+        v = updates["hf_no_speech_threshold"]
+        if not (0.0 <= v <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail="hf_no_speech_threshold 는 0.0~1.0 범위여야 합니다.",
+            )
+    if "hf_compression_ratio_threshold" in updates:
+        v = updates["hf_compression_ratio_threshold"]
+        if not (1.0 <= v <= 10.0):
+            raise HTTPException(
+                status_code=400,
+                detail="hf_compression_ratio_threshold 는 1.0~10.0 범위여야 합니다.",
+            )
+    if "hf_repetition_threshold" in updates:
+        v = updates["hf_repetition_threshold"]
+        if not (isinstance(v, int) and 2 <= v <= 10):
+            raise HTTPException(
+                status_code=400,
+                detail="hf_repetition_threshold 는 2~10 범위의 정수여야 합니다.",
+            )
+
     # === config.yaml 파일 업데이트 ===
     config_path = _get_config_path()
     try:
@@ -2667,6 +2708,19 @@ async def update_settings(
         yaml_data.setdefault("stt", {})["language"] = updates["stt_language"]
         changed_fields.append("stt_language")
 
+    if "hf_enabled" in updates:
+        yaml_data.setdefault("hallucination_filter", {})["enabled"] = updates["hf_enabled"]
+        changed_fields.append("hf_enabled")
+    if "hf_no_speech_threshold" in updates:
+        yaml_data.setdefault("hallucination_filter", {})["no_speech_threshold"] = updates["hf_no_speech_threshold"]
+        changed_fields.append("hf_no_speech_threshold")
+    if "hf_compression_ratio_threshold" in updates:
+        yaml_data.setdefault("hallucination_filter", {})["compression_ratio_threshold"] = updates["hf_compression_ratio_threshold"]
+        changed_fields.append("hf_compression_ratio_threshold")
+    if "hf_repetition_threshold" in updates:
+        yaml_data.setdefault("hallucination_filter", {})["repetition_threshold"] = updates["hf_repetition_threshold"]
+        changed_fields.append("hf_repetition_threshold")
+
     # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
     try:
         with open(config_path, encoding="utf-8") as f:
@@ -2686,6 +2740,24 @@ async def update_settings(
             content = _replace_yaml_value(content, "pipeline", "skip_llm_steps", val)
         if "stt_language" in updates:
             content = _replace_yaml_value(content, "stt", "language", f'"{updates["stt_language"]}"')
+        if "hf_enabled" in updates:
+            val = "true" if updates["hf_enabled"] else "false"
+            content = _replace_yaml_value(content, "hallucination_filter", "enabled", val)
+        if "hf_no_speech_threshold" in updates:
+            content = _replace_yaml_value(
+                content, "hallucination_filter", "no_speech_threshold",
+                str(updates["hf_no_speech_threshold"]),
+            )
+        if "hf_compression_ratio_threshold" in updates:
+            content = _replace_yaml_value(
+                content, "hallucination_filter", "compression_ratio_threshold",
+                str(updates["hf_compression_ratio_threshold"]),
+            )
+        if "hf_repetition_threshold" in updates:
+            content = _replace_yaml_value(
+                content, "hallucination_filter", "repetition_threshold",
+                str(updates["hf_repetition_threshold"]),
+            )
 
         # 원자적 쓰기 + .bak 백업 (도중 죽어도 config.yaml 손상 방지)
         await asyncio.to_thread(_atomic_write_text, config_path, content)
@@ -2722,6 +2794,20 @@ async def update_settings(
         new_stt = config.stt.model_copy(update={"language": updates["stt_language"]})
         config = config.model_copy(update={"stt": new_stt})
 
+    # 환각 필터 런타임 갱신
+    hf_updates: dict[str, Any] = {}
+    if "hf_enabled" in updates:
+        hf_updates["enabled"] = updates["hf_enabled"]
+    if "hf_no_speech_threshold" in updates:
+        hf_updates["no_speech_threshold"] = updates["hf_no_speech_threshold"]
+    if "hf_compression_ratio_threshold" in updates:
+        hf_updates["compression_ratio_threshold"] = updates["hf_compression_ratio_threshold"]
+    if "hf_repetition_threshold" in updates:
+        hf_updates["repetition_threshold"] = updates["hf_repetition_threshold"]
+    if hf_updates:
+        new_hf = config.hallucination_filter.model_copy(update=hf_updates)
+        config = config.model_copy(update={"hallucination_filter": new_hf})
+
     # app.state.config 갱신
     request.app.state.config = config
 
@@ -2738,6 +2824,10 @@ async def update_settings(
             llm_mlx_max_tokens=config.llm.mlx_max_tokens,
             llm_skip_steps=config.pipeline.skip_llm_steps,
             stt_language=config.stt.language,
+            hf_enabled=config.hallucination_filter.enabled,
+            hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
+            hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
+            hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
             available_models=_AVAILABLE_MODELS,
         ),
         message=message,

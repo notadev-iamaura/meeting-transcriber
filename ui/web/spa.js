@@ -387,34 +387,80 @@
             });
 
             // 녹음 이벤트 처리 (플로팅 바)
+            // ──────────────────────────────────────────────
+            // 녹음 경과시간 표시 전략:
+            //   - 백엔드는 10초마다 `ws:recording_duration` 을 쏜다 (싱크 포인트)
+            //   - 프론트는 싱크 포인트를 기준선으로 잡고, 로컬 1초 타이머로
+            //     부드럽게 증가시킨다. 다음 싱크가 오면 드리프트를 보정한다.
+            //   - 탭 전환(SPA 뷰 이동)에는 영향받지 않지만, 브라우저 탭
+            //     자체가 백그라운드로 가면 setInterval 이 throttle 되므로
+            //     포커스 복귀 시 다음 싱크 포인트(최대 10초)에 정확히 보정된다.
+            // ──────────────────────────────────────────────
+            var _recTickTimer = null;
+            var _recBaseSeconds = 0;          // 마지막 싱크 시점의 서버 초
+            var _recBaseWallClock = 0;        // 그 싱크를 받은 로컬 타임스탬프 (ms)
+            function _formatRecDuration(sec) {
+                var s0 = Math.floor(sec);
+                if (s0 < 0) s0 = 0;
+                var m = Math.floor(s0 / 60);
+                var s = s0 % 60;
+                var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+                return pad(m) + ":" + pad(s);
+            }
+            function _renderRecDuration() {
+                var recDuration = document.getElementById("recordingDuration");
+                if (!recDuration) return;
+                var elapsedMs = Date.now() - _recBaseWallClock;
+                var cur = _recBaseSeconds + elapsedMs / 1000;
+                App.safeText(recDuration, _formatRecDuration(cur));
+            }
+            function _startRecTicker(initialSeconds) {
+                _recBaseSeconds = initialSeconds || 0;
+                _recBaseWallClock = Date.now();
+                _renderRecDuration();
+                if (_recTickTimer) clearInterval(_recTickTimer);
+                _recTickTimer = setInterval(_renderRecDuration, 1000);
+            }
+            function _stopRecTicker() {
+                if (_recTickTimer) {
+                    clearInterval(_recTickTimer);
+                    _recTickTimer = null;
+                }
+                _recBaseSeconds = 0;
+                _recBaseWallClock = 0;
+            }
+
             document.addEventListener("ws:recording_started", function () {
                 var recStatus = document.getElementById("recordingStatus");
                 if (recStatus) recStatus.classList.add("visible");
-                var recDuration = document.getElementById("recordingDuration");
-                if (recDuration) App.safeText(recDuration, "00:00");
+                _startRecTicker(0);
                 loadMeetings();
             });
             document.addEventListener("ws:recording_stopped", function () {
                 var recStatus = document.getElementById("recordingStatus");
                 if (recStatus) recStatus.classList.remove("visible");
+                _stopRecTicker();
                 loadMeetings();
             });
             document.addEventListener("ws:recording_duration", function (e) {
+                // 백엔드 싱크 포인트: 기준선을 갱신하고 즉시 렌더
                 var detail = e.detail || {};
                 var seconds = detail.duration_seconds || 0;
-                var recDuration = document.getElementById("recordingDuration");
-                if (recDuration) {
-                    var sec = Math.floor(seconds);
-                    var m = Math.floor(sec / 60);
-                    var s = sec % 60;
-                    var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
-                    App.safeText(recDuration, pad(m) + ":" + pad(s));
+                _recBaseSeconds = seconds;
+                _recBaseWallClock = Date.now();
+                // 싱크가 왔는데 타이머가 없다면(복원 누락 등) 새로 시작
+                if (!_recTickTimer) {
+                    var recStatus = document.getElementById("recordingStatus");
+                    if (recStatus) recStatus.classList.add("visible");
+                    _recTickTimer = setInterval(_renderRecDuration, 1000);
                 }
+                _renderRecDuration();
             });
             document.addEventListener("ws:recording_error", function (e) {
                 var detail = e.detail || {};
                 var recStatus = document.getElementById("recordingStatus");
                 if (recStatus) recStatus.classList.remove("visible");
+                _stopRecTicker();
                 var msg = detail.error || detail.message || "녹음 중 오류가 발생했습니다";
                 errorBanner.show(msg);
             });
@@ -431,14 +477,7 @@
                     if (rec && rec.is_recording) {
                         var recStatus = document.getElementById("recordingStatus");
                         if (recStatus) recStatus.classList.add("visible");
-                        var sec = Math.floor(rec.duration_seconds || 0);
-                        var m = Math.floor(sec / 60);
-                        var s = sec % 60;
-                        var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
-                        var recDuration = document.getElementById("recordingDuration");
-                        if (recDuration) {
-                            App.safeText(recDuration, pad(m) + ":" + pad(s));
-                        }
+                        _startRecTicker(rec.duration_seconds || 0);
                     }
                 })
                 .catch(function () {
@@ -1153,6 +1192,11 @@
         self._totalMatches = 0;
         self._searchTimeout = null;
 
+        // 실시간 처리 로그 상태 — 단계별 { elapsed, eta, status, anomaly, startedAt }
+        // status: "pending" | "running" | "completed" | "failed" | "skipped"
+        self._liveLog = {};
+        self._liveLogTickTimer = null;
+
         // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
         var urlParams = new URLSearchParams(window.location.search);
         self._initialQuery = urlParams.get("q") || "";
@@ -1437,6 +1481,15 @@
         };
         document.addEventListener("ws:pipeline_status", onPipelineStatus);
         self._listeners.push({ el: document, type: "ws:pipeline_status", fn: onPipelineStatus });
+
+        // 단계별 실시간 진행/ETA/이상 탐지 이벤트
+        var onStepProgress = function (e) {
+            var detail = e.detail || {};
+            if (detail.meeting_id && detail.meeting_id !== self._meetingId) return;
+            self._handleStepProgress(detail);
+        };
+        document.addEventListener("ws:step_progress", onStepProgress);
+        self._listeners.push({ el: document, type: "ws:step_progress", fn: onStepProgress });
 
         // 요약 생성 버튼 클릭
         var onSummarize = function () {
@@ -2547,6 +2600,169 @@
     };
 
     /**
+     * 단계 진행 이벤트(`step_progress`)를 처리해 라이브 로그 상태를 갱신한다.
+     *
+     * detail 스키마:
+     *   {
+     *     meeting_id, job_id, step,
+     *     phase: "start" | "complete",
+     *     input_size, eta_seconds, elapsed_seconds, anomaly
+     *   }
+     */
+    ViewerView.prototype._handleStepProgress = function (detail) {
+        var step = detail.step;
+        if (!step) return;
+        var entry = this._liveLog[step] || {};
+
+        if (detail.phase === "start") {
+            entry.status = "running";
+            entry.startedAt = Date.now();
+            entry.eta = Number(detail.eta_seconds) || 0;
+            entry.anomaly = "normal";
+            entry.elapsed = 0;
+            entry.inputSize = Number(detail.input_size) || 0;
+            // 이전에 완료됐다가 재시도되는 경우도 있으므로 성공 플래그 초기화
+        } else if (detail.phase === "complete") {
+            entry.status = "completed";
+            entry.elapsed = Number(detail.elapsed_seconds) || entry.elapsed || 0;
+            entry.eta = Number(detail.eta_seconds) || entry.eta || 0;
+            entry.anomaly = detail.anomaly || "normal";
+        }
+        this._liveLog[step] = entry;
+        this._ensureLiveLogTicker();
+        this._renderLiveLog();
+    };
+
+    /**
+     * 라이브 로그 1초 틱을 시작한다 (실행 중인 단계가 있을 때만).
+     */
+    ViewerView.prototype._ensureLiveLogTicker = function () {
+        var self = this;
+        if (self._liveLogTickTimer) return;
+        self._liveLogTickTimer = setInterval(function () {
+            var hasRunning = false;
+            Object.keys(self._liveLog).forEach(function (k) {
+                if (self._liveLog[k].status === "running") hasRunning = true;
+            });
+            if (!hasRunning) {
+                clearInterval(self._liveLogTickTimer);
+                self._liveLogTickTimer = null;
+                return;
+            }
+            self._renderLiveLog();
+        }, 1000);
+        self._timers.push(self._liveLogTickTimer);
+    };
+
+    /**
+     * 라이브 로그 상태를 처리 로그 패널에 렌더링한다.
+     *
+     * 진행 중인 단계는 경과 시간을 Date.now() 기반으로 재계산하고,
+     * elapsed/eta 비율을 진행률 바로 표시한다. 예상 대비 초과 시 색상 경고.
+     */
+    ViewerView.prototype._renderLiveLog = function () {
+        var self = this;
+        var els = self._els;
+        if (!els.logPanel || !els.logTable || !els.logTotal) return;
+
+        var stepKeys = PIPELINE_STEPS.map(function (s) { return s.key; });
+        var labelMap = {};
+        PIPELINE_STEPS.forEach(function (s) { labelMap[s.key] = s.label; });
+
+        // 표시할 단계가 하나도 없으면 패널 숨김
+        var hasAnyEntry = stepKeys.some(function (k) { return self._liveLog[k]; });
+        if (!hasAnyEntry) {
+            // 라이브 데이터가 없으면 REST 기반 폴백(_loadPipelineLog)에 맡김
+            return;
+        }
+
+        var totalElapsed = 0;
+        var rows = stepKeys.map(function (key) {
+            var entry = self._liveLog[key];
+            if (!entry) return "";
+
+            // 진행 중이면 wall-clock 기반으로 현재 경과 시간 재계산
+            var elapsed = entry.elapsed || 0;
+            if (entry.status === "running" && entry.startedAt) {
+                elapsed = (Date.now() - entry.startedAt) / 1000;
+            }
+
+            // 상태/색상 분류
+            var statusClass, statusText;
+            if (entry.status === "completed") {
+                statusClass = "success";
+                statusText = "✓";
+                totalElapsed += elapsed;
+            } else if (entry.status === "failed") {
+                statusClass = "failed";
+                statusText = "✗";
+            } else if (entry.status === "skipped") {
+                statusClass = "skipped";
+                statusText = "skip";
+            } else if (entry.status === "running") {
+                statusClass = "running";
+                statusText = "…";
+                totalElapsed += elapsed;
+            } else {
+                statusClass = "pending";
+                statusText = "·";
+            }
+
+            // 예상 대비 경과 비율 → 이상 탐지 색상 (실시간 판단)
+            var anomaly = entry.anomaly || "normal";
+            if (entry.status === "running" && entry.eta > 0) {
+                var ratio = elapsed / entry.eta;
+                if (ratio >= 2.5) anomaly = "danger";
+                else if (ratio >= 1.5) anomaly = "warning";
+                else anomaly = "normal";
+            }
+
+            // 진행률 바 (ETA가 있을 때만)
+            var progressBar = "";
+            if (entry.eta > 0 && entry.status === "running") {
+                var pct = Math.min(100, Math.round((elapsed / entry.eta) * 100));
+                progressBar =
+                    '<div class="log-progress-bar"><div class="log-progress-fill" ' +
+                    'style="width:' + pct + '%"></div></div>';
+            }
+
+            // ETA 텍스트
+            var etaText = "";
+            if (entry.eta > 0) {
+                if (entry.status === "running") {
+                    var remain = Math.max(0, entry.eta - elapsed);
+                    etaText = '<span class="log-eta">남은 ~' + self._formatElapsed(remain) + '</span>';
+                } else if (entry.status === "completed") {
+                    etaText = '<span class="log-eta">예상 ' + self._formatElapsed(entry.eta) + '</span>';
+                }
+            }
+
+            return [
+                '<div class="log-row anomaly-' + anomaly + ' status-' + statusClass + '">',
+                '  <div class="log-step">' + App.escapeHtml(labelMap[key] || key) + '</div>',
+                '  <div class="log-progress">',
+                     progressBar,
+                '    <div class="log-elapsed">' + self._formatElapsed(elapsed) + '</div>',
+                     etaText,
+                '  </div>',
+                '  <div class="log-status ' + statusClass + '">' + statusText + '</div>',
+                '</div>',
+            ].join("");
+        }).filter(function (r) { return r; });
+
+        els.logTable.innerHTML = rows.join("");
+        els.logTotal.textContent = "(총 " + self._formatElapsed(totalElapsed) + ")";
+        els.logPanel.style.display = "block";
+        // 실행 중일 때는 패널 자동 펼침
+        var anyRunning = stepKeys.some(function (k) {
+            return self._liveLog[k] && self._liveLog[k].status === "running";
+        });
+        if (anyRunning && !els.logPanel.hasAttribute("open")) {
+            els.logPanel.setAttribute("open", "");
+        }
+    };
+
+    /**
      * 파이프라인 처리 로그 (단계별 소요시간) 를 로드하여 표시한다.
      * GET /meetings/{id}/pipeline-state
      */
@@ -2560,9 +2776,31 @@
             );
             var steps = data.step_results || [];
             if (!steps.length) {
-                els.logPanel.style.display = "none";
+                // 라이브 데이터가 이미 있다면 패널은 유지
+                if (Object.keys(self._liveLog).length === 0) {
+                    els.logPanel.style.display = "none";
+                }
                 return;
             }
+
+            // REST 로 받은 완료된 단계들을 라이브 상태에도 반영 (재진입 복원)
+            steps.forEach(function (s) {
+                var existing = self._liveLog[s.step];
+                // 라이브 상태가 running 이면 덮어쓰지 않음 (최신이 우선)
+                if (existing && existing.status === "running") return;
+                self._liveLog[s.step] = {
+                    status: s.success ? "completed" : "failed",
+                    elapsed: Number(s.elapsed_seconds) || 0,
+                    eta: existing ? existing.eta : 0,
+                    anomaly: "normal",
+                };
+            });
+            (data.skipped_steps || []).forEach(function (k) {
+                self._liveLog[k] = { status: "skipped", elapsed: 0, eta: 0, anomaly: "normal" };
+            });
+            // 라이브 렌더러가 있으면 그걸로 통일
+            self._renderLiveLog();
+            return;
             var total = data.total_elapsed_seconds || 0;
             els.logTotal.textContent = "(총 " + self._formatElapsed(total) + ")";
 
@@ -3845,6 +4083,40 @@
             '    </div>',
             '  </section>',
             '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">환각(Hallucination) 필터</h3>',
+            '    <p class="settings-section-desc">Whisper 가 무음/잡음 구간에서 생성하는 가짜 텍스트를 제거해요. 너무 공격적이면 실제 발화도 삭제되니 0.9 권장.</p>',
+            '    <div class="settings-group">',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsHfEnabled">필터 사용</label>',
+            '        <label class="setting-toggle">',
+            '          <input type="checkbox" id="settingsHfEnabled">',
+            '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+            '        </label>',
+            '      </div>',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsHfNoSpeech">무음 임계값 (no_speech)</label>',
+            '        <div class="setting-slider-group">',
+            '          <input type="range" class="setting-slider" id="settingsHfNoSpeech" min="0" max="1" step="0.05">',
+            '          <span class="setting-slider-value" id="settingsHfNoSpeechValue">0.9</span>',
+            '        </div>',
+            '      </div>',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsHfCompRatio">압축비 임계값</label>',
+            '        <div class="setting-slider-group">',
+            '          <input type="range" class="setting-slider" id="settingsHfCompRatio" min="1" max="5" step="0.1">',
+            '          <span class="setting-slider-value" id="settingsHfCompRatioValue">2.4</span>',
+            '        </div>',
+            '      </div>',
+            '      <div class="setting-row">',
+            '        <label class="setting-label" for="settingsHfRepetition">반복 감지 임계값</label>',
+            '        <div class="setting-slider-group">',
+            '          <input type="range" class="setting-slider" id="settingsHfRepetition" min="2" max="10" step="1">',
+            '          <span class="setting-slider-value" id="settingsHfRepetitionValue">3</span>',
+            '        </div>',
+            '      </div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="settings-section">',
             '    <h3 class="settings-section-title">음성 인식 모델 (STT)</h3>',
             '    <p class="settings-section-desc">한국어 회의 전사에 사용할 모델을 선택하세요. 다운로드 완료 후 활성화하면 다음 전사부터 적용돼요.</p>',
             '    <div class="stt-models" id="settingsSttModels" aria-live="polite">',
@@ -3871,6 +4143,13 @@
             saveStatus: document.getElementById("settingsSaveStatus"),
             sttModels: document.getElementById("settingsSttModels"),
             sttStatus: document.getElementById("settingsSttStatus"),
+            hfEnabled: document.getElementById("settingsHfEnabled"),
+            hfNoSpeech: document.getElementById("settingsHfNoSpeech"),
+            hfNoSpeechValue: document.getElementById("settingsHfNoSpeechValue"),
+            hfCompRatio: document.getElementById("settingsHfCompRatio"),
+            hfCompRatioValue: document.getElementById("settingsHfCompRatioValue"),
+            hfRepetition: document.getElementById("settingsHfRepetition"),
+            hfRepetitionValue: document.getElementById("settingsHfRepetitionValue"),
         };
         // 모델별 description 캐시 (툴팁 갱신용)
         this._modelDescriptions = {};
@@ -3888,6 +4167,17 @@
         };
         els.temp.addEventListener("input", onTempInput);
         self._listeners.push({ el: els.temp, type: "input", fn: onTempInput });
+
+        // 환각 필터 슬라이더 라이브 값 표시
+        var onHfNoSpeech = function () { els.hfNoSpeechValue.textContent = els.hfNoSpeech.value; };
+        var onHfCompRatio = function () { els.hfCompRatioValue.textContent = els.hfCompRatio.value; };
+        var onHfRepetition = function () { els.hfRepetitionValue.textContent = els.hfRepetition.value; };
+        els.hfNoSpeech.addEventListener("input", onHfNoSpeech);
+        els.hfCompRatio.addEventListener("input", onHfCompRatio);
+        els.hfRepetition.addEventListener("input", onHfRepetition);
+        self._listeners.push({ el: els.hfNoSpeech, type: "input", fn: onHfNoSpeech });
+        self._listeners.push({ el: els.hfCompRatio, type: "input", fn: onHfCompRatio });
+        self._listeners.push({ el: els.hfRepetition, type: "input", fn: onHfRepetition });
 
         // LLM 모델 변경 시 (?) 툴팁 description 갱신
         var onModelChange = function () {
@@ -3935,6 +4225,20 @@
             }
             els.skipLlm.checked = !!data.llm_skip_steps;
             if (data.stt_language) els.lang.value = data.stt_language;
+            // 환각 필터
+            els.hfEnabled.checked = !!data.hf_enabled;
+            if (data.hf_no_speech_threshold !== undefined && data.hf_no_speech_threshold !== null) {
+                els.hfNoSpeech.value = data.hf_no_speech_threshold;
+                els.hfNoSpeechValue.textContent = data.hf_no_speech_threshold;
+            }
+            if (data.hf_compression_ratio_threshold !== undefined && data.hf_compression_ratio_threshold !== null) {
+                els.hfCompRatio.value = data.hf_compression_ratio_threshold;
+                els.hfCompRatioValue.textContent = data.hf_compression_ratio_threshold;
+            }
+            if (data.hf_repetition_threshold !== undefined && data.hf_repetition_threshold !== null) {
+                els.hfRepetition.value = data.hf_repetition_threshold;
+                els.hfRepetitionValue.textContent = data.hf_repetition_threshold;
+            }
         } catch (err) {
             errorBanner.show("설정 불러오기 실패: " + (err.message || err));
         }
@@ -3967,6 +4271,10 @@
             llm_temperature: parseFloat(els.temp.value),
             llm_skip_steps: els.skipLlm.checked,
             stt_language: els.lang.value,
+            hf_enabled: els.hfEnabled.checked,
+            hf_no_speech_threshold: parseFloat(els.hfNoSpeech.value),
+            hf_compression_ratio_threshold: parseFloat(els.hfCompRatio.value),
+            hf_repetition_threshold: parseInt(els.hfRepetition.value, 10),
         };
 
         try {

@@ -157,7 +157,7 @@ hallucination_filter:
   enabled: true                              # 환각 필터링 활성화 여부
   compression_ratio_threshold: 2.4           # 압축비 임계값 (초과 시 환각으로 판정)
   logprob_threshold: -1.0                    # 평균 로그 확률 임계값 (미만 시 저신뢰도)
-  no_speech_threshold: 0.6                   # 무음 확률 임계값 (초과 시 무음 세그먼트 제거)
+  no_speech_threshold: 0.9  # 무음 확률 임계값 (초과 시 무음 세그먼트 제거, 0.6은 너무 공격적)
   repetition_threshold: 3                    # 반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)
 
 # === 텍스트 후처리 설정 ===
