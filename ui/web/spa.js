@@ -123,6 +123,7 @@
                     }
                 });
             });
+            // 전역 키보드 단축키(⌘,/⌘1/⌘2/⌘3/⌘K)는 WS-3 Command Palette 모듈이 소유.
         }
 
         /**
@@ -505,6 +506,13 @@
             // 카운트 업데이트
             if (_countEl) {
                 App.safeText(_countEl, filtered.length + "/" + _meetings.length);
+            }
+
+            // Progressive Disclosure: 회의가 하나도 없을 때 검색/정렬/카운트 UI 숨김
+            // (§5.3 Progressive Onboarding — 빈 상태에서 사용자를 압도하지 않음)
+            var listPanelEl = document.getElementById("list-panel");
+            if (listPanelEl) {
+                listPanelEl.classList.toggle("list-panel-empty", _meetings.length === 0);
             }
 
             render(filtered);
@@ -1010,7 +1018,7 @@
                     "날짜/화자 필터를 해제하거나 다른 검색어를 시도해 보세요");
             } else {
                 App.safeText(emptySub,
-                    "다른 키워드를 사용하거나, AI Chat에서 자연어로 질문해 보세요");
+                    "다른 키워드를 사용하거나, 채팅에서 자연어로 질문해 보세요");
             }
 
             els.searchEmpty.style.display = "block";
@@ -1192,7 +1200,7 @@
             '  <button class="tab-btn" data-tab="summary"',
             '          role="tab" id="viewerTabSummary"',
             '          aria-selected="false"',
-            '          aria-controls="viewerPanelSummary">회의록 (AI 요약)</button>',
+            '          aria-controls="viewerPanelSummary">요약</button>',
             '</div>',
 
             // 전사문 탭 패널
@@ -1244,7 +1252,7 @@
             '    <div class="empty-state-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="6" width="28" height="36" rx="4" stroke="currentColor" stroke-width="2.5"/><path d="M18 6v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1M16 18h16M16 26h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg></div>',
             '    <div class="empty-state-text">회의록이 아직 생성되지 않았습니다</div>',
             '    <div class="empty-state-sub">',
-            '      전사가 완료된 후 아래 버튼을 눌러 AI 요약을 생성할 수 있습니다.',
+            '      전사가 완료된 후 아래 버튼을 눌러 요약을 생성할 수 있습니다.',
             '    </div>',
             '    <button class="btn-summarize" id="viewerSummarizeBtn" style="display:none;">',
             '      ' + Icons.doc + ' 요약 생성',
@@ -1853,7 +1861,7 @@
             '  <div class="modal-field">',
             '    <label class="checkbox-label">',
             '      <input type="checkbox" id="replaceAddVocab" checked />',
-            '      <span>용어집에도 추가 (다음부터 AI 보정에 자동 반영)</span>',
+            '      <span>용어집에도 추가 (다음부터 보정에 자동 반영)</span>',
             '    </label>',
             '  </div>',
             '  <div class="modal-error" id="replaceError"></div>',
@@ -2903,7 +2911,7 @@
             if (self._summaryDirty) {
                 if (!window.confirm(
                     "직접 편집한 내용이 있어요. 재생성하면 편집본이 사라지고 " +
-                    "AI 출력으로 덮어쓰여요 (.bak 에 백업). 계속할까요?"
+                    "보정 결과로 덮어쓰여요 (.bak 에 백업). 계속할까요?"
                 )) return;
             }
             self._requestSummarize(true);
@@ -3064,10 +3072,10 @@
     ChatView.prototype._createWelcomeHtml = function () {
         return '<div class="welcome-message" id="chatWelcomeMessage">' +
             '<div class="welcome-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8h36a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H18l-8 6V32H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="20" r="2" fill="currentColor"/><circle cx="24" cy="20" r="2" fill="currentColor"/><circle cx="32" cy="20" r="2" fill="currentColor"/></svg></div>' +
-            '<div class="welcome-title">AI 회의 어시스턴트</div>' +
+            '<div class="welcome-title">회의 어시스턴트</div>' +
             '<div class="welcome-desc">' +
                 '회의 내용에 대해 자유롭게 질문하세요.<br>' +
-                '관련 회의 내용을 검색하여 AI가 답변합니다.' +
+                '관련 회의 내용을 검색해 답변을 드려요.' +
             '</div>' +
             '<div class="welcome-tips">' +
                 '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "지난 회의에서 결정된 일정이 뭐야?"</div>' +
@@ -3110,7 +3118,7 @@
             '      <span class="typing-dot"></span>',
             '      <span class="typing-dot"></span>',
             '    </div>',
-            '    <span class="typing-text">AI가 답변을 생성하고 있습니다...</span>',
+            '    <span class="typing-text">답변을 생성하고 있어요…</span>',
             '  </div>',
 
             // 입력 영역
@@ -3146,7 +3154,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = "AI Chat — 회의록";
+        document.title = "채팅 — 회의록";
     };
 
     /**
@@ -3340,7 +3348,7 @@
         if (!data.llm_used && data.error_message) {
             var notice = document.createElement("div");
             notice.className = "llm-fallback-notice";
-            notice.textContent = "\u26A0 AI 모델 응답 불가: " + data.error_message;
+            notice.textContent = "\u26A0 응답을 받지 못했어요: " + data.error_message;
             body.appendChild(notice);
         }
 
@@ -3530,7 +3538,7 @@
             if (e.name === "AbortError") return;
 
             if (e.status === 503) {
-                errorBanner.show("AI 엔진이 아직 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.");
+                errorBanner.show("아직 답변 준비가 덜 됐어요. 잠시 후 다시 시도해 주세요.");
             } else if (e.status === 400) {
                 errorBanner.show("입력 내용을 확인해 주세요: " + e.message);
             } else if (e.status === 0) {
@@ -4605,7 +4613,7 @@
         },
         chat: {
             title: "채팅 프롬프트",
-            desc: "회의록을 검색해 답변하는 AI 채팅에 사용해요.",
+            desc: "회의록을 검색해 답변하는 채팅에 사용해요.",
         },
     };
 
@@ -5049,7 +5057,7 @@
                 els.list.innerHTML = [
                     '<div class="vocab-empty">',
                     '  <div class="vocab-empty-title">아직 등록된 용어가 없어요</div>',
-                    '  <div class="vocab-empty-desc">자주 잘못 인식되는 이름·전문용어를 추가하면 AI가 자동으로 교정해 드려요.</div>',
+                    '  <div class="vocab-empty-desc">자주 잘못 인식되는 이름·전문용어를 추가하면 자동으로 교정해 드려요.</div>',
                     '</div>',
                 ].join("\n");
             } else {
@@ -5234,7 +5242,15 @@
                     var ramBar = document.getElementById("grb-ram-bar");
                     var ramText = document.getElementById("grb-ram-text");
                     if (ramBar && ramText) {
-                        var ramPct = data.ram_percent || 0;
+                        // 표시 텍스트(used/total)와 막대를 일치시키기 위해
+                        // psutil 의 ram_percent (macOS 에서는 wired+inactive 포함으로 과대표시)
+                        // 대신 used/total 비율을 직접 계산한다.
+                        var ramPct = 0;
+                        if (data.ram_total_gb > 0) {
+                            ramPct = Math.round(
+                                (data.ram_used_gb / data.ram_total_gb) * 100
+                            );
+                        }
                         ramBar.style.width = ramPct + "%";
                         ramBar.className = "grb-bar-fill" +
                             (ramPct > 85 ? " danger" : ramPct > 70 ? " warning" : "");
@@ -5281,32 +5297,636 @@
     // === 키보드 단축키 (글로벌) ===
     // =================================================================
 
+    // 편집 컨텍스트 판별: 텍스트 입력 중에는 전역 단축키가 키 입력을 가로채지 않도록.
+    // 단, Command Palette 자체 입력창은 예외(팔레트 내부 동작은 자체 핸들러가 처리).
+    function isEditingContext(target) {
+        if (!target) return false;
+        var inPalette =
+            target.closest && target.closest(".command-palette-overlay");
+        if (inPalette) return false;
+        var tag = (target.tagName || "").toUpperCase();
+        return (
+            tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable
+        );
+    }
+
+    // 통합 전역 키핸들러 (WS-3 소유).
+    //   ⌘K  → Command Palette 열기
+    //   ⌘,  → 설정 이동 (macOS 관례상 편집 중에도 허용)
+    //   ⌘1  → /app (회의록)
+    //   ⌘2  → /app/search (검색)
+    //   ⌘3  → /app/chat (채팅)
     document.addEventListener("keydown", function (e) {
-        // Cmd+K → 검색 뷰로 이동
-        if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-            // 편집 컨텍스트(input/textarea/contenteditable) 에서는 가로채지 않음.
-            // 사용자가 프롬프트/요약/전사 편집 중 Cmd+K 를 눌러 편집 내용이
-            // 사라지는 데이터 손실 방지.
-            var t = e.target;
-            if (t) {
-                var tag = (t.tagName || "").toUpperCase();
-                if (
-                    tag === "INPUT" ||
-                    tag === "TEXTAREA" ||
-                    t.isContentEditable
-                ) {
-                    return;
-                }
-            }
+        if (!(e.metaKey || e.ctrlKey)) return;
+
+        // Cmd+K → Command Palette
+        if (e.key === "k") {
+            if (isEditingContext(e.target)) return;
             e.preventDefault();
-            Router.navigate("/app/search");
-            // 검색 입력에 포커스
-            setTimeout(function () {
-                var searchInput = document.getElementById("searchQuery");
-                if (searchInput) searchInput.focus();
-            }, 100);
+            commandPalette.open();
+            return;
+        }
+
+        // Cmd+, → 설정 (macOS 표준 단축키 — 편집 중에도 허용)
+        if (e.key === ",") {
+            e.preventDefault();
+            Router.navigate("/app/settings");
+            return;
+        }
+
+        // Cmd+1/2/3 → 주요 라우트 빠른 전환 (편집 중에는 숫자 입력 보호)
+        if (e.key === "1" || e.key === "2" || e.key === "3") {
+            if (isEditingContext(e.target)) return;
+            e.preventDefault();
+            if (e.key === "1") Router.navigate("/app");
+            else if (e.key === "2") Router.navigate("/app/search");
+            else Router.navigate("/app/chat");
+            return;
         }
     });
+
+
+    // =================================================================
+    // === CommandPalette — ⌘K 명령 팔레트 (신규) ===
+    // =================================================================
+    //
+    // macOS Spotlight / Raycast 스타일 전역 명령 팔레트.
+    // 카테고리: 회의(최신 5건) / 액션(네비게이션·테마) /
+    //           STT 모델(활성화 가능) / 도움말.
+    //
+    // 키보드:
+    //   ⌘K     → 열기 (전역 keydown 핸들러 연결됨)
+    //   ↑↓     → 항목 선택 (순환)
+    //   Enter  → 실행
+    //   Esc    → 닫기
+    //   외부클릭 → 닫기
+
+    function CommandPalette() {
+        this._isOpen = false;
+        this._overlayEl = null;
+        this._inputEl = null;
+        this._resultsEl = null;
+        this._items = [];
+        this._filteredItems = [];
+        this._selectedIdx = 0;
+        this._recentActions = [];
+        this._meetingsCache = null;
+        this._sttModelsCache = null;
+        this._boundKeydown = null;
+        this._loadRecent();
+    }
+
+    var CMDK_STORAGE_KEY = "cmdk-recent-actions";
+    var CMDK_RECENT_LIMIT = 20;
+
+    /**
+     * LocalStorage 에서 최근 액션 ID 목록 로드.
+     */
+    CommandPalette.prototype._loadRecent = function () {
+        try {
+            var raw = localStorage.getItem(CMDK_STORAGE_KEY);
+            this._recentActions = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(this._recentActions)) {
+                this._recentActions = [];
+            }
+        } catch (err) {
+            this._recentActions = [];
+        }
+    };
+
+    /**
+     * 최근 사용 액션 ID 를 앞쪽에 추가 + 저장.
+     */
+    CommandPalette.prototype._pushRecent = function (itemId) {
+        if (!itemId) return;
+        var next = [itemId];
+        for (var i = 0; i < this._recentActions.length; i++) {
+            if (this._recentActions[i] !== itemId) {
+                next.push(this._recentActions[i]);
+            }
+        }
+        this._recentActions = next.slice(0, CMDK_RECENT_LIMIT);
+        try {
+            localStorage.setItem(
+                CMDK_STORAGE_KEY,
+                JSON.stringify(this._recentActions)
+            );
+        } catch (err) {
+            // 저장 실패 무시
+        }
+    };
+
+    /**
+     * 간단한 fuzzy 매칭 점수: 완전일치(100) > 접두(50) > 부분(10) > 불일치(0).
+     */
+    function cmdkFuzzyMatch(query, text) {
+        if (!query) return 1;
+        if (!text) return 0;
+        var q = String(query).toLowerCase();
+        var t = String(text).toLowerCase();
+        if (t === q) return 100;
+        if (t.indexOf(q) === 0) return 50;
+        if (t.indexOf(q) >= 0) return 10;
+        return 0;
+    }
+
+    /**
+     * 팔레트 열기. 최초 호출 시 DOM 생성, 매 호출마다 항목 갱신.
+     */
+    CommandPalette.prototype.open = function () {
+        if (this._isOpen) return;
+        var self = this;
+
+        // 접근성: 팔레트 열기 전 포커스 요소 저장(닫힘 후 복원)
+        this._previousFocus =
+            document.activeElement && document.activeElement !== document.body
+                ? document.activeElement
+                : null;
+
+        if (!this._overlayEl) {
+            this._createDom();
+        }
+
+        this._items = this._buildStaticItems();
+        this._filter("");
+        this._selectedIdx = 0;
+
+        this._overlayEl.style.display = "flex";
+        document.body.classList.add("command-palette-open");
+        this._isOpen = true;
+        this._inputEl.value = "";
+        this._render();
+
+        setTimeout(function () {
+            if (self._inputEl) self._inputEl.focus();
+        }, 0);
+
+        this._boundKeydown = function (e) {
+            self._handleKeydown(e);
+        };
+        document.addEventListener("keydown", this._boundKeydown, true);
+
+        this._loadAsyncItems();
+    };
+
+    /**
+     * 팔레트 닫기.
+     */
+    CommandPalette.prototype.close = function () {
+        if (!this._isOpen) return;
+        this._isOpen = false;
+        if (this._overlayEl) {
+            this._overlayEl.style.display = "none";
+        }
+        document.body.classList.remove("command-palette-open");
+        if (this._boundKeydown) {
+            document.removeEventListener("keydown", this._boundKeydown, true);
+            this._boundKeydown = null;
+        }
+        // 접근성: 이전 포커스 복원 (호출 요소로)
+        if (this._previousFocus && typeof this._previousFocus.focus === "function") {
+            try {
+                this._previousFocus.focus();
+            } catch (err) {
+                // 포커스 복원 실패 무시
+            }
+        }
+        this._previousFocus = null;
+    };
+
+    /**
+     * 모달 DOM 생성 (최초 1회).
+     */
+    CommandPalette.prototype._createDom = function () {
+        var self = this;
+
+        var overlay = document.createElement("div");
+        overlay.className = "command-palette-overlay";
+        overlay.style.display = "none";
+
+        var modal = document.createElement("div");
+        modal.className = "command-palette";
+        modal.setAttribute("role", "dialog");
+        modal.setAttribute("aria-modal", "true");
+        modal.setAttribute("aria-label", "명령 팔레트");
+
+        var inputWrap = document.createElement("div");
+        inputWrap.className = "command-palette-input-wrap";
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "command-palette-input";
+        input.setAttribute("placeholder", "명령 검색…");
+        input.setAttribute("aria-label", "명령 검색");
+        input.setAttribute("autocomplete", "off");
+        input.setAttribute("spellcheck", "false");
+        inputWrap.appendChild(input);
+
+        var results = document.createElement("div");
+        results.className = "command-palette-results";
+        results.setAttribute("role", "listbox");
+        results.setAttribute("aria-label", "명령 결과");
+
+        modal.appendChild(inputWrap);
+        modal.appendChild(results);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        this._overlayEl = overlay;
+        this._inputEl = input;
+        this._resultsEl = results;
+
+        // 입력 → 즉시 필터링
+        input.addEventListener("input", function () {
+            self._filter(input.value);
+            self._selectedIdx = 0;
+            self._render();
+        });
+
+        // 모달 내부 클릭은 전파 차단 (외부 클릭 닫기와 분리)
+        modal.addEventListener("click", function (e) {
+            e.stopPropagation();
+        });
+
+        // 외부 클릭 → 닫기
+        overlay.addEventListener("click", function () {
+            self.close();
+        });
+
+        // 결과 클릭 → 해당 항목 실행
+        results.addEventListener("click", function (e) {
+            var target = e.target;
+            while (target && target !== results) {
+                if (
+                    target.classList &&
+                    target.classList.contains("command-palette-item")
+                ) {
+                    var idx = parseInt(target.getAttribute("data-idx"), 10);
+                    if (!isNaN(idx) && self._filteredItems[idx]) {
+                        self._executeItem(self._filteredItems[idx]);
+                    }
+                    return;
+                }
+                target = target.parentNode;
+            }
+        });
+    };
+
+    /**
+     * 정적 항목(액션/도움말) 빌드. 비동기 항목은 _loadAsyncItems() 가 이후 주입.
+     */
+    CommandPalette.prototype._buildStaticItems = function () {
+        var items = [];
+
+        items.push({
+            id: "action:goto-settings",
+            category: "액션",
+            title: "설정 열기",
+            subtitle: "일반 / 프롬프트 / 용어집",
+            run: function () {
+                Router.navigate("/app/settings");
+            },
+        });
+        items.push({
+            id: "action:goto-chat",
+            category: "액션",
+            title: "채팅 열기",
+            subtitle: "회의록 기반 대화",
+            run: function () {
+                Router.navigate("/app/chat");
+            },
+        });
+        items.push({
+            id: "action:goto-search",
+            category: "액션",
+            title: "검색 열기",
+            subtitle: "전체 회의 하이브리드 검색",
+            run: function () {
+                Router.navigate("/app/search");
+            },
+        });
+        items.push({
+            id: "action:toggle-theme",
+            category: "액션",
+            title: "다크 모드 전환",
+            subtitle: "라이트 ↔ 다크 테마 토글",
+            run: function () {
+                var root = document.documentElement;
+                var current = root.getAttribute("data-theme");
+                var next;
+                if (current === "dark") {
+                    next = "light";
+                } else if (current === "light") {
+                    next = "dark";
+                } else {
+                    next = window.matchMedia("(prefers-color-scheme: dark)")
+                        .matches
+                        ? "light"
+                        : "dark";
+                }
+                root.setAttribute("data-theme", next);
+                try {
+                    localStorage.setItem("theme", next);
+                } catch (err) {
+                    // 저장 실패 무시
+                }
+            },
+        });
+        items.push({
+            id: "action:goto-home",
+            category: "액션",
+            title: "홈으로 이동",
+            subtitle: "회의 목록 대시보드",
+            run: function () {
+                Router.navigate("/app");
+            },
+        });
+
+        items.push({
+            id: "help:shortcuts",
+            category: "도움말",
+            title: "키보드 단축키",
+            subtitle: "⌘K 명령 팔레트 · ⌘F 찾기 · ⌘S 저장",
+            run: function () {
+                alert(
+                    "키보드 단축키\n\n" +
+                        "⌘K  명령 팔레트 열기\n" +
+                        "⌘F  뷰어 내 찾기\n" +
+                        "⌘S  저장"
+                );
+            },
+        });
+
+        return items;
+    };
+
+    /**
+     * /api/meetings, /api/stt-models 를 병렬 호출해 항목 주입.
+     */
+    CommandPalette.prototype._loadAsyncItems = function () {
+        var self = this;
+
+        App.apiRequest("/meetings")
+            .then(function (data) {
+                var meetings = (data && data.meetings) || [];
+                self._meetingsCache = meetings;
+                var added = [];
+                for (var i = 0; i < Math.min(meetings.length, 5); i++) {
+                    var m = meetings[i];
+                    if (!m || !m.id) continue;
+                    var title =
+                        m.title ||
+                        (App.getFileName
+                            ? App.getFileName(m.audio_file || "")
+                            : "") ||
+                        m.id;
+                    added.push({
+                        id: "meeting:" + m.id,
+                        category: "회의",
+                        title: String(title),
+                        subtitle: m.created_at
+                            ? App.formatDate
+                                ? App.formatDate(m.created_at)
+                                : String(m.created_at)
+                            : "",
+                        run: (function (mid) {
+                            return function () {
+                                Router.navigate(
+                                    "/app/viewer/" + encodeURIComponent(mid)
+                                );
+                            };
+                        })(m.id),
+                    });
+                }
+                self._mergeDynamicItems("회의", added);
+                self._filter(self._inputEl ? self._inputEl.value : "");
+                self._render();
+            })
+            .catch(function () {
+                // 실패 시 정적 항목만 유지
+            });
+
+        App.apiRequest("/stt-models")
+            .then(function (data) {
+                var models = (data && data.models) || [];
+                self._sttModelsCache = models;
+                var added = [];
+                for (var i = 0; i < models.length; i++) {
+                    var m = models[i];
+                    if (!m || !m.id) continue;
+                    var st = m.status || "";
+                    if (
+                        st &&
+                        st !== "ready" &&
+                        st !== "active" &&
+                        st !== "downloaded"
+                    ) {
+                        continue;
+                    }
+                    added.push({
+                        id: "stt:" + m.id,
+                        category: "STT 모델",
+                        title: "모델 활성화: " + (m.name || m.id),
+                        subtitle: m.description || m.id,
+                        run: (function (modelId) {
+                            return function () {
+                                App.apiPost(
+                                    "/stt-models/" +
+                                        encodeURIComponent(modelId) +
+                                        "/activate",
+                                    {}
+                                ).catch(function () {});
+                                Router.navigate("/app/settings/general");
+                            };
+                        })(m.id),
+                    });
+                }
+                self._mergeDynamicItems("STT 모델", added);
+                self._filter(self._inputEl ? self._inputEl.value : "");
+                self._render();
+            })
+            .catch(function () {
+                // 실패 시 정적 항목만 유지
+            });
+    };
+
+    /**
+     * 특정 카테고리의 기존 항목을 제거하고 새 항목으로 교체 (중복 방지).
+     */
+    CommandPalette.prototype._mergeDynamicItems = function (category, added) {
+        var base = [];
+        for (var i = 0; i < this._items.length; i++) {
+            if (this._items[i].category !== category) {
+                base.push(this._items[i]);
+            }
+        }
+        this._items = base.concat(added);
+    };
+
+    /**
+     * 쿼리로 필터링 + 최근 사용 가중치로 정렬.
+     */
+    CommandPalette.prototype._filter = function (query) {
+        var q = (query || "").trim();
+        var scored = [];
+        for (var i = 0; i < this._items.length; i++) {
+            var item = this._items[i];
+            var haystack =
+                (item.title || "") +
+                " " +
+                (item.subtitle || "") +
+                " " +
+                (item.category || "");
+            var score = cmdkFuzzyMatch(q, haystack);
+            if (score > 0 || !q) {
+                var recentIdx = this._recentActions.indexOf(item.id);
+                var recentBoost =
+                    recentIdx >= 0 ? CMDK_RECENT_LIMIT - recentIdx : 0;
+                scored.push({ item: item, score: score + recentBoost });
+            }
+        }
+        scored.sort(function (a, b) {
+            return b.score - a.score;
+        });
+        this._filteredItems = scored.map(function (s) {
+            return s.item;
+        });
+    };
+
+    /**
+     * 카테고리별로 그룹화해 렌더. XSS 방지: textContent 만 사용.
+     */
+    CommandPalette.prototype._render = function () {
+        if (!this._resultsEl) return;
+        var results = this._resultsEl;
+        while (results.firstChild) {
+            results.removeChild(results.firstChild);
+        }
+
+        if (this._filteredItems.length === 0) {
+            var empty = document.createElement("div");
+            empty.className = "command-palette-empty";
+            empty.textContent = "결과가 없습니다";
+            results.appendChild(empty);
+            return;
+        }
+
+        var groups = {};
+        var groupOrder = [];
+        for (var i = 0; i < this._filteredItems.length; i++) {
+            var it = this._filteredItems[i];
+            var cat = it.category || "기타";
+            if (!groups[cat]) {
+                groups[cat] = [];
+                groupOrder.push(cat);
+            }
+            groups[cat].push({ item: it, idx: i });
+        }
+
+        for (var g = 0; g < groupOrder.length; g++) {
+            var catName = groupOrder[g];
+            var groupEl = document.createElement("div");
+            groupEl.className = "command-palette-group";
+            groupEl.setAttribute("role", "group");
+            groupEl.setAttribute("aria-label", catName);
+
+            var header = document.createElement("div");
+            header.className = "command-palette-category";
+            header.textContent = catName;
+            groupEl.appendChild(header);
+
+            for (var k = 0; k < groups[catName].length; k++) {
+                var entry = groups[catName][k];
+                var itemEl = document.createElement("div");
+                itemEl.className = "command-palette-item";
+                itemEl.setAttribute("role", "option");
+                itemEl.setAttribute("data-idx", String(entry.idx));
+                if (entry.idx === this._selectedIdx) {
+                    itemEl.classList.add("selected");
+                    itemEl.setAttribute("aria-selected", "true");
+                } else {
+                    itemEl.setAttribute("aria-selected", "false");
+                }
+
+                var titleEl = document.createElement("div");
+                titleEl.className = "command-palette-item-title";
+                titleEl.textContent = entry.item.title || "";
+                itemEl.appendChild(titleEl);
+
+                if (entry.item.subtitle) {
+                    var subEl = document.createElement("div");
+                    subEl.className = "command-palette-item-subtitle";
+                    subEl.textContent = entry.item.subtitle;
+                    itemEl.appendChild(subEl);
+                }
+
+                groupEl.appendChild(itemEl);
+            }
+
+            results.appendChild(groupEl);
+        }
+
+        var selectedEl = results.querySelector(
+            ".command-palette-item.selected"
+        );
+        if (selectedEl && selectedEl.scrollIntoView) {
+            selectedEl.scrollIntoView({ block: "nearest" });
+        }
+    };
+
+    /**
+     * 팔레트 내부 키보드 조작 (document capture phase).
+     */
+    CommandPalette.prototype._handleKeydown = function (e) {
+        if (!this._isOpen) return;
+        if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            this.close();
+            return;
+        }
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            if (this._filteredItems.length > 0) {
+                this._selectedIdx =
+                    (this._selectedIdx + 1) % this._filteredItems.length;
+                this._render();
+            }
+            return;
+        }
+        if (e.key === "ArrowUp") {
+            e.preventDefault();
+            if (this._filteredItems.length > 0) {
+                this._selectedIdx =
+                    (this._selectedIdx - 1 + this._filteredItems.length) %
+                    this._filteredItems.length;
+                this._render();
+            }
+            return;
+        }
+        if (e.key === "Enter") {
+            e.preventDefault();
+            var item = this._filteredItems[this._selectedIdx];
+            if (item) this._executeItem(item);
+            return;
+        }
+    };
+
+    /**
+     * 항목 실행: 최근 목록 갱신 → 닫기 → run().
+     */
+    CommandPalette.prototype._executeItem = function (item) {
+        if (!item || typeof item.run !== "function") return;
+        this._pushRecent(item.id);
+        this.close();
+        try {
+            item.run();
+        } catch (err) {
+            // 실행 실패 무시
+        }
+    };
+
+    // 싱글턴 인스턴스 (전역 ⌘K 핸들러에서 사용)
+    var commandPalette = new CommandPalette();
 
 
     // =================================================================
@@ -5322,6 +5942,7 @@
         ViewerView: ViewerView,
         ChatView: ChatView,
         SettingsView: SettingsView,
+        CommandPalette: commandPalette,
     };
 
 

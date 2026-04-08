@@ -56,8 +56,14 @@
   /* 레이아웃 토큰 */
   --radius: 6px;
   --radius-lg: 10px;
-  --transition: 0.2s ease;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+
+  /* macOS 네이티브 이징 곡선 (docs/design.md §1.6) */
+  --ease-macos: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  /* 인터랙션 duration 토큰 */
+  --duration-fast: 150ms;   /* hover/focus/색상 변경 */
+  --duration-base: 250ms;   /* 기본값: 배경/보더/opacity/transform */
+  --duration-slow: 400ms;   /* 레이아웃 변화, 진행 바 */
 
   /* 화자별 컬러 도트 — 구분 최적화 */
   --speaker-0: #007AFF;
@@ -293,7 +299,7 @@ body {
 a {
   color: var(--accent);
   text-decoration: none;
-  transition: color var(--transition);
+  transition: color var(--duration-fast) var(--ease-macos);
 }
 
 a:hover {
@@ -379,7 +385,7 @@ button {
   width: 48px;
   border-radius: var(--radius);
   color: var(--text-secondary);
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
   cursor: pointer;
 }
 
@@ -404,6 +410,20 @@ button {
   font-weight: 500;
   line-height: 1;
 }
+
+/* Nav 단축키 힌트 — 기본은 숨김, hover/focus 시 노출(점진적 공개) */
+.nav-kbd {
+  display: none;
+  margin-top: 2px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Mono", monospace;
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  line-height: 1;
+}
+.nav-btn:hover .nav-kbd,
+.nav-btn:focus-visible .nav-kbd { display: inline-block; }
 
 /* Nav Bar 내 상태 인디케이터 */
 .nav-status {
@@ -482,7 +502,7 @@ button {
   border: 1px solid transparent;
   border-radius: var(--radius);
   outline: none;
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos), box-shadow var(--duration-fast) var(--ease-macos);
 }
 
 .list-search input::placeholder {
@@ -511,7 +531,7 @@ button {
   border-radius: var(--radius);
   outline: none;
   cursor: pointer;
-  transition: border-color var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos);
 }
 
 .list-sort select:focus {
@@ -535,7 +555,7 @@ button {
   padding: 10px 12px;
   border-radius: 8px;
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   margin-bottom: 1px;
 }
 
@@ -616,7 +636,7 @@ button {
   border: 1px solid transparent;
   border-radius: var(--radius);
   outline: none;
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos), box-shadow var(--duration-fast) var(--ease-macos);
 }
 
 .sidebar-search::placeholder {
@@ -655,7 +675,7 @@ button {
   border-radius: 50%;
   background: var(--text-muted);
   flex-shrink: 0;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .status-dot.connected {
@@ -728,7 +748,7 @@ button {
 
 /* 뷰 전환 시 부드러운 페이드인 */
 #content > :first-child {
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn var(--duration-base) var(--ease-macos);
 }
 
 
@@ -754,7 +774,7 @@ button {
   font-weight: 500;
   border-radius: 10px;
   box-shadow: var(--shadow-lg);
-  transition: top 0.3s ease;
+  transition: top var(--duration-slow) var(--ease-macos);
   max-width: 480px;
   white-space: nowrap;
   backdrop-filter: blur(20px);
@@ -771,7 +791,7 @@ button {
 .error-banner.auto-hiding {
   opacity: 0;
   top: -60px;
-  transition: top 0.4s ease, opacity 0.4s ease;
+  transition: top var(--duration-slow) var(--ease-macos), opacity var(--duration-slow) var(--ease-macos);
 }
 
 /* 토스트 타입 변형 */
@@ -814,7 +834,7 @@ button {
   color: #FFFFFF;
   font-size: 11px;
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   flex-shrink: 0;
 }
 
@@ -844,7 +864,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: all var(--duration-base) var(--ease-macos);
   backdrop-filter: blur(12px);
   box-shadow: var(--shadow-sm);
 }
@@ -893,7 +913,7 @@ button {
   font-weight: 500;
   border-radius: 20px;
   box-shadow: var(--shadow-lg);
-  transition: top 0.3s ease;
+  transition: top var(--duration-slow) var(--ease-macos);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
@@ -959,7 +979,7 @@ button {
   -webkit-backdrop-filter: blur(8px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--duration-base) var(--ease-macos);
   font-size: 13px;
   color: var(--text-secondary);
 }
@@ -1033,7 +1053,7 @@ button {
   height: 12px;
   border-radius: 50%;
   background: var(--border);
-  transition: all 0.3s ease;
+  transition: all var(--duration-slow) var(--ease-macos);
 }
 
 .pipeline-step.done .pipeline-step-dot {
@@ -1068,7 +1088,7 @@ button {
   background: var(--border);
   margin: 0 2px;
   margin-bottom: 20px;
-  transition: background 0.3s ease;
+  transition: background var(--duration-slow) var(--ease-macos);
 }
 
 .pipeline-step-line.done {
@@ -1134,7 +1154,7 @@ button {
   color: var(--text-secondary);
   background: var(--bg-secondary);
   border-radius: var(--radius);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
 }
 
 
@@ -1196,7 +1216,7 @@ button {
   height: 100%;
   background: var(--accent);
   border-radius: 2px;
-  transition: width 0.3s ease, background 0.3s ease;
+  transition: width var(--duration-slow) var(--ease-macos), background var(--duration-slow) var(--ease-macos);
   min-width: 0;
 }
 
@@ -1257,7 +1277,7 @@ button {
   width: 0%;
   background: var(--accent);
   border-radius: 2px;
-  transition: width 0.3s ease, background 0.3s ease;
+  transition: width var(--duration-slow) var(--ease-macos), background var(--duration-slow) var(--ease-macos);
 }
 
 .global-resource-bar .grb-bar-fill.warning { background: var(--warning); }
@@ -1309,7 +1329,7 @@ button {
   content: "▸";
   margin-right: 6px;
   display: inline-block;
-  transition: transform 0.2s ease;
+  transition: transform var(--duration-base) var(--ease-macos);
 }
 
 .viewer-log-panel[open] summary::before {
@@ -1441,10 +1461,10 @@ button {
   font-family: var(--font);
   color: var(--text-primary);
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   outline: none;
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos), box-shadow var(--duration-fast) var(--ease-macos);
 }
 
 .search-input::placeholder {
@@ -1467,7 +1487,7 @@ button {
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), opacity var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), opacity var(--duration-fast) var(--ease-macos);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -1509,10 +1529,10 @@ button {
   font-family: var(--font);
   color: var(--text-primary);
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   outline: none;
-  transition: border-color var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos);
 }
 
 .filter-input:focus {
@@ -1524,10 +1544,10 @@ button {
   font-size: 11px;
   color: var(--accent);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .filter-clear-btn:hover {
@@ -1542,7 +1562,7 @@ button {
   padding: 6px 8px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .checkbox-item:hover {
@@ -1572,14 +1592,14 @@ button {
   padding: 16px;
   max-width: 960px;
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
 }
 
 .search-results.visible {
   display: block;
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn var(--duration-base) var(--ease-macos);
 }
 
 .search-results-header {
@@ -1599,10 +1619,10 @@ button {
   font-size: 12px;
   color: var(--text-secondary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .search-close-btn:hover {
@@ -1641,11 +1661,11 @@ button {
   font-family: var(--font);
   color: var(--text-primary);
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   outline: none;
   cursor: pointer;
-  transition: border-color var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos);
 }
 
 .sort-select:focus {
@@ -1672,7 +1692,7 @@ button {
   border: 1px solid var(--accent);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .batch-summarize-btn:hover {
@@ -1710,11 +1730,11 @@ button {
 /* 개별 회의 카드: macOS 카드 스타일 */
 .meeting-card {
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 16px;
   cursor: pointer;
-  transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+  transition: transform var(--duration-base) var(--ease-macos), box-shadow var(--duration-base) var(--ease-macos), border-color var(--duration-base) var(--ease-macos);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1834,7 +1854,7 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--border);
-  transition: background var(--transition), transform var(--transition);
+  transition: background var(--duration-base) var(--ease-macos), transform var(--duration-base) var(--ease-macos);
   overflow: hidden;
   font-size: 0;
 }
@@ -1861,7 +1881,7 @@ button {
   height: 100%;
   background: var(--accent);
   border-radius: 1px;
-  transition: width 0.3s ease;
+  transition: width var(--duration-slow) var(--ease-macos);
 }
 
 
@@ -1883,10 +1903,10 @@ button {
   font-family: var(--font);
   color: var(--accent);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
   text-align: center;
 }
 
@@ -1944,10 +1964,10 @@ button {
 
 .result-item {
   padding: 12px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 8px;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .result-item:hover {
@@ -2016,7 +2036,7 @@ button {
 
 .skeleton-card {
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 16px;
   display: flex;
@@ -2065,7 +2085,7 @@ button {
   font-weight: 500;
   color: var(--accent);
   cursor: pointer;
-  transition: opacity var(--transition);
+  transition: opacity var(--duration-fast) var(--ease-macos);
 }
 
 .back-link:hover {
@@ -2143,12 +2163,12 @@ button {
   padding: 6px 12px;
   font-size: 12px;
   font-weight: 500;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-card);
   color: var(--text-primary);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--duration-base) var(--ease-macos);
 }
 
 .viewer-action-btn:hover {
@@ -2259,7 +2279,7 @@ button {
   border: none;
   border-bottom: 2px solid transparent;
   cursor: pointer;
-  transition: color var(--transition), border-color var(--transition);
+  transition: color var(--duration-fast) var(--ease-macos), border-color var(--duration-fast) var(--ease-macos);
   position: relative;
   bottom: -1px;
 }
@@ -2283,7 +2303,7 @@ button {
 
 .tab-panel.active {
   display: block;
-  animation: fadeIn 0.15s ease;
+  animation: fadeIn var(--duration-fast) var(--ease-macos);
 }
 
 
@@ -2326,10 +2346,10 @@ button {
   font-family: var(--font);
   color: var(--text-secondary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .search-bar-clear:hover {
@@ -2352,7 +2372,7 @@ button {
   gap: 16px;
   padding: 20px 24px;
   border-bottom: 0.5px solid var(--border);
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .utterance:last-child {
@@ -2531,7 +2551,7 @@ button {
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), opacity var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), opacity var(--duration-fast) var(--ease-macos);
 }
 
 .btn-summarize:hover {
@@ -2557,13 +2577,13 @@ button {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 6px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--duration-base) var(--ease-macos);
 }
 
 .btn-regenerate:hover {
@@ -2617,7 +2637,7 @@ button {
   font-family: var(--font);
   color: var(--text-primary);
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   outline: none;
   cursor: pointer;
@@ -2643,10 +2663,10 @@ button {
   font-family: var(--font);
   color: var(--text-secondary);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .btn-small:hover {
@@ -2788,14 +2808,14 @@ button {
   font-family: var(--font);
   color: var(--text-primary);
   background: var(--bg-input);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius);
   outline: none;
   resize: none;
   min-height: 40px;
   max-height: 120px;
   line-height: 1.5;
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-macos), box-shadow var(--duration-fast) var(--ease-macos);
 }
 
 .chat-input::placeholder {
@@ -2818,7 +2838,7 @@ button {
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition), opacity var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos), opacity var(--duration-fast) var(--ease-macos);
   white-space: nowrap;
   flex-shrink: 0;
   min-height: 40px;
@@ -2845,7 +2865,7 @@ button {
   border: 1px solid rgba(255, 59, 48, 0.3);
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   flex-shrink: 0;
   min-height: 40px;
 }
@@ -2875,7 +2895,7 @@ button {
   gap: 10px;
   max-width: 85%;
   align-items: flex-start;
-  animation: fadeIn 0.2s ease;
+  animation: fadeIn var(--duration-base) var(--ease-macos);
 }
 
 .message.user {
@@ -2963,9 +2983,9 @@ button {
   gap: 8px;
   padding: 8px 10px;
   background: var(--ref-bg);
-  border: 1px solid var(--ref-border);
+  border: 0.5px solid var(--ref-border);
   border-radius: var(--radius);
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   cursor: default;
 }
 
@@ -3032,7 +3052,7 @@ button {
   border: 1px solid transparent;
   border-radius: 4px;
   cursor: pointer;
-  transition: color var(--transition), background var(--transition), border-color var(--transition);
+  transition: color var(--duration-fast) var(--ease-macos), background var(--duration-fast) var(--ease-macos), border-color var(--duration-fast) var(--ease-macos);
 }
 
 .btn-copy:hover {
@@ -3059,7 +3079,7 @@ button {
   padding: 8px 12px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   margin-bottom: 1px;
 }
 
@@ -3144,7 +3164,7 @@ button {
   padding: 10px 24px;
   border-bottom: 0.5px solid var(--border);
   cursor: pointer;
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
   font-size: 13px;
 }
 
@@ -3195,6 +3215,11 @@ button {
   display: none;
 }
 
+/* Progressive Disclosure — 회의 0건일 때 검색/정렬/카운트 숨김 (§5.3) */
+#list-panel.list-panel-empty .list-search,
+#list-panel.list-panel-empty .list-sort,
+#list-panel.list-panel-empty .list-count { display: none; }
+
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
@@ -3226,7 +3251,7 @@ button {
   padding: 10px 12px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos), transform var(--duration-fast) var(--ease-macos);
   margin-bottom: 1px;
 }
 
@@ -3259,7 +3284,7 @@ button {
 
 /* 처리 중 아이템: 미묘한 펄스 */
 .meeting-item.processing {
-  animation: fadeIn 0.3s ease;
+  animation: fadeIn var(--duration-slow) var(--ease-macos);
 }
 
 /* 상태 도트 */
@@ -3270,7 +3295,7 @@ button {
   flex-shrink: 0;
   margin-top: 5px;
   background: var(--text-muted);
-  transition: background var(--transition);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .meeting-item-dot.completed {
@@ -3617,7 +3642,7 @@ button {
   background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 8px center;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--duration-fast) var(--ease-macos);
 }
 
 .setting-select:hover {
@@ -3659,7 +3684,7 @@ button {
   user-select: none;
   position: relative;
   border: 0.5px solid var(--border);
-  transition: all var(--transition);
+  transition: all var(--duration-base) var(--ease-macos);
   flex-shrink: 0;
 }
 
@@ -3737,7 +3762,7 @@ button {
   height: 20px;
   border-radius: 10px;
   background: var(--border);
-  transition: background 0.2s ease;
+  transition: background var(--duration-base) var(--ease-macos);
   position: relative;
 }
 
@@ -3751,7 +3776,7 @@ button {
   position: absolute;
   top: 2px;
   left: 2px;
-  transition: transform 0.2s ease;
+  transition: transform var(--duration-base) var(--ease-macos);
 }
 
 .setting-toggle input:checked + .toggle-track {
@@ -3828,7 +3853,7 @@ button {
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos), opacity var(--duration-fast) var(--ease-macos);
 }
 
 .settings-save-btn:hover {
@@ -3848,7 +3873,7 @@ button {
 .settings-save-status {
   font-size: 13px;
   color: var(--text-secondary);
-  transition: opacity 0.2s ease;
+  transition: opacity var(--duration-base) var(--ease-macos);
 }
 
 .settings-save-status.success {
@@ -3912,7 +3937,7 @@ button {
   font-weight: 500;
   border-radius: 6px;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .settings-tab:hover {
@@ -3937,13 +3962,13 @@ button {
 /* --- Secondary / Destructive 버튼 --- */
 .btn-secondary {
   padding: 7px 14px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   background: transparent;
   color: var(--text-primary);
   font-size: 13px;
   border-radius: 6px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .btn-secondary:hover:not(:disabled) {
@@ -3998,7 +4023,7 @@ button {
   font-weight: 500;
   border-radius: 5px;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .prompt-subtab:hover { color: var(--text-primary); }
@@ -4041,7 +4066,7 @@ button {
   color: var(--accent);
   font-weight: 500;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--duration-base) var(--ease-macos);
   white-space: nowrap;
 }
 
@@ -4054,7 +4079,7 @@ button {
   min-height: 320px;
   max-height: 60vh;
   padding: 12px 14px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 8px;
   background: var(--bg-card);
   color: var(--text-primary);
@@ -4140,7 +4165,7 @@ button {
   flex: 1;
   max-width: 280px;
   padding: 7px 12px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 6px;
   background: var(--bg-card);
   color: var(--text-primary);
@@ -4173,9 +4198,9 @@ button {
   gap: 16px;
   padding: 12px 14px;
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 8px;
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos);
 }
 
 .vocab-card:hover {
@@ -4235,7 +4260,7 @@ button {
   font-size: 12px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
 }
 
 .btn-icon:hover {
@@ -4270,12 +4295,15 @@ button {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.4);
+  /* macOS 스타일 배경 블러 — docs/design.md §1 */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
   opacity: 1;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--duration-base) var(--ease-macos);
 }
 
 .modal-overlay.hidden {
@@ -4284,7 +4312,7 @@ button {
 
 .modal-content {
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 12px;
   padding: 22px 24px;
   width: 90%;
@@ -4313,7 +4341,7 @@ button {
 .modal-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 6px;
   background: var(--bg-input);
   color: var(--text-primary);
@@ -4388,7 +4416,7 @@ button {
   border-radius: 8px;
   padding: 16px;
   background: var(--bg-input);
-  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+  transition: border-color var(--duration-base) var(--ease-macos), background var(--duration-base) var(--ease-macos), box-shadow var(--duration-base) var(--ease-macos);
 }
 
 .stt-model-card.active {
@@ -4484,7 +4512,7 @@ button {
   background: var(--bg-secondary);
   color: var(--text-primary);
   cursor: pointer;
-  transition: opacity var(--transition), background var(--transition), border-color var(--transition);
+  transition: opacity var(--duration-fast) var(--ease-macos), background var(--duration-fast) var(--ease-macos), border-color var(--duration-fast) var(--ease-macos);
 }
 
 .stt-action-btn.download {
@@ -4541,7 +4569,7 @@ button {
 .progress-fill {
   height: 100%;
   background: var(--accent);
-  transition: width 0.3s ease;
+  transition: width var(--duration-slow) var(--ease-macos);
 }
 
 .stt-model-error {
@@ -4602,7 +4630,7 @@ button {
 .stt-manual-download > summary::before {
   content: "▸ ";
   display: inline-block;
-  transition: transform 0.15s ease;
+  transition: transform var(--duration-fast) var(--ease-macos);
 }
 
 .stt-manual-download[open] > summary::before {
@@ -4640,7 +4668,7 @@ button {
 .stt-direct-download-group {
   padding: 12px 14px;
   background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 8px;
   margin-bottom: 4px;
 }
@@ -4680,7 +4708,7 @@ button {
   cursor: text;
   padding: 2px 4px;
   border-radius: 4px;
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-macos);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4699,7 +4727,7 @@ button {
   padding: 2px 6px;
   border-radius: 4px;
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-macos), background var(--duration-fast) var(--ease-macos);
 }
 
 .viewer-title:hover .viewer-title-edit-btn {
@@ -4744,7 +4772,7 @@ button {
   gap: 8px;
   margin-bottom: 12px;
   padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 0.5px solid var(--border-light);
 }
 
 .summary-rendered {
@@ -4762,7 +4790,7 @@ button {
   min-height: 400px;
   max-height: 70vh;
   padding: 14px 16px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 8px;
   background: var(--bg-primary);
   color: var(--text-primary);
@@ -4863,7 +4891,7 @@ button {
   gap: 8px;
   padding: 6px 8px;
   background: var(--bg-primary);
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 6px;
   flex-wrap: wrap;
 }
@@ -4915,7 +4943,7 @@ button {
 
 .stt-manual-path-input {
   padding: 7px 10px;
-  border: 1px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: 6px;
   background: var(--bg-primary);
   color: var(--text-primary);
@@ -4932,4 +4960,267 @@ button {
 .stt-manual-import-group .stt-action-btn {
   align-self: flex-end;
   margin-top: 4px;
+}
+
+/* ==========================================================================
+   Keyboard Hint (<kbd>) — docs/design.md §1.4, §4.1
+   ========================================================================== */
+
+kbd {
+  /* 타이포 */
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0;
+
+  /* 레이아웃 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+
+  /* 외형 */
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border: 0.5px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 1px 0 var(--border);   /* 미세한 입체감 */
+
+  /* 기타 */
+  vertical-align: middle;
+  white-space: nowrap;
+  user-select: none;
+  transition:
+    background var(--duration-fast) var(--ease-macos),
+    color var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+/* 부모 버튼 hover 시 kbd 강조 */
+button:hover > kbd,
+.btn:hover > kbd,
+.nav-btn:hover > kbd,
+.meeting-card-action:hover > kbd,
+a:hover > kbd {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+/* 활성 상태 (Primary 버튼 안의 kbd) */
+.btn-primary > kbd {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.24);
+  box-shadow: none;
+}
+
+.btn-primary:hover > kbd {
+  background: rgba(255, 255, 255, 0.26);
+  color: #fff;
+}
+
+/* Command Palette 행(row)의 kbd는 오른쪽 정렬 */
+.palette-row kbd {
+  margin-left: auto;
+}
+
+/* 연속된 kbd 사이 간격 (예: ⌘ + K) */
+kbd + kbd {
+  margin-left: 2px;
+}
+
+/* 다크 모드 대응 — shadow 대비 보정 */
+@media (prefers-color-scheme: dark) {
+  kbd {
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+  }
+
+  .btn-primary > kbd {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+}
+
+
+/* =================================================================
+ * Command Palette — ⌘K 전역 명령 팔레트 (신규)
+ * macOS Spotlight / Raycast 스타일.
+ * ================================================================= */
+
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+  animation: cmdkOverlayIn 150ms ease-out;
+}
+
+@keyframes cmdkOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.command-palette {
+  width: 600px;
+  max-width: calc(100vw - 40px);
+  max-height: 60vh;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 0.5px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: cmdkPanelIn 180ms ease-out;
+}
+
+@keyframes cmdkPanelIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.command-palette-input-wrap {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  height: 56px;
+  border-bottom: 0.5px solid rgba(0, 0, 0, 0.1);
+}
+
+.command-palette-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  color: var(--text-primary, #1d1d1f);
+  outline: none;
+  font-family: inherit;
+}
+
+.command-palette-input::placeholder {
+  color: var(--text-secondary, #86868b);
+}
+
+.command-palette-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.command-palette-group {
+  margin-bottom: 4px;
+}
+
+.command-palette-category {
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary, #86868b);
+  user-select: none;
+}
+
+.command-palette-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 16px;
+  margin: 0 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease-out;
+}
+
+.command-palette-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.command-palette-item.selected {
+  background: var(--accent, #007aff);
+  color: #ffffff;
+}
+
+.command-palette-item.selected .command-palette-item-subtitle {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.command-palette-item-title {
+  font-size: 13px;
+  color: var(--text-primary, #1d1d1f);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-palette-item.selected .command-palette-item-title {
+  color: #ffffff;
+}
+
+.command-palette-item-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary, #86868b);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-palette-empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary, #86868b);
+}
+
+/* 스크롤 방지 (팔레트 열려있는 동안 body 스크롤 고정) */
+body.command-palette-open {
+  overflow: hidden;
+}
+
+/* 다크 모드 대응 */
+[data-theme="dark"] .command-palette,
+@media (prefers-color-scheme: dark) {
+  .command-palette {
+    background: rgba(30, 30, 32, 0.92);
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  }
+  .command-palette-input-wrap {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+  .command-palette-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+}
+
+[data-theme="dark"] .command-palette-input,
+[data-theme="dark"] .command-palette-item-title {
+  color: #f5f5f7;
+}
+
+[data-theme="dark"] .command-palette-input::placeholder,
+[data-theme="dark"] .command-palette-category,
+[data-theme="dark"] .command-palette-item-subtitle,
+[data-theme="dark"] .command-palette-empty {
+  color: #98989d;
+}
+
+/* reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .command-palette-overlay,
+  .command-palette {
+    animation: none;
+  }
 }
