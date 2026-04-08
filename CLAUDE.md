@@ -471,13 +471,23 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 
 ```css
 /* 핵심 디자인 토큰 (style.css :root) */
---bg-primary, --bg-secondary, --bg-sidebar
---text-primary, --text-secondary
+--bg-canvas, --bg-sidebar, --bg-card, --bg-secondary, --bg-input
+--text-primary, --text-secondary, --text-muted
 --accent (#007aff / #0a84ff)
---border, --shadow, --radius
+--border (0.5px hairline), --shadow, --radius
 
 /* @media (prefers-color-scheme: dark) 에서 자동 전환 */
+/* [data-theme="dark"] 로 수동 토글도 지원 */
 ```
+
+> **🎨 디자인 작업 시 반드시 참고**: [`docs/design.md`](docs/design.md)
+>
+> macOS 네이티브 디자인 원칙(Vibrancy, 0.5px hairline, Independent Dark Mode, macOS easing),
+> 디자인 토큰(컬러/타이포/스페이싱/radius/shadow), 컴포넌트 패턴(카드/버튼/입력/모달/툴팁/빈상태/스켈레톤),
+> SaaS 패턴(Command Palette, Hidden AI, Progressive Disclosure),
+> 안티 패턴 금지 목록, 우리 프로젝트 적용 우선순위까지 전부 정리되어 있다.
+>
+> **UI/CSS/스타일 관련 작업 전에 반드시 docs/design.md 를 먼저 읽고 시작할 것.**
 
 ---
 
@@ -493,6 +503,7 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 - 비동기: `asyncio` 사용 (threading은 rumps/FastAPI 연동에만)
 - 문자열: f-string (`.format()` 또는 `%` 금지)
 - 경로: `pathlib.Path` (os.path 금지)
+- **UI/CSS/디자인 작업**: 반드시 [`docs/design.md`](docs/design.md) 먼저 읽고 시작 (디자인 토큰/컴포넌트 패턴/안티 패턴)
 
 ### 금지 사항
 
