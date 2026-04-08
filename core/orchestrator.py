@@ -66,6 +66,15 @@ class JobProcessor:
         # asyncio.CancelledError 를 발생시키고 작업을 recorded 로 되돌린다.
         self._cancellation_requests: set[str] = set()
 
+        # 단계별 성능 통계 (EMA) — ETA 예측 및 이상 탐지용
+        try:
+            from core.perf_stats import PerfStats
+
+            self._perf_stats = PerfStats.load()
+        except Exception as e:
+            logger.warning(f"perf_stats 초기화 실패 (예측 비활성화): {e}")
+            self._perf_stats = None
+
         logger.info(f"JobProcessor 초기화: poll_interval={poll_interval}초")
 
     def request_cancellation(self, meeting_id: str) -> None:
@@ -187,6 +196,44 @@ class JobProcessor:
         except Exception as e:
             logger.error(f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}")
 
+    def _resolve_step_model_id(self, step: str) -> str:
+        """단계에 해당하는 활성 모델 ID를 반환한다.
+
+        - transcribe: STT 모델명 (HF repo ID 의 마지막 segment 또는 원본)
+        - correct / summarize: LLM 모델명
+        - 나머지 단계: "default"
+
+        perf_stats 의 by_model 기본값 키와 일치하도록 단순화한다.
+        """
+        try:
+            config = getattr(self._pipeline, "_config", None)
+            if config is None:
+                return "default"
+
+            if step == "transcribe":
+                stt_name = getattr(getattr(config, "stt", None), "model_name", "") or ""
+                # HF repo ID 에서 슬러그 추출: "youngouk/seastar-medium-ko-4bit-mlx" → 마지막 segment
+                # 단, perf_baseline.json 의 by_model 키와 매칭되도록 간단한 변환 사용
+                if "seastar" in stt_name:
+                    return "seastar-medium-4bit"
+                if "ghost613" in stt_name:
+                    return "ghost613-turbo-4bit"
+                if "komixv2" in stt_name or "komix" in stt_name:
+                    return "komixv2"
+                return stt_name.split("/")[-1] if stt_name else "default"
+
+            if step in ("correct", "summarize"):
+                llm_cfg = getattr(config, "llm", None)
+                if llm_cfg is None:
+                    return "default"
+                backend = getattr(llm_cfg, "backend", "mlx")
+                if backend == "mlx":
+                    return getattr(llm_cfg, "mlx_model_name", "default") or "default"
+                return getattr(llm_cfg, "model_name", "default") or "default"
+        except Exception:
+            pass
+        return "default"
+
     async def _broadcast_event(self, event_type: str, data: dict[str, Any]) -> None:
         """WebSocket으로 이벤트를 브로드캐스트한다.
 
@@ -258,12 +305,69 @@ class JobProcessor:
                     {"job_id": job_id, "step": step_name, "status": mapped_status},
                 )
 
+        async def on_step_progress(evt: dict[str, Any]) -> None:
+            """단계 시작/완료 시 ETA 예측과 EMA 업데이트를 수행하고 브로드캐스트한다.
+
+            `evt` 는 pipeline.run() 이 전달하는 dict:
+              - phase: "start" | "complete"
+              - step: 단계명
+              - input_size: 입력 크기 (단계별 단위)
+              - elapsed: (complete 시) 실제 소요 시간
+            """
+            if self._perf_stats is None:
+                return
+            try:
+                phase = evt.get("phase", "")
+                step = evt.get("step", "")
+                input_size = float(evt.get("input_size") or 0.0)
+                model_id = self._resolve_step_model_id(step)
+
+                payload: dict[str, Any] = {
+                    "job_id": job_id,
+                    "meeting_id": meeting_id,
+                    "step": step,
+                    "phase": phase,
+                    "input_size": input_size,
+                    "model_id": model_id,
+                }
+
+                if phase == "start":
+                    eta = self._perf_stats.predict(
+                        step, model_id=model_id, input_size=input_size
+                    )
+                    payload["eta_seconds"] = eta
+                    payload["anomaly"] = "normal"
+                elif phase == "complete":
+                    elapsed = float(evt.get("elapsed") or 0.0)
+                    # EMA 업데이트
+                    self._perf_stats.update(
+                        step,
+                        model_id=model_id,
+                        input_size=input_size,
+                        elapsed=elapsed,
+                    )
+                    self._perf_stats.save()
+                    # 완료 시점의 이상 탐지 (사후 기록용)
+                    eta = self._perf_stats.predict(
+                        step, model_id=model_id, input_size=input_size
+                    )
+                    payload["eta_seconds"] = eta
+                    payload["elapsed_seconds"] = elapsed
+                    payload["anomaly"] = self._perf_stats.classify_anomaly(
+                        elapsed=elapsed, eta=eta
+                    )
+
+                await self._broadcast_event("step_progress", payload)
+            except Exception as e:
+                logger.debug(f"step_progress 처리 실패 (무시): {e}")
+
         try:
             # 파이프라인 실행 (LLM 단계는 온디맨드로 실행하므로 스킵)
             result = await self._pipeline.run(
                 Path(audio_path),
                 meeting_id=meeting_id,
                 on_step_start=on_step_start,
+                on_step_progress=on_step_progress,
                 skip_llm_steps=True,
             )
 

@@ -1344,34 +1344,99 @@ button {
 
 .viewer-log-panel .log-table {
   margin-top: 10px;
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 6px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
 .viewer-log-panel .log-row {
-  display: contents;
+  display: grid;
+  grid-template-columns: 80px 1fr 28px;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background var(--duration-base) var(--ease-macos);
+}
+
+.viewer-log-panel .log-row.status-running {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.viewer-log-panel .log-row.anomaly-warning {
+  background: color-mix(in srgb, #ff9500 12%, transparent);
+}
+
+.viewer-log-panel .log-row.anomaly-danger {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  animation: log-danger-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes log-danger-pulse {
+  0%, 100% { background: color-mix(in srgb, var(--error) 15%, transparent); }
+  50% { background: color-mix(in srgb, var(--error) 28%, transparent); }
 }
 
 .viewer-log-panel .log-step {
   color: var(--text-primary);
+  font-weight: 500;
+}
+
+.viewer-log-panel .log-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.viewer-log-panel .log-progress-bar {
+  flex: 1;
+  min-width: 60px;
+  height: 4px;
+  background: var(--bg-canvas);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.viewer-log-panel .log-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s var(--ease-macos);
+}
+
+.viewer-log-panel .log-row.anomaly-warning .log-progress-fill {
+  background: #ff9500;
+}
+
+.viewer-log-panel .log-row.anomaly-danger .log-progress-fill {
+  background: var(--error);
 }
 
 .viewer-log-panel .log-elapsed {
   color: var(--text-secondary);
   text-align: right;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.viewer-log-panel .log-eta {
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .viewer-log-panel .log-status {
   text-align: right;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .viewer-log-panel .log-status.success { color: var(--success); }
 .viewer-log-panel .log-status.failed { color: var(--error); }
 .viewer-log-panel .log-status.skipped { color: var(--text-muted); }
+.viewer-log-panel .log-status.running { color: var(--accent); }
+.viewer-log-panel .log-status.pending { color: var(--text-muted); }
 
 .resource-model {
   font-size: 10px;

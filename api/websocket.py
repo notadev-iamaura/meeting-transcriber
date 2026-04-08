@@ -60,6 +60,10 @@ class EventType(str, Enum):
     RECORDING_STOPPED = "recording_stopped"
     RECORDING_ERROR = "recording_error"
     RECORDING_DURATION = "recording_duration"
+    # 파이프라인 단계 진행률 / 예상 시간 (step_progress)
+    # data: { job_id, meeting_id, step, phase("start"|"complete"),
+    #         input_size, eta_seconds, elapsed_seconds, anomaly("normal"|"warning"|"danger") }
+    STEP_PROGRESS = "step_progress"
 
 
 @dataclass

@@ -285,6 +285,9 @@ class PipelineState:
     current_step: str = ""
     completed_steps: list[str] = field(default_factory=list)
     step_results: list[dict[str, Any]] = field(default_factory=list)
+    # 성능 예측/이상 탐지용 입력 메트릭 (진행률 바, ETA 에 사용)
+    audio_duration_seconds: float = 0.0
+    utterance_count: int = 0
     created_at: str = ""
     updated_at: str = ""
     error_message: str = ""
@@ -575,6 +578,48 @@ class PipelineManager:
 
         return max_completed_idx + 1
 
+    def _compute_step_input_size(
+        self,
+        step: "PipelineStep",
+        state: "PipelineState",
+        audio_path: Path,
+        merged_result: Any,
+        corrected_result: Any,
+    ) -> float:
+        """단계별 입력 크기를 단위에 맞춰 계산한다.
+
+        - convert: 파일 크기 MB
+        - transcribe / diarize / merge: 오디오 길이(초)
+        - correct: merged_result 의 발화 수 (없으면 state.utterance_count)
+        - summarize: corrected_result 의 발화 수 (없으면 state.utterance_count)
+
+        입력이 아직 준비되지 않았으면 0.0 반환 (ETA 예측 불가).
+        """
+        try:
+            if step == PipelineStep.CONVERT:
+                if audio_path.exists():
+                    return round(audio_path.stat().st_size / (1024 * 1024), 3)
+                return 0.0
+            if step in (
+                PipelineStep.TRANSCRIBE,
+                PipelineStep.DIARIZE,
+                PipelineStep.MERGE,
+            ):
+                return float(state.audio_duration_seconds or 0.0)
+            if step == PipelineStep.CORRECT:
+                if merged_result is not None:
+                    utterances = getattr(merged_result, "utterances", None) or []
+                    return float(len(utterances))
+                return float(state.utterance_count or 0)
+            if step == PipelineStep.SUMMARIZE:
+                if corrected_result is not None:
+                    utterances = getattr(corrected_result, "utterances", None) or []
+                    return float(len(utterances))
+                return float(state.utterance_count or 0)
+        except Exception as e:
+            logger.debug(f"입력 크기 계산 실패 (step={step.value}): {e}")
+        return 0.0
+
     async def _run_step_convert(
         self,
         audio_path: Path,
@@ -814,6 +859,7 @@ class PipelineManager:
         audio_path: Path,
         meeting_id: str | None = None,
         on_step_start: Callable[[str], Awaitable[None]] | None = None,
+        on_step_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         skip_llm_steps: bool | None = None,
     ) -> PipelineState:
         """파이프라인 전체를 실행한다.
@@ -825,6 +871,11 @@ class PipelineManager:
             audio_path: 입력 오디오 파일 경로
             meeting_id: 회의 ID (None이면 자동 생성, 재개 시 기존 ID 사용)
             on_step_start: 각 단계 시작 전 호출되는 비동기 콜백 (단계명 문자열 전달)
+            on_step_progress: 단계 진행/완료 이벤트 콜백. dict 인자:
+                - phase: "start" | "complete"
+                - step: 단계명
+                - input_size: 입력 크기 (단계별 단위)
+                - elapsed: (complete 시) 실제 소요 시간 초
             skip_llm_steps: LLM 단계 스킵 여부 (None이면 config 설정값 사용)
 
         Returns:
@@ -889,6 +940,19 @@ class PipelineManager:
 
         state.status = "running"
         state.save(state_path)
+
+        # 오디오 길이 선 획득 (ETA 예측용). 실패해도 치명적이지 않음.
+        if state.audio_duration_seconds <= 0:
+            try:
+                from steps.audio_converter import AudioConverter
+
+                _converter_probe = AudioConverter(self._config)
+                _info = _converter_probe.probe(audio_path)
+                if _info is not None and _info.duration > 0:
+                    state.audio_duration_seconds = float(_info.duration)
+                    state.save(state_path)
+            except Exception as e:
+                logger.debug(f"오디오 길이 사전 조회 실패(무시): {e}")
 
         logger.info(
             f"파이프라인 시작: meeting_id={meeting_id}, "
@@ -982,6 +1046,24 @@ class PipelineManager:
                 except Exception as e:
                     logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
 
+            # 단계 시작 시점의 입력 크기 계산 (ETA 예측용)
+            step_input_size = self._compute_step_input_size(
+                step, state, audio_path, merged_result, corrected_result
+            )
+
+            # 단계 시작 진행 이벤트 (ETA 예측은 상위 콜백에서 수행)
+            if on_step_progress is not None:
+                try:
+                    await on_step_progress(
+                        {
+                            "phase": "start",
+                            "step": step.value,
+                            "input_size": step_input_size,
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"on_step_progress 콜백 예외 (start, 무시): {e}")
+
             state.current_step = step.value
             state.save(state_path)
 
@@ -1069,10 +1151,35 @@ class PipelineManager:
             )
             state.step_results.append(step_result.to_dict())
 
+            # MERGE 완료 시 발화 수를 상태에 저장 (이후 correct/summarize 예측용)
+            if success and step == PipelineStep.MERGE and merged_result is not None:
+                try:
+                    state.utterance_count = len(
+                        getattr(merged_result, "utterances", []) or []
+                    )
+                except Exception:
+                    state.utterance_count = 0
+
             if success:
                 state.completed_steps.append(step.value)
                 state.save(state_path)
                 logger.info(f"단계 완료: {step.value} ({step_elapsed:.1f}초)")
+
+                # 단계 완료 진행 이벤트 (EMA 업데이트 + 브로드캐스트는 상위 콜백)
+                if on_step_progress is not None:
+                    try:
+                        await on_step_progress(
+                            {
+                                "phase": "complete",
+                                "step": step.value,
+                                "input_size": step_input_size,
+                                "elapsed": round(step_elapsed, 2),
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"on_step_progress 콜백 예외 (complete, 무시): {e}"
+                        )
             else:
                 # 실패 시 파이프라인 중단
                 state.status = "failed"
