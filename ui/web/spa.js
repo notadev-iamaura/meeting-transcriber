@@ -422,6 +422,28 @@
             loadMeetings();
             fetchStatus();
 
+            // 새로고침/재방문 시 진행 중인 녹음 상태 복원
+            // (백엔드는 녹음을 계속하지만 ws:recording_started 이벤트는 다시 안 오므로
+            //  프론트 플로팅 바가 사라지는 UX 결함을 방지)
+            App.apiRequest("/recording/status")
+                .then(function (rec) {
+                    if (rec && rec.is_recording) {
+                        var recStatus = document.getElementById("recordingStatus");
+                        if (recStatus) recStatus.classList.add("visible");
+                        var sec = Math.floor(rec.duration_seconds || 0);
+                        var m = Math.floor(sec / 60);
+                        var s = sec % 60;
+                        var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+                        var recDuration = document.getElementById("recordingDuration");
+                        if (recDuration) {
+                            App.safeText(recDuration, pad(m) + ":" + pad(s));
+                        }
+                    }
+                })
+                .catch(function () {
+                    // recorder 미초기화 등은 무시
+                });
+
             // 주기적 폴링 (WebSocket 폴백)
             _statusTimer = setInterval(fetchStatus, STATUS_POLL_INTERVAL);
             _meetingsTimer = setInterval(loadMeetings, MEETINGS_POLL_INTERVAL);
