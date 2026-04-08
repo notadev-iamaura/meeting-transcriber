@@ -491,12 +491,24 @@ def _setup_static_files(app: FastAPI) -> None:
         app: FastAPI 인스턴스
     """
     if _STATIC_DIR.is_dir():
+        # 캐시 무효화: 로컬 데스크탑 앱이므로 Last-Modified/ETag 조차 무시하고
+        # 항상 최신 파일을 서빙. 사용자가 업데이트 후 새로고침만 하면 즉시 반영되어야 한다.
+        from starlette.types import Scope
+
+        class NoCacheStaticFiles(StaticFiles):
+            async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
+                resp = await super().get_response(path, scope)
+                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                return resp
+
         app.mount(
             "/static",
-            StaticFiles(directory=str(_STATIC_DIR)),
+            NoCacheStaticFiles(directory=str(_STATIC_DIR)),
             name="static",
         )
-        logger.info(f"정적 파일 서빙 설정 완료 — 경로: {_STATIC_DIR}")
+        logger.info(f"정적 파일 서빙 설정 완료 (no-cache) — 경로: {_STATIC_DIR}")
     else:
         logger.warning(
             f"정적 파일 디렉토리가 존재하지 않습니다: {_STATIC_DIR}. "
@@ -518,16 +530,54 @@ def _setup_spa_routes(app: FastAPI) -> None:
     """
     index_path = _STATIC_DIR / "index.html"
 
-    @app.get("/app", response_class=FileResponse)
-    @app.get("/app/{path:path}", response_class=FileResponse)
-    async def spa_handler(path: str = "") -> FileResponse:
-        """SPA 엔트리포인트. 모든 /app 하위 경로에 index.html을 반환한다."""
+    from fastapi.responses import HTMLResponse
+
+    def _build_index_html() -> str:
+        """index.html 을 읽어 spa.js / app.js / style.css 의 src/href 에
+        파일 mtime 기반 버전 쿼리를 자동 주입한다.
+
+        브라우저가 강력하게 캐싱해서 코드 변경 후에도 구버전을 사용하는
+        문제를 방지한다. mtime 이 바뀌면 URL 도 바뀌므로 강제 재다운로드된다.
+        """
+        import re
+
+        html = index_path.read_text(encoding="utf-8")
+
+        def _ver(filename: str) -> str:
+            p = _STATIC_DIR / filename
+            try:
+                return str(int(p.stat().st_mtime))
+            except OSError:
+                return "0"
+
+        # /static/spa.js, /static/app.js, /static/style.css 에 ?v=mtime 추가
+        for fname in ("spa.js", "app.js", "style.css"):
+            v = _ver(fname)
+            pattern = re.compile(
+                r'(/static/' + re.escape(fname) + r')(\?[^"\'>\s]*)?'
+            )
+            html = pattern.sub(lambda m: f"{m.group(1)}?v={v}", html)
+        return html
+
+    @app.get("/app", response_class=HTMLResponse)
+    @app.get("/app/{path:path}", response_class=HTMLResponse)
+    async def spa_handler(path: str = "") -> HTMLResponse:
+        """SPA 엔트리포인트. 모든 /app 하위 경로에 index.html을 반환한다.
+
+        spa.js/app.js/style.css 는 mtime 기반 버전 쿼리로 캐시 무효화된다.
+        """
         if not index_path.is_file():
             raise HTTPException(
                 status_code=404,
                 detail="index.html을 찾을 수 없습니다",
             )
-        return FileResponse(index_path, media_type="text/html")
+        return HTMLResponse(
+            content=_build_index_html(),
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
     logger.info("SPA 라우팅 설정 완료 — /app/*")
 

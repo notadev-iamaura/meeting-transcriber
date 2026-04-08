@@ -2199,6 +2199,24 @@
         var actionsEl = els.viewerActions;
         actionsEl.innerHTML = "";
 
+        // 진행 중(queued/transcribing/diarizing/merging/embedding) 시 취소 버튼
+        var inProgressStates = {
+            queued: true, transcribing: true, diarizing: true,
+            merging: true, embedding: true,
+        };
+        if (inProgressStates[data.status]) {
+            var cancelBtn = document.createElement("button");
+            cancelBtn.className = "viewer-action-btn delete";
+            cancelBtn.innerHTML = "✕ 전사 취소";
+            cancelBtn.title =
+                "전사 작업을 취소하고 녹음 완료 상태로 되돌립니다. " +
+                "실행 중인 단계가 끝난 직후에 중지됩니다.";
+            cancelBtn.addEventListener("click", function () {
+                self._cancelMeeting(data.meeting_id, cancelBtn);
+            });
+            actionsEl.appendChild(cancelBtn);
+        }
+
         // 녹음 완료 시 전사 시작 버튼
         if (data.status === "recorded") {
             var transcribeBtn = document.createElement("button");
@@ -2427,6 +2445,44 @@
             ListPanel.loadMeetings();
         } catch (e) {
             errorBanner.show("재시도 실패: " + e.message);
+        }
+    };
+
+    /**
+     * 진행 중인 전사를 취소한다.
+     * queued: 즉시 recorded 로 전환.
+     * processing: 다음 단계 경계에서 중지 (백그라운드 폴링이 갱신).
+     * @param {string} meetingId
+     * @param {HTMLElement} btn
+     */
+    ViewerView.prototype._cancelMeeting = async function (meetingId, btn) {
+        if (!confirm(
+            "진행 중인 전사를 취소하시겠습니까?\n" +
+            "현재 실행 중인 단계가 끝난 직후 중지되고\n" +
+            "녹음 완료 상태로 되돌아갑니다."
+        )) {
+            return;
+        }
+        var originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = "취소 요청 중...";
+        try {
+            await App.apiPost(
+                "/meetings/" + encodeURIComponent(meetingId) + "/cancel",
+                {}
+            );
+            // 즉시 한 번 갱신하고, 백그라운드 폴링이 처리되도록 약간의 딜레이 후 한 번 더
+            this._loadMeetingInfo();
+            ListPanel.loadMeetings();
+            setTimeout(function () {
+                if (typeof ListPanel !== "undefined" && ListPanel.loadMeetings) {
+                    ListPanel.loadMeetings();
+                }
+            }, 3000);
+        } catch (e) {
+            errorBanner.show("취소 실패: " + e.message);
+            btn.disabled = false;
+            btn.innerHTML = originalText;
         }
     };
 

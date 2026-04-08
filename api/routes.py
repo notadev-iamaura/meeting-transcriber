@@ -769,6 +769,11 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
         # 재시도 실행 (job_id 기반)
         updated_job = await asyncio.to_thread(queue.queue.retry_job, job.id)
 
+        # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
+        job_processor = getattr(request.app.state, "job_processor", None)
+        if job_processor is not None:
+            job_processor._cancellation_requests.discard(meeting_id)
+
         logger.info(f"회의 재시도 요청: {meeting_id} (job_id={job.id})")
 
         return MeetingItem(
@@ -841,6 +846,11 @@ async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
             JobStatus.QUEUED,
         )
 
+        # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
+        job_processor = getattr(request.app.state, "job_processor", None)
+        if job_processor is not None:
+            job_processor._cancellation_requests.discard(meeting_id)
+
         logger.info(f"전사 시작 요청: {meeting_id} (job_id={job.id})")
 
         return MeetingItem(
@@ -865,6 +875,105 @@ async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
         raise HTTPException(
             status_code=500,
             detail=f"전사 시작 중 오류가 발생했습니다: {e}",
+        ) from e
+
+
+@router.post("/meetings/{meeting_id}/cancel")
+async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
+    """진행 중(또는 대기 중)인 회의 전사를 취소하고 recorded 로 되돌린다.
+
+    동작:
+        - status == queued: 아직 워커가 잡지 않았으므로 즉시 force_set_status 로 recorded.
+        - status in (transcribing, diarizing, merging, embedding):
+          JobProcessor.request_cancellation() 으로 취소 요청 등록.
+          현재 실행 중인 단계가 끝난 뒤 다음 단계 경계에서 CancelledError 가 발생하여
+          orchestrator 가 status 를 recorded 로 되돌리고 brodcast.
+        - 그 외 상태: 409 (취소 대상 아님)
+
+    Args:
+        request: FastAPI Request
+        meeting_id: 취소할 회의 ID
+
+    Returns:
+        업데이트된 MeetingItem (queued 였다면 즉시 recorded, 진행 중이었다면
+        아직 recorded 가 아닐 수 있음 — 프론트가 폴링/브로드캐스트로 갱신)
+
+    Raises:
+        HTTPException: 회의 없음(404), 취소 대상 상태 아님(409)
+    """
+    from core.job_queue import JobNotFoundError, JobStatus
+
+    queue = _get_job_queue(request)
+
+    in_progress_states = {
+        JobStatus.QUEUED.value,
+        JobStatus.TRANSCRIBING.value,
+        JobStatus.DIARIZING.value,
+        JobStatus.MERGING.value,
+        JobStatus.EMBEDDING.value,
+    }
+
+    try:
+        job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+            )
+
+        if job.status not in in_progress_states:
+            raise HTTPException(
+                status_code=409,
+                detail=f"취소할 수 있는 상태가 아닙니다: {job.status}",
+            )
+
+        # queued: 즉시 recorded 로 강제 전환 (아직 워커가 잡지 않음)
+        if job.status == JobStatus.QUEUED.value:
+            updated_job = await asyncio.to_thread(
+                queue.queue.force_set_status,
+                job.id,
+                JobStatus.RECORDED,
+                "사용자가 취소함 (대기 중)",
+            )
+            # 혹시 이전에 in-progress 취소 요청이 등록되어 있을 수 있으니 정리
+            job_processor = getattr(request.app.state, "job_processor", None)
+            if job_processor is not None:
+                job_processor._cancellation_requests.discard(meeting_id)
+        else:
+            # 실행 중: JobProcessor 에 취소 요청 등록.
+            # 단계 경계에서 orchestrator 가 잡고 recorded 로 되돌린다.
+            job_processor = getattr(request.app.state, "job_processor", None)
+            if job_processor is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="JobProcessor 가 초기화되지 않아 취소할 수 없습니다.",
+                )
+            job_processor.request_cancellation(meeting_id)
+            # 현재 시점의 job 그대로 반환 — 프론트는 폴링/WebSocket 으로 갱신
+            updated_job = job
+
+        logger.info(f"취소 요청 처리: {meeting_id} (이전 status={job.status})")
+
+        return MeetingItem(
+            id=updated_job.id,
+            meeting_id=updated_job.meeting_id,
+            audio_path=updated_job.audio_path,
+            status=updated_job.status,
+            retry_count=updated_job.retry_count,
+            error_message=updated_job.error_message,
+            created_at=updated_job.created_at,
+            updated_at=updated_job.updated_at,
+            title=getattr(updated_job, "title", "") or "",
+        )
+    except HTTPException:
+        raise
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"취소 처리 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"취소 처리 중 오류가 발생했습니다: {e}",
         ) from e
 
 
@@ -926,6 +1035,11 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
         updated_job = await asyncio.to_thread(
             queue.queue.reset_for_retranscribe, job.id
         )
+
+        # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
+        job_processor = getattr(request.app.state, "job_processor", None)
+        if job_processor is not None:
+            job_processor._cancellation_requests.discard(meeting_id)
 
         logger.info(f"재전사 요청: {meeting_id} (job_id={job.id})")
 

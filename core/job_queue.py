@@ -630,6 +630,49 @@ class JobQueue:
 
         return self.get_job(job_id)
 
+    def force_set_status(
+        self,
+        job_id: int,
+        new_status: JobStatus,
+        error_message: str = "",
+    ) -> Job:
+        """전이 규칙을 우회하여 작업 상태를 강제로 변경한다.
+
+        VALID_TRANSITIONS 검증을 건너뛰므로 호출자가 안전성을 책임진다.
+        주 사용처는 사용자 취소 (in-progress → recorded), 외부 강제 종료 등.
+
+        Args:
+            job_id: 변경할 작업 ID
+            new_status: 새 상태
+            error_message: 에러/사유 메시지
+
+        Returns:
+            업데이트된 Job 인스턴스
+
+        Raises:
+            JobNotFoundError: 작업이 없을 때
+        """
+        conn = self._ensure_connection()
+        # 존재 확인 (없으면 JobNotFoundError)
+        self.get_job(job_id)
+
+        now = self._now_iso()
+        with self._write_lock:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_status.value, error_message, now, job_id),
+            )
+            conn.commit()
+
+        logger.info(
+            f"작업 상태 강제 변경: id={job_id} → {new_status.value} ({error_message or '사유 없음'})"
+        )
+        return self.get_job(job_id)
+
     def reset_for_retranscribe(self, job_id: int) -> Job:
         """완료/실패한 작업을 재전사 대상으로 초기화한다.
 

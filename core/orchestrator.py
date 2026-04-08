@@ -61,7 +61,32 @@ class JobProcessor:
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
+        # 사용자 취소 요청 집합. API 가 meeting_id 를 추가하면
+        # _process_job 의 on_step_start 콜백이 단계 경계에서 감지하여
+        # asyncio.CancelledError 를 발생시키고 작업을 recorded 로 되돌린다.
+        self._cancellation_requests: set[str] = set()
+
         logger.info(f"JobProcessor 초기화: poll_interval={poll_interval}초")
+
+    def request_cancellation(self, meeting_id: str) -> None:
+        """진행 중인 회의에 대해 취소 요청을 등록한다.
+
+        다음 파이프라인 단계 경계(`on_step_start`)에서 감지되어
+        `asyncio.CancelledError` 가 발생하고, `_process_job` 에서
+        잡아 작업을 `recorded` 상태로 되돌린다.
+
+        주의: 이 메서드는 즉시 작업을 중단시키지 않는다. 현재 실행 중인
+        단계(예: 전사)가 끝난 뒤 다음 단계 시작 직전에 취소된다.
+
+        Args:
+            meeting_id: 취소할 회의 ID
+        """
+        self._cancellation_requests.add(meeting_id)
+        logger.info(f"취소 요청 등록: meeting_id={meeting_id}")
+
+    def is_cancellation_requested(self, meeting_id: str) -> bool:
+        """해당 회의에 대해 취소 요청이 있는지 확인한다."""
+        return meeting_id in self._cancellation_requests
 
     @property
     def is_running(self) -> bool:
@@ -210,9 +235,21 @@ class JobProcessor:
         async def on_step_start(step_name: str) -> None:
             """파이프라인 단계 시작 시 호출되는 콜백.
 
+            사용자 취소 요청이 있으면 단계 경계에서 CancelledError 를 발생시켜
+            파이프라인을 중단시킨다.
+
             Args:
                 step_name: 단계 이름
+
+            Raises:
+                asyncio.CancelledError: 사용자가 이 회의에 대해 취소를 요청한 경우
             """
+            if meeting_id in self._cancellation_requests:
+                logger.info(
+                    f"취소 감지: meeting_id={meeting_id}, step={step_name} → CancelledError 발생"
+                )
+                raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
+
             mapped_status = STEP_TO_STATUS.get(step_name)
             if mapped_status:
                 await self._update_job_status_safe(job_id, mapped_status)
@@ -239,6 +276,27 @@ class JobProcessor:
             )
 
             logger.info(f"작업 처리 완료: job_id={job_id}")
+
+        except asyncio.CancelledError:
+            # 사용자 취소: recorded 상태로 되돌리고 취소 요청 set 에서 제거
+            self._cancellation_requests.discard(meeting_id)
+            try:
+                # JobStatus 전이 규칙 우회: 직접 강제 업데이트
+                await asyncio.to_thread(
+                    self._job_queue.queue.force_set_status,
+                    job_id,
+                    JobStatus.RECORDED,
+                    "사용자가 취소함",
+                )
+            except Exception as exc:
+                logger.error(f"취소 후 상태 복귀 실패: job_id={job_id}, error={exc}")
+            await self._thermal_manager.notify_job_completed()
+            await self._broadcast_event(
+                "job_cancelled",
+                {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
+            )
+            logger.info(f"작업 취소 완료: job_id={job_id}, meeting_id={meeting_id}")
+            # CancelledError 를 다시 raise 하지 않음 — 작업 루프는 계속 동작해야 함
 
         except Exception as e:
             # 실패 상태 업데이트
