@@ -713,10 +713,13 @@ button {
    7. Content Area — 메인 콘텐츠 영역
    ══════════���═══════════════════════════════ */
 
-/* 메인 콘텐츠: 나머지 공간 전체 */
+/* 메인 콘텐츠: 나머지 공간 전체.
+   overflow-y: auto 로 viewer/search 등 자체 스크롤이 없는 뷰가 정상 스크롤되게 한다.
+   chat-layout / settings-view 는 height:100% 로 정확히 채워 이중 스크롤이 발생하지 않는다. */
 #content {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--bg-content);
   min-width: 0;
   display: flex;
