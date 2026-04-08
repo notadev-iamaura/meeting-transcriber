@@ -138,10 +138,29 @@ pipeline:
             mlx_max_tokens=4096,
         ),
         pipeline=SimpleNamespace(skip_llm_steps=False),
+        hallucination_filter=SimpleNamespace(
+            enabled=True,
+            no_speech_threshold=0.9,
+            compression_ratio_threshold=2.4,
+            repetition_threshold=3,
+        ),
     )
 
-    # cfg 가 model_copy 를 지원해야 함 (Pydantic mock)
-    cfg.model_copy = lambda update: SimpleNamespace(**{**cfg.__dict__, **update})
+    # cfg + 각 하위 네임스페이스가 Pydantic model_copy 를 지원해야 함
+    def _add_model_copy(ns: SimpleNamespace) -> None:
+        ns.model_copy = lambda update, _ns=ns: (
+            _add_model_copy_and_return(
+                SimpleNamespace(**{**_ns.__dict__, **update})
+            )
+        )
+
+    def _add_model_copy_and_return(ns: SimpleNamespace) -> SimpleNamespace:
+        _add_model_copy(ns)
+        return ns
+
+    for sub in (cfg.stt, cfg.llm, cfg.pipeline, cfg.hallucination_filter):
+        _add_model_copy(sub)
+    _add_model_copy(cfg)
 
     app.state.config = cfg
 
@@ -201,6 +220,79 @@ class TestSTTLanguageInjection:
         from api.routes import _STT_LANGUAGE_PATTERN
 
         assert _STT_LANGUAGE_PATTERN.match(lang) is not None
+
+
+class TestHallucinationFilterSettings:
+    """환각 필터 설정 API (hf_*) 의 GET/PUT 왕복 회귀 방지."""
+
+    def test_get_settings_가_hf_필드를_노출(self, client: TestClient) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "hf_enabled" in data
+        assert "hf_no_speech_threshold" in data
+        assert "hf_compression_ratio_threshold" in data
+        assert "hf_repetition_threshold" in data
+        assert data["hf_enabled"] is True
+        assert data["hf_no_speech_threshold"] == 0.9
+
+    def test_put_settings_가_hf_no_speech_를_저장(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/settings",
+            json={"hf_no_speech_threshold": 0.85},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "hf_no_speech_threshold" in body["changed_fields"]
+        assert body["settings"]["hf_no_speech_threshold"] == 0.85
+
+    def test_put_settings_가_hf_4필드_동시_저장(
+        self, client: TestClient
+    ) -> None:
+        resp = client.put(
+            "/api/settings",
+            json={
+                "hf_enabled": False,
+                "hf_no_speech_threshold": 0.8,
+                "hf_compression_ratio_threshold": 3.0,
+                "hf_repetition_threshold": 5,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        changed = set(body["changed_fields"])
+        assert {
+            "hf_enabled",
+            "hf_no_speech_threshold",
+            "hf_compression_ratio_threshold",
+            "hf_repetition_threshold",
+        }.issubset(changed)
+        s = body["settings"]
+        assert s["hf_enabled"] is False
+        assert s["hf_no_speech_threshold"] == 0.8
+        assert s["hf_compression_ratio_threshold"] == 3.0
+        assert s["hf_repetition_threshold"] == 5
+
+    @pytest.mark.parametrize(
+        "payload,expected_detail",
+        [
+            ({"hf_no_speech_threshold": -0.1}, "hf_no_speech_threshold"),
+            ({"hf_no_speech_threshold": 1.5}, "hf_no_speech_threshold"),
+            ({"hf_compression_ratio_threshold": 0.5}, "hf_compression_ratio_threshold"),
+            ({"hf_compression_ratio_threshold": 20.0}, "hf_compression_ratio_threshold"),
+            ({"hf_repetition_threshold": 1}, "hf_repetition_threshold"),
+            ({"hf_repetition_threshold": 15}, "hf_repetition_threshold"),
+        ],
+    )
+    def test_hf_검증_범위_벗어나면_400(
+        self,
+        client: TestClient,
+        payload: dict,
+        expected_detail: str,
+    ) -> None:
+        resp = client.put("/api/settings", json=payload)
+        assert resp.status_code == 400
+        assert expected_detail in resp.json().get("detail", "")
 
 
 class TestConfigYamlAtomicWrite:
