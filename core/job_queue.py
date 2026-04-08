@@ -211,7 +211,15 @@ class JobQueue:
         """
         self._db_path = db_path
         self._max_retries = max_retries
-        self._conn: sqlite3.Connection | None = None
+        # 스레드별 connection — sqlite3.Connection 은 같은 conn 객체를
+        # 여러 스레드에서 동시에 사용하면 SQLITE_MISUSE 가 발생할 수 있다.
+        # asyncio.to_thread 로 워커 스레드 풀에서 호출되는 모든 메서드가
+        # 자기 스레드의 독립 connection 을 사용하도록 한다.
+        self._local = threading.local()
+        # 모든 스레드 conn 을 추적해 close() 시 정리할 수 있게 한다.
+        self._all_conns: list[sqlite3.Connection] = []
+        self._all_conns_lock = threading.Lock()
+        self._initialized = False
         # 쓰기 직렬화 락 — 동시 쓰기로 인한 "database is locked" 방지
         self._write_lock = threading.Lock()
 
@@ -222,11 +230,34 @@ class JobQueue:
         """데이터베이스 파일 경로를 반환한다."""
         return self._db_path
 
+    def _create_connection(self) -> sqlite3.Connection:
+        """새 sqlite3 connection 을 생성하고 PRAGMA 를 적용한다.
+
+        WAL 모드 + busy_timeout + 외래키 제약을 모든 connection 에 일관되게 적용.
+        스레드별 connection 패턴이라 호출자가 conn 을 _local 또는 _all_conns 에
+        등록하는 책임을 진다.
+        """
+        conn = sqlite3.connect(
+            str(self._db_path),
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        # WAL 모드 설정 (읽기/쓰기 동시성 향상). 한 번 설정되면 DB 전체에 적용되지만
+        # connection 별로도 안전하게 호출할 수 있다.
+        conn.execute("PRAGMA journal_mode=WAL")
+        # 동시 쓰기 충돌 시 5초간 재시도 (STAB-011)
+        conn.execute("PRAGMA busy_timeout=5000")
+        # 외래 키 제약 활성화
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
     def initialize(self) -> None:
         """데이터베이스를 초기화한다.
 
         DB 파일과 테이블을 생성하고 WAL 모드를 설정한다.
         이미 존재하는 DB에 대해서는 멱등하게 동작한다.
+        스키마 생성/마이그레이션은 메인 스레드의 connection 에서만 1회 수행되며,
+        이후 다른 스레드의 connection 은 _ensure_connection 에서 lazy 생성된다.
 
         Raises:
             JobQueueError: DB 초기화 실패 시
@@ -235,68 +266,89 @@ class JobQueue:
             # 부모 디렉토리 생성
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-            self._conn = sqlite3.connect(
-                str(self._db_path),
-                check_same_thread=False,
-            )
-            self._conn.row_factory = sqlite3.Row
+            conn = self._create_connection()
+            self._local.conn = conn
+            with self._all_conns_lock:
+                self._all_conns.append(conn)
 
-            # WAL 모드 설정 (읽기/쓰기 동시성 향상)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-
-            # 동시 쓰기 충돌 시 5초간 재시도 (STAB-011)
-            self._conn.execute("PRAGMA busy_timeout=5000")
-
-            # 외래 키 제약 활성화
-            self._conn.execute("PRAGMA foreign_keys=ON")
-
-            # 테이블 + 인덱스 생성 (쓰기 직렬화)
+            # 테이블 + 인덱스 생성 + 마이그레이션 (쓰기 직렬화, 메인 conn 에서 1회)
             with self._write_lock:
-                self._conn.execute(self._CREATE_TABLE_SQL)
-                self._conn.execute(self._CREATE_INDEX_SQL)
-                self._ensure_schema_migrations()
-                self._conn.commit()
+                conn.execute(self._CREATE_TABLE_SQL)
+                conn.execute(self._CREATE_INDEX_SQL)
+                self._ensure_schema_migrations(conn=conn)
+                conn.commit()
 
+            self._initialized = True
             logger.info(f"JobQueue DB 초기화 완료: {self._db_path}")
 
         except sqlite3.Error as e:
             raise JobQueueError(f"DB 초기화 실패: {e}") from e
 
     def close(self) -> None:
-        """데이터베이스 연결을 종료한다."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-            logger.info("JobQueue DB 연결 종료")
+        """모든 스레드의 데이터베이스 connection 을 종료한다."""
+        with self._all_conns_lock:
+            for conn in self._all_conns:
+                try:
+                    conn.close()
+                except sqlite3.Error as e:
+                    logger.warning(f"connection 종료 실패 (무시): {e}")
+            self._all_conns.clear()
+        # _local 의 conn 참조도 제거 (재초기화 대비)
+        if hasattr(self._local, "conn"):
+            del self._local.conn
+        self._initialized = False
+        logger.info("JobQueue DB 모든 connection 종료")
 
     def _ensure_connection(self) -> sqlite3.Connection:
-        """DB 연결이 활성 상태인지 확인하고 반환한다.
+        """현재 스레드의 DB 연결을 반환한다. 없으면 새로 생성한다.
+
+        threading.local 에 conn 을 보관하여 스레드 간 conn 공유를
+        방지한다 (SQLITE_MISUSE 회피). 새 스레드에서 처음 호출되면
+        새 connection 을 만들어 _all_conns 에 등록한다.
 
         Returns:
-            활성 sqlite3.Connection
+            현재 스레드 전용 sqlite3.Connection
 
         Raises:
-            JobQueueError: 연결이 초기화되지 않았을 때
+            JobQueueError: initialize() 가 호출되지 않았을 때
         """
-        if self._conn is None:
-            raise JobQueueError("DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요.")
-        return self._conn
+        if not self._initialized:
+            raise JobQueueError(
+                "DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요."
+            )
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._create_connection()
+            self._local.conn = conn
+            with self._all_conns_lock:
+                self._all_conns.append(conn)
+            logger.debug(
+                f"스레드별 conn 생성: thread={threading.current_thread().name}, "
+                f"total={len(self._all_conns)}"
+            )
+        return conn
 
     @staticmethod
     def _now_iso() -> str:
         """현재 시각을 ISO 형식 문자열로 반환한다."""
         return datetime.now().isoformat()
 
-    def _ensure_schema_migrations(self) -> None:
+    def _ensure_schema_migrations(self, conn: sqlite3.Connection | None = None) -> None:
         """기존 DB 스키마를 최신 형태로 마이그레이션한다.
 
         SQLite는 DROP COLUMN 지원이 제한적이므로, 새 컬럼 추가는 ALTER TABLE ADD COLUMN
         방식으로만 수행한다. PRAGMA table_info 로 현재 컬럼을 확인하고 누락분만 추가한다.
 
+        Args:
+            conn: 사용할 connection. None 이면 _ensure_connection() 으로 가져온다.
+                  initialize() 도중 호출 시에는 _initialized 가 False 이므로
+                  명시적으로 conn 을 전달해야 한다.
+
         마이그레이션 목록:
             - v1: title TEXT NOT NULL DEFAULT '' (사용자 정의 회의 제목)
         """
-        conn = self._ensure_connection()
+        if conn is None:
+            conn = self._ensure_connection()
         cursor = conn.execute("PRAGMA table_info(jobs)")
         existing_columns = {row["name"] for row in cursor.fetchall()}
 

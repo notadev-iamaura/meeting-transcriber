@@ -27,7 +27,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig, get_config
@@ -529,8 +529,6 @@ def _setup_spa_routes(app: FastAPI) -> None:
         app: FastAPI 인스턴스
     """
     index_path = _STATIC_DIR / "index.html"
-
-    from fastapi.responses import HTMLResponse
 
     def _build_index_html() -> str:
         """index.html 을 읽어 spa.js / app.js / style.css 의 src/href 에

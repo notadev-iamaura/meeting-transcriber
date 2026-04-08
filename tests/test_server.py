@@ -339,8 +339,10 @@ class TestLifespan:
             assert queue is not None
 
         # TestClient __exit__ 후 lifespan shutdown 실행됨
-        # JobQueue 내부 conn이 None이 되어야 함
-        assert queue.queue._conn is None
+        # JobQueue 내부 모든 conn 이 닫히고 _initialized=False 이어야 함
+        # (per-thread connection 패턴: _conn 단일 필드는 더 이상 존재하지 않음)
+        assert queue.queue._initialized is False
+        assert queue.queue._all_conns == []
 
     def test_lifespan_db_파일_생성(self, tmp_path: Path) -> None:
         """lifespan startup 후 pipeline.db 파일이 생성되는지 확인한다."""
