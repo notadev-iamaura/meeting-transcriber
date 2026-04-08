@@ -63,12 +63,13 @@ pip install -e ".[dev]"
 brew install ffmpeg
 
 # 3단계: LLM 모델 (MLX 기본, 추가 설치 불필요)
-# mlx-lm은 pip install -e ".[dev]"에 포함됨
+# mlx-lm(EXAONE 등) 과 mlx-vlm(Gemma 4 등) 둘 다 pip install -e ".[dev]" 에 포함됨
 # 첫 실행 시 EXAONE 3.5 7.8B 4bit 모델이 자동 다운로드됨
 #
 # [선택] Gemma 4로 모델 변경 시:
 # config.yaml의 llm.mlx_model_name을 변경하면 자동 다운로드
 # 예: mlx-community/gemma-4-e4b-it-4bit
+# Gemma 4 는 멀티모달 모델이라 mlx-vlm 패키지가 자동 사용됨 (core/mlx_client.py 가 분기).
 #
 # [선택] Ollama 백엔드 사용 시 (별도 서버 프로세스):
 # ollama pull exaone3.5:7.8b-instruct-q4_K_M
@@ -591,7 +592,8 @@ python -m py_compile main.py
 | `NotImplementedError: beam_size` | mlx-whisper 0.4.x | transcriber.py에서 beam_size 파라미터 제거 |
 | Ollama 연결 실패 | Ollama 미실행 (backend=ollama일 때) | Ollama 앱 실행 또는 `ollama serve` |
 | EXAONE 모델 없음 | 모델 미다운로드 (backend=ollama일 때) | `ollama pull exaone3.5:7.8b-instruct-q4_K_M` |
-| MLXLoadError | mlx-lm 미설치 (backend=mlx일 때) | `pip install mlx-lm` |
+| MLXLoadError (EXAONE 등) | mlx-lm 미설치 (오래된 설치 환경) | `pip install -e .` 재실행 또는 `pip install mlx-lm` |
+| MLXLoadError (Gemma 4) | mlx-vlm 미설치 (오래된 설치 환경) | `pip install -e .` 재실행 또는 `pip install mlx-vlm` |
 | MLX 메모리 부족 | RAM 부족 (8GB 이하에서 MLX 사용) | `llm.backend: "ollama"`로 변경 |
 | MPS 관련 크래시 | pyannote MPS 버그 | config.yaml에서 `diarization.device: "cpu"` 확인 |
 | ChromaDB ValueError | datetime 메타데이터 | `str()` 변환 확인 |
