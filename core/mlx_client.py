@@ -212,12 +212,22 @@ class MLXBackend:
             else:
                 from mlx_lm import generate  # type: ignore[import-untyped]
 
+                # mlx-lm 0.30.x+ 에서 temp 인자가 제거되고 sampler 로 대체됨
+                # 구버전 호환: make_sampler 가 없으면 temp 직접 전달
+                gen_kwargs: dict[str, Any] = {
+                    "max_tokens": self._max_tokens,
+                }
+                try:
+                    from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
+                    gen_kwargs["sampler"] = make_sampler(temp=temp)
+                except ImportError:
+                    gen_kwargs["temp"] = temp
+
                 response = generate(
                     self._model,
                     self._tokenizer,
                     prompt=prompt,
-                    max_tokens=self._max_tokens,
-                    temp=temp,
+                    **gen_kwargs,
                 )
                 return response
 
@@ -271,12 +281,21 @@ class MLXBackend:
             else:
                 from mlx_lm import stream_generate  # type: ignore[import-untyped]
 
+                # mlx-lm 0.30.x+ 에서 temp 인자가 제거되고 sampler 로 대체됨
+                stream_kwargs: dict[str, Any] = {
+                    "max_tokens": self._max_tokens,
+                }
+                try:
+                    from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
+                    stream_kwargs["sampler"] = make_sampler(temp=temp)
+                except ImportError:
+                    stream_kwargs["temp"] = temp
+
                 for response in stream_generate(
                     self._model,
                     self._tokenizer,
                     prompt=prompt,
-                    max_tokens=self._max_tokens,
-                    temp=temp,
+                    **stream_kwargs,
                 ):
                     # stream_generate는 GenerateStepOutput 객체를 반환
                     # .text 속성에서 토큰 텍스트를 추출
