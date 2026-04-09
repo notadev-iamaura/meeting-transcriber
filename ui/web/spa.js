@@ -4223,7 +4223,7 @@
         self._listeners = [];
         self._timers = [];
         self._testType = "llm";    // "llm" 또는 "stt"
-        self._meetings = [];
+        self._meetings = [];       // 전체 회의 목록 (필터 전)
         self._sttModels = [];
 
         // LLM 프리셋 목록
@@ -4326,6 +4326,8 @@
                     t.classList.toggle("active", t === tab);
                 });
                 self._updateTypeUI();
+                // 탭 전환 시 소스 드롭다운도 유형에 맞게 재구성
+                self._updateSourceDropdown();
                 self._populateModelSelects();
                 self._validate();
             };
@@ -4393,9 +4395,8 @@
 
         try {
             var data = await App.apiRequest("/meetings");
-            self._meetings = (data.meetings || []).filter(function (m) {
-                return m.status === "completed";
-            });
+            // 전체 회의 목록을 저장해두고 필터링은 _updateSourceDropdown 에서 수행
+            self._meetings = data.meetings || [];
         } catch (e) {
             self._meetings = [];
         }
@@ -4411,22 +4412,7 @@
             self._sttModels = [];
         }
 
-        // 소스 회의 드롭다운 채우기
-        var srcSel = document.getElementById("abSourceMeeting");
-        if (srcSel) {
-            self._meetings.forEach(function (m) {
-                var opt = document.createElement("option");
-                opt.value = m.meeting_id;
-                opt.textContent = App.extractMeetingTitle ? App.extractMeetingTitle(m) : m.meeting_id;
-                srcSel.appendChild(opt);
-            });
-            // URL 에서 source 파라미터가 있으면 자동 선택
-            if (self._sourceParam) {
-                srcSel.value = self._sourceParam;
-            }
-        }
-
-        // 유형 UI 업데이트 + 모델 셀렉트 채우기
+        // 유형 UI 업데이트 + 소스 드롭다운 + 모델 셀렉트 채우기
         if (self._testType === "stt") {
             var sttTab = document.getElementById("abTypeStt");
             var llmTab = document.getElementById("abTypeLlm");
@@ -4434,8 +4420,57 @@
             if (llmTab) llmTab.classList.remove("active");
         }
         self._updateTypeUI();
+        self._updateSourceDropdown();
         self._populateModelSelects();
         self._validate();
+    };
+
+    /**
+     * 현재 테스트 유형에 맞게 소스 회의 드롭다운을 다시 채운다.
+     *
+     * - LLM 비교: merge.json 이 필요하므로 status === "completed" 인 회의만 표시
+     * - STT 비교: input.wav 만 있으면 되므로 "recorded" 이상(recorded, transcribing,
+     *             completed) 인 회의도 표시
+     */
+    AbTestNewView.prototype._updateSourceDropdown = function () {
+        var self = this;
+        var srcSel = document.getElementById("abSourceMeeting");
+        if (!srcSel) return;
+
+        // 현재 선택값을 보존해두고 재구성 후 복원한다
+        var prevValue = srcSel.value;
+
+        // 기존 옵션 초기화 (placeholder 포함 전체 재구성)
+        srcSel.innerHTML = "";
+        var placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "회의 선택...";
+        srcSel.appendChild(placeholder);
+
+        // 유형별 필터: LLM 은 completed 만, STT 는 wav 파일이 있는 상태(recorded 이상)
+        var filtered = self._meetings.filter(function (m) {
+            if (self._testType === "llm") {
+                return m.status === "completed";
+            } else {
+                // recorded / transcribing / completed 모두 허용
+                return m.status === "completed" ||
+                       m.status === "recorded" ||
+                       m.status === "transcribing";
+            }
+        });
+
+        filtered.forEach(function (m) {
+            var opt = document.createElement("option");
+            opt.value = m.meeting_id;
+            opt.textContent = App.extractMeetingTitle ? App.extractMeetingTitle(m) : m.meeting_id;
+            srcSel.appendChild(opt);
+        });
+
+        // 이전 선택값 또는 URL source 파라미터 복원
+        var restoreValue = prevValue || self._sourceParam;
+        if (restoreValue) {
+            srcSel.value = restoreValue;
+        }
     };
 
     /**
@@ -4673,21 +4708,40 @@
      */
     AbTestResultView.prototype._loadData = async function () {
         var self = this;
-        try {
-            var data = await App.apiRequest("/ab-tests/" + encodeURIComponent(self._testId));
-            self._data = data;
-            self._renderHeader(data);
-            if (data.status === "running" || data.status === "pending") {
-                self._renderProgress(data);
-                self._startPolling();
-            } else {
-                self._renderCompare(data);
+        // 서버가 pending metadata 를 쓰기 전에 GET 이 도착할 경우를 대비해
+        // 최대 3회까지 500ms 간격으로 재시도한다 (백그라운드 태스크 race condition 방어).
+        var maxRetries = 3;
+        var retryDelay = 500; // ms
+        var attempt = 0;
+        var lastError = null;
+        while (attempt <= maxRetries) {
+            try {
+                var data = await App.apiRequest("/ab-tests/" + encodeURIComponent(self._testId));
+                self._data = data;
+                self._renderHeader(data);
+                var status = (data.metadata && data.metadata.status) || data.status || "";
+                if (status === "running" || status === "pending") {
+                    self._renderProgress(data);
+                    self._startPolling();
+                } else {
+                    self._renderCompare(data);
+                }
+                return;
+            } catch (e) {
+                lastError = e;
+                // 404 이면 재시도, 그 외 에러는 즉시 중단
+                var isNotFound = e && (e.status === 404 || (e.message && e.message.indexOf("404") !== -1));
+                if (!isNotFound || attempt >= maxRetries) {
+                    break;
+                }
+                attempt++;
+                await new Promise(function (resolve) { setTimeout(resolve, retryDelay); });
             }
-        } catch (e) {
-            var headerEl = document.getElementById("abResultHeader");
-            if (headerEl) {
-                headerEl.innerHTML = '<div class="ab-test-empty"><div class="ab-test-empty-text">테스트를 찾을 수 없습니다</div></div>';
-            }
+        }
+        // 재시도 소진 또는 404 외 에러
+        var headerEl = document.getElementById("abResultHeader");
+        if (headerEl) {
+            headerEl.innerHTML = '<div class="ab-test-empty"><div class="ab-test-empty-text">테스트를 찾을 수 없습니다</div></div>';
         }
     };
 

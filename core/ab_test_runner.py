@@ -514,30 +514,38 @@ async def run_llm_ab_test(
     elif not ab_test_store.is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
 
+    # Race condition 방지: lock 획득 전에 pending 상태의 초기 metadata 를 먼저 기록한다.
+    # asyncio.create_task() 로 발사된 코루틴이 실제로 lock 을 획득하기 전에
+    # 프론트엔드가 GET /api/ab-tests/{test_id} 를 호출하면 FileNotFoundError 가
+    # 발생해 404 를 반환하는 race condition 을 이 방식으로 차단한다.
+    ab_test_store.create_test_dir(config, test_id)
+    initial_metadata = _init_metadata(
+        test_id=test_id,
+        test_type="llm",
+        source_meeting_id=source_meeting_id,
+        source_snapshot={
+            "merge_json_path": str(merge_path.resolve()),
+            "wav_path": str((meeting_dir / "input.wav").resolve()),
+            "diarize_json_path": (
+                str((meeting_dir / "diarize.json").resolve())
+                if (meeting_dir / "diarize.json").exists()
+                else None
+            ),
+        },
+        variant_a=variant_a,
+        variant_b=variant_b,
+        scope={"correct": scope.correct, "summarize": scope.summarize},
+    )
+    # status 는 _init_metadata 기본값인 "pending" 유지 — lock 획득 후 "running" 으로 갱신
+    ab_test_store.write_metadata(config, test_id, initial_metadata)
+
     async with lock:
         global _current_test_id
         _current_test_id = test_id
 
-        test_dir = ab_test_store.create_test_dir(config, test_id)
-        metadata = _init_metadata(
-            test_id=test_id,
-            test_type="llm",
-            source_meeting_id=source_meeting_id,
-            source_snapshot={
-                "merge_json_path": str(merge_path.resolve()),
-                "wav_path": str((meeting_dir / "input.wav").resolve()),
-                "diarize_json_path": (
-                    str((meeting_dir / "diarize.json").resolve())
-                    if (meeting_dir / "diarize.json").exists()
-                    else None
-                ),
-            },
-            variant_a=variant_a,
-            variant_b=variant_b,
-            scope={"correct": scope.correct, "summarize": scope.summarize},
-        )
-        metadata["status"] = "running"
-        ab_test_store.write_metadata(config, test_id, metadata)
+        test_dir = ab_test_store.resolve_test_dir(config, test_id)
+        # lock 획득 후 상태를 "running" 으로 갱신
+        ab_test_store.update_metadata(config, test_id, status="running")
 
         # 소스 merge 체크포인트 로드 (한 번만)
         merged = MergedResult.from_checkpoint(merge_path)
@@ -772,11 +780,33 @@ async def run_stt_ab_test(
     elif not ab_test_store.is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
 
+    # Race condition 방지: lock 획득 전에 pending 상태의 초기 metadata 를 먼저 기록한다.
+    # asyncio.create_task() 로 발사된 코루틴이 실제로 lock 을 획득하기 전에
+    # 프론트엔드가 GET /api/ab-tests/{test_id} 를 호출하면 FileNotFoundError 가
+    # 발생해 404 를 반환하는 race condition 을 이 방식으로 차단한다.
+    # diarize 경로는 lock 진입 후에 결정되므로 일단 None 으로 기록하고 갱신한다.
+    ab_test_store.create_test_dir(config, test_id)
+    initial_metadata = _init_metadata(
+        test_id=test_id,
+        test_type="stt",
+        source_meeting_id=source_meeting_id,
+        source_snapshot={
+            "merge_json_path": str((meeting_dir / "merge.json").resolve()),
+            "wav_path": str(wav_path.resolve()),
+            "diarize_json_path": None,  # diarize 확보 후 갱신됨
+        },
+        variant_a=variant_a,
+        variant_b=variant_b,
+        scope={"allow_diarize_rerun": allow_diarize_rerun},
+    )
+    # status 는 _init_metadata 기본값인 "pending" 유지 — lock 획득 후 "running" 으로 갱신
+    ab_test_store.write_metadata(config, test_id, initial_metadata)
+
     async with lock:
         global _current_test_id
         _current_test_id = test_id
 
-        test_dir = ab_test_store.create_test_dir(config, test_id)
+        test_dir = ab_test_store.resolve_test_dir(config, test_id)
 
         # diarize 캐시 확보 (variant 전에 1회)
         cached_diarize = await _ensure_diarize(
@@ -786,11 +816,12 @@ async def run_stt_ab_test(
             allow_diarize_rerun=allow_diarize_rerun,
         )
 
+        # diarize 경로 확정 후 metadata 갱신 + 상태 "running" 으로 전환
         diarize_path = meeting_dir / "diarize.json"
-        metadata = _init_metadata(
-            test_id=test_id,
-            test_type="stt",
-            source_meeting_id=source_meeting_id,
+        ab_test_store.update_metadata(
+            config,
+            test_id,
+            status="running",
             source_snapshot={
                 "merge_json_path": str((meeting_dir / "merge.json").resolve()),
                 "wav_path": str(wav_path.resolve()),
@@ -798,12 +829,7 @@ async def run_stt_ab_test(
                     str(diarize_path.resolve()) if diarize_path.exists() else None
                 ),
             },
-            variant_a=variant_a,
-            variant_b=variant_b,
-            scope={"allow_diarize_rerun": allow_diarize_rerun},
         )
-        metadata["status"] = "running"
-        ab_test_store.write_metadata(config, test_id, metadata)
 
         variant_errors: dict[str, str] = {}
         variant_success: dict[str, dict[str, Any]] = {}
