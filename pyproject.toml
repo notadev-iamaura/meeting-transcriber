@@ -52,6 +52,9 @@ dependencies = [
     # 사용자가 config.yaml 에서 선택한 모델에 따라 core/mlx_client.py 가 자동 분기한다.
     "mlx-lm>=0.19.0,<1.0",
     "mlx-vlm>=0.1.0,<1.0",
+    # AI/ML — VAD (무음 구간 감지 → 환각 방지)
+    # 무음 구간을 STT 에 보내지 않아 환각을 원천 차단. torch 는 pyannote 의존성으로 이미 설치됨.
+    "silero-vad>=5.1",
     # AI/ML — 화자분리
     "pyannote.audio>=3.1.0",
     # AI/ML — 임베딩

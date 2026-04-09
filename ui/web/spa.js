@@ -5055,10 +5055,10 @@
         // LLM: correct.utterances, STT: transcribe.utterances
         var uttA = isLlm
             ? ((va.correct && va.correct.utterances) || [])
-            : ((va.transcribe && va.transcribe.utterances) || []);
+            : ((va.transcribe && (va.transcribe.utterances || va.transcribe.segments)) || []);
         var uttB = isLlm
             ? ((vb.correct && vb.correct.utterances) || [])
-            : ((vb.transcribe && vb.transcribe.utterances) || []);
+            : ((vb.transcribe && (vb.transcribe.utterances || vb.transcribe.segments)) || []);
 
         // 타임스탬프 기반 매칭 (±3초 허용)
         var paired = _pairByTimestamp(uttA, uttB, 3.0);
@@ -5139,10 +5139,10 @@
 
         var uttA = isLlm
             ? ((va.correct && va.correct.utterances) || [])
-            : ((va.transcribe && va.transcribe.utterances) || []);
+            : ((va.transcribe && (va.transcribe.utterances || va.transcribe.segments)) || []);
         var uttB = isLlm
             ? ((vb.correct && vb.correct.utterances) || [])
-            : ((vb.transcribe && vb.transcribe.utterances) || []);
+            : ((vb.transcribe && (vb.transcribe.utterances || vb.transcribe.segments)) || []);
 
         var paired = _pairByTimestamp(uttA, uttB, 3.0);
 

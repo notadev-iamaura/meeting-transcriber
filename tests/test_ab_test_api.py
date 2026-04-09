@@ -188,7 +188,7 @@ def patch_stt_steps(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         def __init__(self, config: Any, manager: Any) -> None:
             pass
 
-        async def transcribe(self, wav_path: Path) -> TranscriptResult:
+        async def transcribe(self, wav_path: Path, **kwargs) -> TranscriptResult:
             counts["transcribe"] += 1
             return TranscriptResult(
                 segments=[

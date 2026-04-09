@@ -730,15 +730,39 @@ async def _run_stt_variant(
     cached_diarize: DiarizationResult,
     variant_dir: Path,
 ) -> dict[str, Any]:
-    """단일 STT variant 를 실행한다."""
+    """단일 STT variant 를 실행한다.
+
+    본 파이프라인(pipeline.py)과 동일하게 VAD 전처리를 적용하여
+    무음 구간의 환각(hallucination)을 방지한다.
+    """
     elapsed: dict[str, float] = {}
     temp_cfg = _build_stt_temp_config(config, spec)
 
     await _force_unload_llm(model_manager)
 
+    # VAD 전처리: 음성 구간만 추출하여 무음 환각 방지 (pipeline.py 와 동일)
+    vad_clip_timestamps: list[float] | None = None
+    vad_config = getattr(config, "vad", None)
+    if vad_config is not None and getattr(vad_config, "enabled", False):
+        try:
+            from steps.vad_detector import VoiceActivityDetector
+
+            vad = VoiceActivityDetector(config)
+            vad_result = await vad.detect(wav_path)
+            if vad_result is not None:
+                vad_clip_timestamps = vad_result.clip_timestamps
+                logger.info(
+                    f"A/B STT VAD 적용: {vad_result.num_segments}개 음성 구간, "
+                    f"무음 {vad_result.total_silence_seconds:.1f}초 제거"
+                )
+        except Exception as e:
+            logger.warning(f"A/B STT VAD 실패, 전체 오디오로 폴백: {e}")
+
     t0 = time.perf_counter()
     transcriber = Transcriber(temp_cfg, model_manager)
-    transcript: TranscriptResult = await transcriber.transcribe(wav_path)
+    transcript: TranscriptResult = await transcriber.transcribe(
+        wav_path, vad_clip_timestamps=vad_clip_timestamps
+    )
     elapsed["transcribe"] = time.perf_counter() - t0
     transcript.save_checkpoint(variant_dir / "transcribe.json")
 

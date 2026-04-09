@@ -303,9 +303,20 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 
 | 모델 ID | 베이스 | CER | WER | RAM | 디스크 | HuggingFace | 추천 |
 |--------|--------|-----|-----|-----|--------|-------------|------|
-| `komixv2` (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx) | 호환성 |
-| `seastar-medium-4bit` ⭐ | Medium + Zeroth (4bit) | **1.25%** | **3.21%** | **1.26GB** | **420MB** | [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx) | 정확도 최고 |
+| `komixv2` ⭐ (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx) | **안정성 최고** |
+| `seastar-medium-4bit` | Medium + Zeroth (4bit) | **1.25%** | **3.21%** | **1.26GB** | **420MB** | [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx) | CER 최저 (벤치) |
 | `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 442MB | [`youngouk/ghost613-turbo-korean-4bit-mlx`](https://huggingface.co/youngouk/ghost613-turbo-korean-4bit-mlx) | 속도 우선 |
+
+> ⚠️ **벤치마크 CER vs 실제 회의 품질**
+> CER/WER 수치는 Zeroth 벤치마크(깨끗한 읽기 음성) 기준입니다. 실제 회의
+> 오디오(잡음, 에코, 원거리 마이크, 줌 오디오)에서 A/B 테스트를 수행한 결과:
+> - **komixv2 (fp16)**: 환각 최소, 가독성 최고, 영어 용어 정확 → **실사용 권장**
+> - **seastar (4bit)**: 세그먼트 세밀하지만 무음 구간 반복 환각 ("ohn ohn", "네 네 네") 빈번
+> - **ghost613 (4bit)**: 대량 환각 ("옷 옷 옷...", 뉴스 텍스트 삽입) → **실사용 부적합**
+>
+> 4bit 양자화 모델은 무음 구간에서 환각에 취약합니다. VAD(음성 구간 감지)가
+> 활성화되어 있으면 환각이 크게 줄어들므로 **`vad.enabled: true` (기본)** 을
+> 유지하세요. silero-vad 가 `pip install -e .` 에 포함되어 있습니다.
 
 **모델 변경 방법:**
 

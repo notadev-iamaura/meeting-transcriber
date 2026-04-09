@@ -524,7 +524,7 @@ class TestSttRunner:
             def __init__(self, config: Any, manager: Any) -> None:
                 self._config = config
 
-            async def transcribe(self, wav_path: Path) -> TranscriptResult:
+            async def transcribe(self, wav_path: Path, **kwargs) -> TranscriptResult:
                 return TranscriptResult(
                     segments=[
                         TranscriptSegment(text="안녕하세요", start=0.0, end=1.0),
