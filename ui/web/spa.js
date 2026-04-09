@@ -4979,12 +4979,15 @@
         var testType = meta.test_type || "llm";
 
         // 탭 결정
+        // STT/LLM 모두: "최종 결과" (diff 없이 깔끔하게) + "상세 비교" (diff 하이라이트)
         var tabs = [];
         if (testType === "llm") {
-            tabs.push({ key: "correct", label: "교정 결과" });
+            tabs.push({ key: "clean", label: "최종 결과" });
+            tabs.push({ key: "diff", label: "상세 비교" });
             tabs.push({ key: "summary", label: "요약" });
         } else {
-            tabs.push({ key: "transcript", label: "전사" });
+            tabs.push({ key: "clean", label: "최종 결과" });
+            tabs.push({ key: "diff", label: "상세 비교" });
         }
 
         self._activeTab = tabs[0].key;
@@ -5031,72 +5034,184 @@
         var vaLabel = (meta.variant_a || {}).label || "A";
         var vbLabel = (meta.variant_b || {}).label || "B";
 
-        if (self._activeTab === "correct") {
-            self._renderCorrectCompare(container, va, vb, vaLabel, vbLabel);
+        if (self._activeTab === "clean") {
+            self._renderCleanCompare(container, data, vaLabel, vbLabel);
+        } else if (self._activeTab === "diff") {
+            self._renderDiffCompare(container, data, vaLabel, vbLabel);
         } else if (self._activeTab === "summary") {
             self._renderSummaryCompare(container, vaLabel, vbLabel);
-        } else if (self._activeTab === "transcript") {
-            self._renderTranscriptCompare(container, va, vb, vaLabel, vbLabel);
         }
     };
 
-    /**
-     * 교정 결과 비교 렌더링.
-     */
-    AbTestResultView.prototype._renderCorrectCompare = function (container, va, vb, vaLabel, vbLabel) {
-        var self = this;
-        var uttA = (va.correct && va.correct.utterances) ? va.correct.utterances : [];
-        var uttB = (vb.correct && vb.correct.utterances) ? vb.correct.utterances : [];
+    // ================================================================
+    // "최종 결과" 탭 — diff 없이, 좌우 최종 전사/교정문을 깔끔하게 나란히
+    // ================================================================
+    AbTestResultView.prototype._renderCleanCompare = function (container, data, vaLabel, vbLabel) {
+        var meta = data.metadata || data;
+        var va = data.variant_a || {};
+        var vb = data.variant_b || {};
+        var isLlm = meta.test_type === "llm";
 
-        var maxLen = Math.max(uttA.length, uttB.length);
+        // LLM: correct.utterances, STT: transcribe.utterances
+        var uttA = isLlm
+            ? ((va.correct && va.correct.utterances) || [])
+            : ((va.transcribe && va.transcribe.utterances) || []);
+        var uttB = isLlm
+            ? ((vb.correct && vb.correct.utterances) || [])
+            : ((vb.transcribe && vb.transcribe.utterances) || []);
+
+        // 타임스탬프 기반 매칭 (±3초 허용)
+        var paired = _pairByTimestamp(uttA, uttB, 3.0);
+
+        // 통계
+        var stats = { matched: 0, aOnly: 0, bOnly: 0 };
+        paired.forEach(function (p) {
+            if (p.a && p.b) stats.matched++;
+            else if (p.a) stats.aOnly++;
+            else stats.bOnly++;
+        });
+
+        var statsHtml = '<div class="ab-stats-bar">' +
+            '<span class="ab-stat">공통 ' + stats.matched + '개</span>' +
+            '<span class="ab-stat ab-stat-a">' + vaLabel + '만 ' + stats.aOnly + '개</span>' +
+            '<span class="ab-stat ab-stat-b">' + vbLabel + '만 ' + stats.bOnly + '개</span>' +
+            '</div>';
+
+        // 행 렌더링 — diff 없이 순수 텍스트만
         var rows = [];
-
-        for (var i = 0; i < maxLen; i++) {
-            var a = uttA[i] || {};
-            var b = uttB[i] || {};
-            var textA = a.text || a.corrected || "";
-            var textB = b.text || b.corrected || "";
+        paired.forEach(function (pair) {
+            var a = pair.a || {};
+            var b = pair.b || {};
+            var textA = a.text || "";
+            var textB = b.text || "";
+            var timeA = a.start != null ? _fmtTime(a.start) : "";
+            var timeB = b.start != null ? _fmtTime(b.start) : "";
             var speakerA = a.speaker || "";
             var speakerB = b.speaker || "";
+
+            // 한쪽만 있는 발화: 빈 칸 + 회색 "발화 없음" 표시
+            var cellA, cellB;
+            if (!pair.a) {
+                cellA = '<div class="ab-utterance-cell ab-cell-empty"><span class="ab-empty-label">발화 없음</span></div>';
+            } else {
+                cellA = '<div class="ab-utterance-cell">' +
+                    '<div class="ab-utterance-meta"><span class="ab-utterance-time">' + App.escapeHtml(timeA) + '</span>' +
+                    (speakerA ? ' <span class="ab-utterance-speaker">' + App.escapeHtml(speakerA) + '</span>' : '') + '</div>' +
+                    '<div class="ab-utterance-text">' + App.escapeHtml(textA) + '</div></div>';
+            }
+            if (!pair.b) {
+                cellB = '<div class="ab-utterance-cell ab-cell-empty"><span class="ab-empty-label">발화 없음</span></div>';
+            } else {
+                cellB = '<div class="ab-utterance-cell">' +
+                    '<div class="ab-utterance-meta"><span class="ab-utterance-time">' + App.escapeHtml(timeB) + '</span>' +
+                    (speakerB ? ' <span class="ab-utterance-speaker">' + App.escapeHtml(speakerB) + '</span>' : '') + '</div>' +
+                    '<div class="ab-utterance-text">' + App.escapeHtml(textB) + '</div></div>';
+            }
+
+            // 양쪽 텍스트가 동일하면 배경 없음, 다르면 연한 노란색
+            var rowClass = "ab-utterance-row";
+            if (pair.a && pair.b && textA !== textB) rowClass += " ab-row-differ";
+            if (!pair.a || !pair.b) rowClass += " ab-row-missing";
+
+            rows.push('<div class="' + rowClass + '">' + cellA + cellB + '</div>');
+        });
+
+        container.innerHTML = [
+            '<div class="ab-compare-header-bar">',
+            '  <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + ' (' + uttA.length + '개)</div>',
+            '  <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + ' (' + uttB.length + '개)</div>',
+            '</div>',
+            statsHtml,
+            '<div class="ab-utterance-list">',
+            rows.join(""),
+            '</div>',
+        ].join("\n");
+    };
+
+    // ================================================================
+    // "상세 비교" 탭 — 매칭된 발화만, 단어 수준 diff 표시
+    // ================================================================
+    AbTestResultView.prototype._renderDiffCompare = function (container, data, vaLabel, vbLabel) {
+        var meta = data.metadata || data;
+        var va = data.variant_a || {};
+        var vb = data.variant_b || {};
+        var isLlm = meta.test_type === "llm";
+
+        var uttA = isLlm
+            ? ((va.correct && va.correct.utterances) || [])
+            : ((va.transcribe && va.transcribe.utterances) || []);
+        var uttB = isLlm
+            ? ((vb.correct && vb.correct.utterances) || [])
+            : ((vb.transcribe && vb.transcribe.utterances) || []);
+
+        var paired = _pairByTimestamp(uttA, uttB, 3.0);
+
+        // 매칭됐고 텍스트가 다른 쌍만 추출
+        var diffPairs = [];
+        var identicalCount = 0;
+        paired.forEach(function (pair) {
+            if (!pair.a || !pair.b) return; // 한쪽만 있는 건 "최종 결과" 탭에서 확인
+            var textA = pair.a.text || "";
+            var textB = pair.b.text || "";
+            if (textA === textB) {
+                identicalCount++;
+                return;
+            }
+            diffPairs.push(pair);
+        });
+
+        var stats = { matched: paired.filter(function (p) { return p.a && p.b; }).length, different: diffPairs.length, identical: identicalCount };
+
+        var statsHtml = '<div class="ab-stats-bar">' +
+            '<span class="ab-stat">매칭 ' + stats.matched + '개</span>' +
+            '<span class="ab-stat ab-stat-identical">동일 ' + stats.identical + '개</span>' +
+            '<span class="ab-stat ab-stat-diff">차이 ' + stats.different + '개</span>' +
+            '</div>';
+
+        if (diffPairs.length === 0) {
+            container.innerHTML = statsHtml +
+                '<div class="ab-empty-diff">매칭된 발화 중 텍스트 차이가 없습니다.</div>';
+            return;
+        }
+
+        var rows = [];
+        diffPairs.forEach(function (pair, idx) {
+            var a = pair.a;
+            var b = pair.b;
+            var textA = a.text || "";
+            var textB = b.text || "";
+            var timeA = a.start != null ? _fmtTime(a.start) : "";
+            var timeB = b.start != null ? _fmtTime(b.start) : "";
 
             var diffs = _diffWords(textA, textB);
 
             rows.push(
-                '<div class="ab-utterance-row">' +
-                '  <div class="ab-utterance-cell">' +
-                '    <div class="ab-utterance-speaker">' + App.escapeHtml(speakerA) + '</div>' +
-                '    <div>' + _renderDiffA(diffs) + '</div>' +
-                '  </div>' +
-                '  <div class="ab-utterance-cell">' +
-                '    <div class="ab-utterance-speaker">' + App.escapeHtml(speakerB) + '</div>' +
-                '    <div>' + _renderDiffB(diffs) + '</div>' +
+                '<div class="ab-diff-row">' +
+                '  <div class="ab-diff-num">' + (idx + 1) + '</div>' +
+                '  <div class="ab-diff-pair">' +
+                '    <div class="ab-diff-cell ab-diff-cell-a">' +
+                '      <span class="ab-utterance-time">' + App.escapeHtml(timeA) + '</span> ' +
+                       _renderDiffA(diffs) +
+                '    </div>' +
+                '    <div class="ab-diff-cell ab-diff-cell-b">' +
+                '      <span class="ab-utterance-time">' + App.escapeHtml(timeB) + '</span> ' +
+                       _renderDiffB(diffs) +
+                '    </div>' +
                 '  </div>' +
                 '</div>'
             );
-        }
-
-        var countNote = "";
-        if (uttA.length !== uttB.length) {
-            countNote = '<div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px;">(모델 A: ' + uttA.length + '개 발화, 모델 B: ' + uttB.length + '개 발화)</div>';
-        }
+        });
 
         container.innerHTML = [
-            '<div class="ab-compare-container">',
-            '  <div class="ab-compare-panel">',
-            '    <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
-            '  </div>',
-            '  <div class="ab-compare-panel">',
-            '    <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
-            '  </div>',
+            '<div class="ab-compare-header-bar">',
+            '  <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
+            '  <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
             '</div>',
-            '<div style="margin-top:12px;">',
+            statsHtml,
+            '<div class="ab-diff-list">',
             rows.join(""),
             '</div>',
-            countNote,
         ].join("\n");
-
-        // 동기 스크롤은 비교 body 가 scroll 가능한 경우에 적용
-        // (현재는 전체 페이지 스크롤이므로 별도 처리 불필요)
     };
 
     /**
@@ -5159,55 +5274,7 @@
         }
     };
 
-    /**
-     * 전사 비교 렌더링 (STT A/B).
-     */
-    AbTestResultView.prototype._renderTranscriptCompare = function (container, va, vb, vaLabel, vbLabel) {
-        var uttA = (va.transcribe && va.transcribe.utterances) ? va.transcribe.utterances : [];
-        var uttB = (vb.transcribe && vb.transcribe.utterances) ? vb.transcribe.utterances : [];
-
-        // 타임스탬프 기반 매칭: 가까운 시간끼리 정렬
-        var paired = _pairByTimestamp(uttA, uttB);
-        var rows = [];
-
-        paired.forEach(function (pair) {
-            var a = pair.a || {};
-            var b = pair.b || {};
-            var textA = a.text || "";
-            var textB = b.text || "";
-            var diffs = _diffWords(textA, textB);
-
-            var timeA = a.start != null ? _fmtTime(a.start) : "";
-            var timeB = b.start != null ? _fmtTime(b.start) : "";
-
-            rows.push(
-                '<div class="ab-utterance-row">' +
-                '  <div class="ab-utterance-cell">' +
-                '    <div class="ab-utterance-time">' + App.escapeHtml(timeA) + '</div>' +
-                '    <div>' + _renderDiffA(diffs) + '</div>' +
-                '  </div>' +
-                '  <div class="ab-utterance-cell">' +
-                '    <div class="ab-utterance-time">' + App.escapeHtml(timeB) + '</div>' +
-                '    <div>' + _renderDiffB(diffs) + '</div>' +
-                '  </div>' +
-                '</div>'
-            );
-        });
-
-        container.innerHTML = [
-            '<div class="ab-compare-container">',
-            '  <div class="ab-compare-panel">',
-            '    <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
-            '  </div>',
-            '  <div class="ab-compare-panel">',
-            '    <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
-            '  </div>',
-            '</div>',
-            '<div style="margin-top:12px;">',
-            rows.join(""),
-            '</div>',
-        ].join("\n");
-    };
+    // _renderTranscriptCompare 삭제됨 → _renderCleanCompare / _renderDiffCompare 로 통합
 
     /**
      * 메트릭 비교 카드를 렌더링한다.
@@ -5409,38 +5476,58 @@
      * @param {Array} uttB - B 발화 리스트
      * @returns {Array} [{a: ..., b: ...}]
      */
-    function _pairByTimestamp(uttA, uttB) {
+    /**
+     * 타임스탬프 기반 양방향 발화 매칭.
+     *
+     * A 와 B 를 시간순으로 병합하되, tolerance 초 이내의 발화를 같은 쌍으로 묶는다.
+     * 한쪽에만 있는 발화도 시간순 위치에 삽입되어 UI 에서 자연스러운 정렬을 보장.
+     *
+     * @param {Array} uttA - A 발화 리스트
+     * @param {Array} uttB - B 발화 리스트
+     * @param {number} [tolerance=3.0] - 매칭 허용 시간 차이(초)
+     * @returns {Array<{a: object|null, b: object|null}>}
+     */
+    function _pairByTimestamp(uttA, uttB, tolerance) {
+        if (tolerance == null) tolerance = 3.0;
+
         var result = [];
+        var usedB = {};  // 이미 매칭된 B 인덱스
         var idxB = 0;
 
-        // A 기준으로 순회하며 B에서 가장 가까운 시간의 발화를 매칭
+        // 1단계: A 기준으로 B 에서 가장 가까운 매칭 찾기
         uttA.forEach(function (a) {
-            var bestIdx = idxB;
-            var bestDist = Infinity;
             var startA = a.start || 0;
+            var bestIdx = -1;
+            var bestDist = Infinity;
 
-            for (var j = idxB; j < uttB.length; j++) {
+            for (var j = Math.max(0, idxB - 2); j < uttB.length; j++) {
+                if (usedB[j]) continue;
                 var dist = Math.abs((uttB[j].start || 0) - startA);
                 if (dist < bestDist) {
                     bestDist = dist;
                     bestIdx = j;
-                } else {
-                    break; // 거리가 커지기 시작하면 중단 (정렬 가정)
                 }
+                // 정렬 가정: 너무 멀어지면 중단
+                if ((uttB[j].start || 0) - startA > tolerance * 3) break;
             }
 
-            if (bestDist < 10) { // 10초 이내면 매칭
-                result.push({ a: a, b: uttB[bestIdx] });
+            if (bestIdx >= 0 && bestDist <= tolerance) {
+                usedB[bestIdx] = true;
+                result.push({ a: a, b: uttB[bestIdx], time: startA });
                 idxB = bestIdx + 1;
             } else {
-                result.push({ a: a, b: null });
+                result.push({ a: a, b: null, time: startA });
             }
         });
 
-        // B에 남은 미매칭 발화 추가
-        for (var k = idxB; k < uttB.length; k++) {
-            result.push({ a: null, b: uttB[k] });
+        // 2단계: B 에서 미매칭된 발화를 시간순 위치에 삽입
+        for (var k = 0; k < uttB.length; k++) {
+            if (usedB[k]) continue;
+            result.push({ a: null, b: uttB[k], time: uttB[k].start || 0 });
         }
+
+        // 3단계: 시간순 정렬
+        result.sort(function (x, y) { return (x.time || 0) - (y.time || 0); });
 
         return result;
     }

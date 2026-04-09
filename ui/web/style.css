@@ -5843,33 +5843,150 @@ body.command-palette-open {
   text-align: center;
 }
 
-/* 발화 행 (비교 뷰) */
+/* === 비교 뷰 공통 === */
+
+/* 헤더 바 (모델 A / 모델 B 라벨) */
+.ab-compare-header-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-canvas);
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--border);
+}
+
+/* 통계 바 (공통 N개 / A만 N개 / B만 N개) */
+.ab-stats-bar {
+  display: flex;
+  gap: 16px;
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 0.5px solid var(--border-light);
+}
+.ab-stat { font-weight: 500; }
+.ab-stat-a { color: var(--error); }
+.ab-stat-b { color: var(--success); }
+.ab-stat-identical { color: var(--text-muted); }
+.ab-stat-diff { color: #ff9500; }
+
+/* === "최종 결과" 탭 — 발화 리스트 === */
+
+.ab-utterance-list { margin-top: 4px; }
+
 .ab-utterance-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  padding: 8px 0;
+  padding: 10px 8px;
   border-bottom: 0.5px solid var(--border-light);
+  transition: background var(--duration-fast) var(--ease-macos);
 }
-.ab-utterance-row:last-child {
-  border-bottom: none;
-}
+.ab-utterance-row:last-child { border-bottom: none; }
+.ab-utterance-row:hover { background: var(--bg-secondary); }
+
+/* 양쪽 텍스트가 다른 행 — 연한 노란 배경 */
+.ab-row-differ { background: color-mix(in srgb, #ff9500 6%, transparent); }
+.ab-row-differ:hover { background: color-mix(in srgb, #ff9500 12%, transparent); }
+
+/* 한쪽만 있는 행 */
+.ab-row-missing { opacity: 0.7; }
 
 .ab-utterance-cell {
   font-size: 13px;
   line-height: 1.6;
 }
 
+.ab-cell-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ab-empty-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+}
+
+.ab-utterance-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 3px;
+}
+
 .ab-utterance-speaker {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 2px;
 }
 
 .ab-utterance-time {
   font-size: 11px;
   color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ab-utterance-text {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+
+/* === "상세 비교" 탭 — diff 뷰 === */
+
+.ab-diff-list { margin-top: 4px; }
+
+.ab-diff-row {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 8px;
+  padding: 10px 4px;
+  border-bottom: 0.5px solid var(--border-light);
+}
+.ab-diff-row:last-child { border-bottom: none; }
+
+.ab-diff-num {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: right;
+  padding-top: 2px;
+}
+
+.ab-diff-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.ab-diff-cell {
+  font-size: 13px;
+  line-height: 1.65;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.ab-diff-cell-a {
+  background: color-mix(in srgb, var(--error) 5%, var(--bg-card));
+}
+
+.ab-diff-cell-b {
+  background: color-mix(in srgb, var(--success) 5%, var(--bg-card));
+}
+
+.ab-empty-diff {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 40px 0;
 }
 
 /* 설정 페이지 — 고급 기능 섹션 */
