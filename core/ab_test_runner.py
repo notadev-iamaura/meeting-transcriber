@@ -303,8 +303,20 @@ def _now_iso() -> str:
 
 
 def _resolve_meeting_dir(config: AppConfig, meeting_id: str) -> Path:
-    """본 파이프라인의 `outputs/{meeting_id}/` 디렉터리 경로를 반환한다."""
-    return config.paths.resolved_outputs_dir / meeting_id
+    """본 파이프라인의 `checkpoints/{meeting_id}/` 디렉터리 경로를 반환한다.
+
+    A/B 테스트에 필요한 중간 산출물(merge.json, diarize.json, transcribe.json)은
+    checkpoints/ 에 저장된다. outputs/ 에는 최종 산출물(corrected.json, summary.md)만 있다.
+    """
+    return config.paths.resolved_checkpoints_dir / meeting_id
+
+
+def _resolve_wav_path(config: AppConfig, meeting_id: str) -> Path:
+    """회의의 원본 WAV 파일 경로를 반환한다.
+
+    WAV 는 audio_input/{meeting_id}.wav 에 저장된다 (pipeline 의 audio_converter 가 변환한 결과).
+    """
+    return config.paths.resolved_audio_input_dir / f"{meeting_id}.wav"
 
 
 def _write_metrics_file(dir_path: Path, metrics: dict[str, Any]) -> None:
@@ -341,8 +353,17 @@ def _build_llm_temp_config(
 def _build_stt_temp_config(
     base_config: AppConfig, spec: ModelSpec
 ) -> AppConfig:
-    """variant 별 STT 임시 설정을 생성한다 (원본 비오염)."""
-    new_stt = base_config.stt.model_copy(update={"model_name": spec.model_id})
+    """variant 별 STT 임시 설정을 생성한다 (원본 비오염).
+
+    spec.model_id 가 레지스트리 짧은 ID (예: "seastar-medium-4bit")이면
+    실제 HF repo ID (예: "youngouk/seastar-medium-ko-4bit-mlx")로 변환한다.
+    """
+    from core.stt_model_registry import get_by_id as stt_get_by_id
+
+    # 레지스트리에서 실제 model_path(HF repo ID) 조회
+    registry_spec = stt_get_by_id(spec.model_id)
+    actual_model_name = registry_spec.model_path if registry_spec else spec.model_id
+    new_stt = base_config.stt.model_copy(update={"model_name": actual_model_name})
     return base_config.model_copy(update={"stt": new_stt})
 
 
@@ -525,12 +546,10 @@ async def run_llm_ab_test(
         source_meeting_id=source_meeting_id,
         source_snapshot={
             "merge_json_path": str(merge_path.resolve()),
-            "wav_path": str((meeting_dir / "input.wav").resolve()),
-            "diarize_json_path": (
-                str((meeting_dir / "diarize.json").resolve())
-                if (meeting_dir / "diarize.json").exists()
-                else None
-            ),
+            "wav_path": str(_resolve_wav_path(config, source_meeting_id).resolve()),
+            "diarize_json_path": str((meeting_dir / "diarize.json").resolve())
+            if (meeting_dir / "diarize.json").exists()
+            else None,
         },
         variant_a=variant_a,
         variant_b=variant_b,
@@ -669,9 +688,15 @@ async def _ensure_diarize(
     config: AppConfig,
     model_manager: ModelLoadManager,
     meeting_dir: Path,
+    wav_path: Path,
     allow_diarize_rerun: bool,
 ) -> DiarizationResult:
-    """diarize 체크포인트를 로드하거나, 허용 시 1회 재실행한다."""
+    """diarize 체크포인트를 로드하거나, 허용 시 1회 재실행한다.
+
+    Args:
+        meeting_dir: checkpoints/{meeting_id}/ 경로 (diarize.json 위치)
+        wav_path: audio_input/{meeting_id}.wav 경로 (재실행 시 필요)
+    """
     ckpt = meeting_dir / "diarize.json"
     if ckpt.exists():
         return DiarizationResult.from_checkpoint(ckpt)
@@ -679,11 +704,10 @@ async def _ensure_diarize(
         raise ValueError(
             "diarize 체크포인트가 없습니다. allow_diarize_rerun=True 로 재실행 허용 필요"
         )
-    wav = meeting_dir / "input.wav"
-    if not wav.exists():
-        raise FileNotFoundError(f"input.wav 가 없습니다: {wav}")
+    if not wav_path.exists():
+        raise FileNotFoundError(f"WAV 파일이 없습니다: {wav_path}")
     diarizer = Diarizer(config, model_manager)
-    return await diarizer.diarize(wav)
+    return await diarizer.diarize(wav_path)
 
 
 async def _run_stt_variant(
@@ -769,9 +793,9 @@ async def run_stt_ab_test(
         raise RuntimeError("다른 A/B 테스트가 이미 진행 중입니다.")
 
     meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
-    wav_path = meeting_dir / "input.wav"
+    wav_path = _resolve_wav_path(config, source_meeting_id)
     if not wav_path.exists():
-        raise FileNotFoundError(f"input.wav 가 없습니다: {wav_path}")
+        raise FileNotFoundError(f"WAV 파일이 없습니다: {wav_path}")
 
     mm = model_manager or get_model_manager()
     # test_id 선점: API 레이어가 202 응답에 포함시킬 ID 를 외부에서 주입할 수 있다.
@@ -813,6 +837,7 @@ async def run_stt_ab_test(
             config=config,
             model_manager=mm,
             meeting_dir=meeting_dir,
+            wav_path=wav_path,
             allow_diarize_rerun=allow_diarize_rerun,
         )
 

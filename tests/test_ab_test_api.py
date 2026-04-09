@@ -70,6 +70,8 @@ def tmp_config(tmp_path: Path) -> AppConfig:
         update={"paths": PathsConfig(base_dir=str(tmp_path))}
     )
     cfg.paths.resolved_outputs_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.resolved_checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.resolved_audio_input_dir.mkdir(parents=True, exist_ok=True)
     return cfg
 
 
@@ -90,11 +92,18 @@ def sample_merged() -> MergedResult:
 def meeting_id_with_merge(tmp_config: AppConfig, sample_merged: MergedResult) -> str:
     """merge.json + input.wav 가 준비된 가짜 회의 ID."""
     mid = "meeting_20260409-100000"
-    mdir = tmp_config.paths.resolved_outputs_dir / mid
-    mdir.mkdir(parents=True, exist_ok=True)
-    sample_merged.save_checkpoint(mdir / "merge.json")
-    (mdir / "input.wav").write_bytes(b"RIFF....WAVEfmt ")
-    (mdir / "metadata.json").write_text(
+    # 체크포인트 디렉터리 (merge.json 등)
+    ckpt_dir = tmp_config.paths.resolved_checkpoints_dir / mid
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    sample_merged.save_checkpoint(ckpt_dir / "merge.json")
+    # WAV 는 audio_input/ 에 저장
+    (tmp_config.paths.resolved_audio_input_dir / f"{mid}.wav").write_bytes(
+        b"RIFF....WAVEfmt "
+    )
+    # outputs 에 metadata (기존 회의 조회용)
+    out_dir = tmp_config.paths.resolved_outputs_dir / mid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "metadata.json").write_text(
         json.dumps({"meeting_id": mid}), encoding="utf-8"
     )
     return mid
@@ -635,11 +644,15 @@ class TestOriginalMeetingUnchanged:
         """A/B 실행 후 원본 회의 디렉터리의 파일이 변경되지 않음을 확인."""
         app.state.model_manager = _DummyManager()
 
+        # outputs/ 와 checkpoints/ 모두 원본 상태 기록
         mdir = tmp_config.paths.resolved_outputs_dir / meeting_id_with_merge
+        ckpt_dir = tmp_config.paths.resolved_checkpoints_dir / meeting_id_with_merge
         before = {}
-        for f in mdir.iterdir():
-            if f.is_file():
-                before[f.name] = f.read_bytes()
+        for d in (mdir, ckpt_dir):
+            if d.exists():
+                for f in d.iterdir():
+                    if f.is_file():
+                        before[str(f)] = f.read_bytes()
 
         resp = await async_client.post(
             "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
@@ -648,9 +661,11 @@ class TestOriginalMeetingUnchanged:
         await _wait_for_task_completion(tmp_config, tid)
 
         after = {}
-        for f in mdir.iterdir():
-            if f.is_file():
-                after[f.name] = f.read_bytes()
+        for d in (mdir, ckpt_dir):
+            if d.exists():
+                for f in d.iterdir():
+                    if f.is_file():
+                        after[str(f)] = f.read_bytes()
 
         assert before.keys() == after.keys(), "파일 목록이 변경됨"
         for name in before:

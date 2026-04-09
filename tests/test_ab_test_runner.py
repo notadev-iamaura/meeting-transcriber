@@ -86,11 +86,14 @@ def meeting_with_merge(
 ) -> str:
     """merge.json 체크포인트가 준비된 가짜 회의 ID."""
     meeting_id = "meeting_20260409-000000"
-    meeting_dir = tmp_config.paths.resolved_outputs_dir / meeting_id
-    meeting_dir.mkdir(parents=True, exist_ok=True)
-    sample_merged.save_checkpoint(meeting_dir / "merge.json")
-    # input.wav placeholder
-    (meeting_dir / "input.wav").write_bytes(b"RIFF....WAVEfmt ")
+    # 체크포인트 디렉터리 (merge.json, diarize.json 등)
+    ckpt_dir = tmp_config.paths.resolved_checkpoints_dir / meeting_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    sample_merged.save_checkpoint(ckpt_dir / "merge.json")
+    # WAV 는 audio_input/ 에 저장
+    audio_dir = tmp_config.paths.resolved_audio_input_dir
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    (audio_dir / f"{meeting_id}.wav").write_bytes(b"RIFF....WAVEfmt ")
     return meeting_id
 
 
@@ -271,7 +274,8 @@ class TestConfigModelCopy:
         original = tmp_config.stt.model_name
         spec = ModelSpec(label="T", model_id="seastar-medium-4bit")
         temp = ab_test_runner._build_stt_temp_config(tmp_config, spec)
-        assert temp.stt.model_name == "seastar-medium-4bit"
+        # 레지스트리가 짧은 ID 를 실제 HF repo ID 로 변환한다
+        assert temp.stt.model_name == "youngouk/seastar-medium-ko-4bit-mlx"
         assert tmp_config.stt.model_name == original
 
 
