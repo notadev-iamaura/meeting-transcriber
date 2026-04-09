@@ -4226,12 +4226,8 @@
         self._meetings = [];       // 전체 회의 목록 (필터 전)
         self._sttModels = [];
 
-        // LLM 프리셋 목록
-        self._llmPresets = [
-            { label: "EXAONE 3.5 7.8B 4bit", id: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit" },
-            { label: "Gemma 4 E4B UD 4bit", id: "unsloth/gemma-4-E4B-it-UD-MLX-4bit" },
-            { label: "Gemma 4 E2B UD 4bit", id: "unsloth/gemma-4-E2B-it-UD-MLX-4bit" },
-        ];
+        // LLM 프리셋 목록 — API 에서 로드 (available 필드로 로컬 보유 여부 판별)
+        self._llmPresets = [];
 
         // URL 쿼리 파라미터 파싱
         var params = new URLSearchParams(window.location.search);
@@ -4412,6 +4408,17 @@
             self._sttModels = [];
         }
 
+        // LLM 프리셋 목록 (로컬 보유 여부 포함)
+        try {
+            var llmData = await App.apiRequest("/llm-models/available");
+            self._llmPresets = (Array.isArray(llmData) ? llmData : []).map(function (m) {
+                return { label: m.label, id: m.model_id, available: m.available };
+            });
+        } catch (e) {
+            // API 실패 시 폴백: 빈 목록 (사용자 정의 입력만 가능)
+            self._llmPresets = [];
+        }
+
         // 유형 UI 업데이트 + 소스 드롭다운 + 모델 셀렉트 채우기
         if (self._testType === "stt") {
             var sttTab = document.getElementById("abTypeStt");
@@ -4504,7 +4511,13 @@
                 self._llmPresets.forEach(function (p) {
                     var opt = document.createElement("option");
                     opt.value = p.id;
-                    opt.textContent = p.label;
+                    if (p.available === false) {
+                        opt.textContent = p.label + " (다운로드 필요)";
+                        opt.disabled = true;
+                        opt.style.color = "var(--text-muted)";
+                    } else {
+                        opt.textContent = p.label;
+                    }
                     sel.appendChild(opt);
                 });
                 var customOpt = document.createElement("option");

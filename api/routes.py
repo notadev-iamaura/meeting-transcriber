@@ -3948,7 +3948,63 @@ def _validate_meeting_exists(config: Any, meeting_id: str) -> None:
         )
 
 
-# --- 엔드포인트 ---
+# --- LLM 모델 로컬 보유 목록 엔드포인트 ---
+
+
+# A/B 테스트에서 사용할 수 있는 LLM 프리셋 목록 (로컬 보유 여부 포함)
+_LLM_PRESETS = [
+    {"label": "EXAONE 3.5 7.8B 4bit", "id": "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"},
+    {"label": "Gemma 4 E4B 4bit", "id": "mlx-community/gemma-4-e4b-it-4bit"},
+    {"label": "Gemma 4 E2B 4bit", "id": "mlx-community/gemma-4-e2b-it-4bit"},
+    {"label": "Gemma 4 E4B UD 4bit (Unsloth)", "id": "unsloth/gemma-4-E4B-it-UD-MLX-4bit"},
+    {"label": "Gemma 4 E2B UD 4bit (Unsloth)", "id": "unsloth/gemma-4-E2B-it-UD-MLX-4bit"},
+]
+
+
+def _check_hf_cache_exists(repo_id: str) -> bool:
+    """HF 캐시에 모델이 존재하는지 확인한다.
+
+    ~/.cache/huggingface/hub/models--{owner}--{name}/ 디렉토리의 snapshots/ 에
+    파일이 존재하면 True.
+    """
+    from pathlib import Path
+
+    cache_dir = (
+        Path.home()
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / f"models--{repo_id.replace('/', '--')}"
+        / "snapshots"
+    )
+    if not cache_dir.exists():
+        return False
+    # snapshots 아래에 실제 파일이 있는 디렉터리가 하나라도 있으면 캐시됨
+    for snap in cache_dir.iterdir():
+        if snap.is_dir() and any(snap.iterdir()):
+            return True
+    return False
+
+
+@router.get(
+    "/llm-models/available",
+    summary="A/B 테스트용 LLM 모델 목록",
+    description="로컬 HF 캐시 보유 여부를 포함한 LLM 프리셋 목록을 반환한다.",
+)
+async def list_available_llm_models() -> list[dict]:
+    """프리셋 LLM 모델 목록 + 로컬 보유 여부를 반환한다."""
+    result = []
+    for preset in _LLM_PRESETS:
+        available = _check_hf_cache_exists(preset["id"])
+        result.append({
+            "label": preset["label"],
+            "model_id": preset["id"],
+            "available": available,
+        })
+    return result
+
+
+# --- A/B 테스트 엔드포인트 ---
 
 
 @router.post(
