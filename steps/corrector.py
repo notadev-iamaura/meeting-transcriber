@@ -497,4 +497,20 @@ class Corrector:
             f"보정율 {result.correction_rate:.1%}"
         )
 
+        # 품질 관측성 경고: 보정율이 비정상적으로 낮으면 원인 점검 필요
+        # (프롬프트 빌드 실패 / 모델 응답 포맷 이탈 / 배치 파싱 오류 등)
+        if len(all_corrected) >= 10 and result.correction_rate < 0.05:
+            logger.warning(
+                "보정율이 비정상적으로 낮습니다 (%.1f%%). "
+                "LLM 응답 포맷, 프롬프트 템플릿, 활성 용어집을 점검하세요.",
+                result.correction_rate * 100,
+            )
+        # 전량 실패 감지
+        if len(all_corrected) >= 10 and total_failed >= len(all_corrected) * 0.5:
+            logger.warning(
+                "보정 실패율이 높습니다 (%d/%d). LLM 백엔드/모델 상태를 점검하세요.",
+                total_failed,
+                len(all_corrected),
+            )
+
         return result

@@ -259,9 +259,25 @@ export MT_LLM_MODEL=mlx-community/gemma-4-e4b-it-4bit
 
 | 조건 | 권장 모델 | 이유 |
 |------|----------|------|
-| M3/M4 + 16GB 이상 | EXAONE 3.5 또는 Gemma 4 E4B | 둘 다 여유 있게 실행 |
-| M1/M2 + 16GB 이상 | EXAONE 3.5 | 검증된 성능 |
-| M1/M2 + 8GB | Gemma 4 E2B | ~3GB로 메모리 절약 |
+| M3/M4 + 16GB 이상 | **EXAONE 3.5** (기본) | 한국어 특화, 한국어 고유명사/비즈니스 용어 처리 최적 |
+| M1/M2 + 16GB 이상 | **EXAONE 3.5** (기본) | 검증된 성능 |
+| 16GB + 멀티모달 필요 | Gemma 4 E4B (수동 전환) | 이미지/문서 분석이 필요한 특수 용도만 |
+| M1/M2 + 8GB | Gemma 4 E2B (수동 전환) | ~3GB로 메모리 절약 — 단, 한국어 고유명사에 영어/중국어 병기 오류 주의 |
+
+> ⚠️ **Gemma 계열 주의사항**
+> Gemma 4 는 다국어 모델로 한국어 고유명사를 만나면 `배미령(Baimilong)` 같은
+> 영어/중국어 병기를 자동으로 덧붙이는 습관이 있습니다. 요약·교정 프롬프트에
+> 병기 금지 지시가 포함되어 있지만 완전 차단은 어렵습니다. 한국어 회의록이
+> 주 용도라면 EXAONE 을 권장합니다.
+
+**8GB 환경에서 Gemma 4 E2B 로 수동 전환:**
+
+```yaml
+# config.yaml
+llm:
+  mlx_model_name: "mlx-community/gemma-4-e2b-it-4bit"
+```
+또는 환경변수: `export MT_LLM_MODEL=mlx-community/gemma-4-e2b-it-4bit`
 
 **Ollama 백엔드 (선택, 별도 서버 필요):**
 

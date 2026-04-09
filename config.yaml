@@ -33,7 +33,7 @@ llm:
   backend: "mlx"  # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
   model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
-  mlx_model_name: "mlx-community/gemma-4-e2b-it-4bit"  # MLX 모델명
+  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # MLX 모델명 (한국어 특화)
   mlx_max_tokens: 2000                       # MLX 최대 생성 토큰
   max_context_tokens: 8192                   # 컨텍스트 윈도우
   temperature: 0.3  # 생성 온도
@@ -154,11 +154,11 @@ vad:
 
 # === 환각 필터링 설정 ===
 hallucination_filter:
-  enabled: true                              # 환각 필터링 활성화 여부
-  compression_ratio_threshold: 2.4           # 압축비 임계값 (초과 시 환각으로 판정)
+  enabled: true  # 환각 필터링 활성화 여부
+  compression_ratio_threshold: 2.4  # 압축비 임계값 (초과 시 환각으로 판정)
   logprob_threshold: -1.0                    # 평균 로그 확률 임계값 (미만 시 저신뢰도)
   no_speech_threshold: 0.9  # 무음 확률 임계값 (초과 시 무음 세그먼트 제거, 0.6은 너무 공격적)
-  repetition_threshold: 3                    # 반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)
+  repetition_threshold: 3  # 반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)
 
 # === 텍스트 후처리 설정 ===
 text_postprocessing:
