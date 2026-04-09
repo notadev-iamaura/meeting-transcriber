@@ -356,13 +356,24 @@ def _build_stt_temp_config(
     """variant 별 STT 임시 설정을 생성한다 (원본 비오염).
 
     spec.model_id 가 레지스트리 짧은 ID (예: "seastar-medium-4bit")이면
-    실제 HF repo ID (예: "youngouk/seastar-medium-ko-4bit-mlx")로 변환한다.
+    get_effective_model_path() 로 실제 사용할 경로를 결정한다.
+    우선순위: 수동 임포트 로컬 경로 > HF 캐시 > HF repo ID.
+    이렇게 해야 SSL 차단 환경에서 수동 다운로드한 모델도 A/B 테스트에서 쓸 수 있다.
+
+    base_config 의 나머지 STT 설정 (transcribe_timeout_seconds 등) 은
+    model_copy 로 그대로 유지된다.
     """
     from core.stt_model_registry import get_by_id as stt_get_by_id
+    from core.stt_model_status import get_effective_model_path
 
-    # 레지스트리에서 실제 model_path(HF repo ID) 조회
     registry_spec = stt_get_by_id(spec.model_id)
-    actual_model_name = registry_spec.model_path if registry_spec else spec.model_id
+    if registry_spec is not None:
+        # 수동 임포트 > HF 캐시 > HF repo ID 우선순위로 실제 경로 결정
+        actual_model_name = get_effective_model_path(registry_spec)
+    else:
+        # 레지스트리에 없는 ID — 그대로 전달 (사용자가 HF repo ID 를 직접 입력한 경우)
+        actual_model_name = spec.model_id
+    logger.info(f"STT 임시 config 생성: {spec.model_id} → {actual_model_name}")
     new_stt = base_config.stt.model_copy(update={"model_name": actual_model_name})
     return base_config.model_copy(update={"stt": new_stt})
 
