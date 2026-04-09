@@ -3729,3 +3729,516 @@ async def import_stt_manual(
             "이제 '활성화' 버튼으로 이 모델을 사용할 수 있어요."
         ),
     )
+
+
+# ============================================================
+# A/B 테스트 엔드포인트 (Phase 2)
+# ============================================================
+
+
+from typing import Literal
+
+from core import ab_test_store
+from core.ab_test_runner import (
+    LlmScope,
+    ModelSpec,
+    cancel_test as _runner_cancel_test,
+    delete_test as _runner_delete_test,
+    get_test_result as _runner_get_test_result,
+    list_tests as _runner_list_tests,
+    new_test_id as _runner_new_test_id,
+    run_llm_ab_test as _runner_run_llm_ab_test,
+    run_stt_ab_test as _runner_run_stt_ab_test,
+)
+
+
+# --- Pydantic 모델 ---
+
+
+class ModelSpecPayload(BaseModel):
+    """A/B 비교 대상 모델 스펙.
+
+    Attributes:
+        label: 사용자에게 표시할 라벨
+        model_id: HF repo ID 또는 레지스트리 ID
+        backend: LLM 백엔드 ("mlx" | "ollama")
+    """
+
+    label: str
+    model_id: str
+    backend: Literal["mlx", "ollama"] = "mlx"
+
+
+class LlmScopePayload(BaseModel):
+    """LLM A/B 테스트 실행 범위.
+
+    Attributes:
+        correct: 교정 수행 여부
+        summarize: 요약 수행 여부
+    """
+
+    correct: bool = True
+    summarize: bool = True
+
+
+class ABTestLLMRequest(BaseModel):
+    """LLM A/B 테스트 요청 바디.
+
+    Attributes:
+        source_meeting_id: 원본 회의 ID
+        variant_a: A 모델 스펙
+        variant_b: B 모델 스펙
+        scope: 실행 범위
+    """
+
+    source_meeting_id: str
+    variant_a: ModelSpecPayload
+    variant_b: ModelSpecPayload
+    scope: LlmScopePayload = LlmScopePayload()
+
+
+class ABTestSTTRequest(BaseModel):
+    """STT A/B 테스트 요청 바디.
+
+    Attributes:
+        source_meeting_id: 원본 회의 ID
+        variant_a: A 모델 스펙
+        variant_b: B 모델 스펙
+        allow_diarize_rerun: 화자분리 체크포인트가 없을 때 재실행 허용
+    """
+
+    source_meeting_id: str
+    variant_a: ModelSpecPayload
+    variant_b: ModelSpecPayload
+    allow_diarize_rerun: bool = False
+
+
+class ABTestStartedResponse(BaseModel):
+    """A/B 테스트 시작 응답.
+
+    Attributes:
+        test_id: 생성된 테스트 ID
+        status: 초기 상태
+    """
+
+    test_id: str
+    status: str = "running"
+
+
+# --- 유효성 검증 헬퍼 ---
+
+
+def _validate_test_id(test_id: str) -> None:
+    """test_id 를 화이트리스트로 검증한다 (path traversal 방지).
+
+    Args:
+        test_id: 검증 대상
+
+    Raises:
+        HTTPException: 유효하지 않은 형식 (400)
+    """
+    if not ab_test_store.is_valid_test_id(test_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"유효하지 않은 A/B 테스트 ID 형식입니다: {test_id}",
+        )
+
+
+def _validate_variant(variant: str) -> None:
+    """variant 경로 파라미터가 "a" 또는 "b" 인지 검증한다.
+
+    Args:
+        variant: 검증 대상
+
+    Raises:
+        HTTPException: 허용되지 않는 값 (400)
+    """
+    if variant not in ("a", "b"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"variant 는 'a' 또는 'b' 만 허용됩니다: {variant}",
+        )
+
+
+def _get_config(request: Request) -> Any:
+    """app.state 에서 AppConfig 를 가져온다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        AppConfig 인스턴스
+
+    Raises:
+        HTTPException: config 가 초기화되지 않았을 때 (503)
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 설정이 초기화되지 않았습니다.",
+        )
+    return config
+
+
+def _get_ws_manager(request: Request) -> Any | None:
+    """app.state 에서 WebSocket ConnectionManager 를 가져온다 (없으면 None).
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        ConnectionManager 또는 None
+    """
+    return getattr(request.app.state, "ws_manager", None)
+
+
+async def _make_ab_broadcaster(request: Request):
+    """A/B 테스트 러너에 주입할 ws_broadcaster 콜러블을 생성한다.
+
+    러너가 보내는 payload dict 를 WebSocketEvent 로 변환하여 브로드캐스트한다.
+    ws_manager 가 없으면 None 을 반환하여 러너가 no-op 으로 동작하게 한다.
+
+    Args:
+        request: FastAPI Request 객체
+
+    Returns:
+        async callable 또는 None
+    """
+    ws_manager = _get_ws_manager(request)
+    if ws_manager is None:
+        return None
+
+    async def _broadcast(payload: dict[str, Any]) -> None:
+        """러너 payload 를 WebSocket 이벤트로 브로드캐스트한다.
+
+        Args:
+            payload: 러너가 생성한 step_progress 딕셔너리
+        """
+        try:
+            from api.websocket import EventType, WebSocketEvent
+
+            event = WebSocketEvent(
+                event_type=EventType.STEP_PROGRESS.value,
+                data=payload,
+            )
+            await ws_manager.broadcast_event(event)
+        except Exception as exc:  # noqa: BLE001 — 브로드캐스트 실패는 비치명적
+            logger.warning(f"A/B 테스트 WS 브로드캐스트 실패(무시): {exc}")
+
+    return _broadcast
+
+
+def _validate_meeting_exists(config: Any, meeting_id: str) -> None:
+    """원본 회의 디렉터리가 존재하는지 검증한다.
+
+    Args:
+        config: AppConfig
+        meeting_id: 회의 ID
+
+    Raises:
+        HTTPException: 디렉터리가 없을 때 (404)
+    """
+    _validate_meeting_id(meeting_id)
+    meeting_dir = config.paths.resolved_outputs_dir / meeting_id
+    if not meeting_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"원본 회의를 찾을 수 없습니다: {meeting_id}",
+        )
+
+
+# --- 엔드포인트 ---
+
+
+@router.post(
+    "/ab-tests/llm",
+    status_code=202,
+    response_model=ABTestStartedResponse,
+    summary="LLM A/B 테스트 시작",
+    description="동일 회의에 대해 LLM 모델 2종의 교정/요약을 순차 비교 실행한다.",
+)
+async def start_llm_ab_test(
+    body: ABTestLLMRequest,
+    request: Request,
+) -> ABTestStartedResponse:
+    """LLM A/B 테스트를 백그라운드로 시작한다.
+
+    Args:
+        body: LLM A/B 테스트 요청 바디
+        request: FastAPI Request 객체
+
+    Returns:
+        202 + test_id
+    """
+    config = _get_config(request)
+
+    # 사전 검증: 동일 모델 거부
+    if body.variant_a.model_id == body.variant_b.model_id and body.variant_a.backend == body.variant_b.backend:
+        raise HTTPException(
+            status_code=400,
+            detail="variant_a 와 variant_b 가 동일합니다.",
+        )
+
+    # 사전 검증: 원본 회의 존재
+    _validate_meeting_exists(config, body.source_meeting_id)
+
+    # test_id 선점
+    selected_id = _runner_new_test_id()
+
+    # ws_broadcaster 생성
+    broadcaster = await _make_ab_broadcaster(request)
+
+    # ModelLoadManager 주입
+    model_manager = getattr(request.app.state, "model_manager", None)
+
+    # 백그라운드 태스크 발사
+    task = asyncio.create_task(
+        _runner_run_llm_ab_test(
+            config=config,
+            source_meeting_id=body.source_meeting_id,
+            variant_a=ModelSpec(
+                label=body.variant_a.label,
+                model_id=body.variant_a.model_id,
+                backend=body.variant_a.backend,
+            ),
+            variant_b=ModelSpec(
+                label=body.variant_b.label,
+                model_id=body.variant_b.model_id,
+                backend=body.variant_b.backend,
+            ),
+            scope=LlmScope(
+                correct=body.scope.correct,
+                summarize=body.scope.summarize,
+            ),
+            ws_broadcaster=broadcaster,
+            model_manager=model_manager,
+            test_id=selected_id,
+        ),
+        name=f"ab-test-llm-{selected_id}",
+    )
+    task.add_done_callback(_log_task_exception)
+
+    return ABTestStartedResponse(test_id=selected_id)
+
+
+@router.post(
+    "/ab-tests/stt",
+    status_code=202,
+    response_model=ABTestStartedResponse,
+    summary="STT A/B 테스트 시작",
+    description="동일 회의에 대해 STT 모델 2종의 전사 결과를 순차 비교 실행한다.",
+)
+async def start_stt_ab_test(
+    body: ABTestSTTRequest,
+    request: Request,
+) -> ABTestStartedResponse:
+    """STT A/B 테스트를 백그라운드로 시작한다.
+
+    Args:
+        body: STT A/B 테스트 요청 바디
+        request: FastAPI Request 객체
+
+    Returns:
+        202 + test_id
+    """
+    config = _get_config(request)
+
+    # 사전 검증: 동일 모델 거부
+    if body.variant_a.model_id == body.variant_b.model_id:
+        raise HTTPException(
+            status_code=400,
+            detail="variant_a 와 variant_b 가 동일합니다.",
+        )
+
+    # 사전 검증: 원본 회의 존재
+    _validate_meeting_exists(config, body.source_meeting_id)
+
+    # test_id 선점
+    selected_id = _runner_new_test_id()
+
+    # ws_broadcaster 생성
+    broadcaster = await _make_ab_broadcaster(request)
+
+    # ModelLoadManager 주입
+    model_manager = getattr(request.app.state, "model_manager", None)
+
+    # 백그라운드 태스크 발사
+    task = asyncio.create_task(
+        _runner_run_stt_ab_test(
+            config=config,
+            source_meeting_id=body.source_meeting_id,
+            variant_a=ModelSpec(
+                label=body.variant_a.label,
+                model_id=body.variant_a.model_id,
+                backend=body.variant_a.backend,
+            ),
+            variant_b=ModelSpec(
+                label=body.variant_b.label,
+                model_id=body.variant_b.model_id,
+                backend=body.variant_b.backend,
+            ),
+            allow_diarize_rerun=body.allow_diarize_rerun,
+            ws_broadcaster=broadcaster,
+            model_manager=model_manager,
+            test_id=selected_id,
+        ),
+        name=f"ab-test-stt-{selected_id}",
+    )
+    task.add_done_callback(_log_task_exception)
+
+    return ABTestStartedResponse(test_id=selected_id)
+
+
+@router.get(
+    "/ab-tests",
+    summary="A/B 테스트 목록 조회",
+    description="저장된 A/B 테스트 목록을 최신순으로 반환한다. source_meeting_id 쿼리 파라미터로 필터 가능.",
+)
+async def list_ab_tests(
+    request: Request,
+    source_meeting_id: str | None = None,
+) -> dict[str, Any]:
+    """A/B 테스트 목록을 조회한다.
+
+    Args:
+        request: FastAPI Request 객체
+        source_meeting_id: (쿼리) 특정 원본 회의에 속한 테스트만 필터
+
+    Returns:
+        {"tests": [...]}
+    """
+    config = _get_config(request)
+    tests = _runner_list_tests(config, source_meeting_id)
+    return {"tests": tests}
+
+
+@router.get(
+    "/ab-tests/{test_id}",
+    summary="A/B 테스트 상세 조회",
+    description="metadata + variant_a/variant_b 산출물을 포함한 테스트 상세를 반환한다.",
+)
+async def get_ab_test(
+    test_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """특정 A/B 테스트의 상세 결과를 조회한다.
+
+    Args:
+        test_id: 테스트 ID (path param)
+        request: FastAPI Request 객체
+
+    Returns:
+        {metadata, variant_a, variant_b}
+    """
+    _validate_test_id(test_id)
+    config = _get_config(request)
+    try:
+        return _runner_get_test_result(config, test_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"A/B 테스트를 찾을 수 없습니다: {test_id}",
+        )
+
+
+@router.get(
+    "/ab-tests/{test_id}/variant/{variant}/summary",
+    summary="A/B 테스트 variant 요약 마크다운 조회",
+    description="variant_a 또는 variant_b 의 summary.md 를 text/markdown 으로 반환한다.",
+)
+async def get_ab_test_summary(
+    test_id: str,
+    variant: str,
+    request: Request,
+):
+    """A/B 테스트 variant 의 요약 마크다운을 반환한다.
+
+    Args:
+        test_id: 테스트 ID (path param)
+        variant: "a" 또는 "b" (path param)
+        request: FastAPI Request 객체
+
+    Returns:
+        text/markdown Response
+    """
+    from fastapi.responses import Response
+
+    _validate_test_id(test_id)
+    _validate_variant(variant)
+    config = _get_config(request)
+
+    test_dir = ab_test_store.resolve_test_dir(config, test_id)
+    summary_path = test_dir / f"variant_{variant}" / "summary.md"
+
+    if not summary_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"요약 파일이 없습니다: variant_{variant}/summary.md",
+        )
+
+    content = summary_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
+@router.delete(
+    "/ab-tests/{test_id}",
+    status_code=204,
+    summary="A/B 테스트 삭제",
+    description="테스트 디렉터리를 통째로 삭제한다.",
+)
+async def delete_ab_test(
+    test_id: str,
+    request: Request,
+):
+    """A/B 테스트를 삭제한다.
+
+    Args:
+        test_id: 테스트 ID (path param)
+        request: FastAPI Request 객체
+
+    Returns:
+        204 No Content
+    """
+    _validate_test_id(test_id)
+    config = _get_config(request)
+    try:
+        _runner_delete_test(config, test_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"A/B 테스트를 찾을 수 없습니다: {test_id}",
+        )
+    return None
+
+
+@router.post(
+    "/ab-tests/{test_id}/cancel",
+    status_code=202,
+    response_model=ABTestStartedResponse,
+    summary="A/B 테스트 취소",
+    description="진행 중인 A/B 테스트의 취소를 요청한다 (variant 경계에서 중단).",
+)
+async def cancel_ab_test(
+    test_id: str,
+    request: Request,
+) -> ABTestStartedResponse:
+    """A/B 테스트 취소를 요청한다.
+
+    Args:
+        test_id: 테스트 ID (path param)
+        request: FastAPI Request 객체
+
+    Returns:
+        202 + test_id
+    """
+    _validate_test_id(test_id)
+    config = _get_config(request)
+    try:
+        await _runner_cancel_test(config, test_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ABTestStartedResponse(test_id=test_id, status="cancelling")

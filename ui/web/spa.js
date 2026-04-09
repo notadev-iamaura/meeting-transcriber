@@ -198,6 +198,27 @@
                 },
             },
             {
+                // /app/ab-test/new — A/B 테스트 생성
+                pattern: /^\/app\/ab-test\/new/,
+                handler: function () {
+                    return new AbTestNewView();
+                },
+            },
+            {
+                // /app/ab-test/{testId} — A/B 테스트 결과
+                pattern: /^\/app\/ab-test\/([^/?]+)/,
+                handler: function (match) {
+                    return new AbTestResultView(decodeURIComponent(match[1]));
+                },
+            },
+            {
+                // /app/ab-test — A/B 테스트 목록
+                pattern: /^\/app\/ab-test\/?$/,
+                handler: function () {
+                    return new AbTestListView();
+                },
+            },
+            {
                 // /app (홈) — 기본 라우트 → EmptyView
                 pattern: /^\/app\/?$/,
                 handler: function () {
@@ -226,7 +247,7 @@
             // list-panel chat-mode 처리 (채팅/설정 뷰에서는 CSS로 숨김)
             var listPanel = document.getElementById("list-panel");
             if (listPanel) {
-                if (pathname === "/app/chat" || pathname.indexOf("/app/settings") === 0) {
+                if (pathname === "/app/chat" || pathname.indexOf("/app/settings") === 0 || pathname.indexOf("/app/ab-test") === 0) {
                     listPanel.classList.add("chat-mode");
                 } else {
                     listPanel.classList.remove("chat-mode");
@@ -2347,6 +2368,18 @@
             actionsEl.appendChild(summarizeBtn);
         }
 
+        // A/B 테스트 버튼 (완료된 회의에서만)
+        if (data.status === "completed") {
+            var abTestBtn = document.createElement("button");
+            abTestBtn.className = "viewer-action-btn";
+            abTestBtn.innerHTML = '&#x1F9EA; A/B 테스트';
+            abTestBtn.title = "이 회의를 서로 다른 모델로 A/B 테스트합니다";
+            abTestBtn.addEventListener("click", function () {
+                Router.navigate("/app/ab-test/new?source=" + encodeURIComponent(data.meeting_id));
+            });
+            actionsEl.appendChild(abTestBtn);
+        }
+
         // 전사문 복사/다운로드 + 모두 바꾸기 버튼 (완료된 회의이며 전사문 로드된 경우)
         if (data.status === "completed" && self._allUtterances && self._allUtterances.length > 0) {
             var copyBtn = document.createElement("button");
@@ -4007,6 +4040,1401 @@
 
 
     // =================================================================
+    // === AbTestListView (A/B 테스트 목록, /app/ab-test) ===
+    // =================================================================
+
+    /**
+     * A/B 테스트 목록 뷰.
+     * @constructor
+     */
+    function AbTestListView() {
+        var self = this;
+        self._listeners = [];
+        self._timers = [];
+        self._render();
+        self._loadTests();
+        document.title = "A/B 테스트 — 회의록";
+    }
+
+    /**
+     * 목록 뷰 DOM을 생성한다.
+     */
+    AbTestListView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        contentEl.innerHTML = [
+            '<div class="ab-test-view">',
+            '  <div class="ab-test-view-header">',
+            '    <h2 class="ab-test-view-title">A/B 모델 테스트</h2>',
+            '    <button class="ab-test-new-btn" id="abNewBtn">+ 새 테스트</button>',
+            '  </div>',
+            '  <div class="ab-test-list" id="abTestList"></div>',
+            '</div>',
+        ].join("\n");
+
+        var self = this;
+        var newBtn = document.getElementById("abNewBtn");
+        if (newBtn) {
+            var onNew = function () { Router.navigate("/app/ab-test/new"); };
+            newBtn.addEventListener("click", onNew);
+            self._listeners.push({ el: newBtn, type: "click", fn: onNew });
+        }
+    };
+
+    /**
+     * 테스트 목록을 API에서 로드한다.
+     */
+    AbTestListView.prototype._loadTests = async function () {
+        var self = this;
+        var listEl = document.getElementById("abTestList");
+        if (!listEl) return;
+
+        try {
+            var data = await App.apiRequest("/ab-tests");
+            var tests = data.tests || [];
+            self._renderList(tests, listEl);
+        } catch (e) {
+            listEl.innerHTML = '<div class="ab-test-empty"><div class="ab-test-empty-text">목록을 불러올 수 없습니다</div></div>';
+        }
+    };
+
+    /**
+     * 테스트 목록을 렌더링한다.
+     * @param {Array} tests - 테스트 목록
+     * @param {HTMLElement} listEl - 목록 컨테이너
+     */
+    AbTestListView.prototype._renderList = function (tests, listEl) {
+        var self = this;
+        listEl.innerHTML = "";
+
+        if (tests.length === 0) {
+            listEl.innerHTML = [
+                '<div class="ab-test-empty">',
+                '  <div class="ab-test-empty-icon">&#x1F9EA;</div>',
+                '  <div class="ab-test-empty-text">아직 A/B 테스트가 없습니다</div>',
+                '  <div class="ab-test-empty-sub">설정 → 고급 기능에서 시작하세요.</div>',
+                '</div>',
+            ].join("\n");
+            return;
+        }
+
+        tests.forEach(function (test) {
+            var card = document.createElement("div");
+            card.className = "ab-test-card";
+
+            var typeClass = (test.test_type || "llm").toLowerCase();
+            var typeLabel = typeClass === "stt" ? "STT" : "LLM";
+            var statusClass = (test.status || "pending").replace(/ /g, "_");
+
+            // 한국어 상태 라벨
+            var statusLabels = {
+                pending: "대기 중",
+                running: "진행 중",
+                completed: "완료",
+                failed: "실패",
+                cancelled: "취소됨",
+                partial_failed: "부분 실패",
+            };
+            var statusText = statusLabels[statusClass] || statusClass;
+
+            var variantALabel = (test.variant_a && test.variant_a.label) || "모델 A";
+            var variantBLabel = (test.variant_b && test.variant_b.label) || "모델 B";
+            var createdAt = test.started_at || test.created_at || "";
+            var dateStr = createdAt ? App.formatDate(createdAt) : "";
+
+            card.innerHTML = [
+                '<span class="ab-test-type-badge ' + App.escapeHtml(typeClass) + '">' + App.escapeHtml(typeLabel) + '</span>',
+                '<div class="ab-test-card-body">',
+                '  <div class="ab-test-card-title">' + App.escapeHtml(variantALabel) + ' vs ' + App.escapeHtml(variantBLabel) + '</div>',
+                '  <div class="ab-test-card-meta">',
+                '    소스: ' + App.escapeHtml(test.source_meeting_id || "-"),
+                dateStr ? (' · ' + App.escapeHtml(dateStr)) : '',
+                '  </div>',
+                '</div>',
+                '<span class="ab-test-status ' + App.escapeHtml(statusClass) + '">' + App.escapeHtml(statusText) + '</span>',
+                '<button class="ab-test-card-delete" data-test-id="' + App.escapeHtml(test.test_id) + '">삭제</button>',
+            ].join("");
+
+            // 카드 클릭 → 결과 뷰
+            var onCardClick = function (e) {
+                if (e.target.classList.contains("ab-test-card-delete")) return;
+                Router.navigate("/app/ab-test/" + encodeURIComponent(test.test_id));
+            };
+            card.addEventListener("click", onCardClick);
+            self._listeners.push({ el: card, type: "click", fn: onCardClick });
+
+            // 삭제 버튼
+            var delBtn = card.querySelector(".ab-test-card-delete");
+            if (delBtn) {
+                var onDel = function (e) {
+                    e.stopPropagation();
+                    self._deleteTest(test.test_id);
+                };
+                delBtn.addEventListener("click", onDel);
+                self._listeners.push({ el: delBtn, type: "click", fn: onDel });
+            }
+
+            listEl.appendChild(card);
+        });
+    };
+
+    /**
+     * 테스트를 삭제한다.
+     * @param {string} testId - 테스트 ID
+     */
+    AbTestListView.prototype._deleteTest = async function (testId) {
+        if (!window.confirm("이 A/B 테스트를 삭제하시겠습니까?")) return;
+        try {
+            await App.apiDelete("/ab-tests/" + encodeURIComponent(testId));
+            this._loadTests();
+        } catch (e) {
+            errorBanner.show("삭제 실패: " + (e.message || "알 수 없는 오류"));
+        }
+    };
+
+    /**
+     * 뷰 정리.
+     */
+    AbTestListView.prototype.destroy = function () {
+        var i;
+        for (i = 0; i < this._listeners.length; i++) {
+            var l = this._listeners[i];
+            l.el.removeEventListener(l.type, l.fn);
+        }
+        this._listeners = [];
+        for (i = 0; i < this._timers.length; i++) {
+            clearInterval(this._timers[i]);
+        }
+        this._timers = [];
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+    };
+
+
+    // =================================================================
+    // === AbTestNewView (A/B 테스트 생성, /app/ab-test/new) ===
+    // =================================================================
+
+    /**
+     * A/B 테스트 생성 폼 뷰.
+     * @constructor
+     */
+    function AbTestNewView() {
+        var self = this;
+        self._listeners = [];
+        self._timers = [];
+        self._testType = "llm";    // "llm" 또는 "stt"
+        self._meetings = [];
+        self._sttModels = [];
+
+        // LLM 프리셋 목록
+        self._llmPresets = [
+            { label: "EXAONE 3.5 7.8B 4bit", id: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit" },
+            { label: "Gemma 4 E4B UD 4bit", id: "unsloth/gemma-4-E4B-it-UD-MLX-4bit" },
+            { label: "Gemma 4 E2B UD 4bit", id: "unsloth/gemma-4-E2B-it-UD-MLX-4bit" },
+        ];
+
+        // URL 쿼리 파라미터 파싱
+        var params = new URLSearchParams(window.location.search);
+        self._sourceParam = params.get("source") || "";
+        var typeParam = params.get("type");
+        if (typeParam === "stt") self._testType = "stt";
+
+        self._render();
+        self._bind();
+        self._loadData();
+        document.title = "새 A/B 테스트 — 회의록";
+    }
+
+    /**
+     * 생성 폼 DOM을 생성한다.
+     */
+    AbTestNewView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        contentEl.innerHTML = [
+            '<div class="ab-new-form">',
+            '  <h2>새 A/B 테스트</h2>',
+
+            // 유형 선택 탭
+            '  <div class="ab-type-tabs">',
+            '    <button class="ab-type-tab active" data-type="llm" id="abTypeLlm">LLM 비교</button>',
+            '    <button class="ab-type-tab" data-type="stt" id="abTypeStt">STT 비교</button>',
+            '  </div>',
+
+            // 소스 회의 선택
+            '  <div class="ab-form-section">',
+            '    <label class="ab-form-label">소스 회의</label>',
+            '    <select class="ab-form-select" id="abSourceMeeting">',
+            '      <option value="">회의를 선택하세요...</option>',
+            '    </select>',
+            '  </div>',
+
+            // 모델 A
+            '  <div class="ab-model-selector">',
+            '    <div class="ab-model-selector-title">모델 A</div>',
+            '    <select class="ab-form-select" id="abModelASelect"></select>',
+            '    <input class="ab-form-input" id="abModelACustom" placeholder="HuggingFace repo ID 입력" style="display:none;margin-top:6px;" />',
+            '  </div>',
+
+            // 모델 B
+            '  <div class="ab-model-selector">',
+            '    <div class="ab-model-selector-title">모델 B</div>',
+            '    <select class="ab-form-select" id="abModelBSelect"></select>',
+            '    <input class="ab-form-input" id="abModelBCustom" placeholder="HuggingFace repo ID 입력" style="display:none;margin-top:6px;" />',
+            '  </div>',
+
+            // LLM 옵션
+            '  <div id="abLlmOptions">',
+            '    <div class="ab-form-section">',
+            '      <label class="ab-form-label">LLM 범위</label>',
+            '      <div class="ab-form-checkbox-row"><input type="checkbox" id="abScopeCorrect" checked /><span>교정</span></div>',
+            '      <div class="ab-form-checkbox-row"><input type="checkbox" id="abScopeSummarize" checked /><span>요약</span></div>',
+            '    </div>',
+            '  </div>',
+
+            // STT 옵션
+            '  <div id="abSttOptions" style="display:none;">',
+            '    <div class="ab-form-section">',
+            '      <div class="ab-form-checkbox-row"><input type="checkbox" id="abAllowDiarize" /><span>diarize 재실행 허용</span></div>',
+            '      <div class="ab-form-hint">체크포인트가 없을 때만 필요합니다</div>',
+            '    </div>',
+            '  </div>',
+
+            // 경고 메시지
+            '  <div class="ab-form-warning" id="abFormWarning" style="display:none;"></div>',
+
+            // 액션 버튼
+            '  <div class="ab-form-actions">',
+            '    <button class="ab-form-submit" id="abSubmitBtn" disabled>테스트 시작</button>',
+            '    <button class="ab-form-cancel" id="abCancelBtn">취소</button>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+    };
+
+    /**
+     * 이벤트 바인딩.
+     */
+    AbTestNewView.prototype._bind = function () {
+        var self = this;
+
+        // 유형 탭 전환
+        var typeTabs = document.querySelectorAll(".ab-type-tab");
+        Array.prototype.forEach.call(typeTabs, function (tab) {
+            var onTab = function () {
+                self._testType = tab.getAttribute("data-type");
+                Array.prototype.forEach.call(typeTabs, function (t) {
+                    t.classList.toggle("active", t === tab);
+                });
+                self._updateTypeUI();
+                self._populateModelSelects();
+                self._validate();
+            };
+            tab.addEventListener("click", onTab);
+            self._listeners.push({ el: tab, type: "click", fn: onTab });
+        });
+
+        // 모델 선택 변경
+        var selectors = ["abModelASelect", "abModelBSelect"];
+        selectors.forEach(function (id) {
+            var sel = document.getElementById(id);
+            if (!sel) return;
+            var customId = id.replace("Select", "Custom");
+            var onChange = function () {
+                var customEl = document.getElementById(customId);
+                if (customEl) {
+                    customEl.style.display = sel.value === "__custom__" ? "block" : "none";
+                }
+                self._validate();
+            };
+            sel.addEventListener("change", onChange);
+            self._listeners.push({ el: sel, type: "change", fn: onChange });
+        });
+
+        // 커스텀 입력 변경 시 유효성 검증
+        var customInputs = ["abModelACustom", "abModelBCustom"];
+        customInputs.forEach(function (id) {
+            var inp = document.getElementById(id);
+            if (!inp) return;
+            var onInput = function () { self._validate(); };
+            inp.addEventListener("input", onInput);
+            self._listeners.push({ el: inp, type: "input", fn: onInput });
+        });
+
+        // 소스 회의 변경
+        var srcSel = document.getElementById("abSourceMeeting");
+        if (srcSel) {
+            var onSrc = function () { self._validate(); };
+            srcSel.addEventListener("change", onSrc);
+            self._listeners.push({ el: srcSel, type: "change", fn: onSrc });
+        }
+
+        // 제출
+        var submitBtn = document.getElementById("abSubmitBtn");
+        if (submitBtn) {
+            var onSubmit = function () { self._submit(); };
+            submitBtn.addEventListener("click", onSubmit);
+            self._listeners.push({ el: submitBtn, type: "click", fn: onSubmit });
+        }
+
+        // 취소
+        var cancelBtn = document.getElementById("abCancelBtn");
+        if (cancelBtn) {
+            var onCancel = function () { Router.navigate("/app/ab-test"); };
+            cancelBtn.addEventListener("click", onCancel);
+            self._listeners.push({ el: cancelBtn, type: "click", fn: onCancel });
+        }
+    };
+
+    /**
+     * 회의 목록 + STT 모델 목록을 로드한다.
+     */
+    AbTestNewView.prototype._loadData = async function () {
+        var self = this;
+
+        try {
+            var data = await App.apiRequest("/meetings");
+            self._meetings = (data.meetings || []).filter(function (m) {
+                return m.status === "completed";
+            });
+        } catch (e) {
+            self._meetings = [];
+        }
+
+        try {
+            var sttData = await App.apiRequest("/stt-models");
+            self._sttModels = sttData || [];
+            // sttData 가 배열이 아닌 경우(객체 래핑) 처리
+            if (!Array.isArray(self._sttModels) && self._sttModels.models) {
+                self._sttModels = self._sttModels.models;
+            }
+        } catch (e) {
+            self._sttModels = [];
+        }
+
+        // 소스 회의 드롭다운 채우기
+        var srcSel = document.getElementById("abSourceMeeting");
+        if (srcSel) {
+            self._meetings.forEach(function (m) {
+                var opt = document.createElement("option");
+                opt.value = m.meeting_id;
+                opt.textContent = App.extractMeetingTitle ? App.extractMeetingTitle(m) : m.meeting_id;
+                srcSel.appendChild(opt);
+            });
+            // URL 에서 source 파라미터가 있으면 자동 선택
+            if (self._sourceParam) {
+                srcSel.value = self._sourceParam;
+            }
+        }
+
+        // 유형 UI 업데이트 + 모델 셀렉트 채우기
+        if (self._testType === "stt") {
+            var sttTab = document.getElementById("abTypeStt");
+            var llmTab = document.getElementById("abTypeLlm");
+            if (sttTab) sttTab.classList.add("active");
+            if (llmTab) llmTab.classList.remove("active");
+        }
+        self._updateTypeUI();
+        self._populateModelSelects();
+        self._validate();
+    };
+
+    /**
+     * 유형에 따라 옵션 영역을 토글한다.
+     */
+    AbTestNewView.prototype._updateTypeUI = function () {
+        var llmOpts = document.getElementById("abLlmOptions");
+        var sttOpts = document.getElementById("abSttOptions");
+        if (llmOpts) llmOpts.style.display = this._testType === "llm" ? "block" : "none";
+        if (sttOpts) sttOpts.style.display = this._testType === "stt" ? "block" : "none";
+    };
+
+    /**
+     * 현재 유형에 맞게 모델 드롭다운을 채운다.
+     */
+    AbTestNewView.prototype._populateModelSelects = function () {
+        var self = this;
+        var selectIds = ["abModelASelect", "abModelBSelect"];
+
+        selectIds.forEach(function (id) {
+            var sel = document.getElementById(id);
+            if (!sel) return;
+            sel.innerHTML = "";
+
+            var placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "모델 선택...";
+            sel.appendChild(placeholder);
+
+            if (self._testType === "llm") {
+                self._llmPresets.forEach(function (p) {
+                    var opt = document.createElement("option");
+                    opt.value = p.id;
+                    opt.textContent = p.label;
+                    sel.appendChild(opt);
+                });
+                var customOpt = document.createElement("option");
+                customOpt.value = "__custom__";
+                customOpt.textContent = "사용자 정의...";
+                sel.appendChild(customOpt);
+            } else {
+                // STT 모델
+                self._sttModels.forEach(function (m) {
+                    var opt = document.createElement("option");
+                    opt.value = m.id || m.model_id || "";
+                    opt.textContent = m.label || m.id || "";
+                    sel.appendChild(opt);
+                });
+            }
+
+            // 커스텀 필드 숨김 리셋
+            var customId = id.replace("Select", "Custom");
+            var customEl = document.getElementById(customId);
+            if (customEl) customEl.style.display = "none";
+        });
+    };
+
+    /**
+     * 폼 유효성 검증. 제출 버튼 활성화/비활성화.
+     */
+    AbTestNewView.prototype._validate = function () {
+        var submitBtn = document.getElementById("abSubmitBtn");
+        var warningEl = document.getElementById("abFormWarning");
+        if (!submitBtn || !warningEl) return;
+
+        var srcSel = document.getElementById("abSourceMeeting");
+        var source = srcSel ? srcSel.value : "";
+        var modelA = this._getModelId("A");
+        var modelB = this._getModelId("B");
+
+        var warning = "";
+        var valid = true;
+
+        if (!source) { valid = false; }
+        if (!modelA || !modelB) { valid = false; }
+        if (modelA && modelB && modelA === modelB) {
+            warning = "서로 다른 모델을 선택하세요";
+            valid = false;
+        }
+
+        warningEl.textContent = warning;
+        warningEl.style.display = warning ? "block" : "none";
+        submitBtn.disabled = !valid;
+    };
+
+    /**
+     * 선택된 모델 ID를 반환한다.
+     * @param {string} variant - "A" 또는 "B"
+     * @returns {string}
+     */
+    AbTestNewView.prototype._getModelId = function (variant) {
+        var suffix = variant === "A" ? "A" : "B";
+        var sel = document.getElementById("abModel" + suffix + "Select");
+        if (!sel) return "";
+        var val = sel.value;
+        if (val === "__custom__") {
+            var custom = document.getElementById("abModel" + suffix + "Custom");
+            return custom ? custom.value.trim() : "";
+        }
+        return val;
+    };
+
+    /**
+     * 선택된 모델 라벨을 반환한다.
+     * @param {string} variant - "A" 또는 "B"
+     * @returns {string}
+     */
+    AbTestNewView.prototype._getModelLabel = function (variant) {
+        var suffix = variant === "A" ? "A" : "B";
+        var sel = document.getElementById("abModel" + suffix + "Select");
+        if (!sel) return "";
+        if (sel.value === "__custom__") {
+            return this._getModelId(variant);
+        }
+        var selectedOption = sel.options[sel.selectedIndex];
+        return selectedOption ? selectedOption.textContent : sel.value;
+    };
+
+    /**
+     * 테스트를 시작한다.
+     */
+    AbTestNewView.prototype._submit = async function () {
+        var self = this;
+        var submitBtn = document.getElementById("abSubmitBtn");
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "시작 중..."; }
+
+        var srcSel = document.getElementById("abSourceMeeting");
+        var source = srcSel ? srcSel.value : "";
+        var modelAId = self._getModelId("A");
+        var modelBId = self._getModelId("B");
+        var modelALabel = self._getModelLabel("A");
+        var modelBLabel = self._getModelLabel("B");
+
+        var endpoint, body;
+
+        if (self._testType === "llm") {
+            var scopeCorrect = document.getElementById("abScopeCorrect");
+            var scopeSummarize = document.getElementById("abScopeSummarize");
+            endpoint = "/ab-tests/llm";
+            body = {
+                source_meeting_id: source,
+                variant_a: { label: modelALabel, model_id: modelAId, backend: "mlx" },
+                variant_b: { label: modelBLabel, model_id: modelBId, backend: "mlx" },
+                scope: {
+                    correct: scopeCorrect ? scopeCorrect.checked : true,
+                    summarize: scopeSummarize ? scopeSummarize.checked : true,
+                },
+            };
+        } else {
+            var allowDiarize = document.getElementById("abAllowDiarize");
+            endpoint = "/ab-tests/stt";
+            body = {
+                source_meeting_id: source,
+                variant_a: { label: modelALabel, model_id: modelAId },
+                variant_b: { label: modelBLabel, model_id: modelBId },
+                allow_diarize_rerun: allowDiarize ? allowDiarize.checked : false,
+            };
+        }
+
+        try {
+            var result = await App.apiPost(endpoint, body);
+            var testId = result.test_id;
+            if (testId) {
+                Router.navigate("/app/ab-test/" + encodeURIComponent(testId));
+            } else {
+                Router.navigate("/app/ab-test");
+            }
+        } catch (e) {
+            errorBanner.show("테스트 시작 실패: " + (e.message || "알 수 없는 오류"));
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "테스트 시작"; }
+        }
+    };
+
+    /**
+     * 뷰 정리.
+     */
+    AbTestNewView.prototype.destroy = function () {
+        var i;
+        for (i = 0; i < this._listeners.length; i++) {
+            var l = this._listeners[i];
+            l.el.removeEventListener(l.type, l.fn);
+        }
+        this._listeners = [];
+        for (i = 0; i < this._timers.length; i++) {
+            clearInterval(this._timers[i]);
+        }
+        this._timers = [];
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+    };
+
+
+    // =================================================================
+    // === AbTestResultView (A/B 테스트 결과, /app/ab-test/:testId) ===
+    // =================================================================
+
+    /**
+     * A/B 테스트 결과 뷰 (진행 상태 + 비교).
+     * @param {string} testId - 테스트 ID
+     * @constructor
+     */
+    function AbTestResultView(testId) {
+        var self = this;
+        self._testId = testId;
+        self._listeners = [];
+        self._timers = [];
+        self._data = null;
+        self._activeTab = "correct"; // "correct" | "summary" | "transcript"
+        self._elapsedBase = 0;       // 서버 경과 시간 (초)
+        self._elapsedWall = 0;       // 로컬 싱크 시점 (ms)
+        self._elapsedTimer = null;
+
+        self._render();
+        self._loadData();
+        self._bindWs();
+        document.title = "A/B 테스트 — 회의록";
+    }
+
+    /**
+     * 결과 뷰 DOM 을 생성한다.
+     */
+    AbTestResultView.prototype._render = function () {
+        var contentEl = Router.getContentEl();
+        contentEl.innerHTML = [
+            '<div class="ab-result-view">',
+            '  <div class="ab-result-header" id="abResultHeader"></div>',
+            '  <div id="abProgressSection"></div>',
+            '  <div id="abCompareSection"></div>',
+            '</div>',
+        ].join("\n");
+    };
+
+    /**
+     * 테스트 데이터를 로드한다.
+     */
+    AbTestResultView.prototype._loadData = async function () {
+        var self = this;
+        try {
+            var data = await App.apiRequest("/ab-tests/" + encodeURIComponent(self._testId));
+            self._data = data;
+            self._renderHeader(data);
+            if (data.status === "running" || data.status === "pending") {
+                self._renderProgress(data);
+                self._startPolling();
+            } else {
+                self._renderCompare(data);
+            }
+        } catch (e) {
+            var headerEl = document.getElementById("abResultHeader");
+            if (headerEl) {
+                headerEl.innerHTML = '<div class="ab-test-empty"><div class="ab-test-empty-text">테스트를 찾을 수 없습니다</div></div>';
+            }
+        }
+    };
+
+    /**
+     * 헤더 메타데이터를 렌더링한다.
+     * @param {Object} d - 테스트 데이터
+     */
+    AbTestResultView.prototype._renderHeader = function (d) {
+        var headerEl = document.getElementById("abResultHeader");
+        if (!headerEl) return;
+
+        var meta = d.metadata || d;
+        var typeLabel = (meta.test_type || "llm") === "stt" ? "STT" : "LLM";
+        var typeClass = (meta.test_type || "llm").toLowerCase();
+        var va = meta.variant_a || {};
+        var vb = meta.variant_b || {};
+        var sourceId = meta.source_meeting_id || "-";
+
+        headerEl.innerHTML = [
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">',
+            '  <a href="javascript:void(0)" id="abBackLink" style="color:var(--accent);font-size:13px;">← 목록</a>',
+            '</div>',
+            '<h2 class="ab-result-title">',
+            '  <span class="ab-test-type-badge ' + App.escapeHtml(typeClass) + '">' + App.escapeHtml(typeLabel) + '</span> ',
+            App.escapeHtml(va.label || "A") + ' vs ' + App.escapeHtml(vb.label || "B"),
+            '</h2>',
+            '<div class="ab-result-meta">',
+            '  <span>소스: <a href="/app/viewer/' + App.escapeHtml(encodeURIComponent(sourceId)) + '">' + App.escapeHtml(sourceId) + '</a></span>',
+            '  <span>상태: <span class="ab-test-status ' + App.escapeHtml(meta.status || "pending") + '">' + App.escapeHtml(meta.status || "pending") + '</span></span>',
+            '</div>',
+        ].join("\n");
+
+        var self = this;
+        var backLink = document.getElementById("abBackLink");
+        if (backLink) {
+            var onBack = function () { Router.navigate("/app/ab-test"); };
+            backLink.addEventListener("click", onBack);
+            self._listeners.push({ el: backLink, type: "click", fn: onBack });
+        }
+    };
+
+    /**
+     * 진행 상태를 렌더링한다.
+     * @param {Object} d - 테스트 데이터
+     */
+    AbTestResultView.prototype._renderProgress = function (d) {
+        var self = this;
+        var section = document.getElementById("abProgressSection");
+        if (!section) return;
+
+        var meta = d.metadata || d;
+        var currentVariant = meta.current_variant || "-";
+        var currentStep = meta.current_step || "-";
+        var pct = meta.progress_pct || 0;
+
+        // 단계 한국어 라벨
+        var stepLabels = {
+            transcribe: "전사 중",
+            correct: "교정 중",
+            summarize: "요약 중",
+            merge: "병합 중",
+            diarize: "화자분리 중",
+        };
+        var stepText = stepLabels[currentStep] || currentStep;
+
+        section.innerHTML = [
+            '<div class="ab-progress-section">',
+            '  <div class="ab-progress-variant">',
+            '    <div class="ab-progress-variant-label">Variant A: ' + App.escapeHtml((meta.variant_a || {}).label || "A") + '</div>',
+            '    <div class="ab-progress-bar"><div class="ab-progress-bar-fill" id="abProgressA" style="width:' + (currentVariant === "B" ? "100" : pct) + '%;"></div></div>',
+            '    <div class="ab-progress-step-text" id="abStepA">' + (currentVariant === "A" ? App.escapeHtml(stepText) : (currentVariant === "B" ? "완료" : "대기 중")) + '</div>',
+            '  </div>',
+            '  <div class="ab-progress-variant">',
+            '    <div class="ab-progress-variant-label">Variant B: ' + App.escapeHtml((meta.variant_b || {}).label || "B") + '</div>',
+            '    <div class="ab-progress-bar"><div class="ab-progress-bar-fill" id="abProgressB" style="width:' + (currentVariant === "B" ? pct : "0") + '%;"></div></div>',
+            '    <div class="ab-progress-step-text" id="abStepB">' + (currentVariant === "B" ? App.escapeHtml(stepText) : "대기 중") + '</div>',
+            '  </div>',
+            '  <div class="ab-progress-elapsed" id="abElapsed"></div>',
+            '  <div class="ab-progress-actions">',
+            '    <button class="ab-form-cancel" id="abCancelTestBtn">취소</button>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+
+        // 경과 시간 카운터
+        if (meta.started_at) {
+            var startMs = new Date(meta.started_at).getTime();
+            self._elapsedBase = Math.floor((Date.now() - startMs) / 1000);
+            self._elapsedWall = Date.now();
+            self._renderElapsed();
+            if (self._elapsedTimer) clearInterval(self._elapsedTimer);
+            self._elapsedTimer = setInterval(function () { self._renderElapsed(); }, 1000);
+            self._timers.push(self._elapsedTimer);
+        }
+
+        // 취소 버튼
+        var cancelBtn = document.getElementById("abCancelTestBtn");
+        if (cancelBtn) {
+            var onCancel = function () {
+                self._cancelTest();
+            };
+            cancelBtn.addEventListener("click", onCancel);
+            self._listeners.push({ el: cancelBtn, type: "click", fn: onCancel });
+        }
+    };
+
+    /**
+     * 경과 시간 표시를 업데이트한다.
+     */
+    AbTestResultView.prototype._renderElapsed = function () {
+        var el = document.getElementById("abElapsed");
+        if (!el) return;
+        var elapsedMs = Date.now() - this._elapsedWall;
+        var sec = this._elapsedBase + Math.floor(elapsedMs / 1000);
+        var m = Math.floor(sec / 60);
+        var s = sec % 60;
+        var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+        el.textContent = "경과 시간: " + pad(m) + ":" + pad(s);
+    };
+
+    /**
+     * 3초 간격 폴링을 시작한다.
+     */
+    AbTestResultView.prototype._startPolling = function () {
+        var self = this;
+        var timer = setInterval(function () {
+            self._pollStatus();
+        }, 3000);
+        self._timers.push(timer);
+    };
+
+    /**
+     * 상태를 폴링한다.
+     */
+    AbTestResultView.prototype._pollStatus = async function () {
+        var self = this;
+        try {
+            var data = await App.apiRequest("/ab-tests/" + encodeURIComponent(self._testId));
+            self._data = data;
+            var meta = data.metadata || data;
+
+            if (meta.status === "completed" || meta.status === "failed" || meta.status === "cancelled" || meta.status === "partial_failed") {
+                // 폴링 중단 + 비교 뷰 렌더
+                self._stopTimers();
+                self._renderHeader(data);
+                var progressSection = document.getElementById("abProgressSection");
+                if (progressSection) progressSection.innerHTML = "";
+                self._renderCompare(data);
+                return;
+            }
+
+            // 진행 중 — UI 업데이트
+            self._updateProgress(meta);
+        } catch (e) {
+            // 무시
+        }
+    };
+
+    /**
+     * 진행 UI 를 업데이트한다.
+     * @param {Object} meta - 메타데이터
+     */
+    AbTestResultView.prototype._updateProgress = function (meta) {
+        var currentVariant = meta.current_variant || "-";
+        var currentStep = meta.current_step || "-";
+        var pct = meta.progress_pct || 0;
+
+        var stepLabels = {
+            transcribe: "전사 중", correct: "교정 중", summarize: "요약 중",
+            merge: "병합 중", diarize: "화자분리 중",
+        };
+        var stepText = stepLabels[currentStep] || currentStep;
+
+        var progressA = document.getElementById("abProgressA");
+        var progressB = document.getElementById("abProgressB");
+        var stepA = document.getElementById("abStepA");
+        var stepB = document.getElementById("abStepB");
+
+        if (progressA) {
+            progressA.style.width = (currentVariant === "B" ? "100" : pct) + "%";
+            if (currentVariant === "B") progressA.classList.add("done");
+        }
+        if (progressB) {
+            progressB.style.width = (currentVariant === "B" ? pct : "0") + "%";
+        }
+        if (stepA) {
+            stepA.textContent = currentVariant === "A" ? stepText : (currentVariant === "B" ? "완료" : "대기 중");
+        }
+        if (stepB) {
+            stepB.textContent = currentVariant === "B" ? stepText : "대기 중";
+        }
+    };
+
+    /**
+     * WebSocket step_progress 이벤트를 구독한다.
+     */
+    AbTestResultView.prototype._bindWs = function () {
+        var self = this;
+        var onStepProgress = function (e) {
+            var detail = e.detail || {};
+            // A/B 테스트 이벤트가 아니면 무시
+            if (detail.ab_test_id !== self._testId) return;
+            var meta = self._data ? (self._data.metadata || self._data) : {};
+            if (detail.variant) meta.current_variant = detail.variant;
+            if (detail.step) meta.current_step = detail.step;
+            if (detail.progress_pct != null) meta.progress_pct = detail.progress_pct;
+            self._updateProgress(meta);
+        };
+        document.addEventListener("ws:step_progress", onStepProgress);
+        self._listeners.push({ el: document, type: "ws:step_progress", fn: onStepProgress });
+    };
+
+    /**
+     * 테스트를 취소한다.
+     */
+    AbTestResultView.prototype._cancelTest = async function () {
+        try {
+            await App.apiPost("/ab-tests/" + encodeURIComponent(this._testId) + "/cancel", {});
+            this._pollStatus();
+        } catch (e) {
+            errorBanner.show("취소 실패: " + (e.message || ""));
+        }
+    };
+
+    /**
+     * 비교 뷰를 렌더링한다.
+     * @param {Object} data - 전체 테스트 데이터
+     */
+    AbTestResultView.prototype._renderCompare = function (data) {
+        var self = this;
+        var section = document.getElementById("abCompareSection");
+        if (!section) return;
+
+        var meta = data.metadata || data;
+        var testType = meta.test_type || "llm";
+
+        // 탭 결정
+        var tabs = [];
+        if (testType === "llm") {
+            tabs.push({ key: "correct", label: "교정 결과" });
+            tabs.push({ key: "summary", label: "요약" });
+        } else {
+            tabs.push({ key: "transcript", label: "전사" });
+        }
+
+        self._activeTab = tabs[0].key;
+
+        // 탭 HTML
+        var tabsHtml = '<div class="ab-compare-tabs">';
+        tabs.forEach(function (t) {
+            tabsHtml += '<button class="ab-compare-tab' + (t.key === self._activeTab ? ' active' : '') + '" data-tab="' + t.key + '">' + App.escapeHtml(t.label) + '</button>';
+        });
+        tabsHtml += '</div>';
+
+        section.innerHTML = tabsHtml + '<div id="abCompareContent"></div><div id="abMetricsSection"></div>';
+
+        // 탭 클릭
+        var tabBtns = section.querySelectorAll(".ab-compare-tab");
+        Array.prototype.forEach.call(tabBtns, function (btn) {
+            var onTab = function () {
+                self._activeTab = btn.getAttribute("data-tab");
+                Array.prototype.forEach.call(tabBtns, function (b) {
+                    b.classList.toggle("active", b === btn);
+                });
+                self._renderCompareContent(data);
+            };
+            btn.addEventListener("click", onTab);
+            self._listeners.push({ el: btn, type: "click", fn: onTab });
+        });
+
+        self._renderCompareContent(data);
+        self._renderMetrics(data);
+    };
+
+    /**
+     * 비교 콘텐츠를 탭에 따라 렌더링한다.
+     * @param {Object} data - 전체 테스트 데이터
+     */
+    AbTestResultView.prototype._renderCompareContent = function (data) {
+        var self = this;
+        var container = document.getElementById("abCompareContent");
+        if (!container) return;
+
+        var meta = data.metadata || data;
+        var va = data.variant_a || {};
+        var vb = data.variant_b || {};
+        var vaLabel = (meta.variant_a || {}).label || "A";
+        var vbLabel = (meta.variant_b || {}).label || "B";
+
+        if (self._activeTab === "correct") {
+            self._renderCorrectCompare(container, va, vb, vaLabel, vbLabel);
+        } else if (self._activeTab === "summary") {
+            self._renderSummaryCompare(container, vaLabel, vbLabel);
+        } else if (self._activeTab === "transcript") {
+            self._renderTranscriptCompare(container, va, vb, vaLabel, vbLabel);
+        }
+    };
+
+    /**
+     * 교정 결과 비교 렌더링.
+     */
+    AbTestResultView.prototype._renderCorrectCompare = function (container, va, vb, vaLabel, vbLabel) {
+        var self = this;
+        var uttA = (va.correct && va.correct.utterances) ? va.correct.utterances : [];
+        var uttB = (vb.correct && vb.correct.utterances) ? vb.correct.utterances : [];
+
+        var maxLen = Math.max(uttA.length, uttB.length);
+        var rows = [];
+
+        for (var i = 0; i < maxLen; i++) {
+            var a = uttA[i] || {};
+            var b = uttB[i] || {};
+            var textA = a.text || a.corrected || "";
+            var textB = b.text || b.corrected || "";
+            var speakerA = a.speaker || "";
+            var speakerB = b.speaker || "";
+
+            var diffs = _diffWords(textA, textB);
+
+            rows.push(
+                '<div class="ab-utterance-row">' +
+                '  <div class="ab-utterance-cell">' +
+                '    <div class="ab-utterance-speaker">' + App.escapeHtml(speakerA) + '</div>' +
+                '    <div>' + _renderDiffA(diffs) + '</div>' +
+                '  </div>' +
+                '  <div class="ab-utterance-cell">' +
+                '    <div class="ab-utterance-speaker">' + App.escapeHtml(speakerB) + '</div>' +
+                '    <div>' + _renderDiffB(diffs) + '</div>' +
+                '  </div>' +
+                '</div>'
+            );
+        }
+
+        var countNote = "";
+        if (uttA.length !== uttB.length) {
+            countNote = '<div style="text-align:center;font-size:12px;color:var(--text-muted);margin-top:8px;">(모델 A: ' + uttA.length + '개 발화, 모델 B: ' + uttB.length + '개 발화)</div>';
+        }
+
+        container.innerHTML = [
+            '<div class="ab-compare-container">',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
+            '  </div>',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
+            '  </div>',
+            '</div>',
+            '<div style="margin-top:12px;">',
+            rows.join(""),
+            '</div>',
+            countNote,
+        ].join("\n");
+
+        // 동기 스크롤은 비교 body 가 scroll 가능한 경우에 적용
+        // (현재는 전체 페이지 스크롤이므로 별도 처리 불필요)
+    };
+
+    /**
+     * 요약 비교 렌더링. 양쪽 요약 마크다운을 로드한다.
+     */
+    AbTestResultView.prototype._renderSummaryCompare = async function (container, vaLabel, vbLabel) {
+        var self = this;
+        container.innerHTML = [
+            '<div class="ab-compare-container">',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
+            '    <div class="ab-compare-body" id="abSummaryA">불러오는 중...</div>',
+            '  </div>',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
+            '    <div class="ab-compare-body" id="abSummaryB">불러오는 중...</div>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+
+        var baseUrl = "/ab-tests/" + encodeURIComponent(self._testId) + "/variant/";
+        var summaryA = "";
+        var summaryB = "";
+
+        try {
+            var respA = await App.apiRequest(baseUrl + "a/summary");
+            summaryA = typeof respA === "string" ? respA : (respA.summary || respA.text || JSON.stringify(respA));
+        } catch (e) { summaryA = "(로드 실패)"; }
+
+        try {
+            var respB = await App.apiRequest(baseUrl + "b/summary");
+            summaryB = typeof respB === "string" ? respB : (respB.summary || respB.text || JSON.stringify(respB));
+        } catch (e) { summaryB = "(로드 실패)"; }
+
+        var elA = document.getElementById("abSummaryA");
+        var elB = document.getElementById("abSummaryB");
+
+        if (elA) elA.innerHTML = _highlightForbidden(App.renderMarkdown(summaryA));
+        if (elB) elB.innerHTML = _highlightForbidden(App.renderMarkdown(summaryB));
+
+        // 동기 스크롤
+        if (elA && elB) {
+            var syncing = false;
+            var onScrollA = function () {
+                if (syncing) return;
+                syncing = true;
+                elB.scrollTop = elA.scrollTop;
+                syncing = false;
+            };
+            var onScrollB = function () {
+                if (syncing) return;
+                syncing = true;
+                elA.scrollTop = elB.scrollTop;
+                syncing = false;
+            };
+            elA.addEventListener("scroll", onScrollA);
+            elB.addEventListener("scroll", onScrollB);
+            self._listeners.push({ el: elA, type: "scroll", fn: onScrollA });
+            self._listeners.push({ el: elB, type: "scroll", fn: onScrollB });
+        }
+    };
+
+    /**
+     * 전사 비교 렌더링 (STT A/B).
+     */
+    AbTestResultView.prototype._renderTranscriptCompare = function (container, va, vb, vaLabel, vbLabel) {
+        var uttA = (va.transcribe && va.transcribe.utterances) ? va.transcribe.utterances : [];
+        var uttB = (vb.transcribe && vb.transcribe.utterances) ? vb.transcribe.utterances : [];
+
+        // 타임스탬프 기반 매칭: 가까운 시간끼리 정렬
+        var paired = _pairByTimestamp(uttA, uttB);
+        var rows = [];
+
+        paired.forEach(function (pair) {
+            var a = pair.a || {};
+            var b = pair.b || {};
+            var textA = a.text || "";
+            var textB = b.text || "";
+            var diffs = _diffWords(textA, textB);
+
+            var timeA = a.start != null ? _fmtTime(a.start) : "";
+            var timeB = b.start != null ? _fmtTime(b.start) : "";
+
+            rows.push(
+                '<div class="ab-utterance-row">' +
+                '  <div class="ab-utterance-cell">' +
+                '    <div class="ab-utterance-time">' + App.escapeHtml(timeA) + '</div>' +
+                '    <div>' + _renderDiffA(diffs) + '</div>' +
+                '  </div>' +
+                '  <div class="ab-utterance-cell">' +
+                '    <div class="ab-utterance-time">' + App.escapeHtml(timeB) + '</div>' +
+                '    <div>' + _renderDiffB(diffs) + '</div>' +
+                '  </div>' +
+                '</div>'
+            );
+        });
+
+        container.innerHTML = [
+            '<div class="ab-compare-container">',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vaLabel) + '</div>',
+            '  </div>',
+            '  <div class="ab-compare-panel">',
+            '    <div class="ab-compare-header">' + App.escapeHtml(vbLabel) + '</div>',
+            '  </div>',
+            '</div>',
+            '<div style="margin-top:12px;">',
+            rows.join(""),
+            '</div>',
+        ].join("\n");
+    };
+
+    /**
+     * 메트릭 비교 카드를 렌더링한다.
+     * @param {Object} data - 전체 테스트 데이터
+     */
+    AbTestResultView.prototype._renderMetrics = function (data) {
+        var section = document.getElementById("abMetricsSection");
+        if (!section) return;
+
+        var va = data.variant_a || {};
+        var vb = data.variant_b || {};
+        var metricsA = va.metrics || {};
+        var metricsB = vb.metrics || {};
+        var meta = data.metadata || data;
+
+        var elapsed_a = metricsA.elapsed_seconds ? (metricsA.elapsed_seconds.total || 0) : 0;
+        var elapsed_b = metricsB.elapsed_seconds ? (metricsB.elapsed_seconds.total || 0) : 0;
+        var chars_a = metricsA.char_count ? (metricsA.char_count.correct || metricsA.char_count.transcribe || 0) : 0;
+        var chars_b = metricsB.char_count ? (metricsB.char_count.correct || metricsB.char_count.transcribe || 0) : 0;
+        var forbidden_a = metricsA.forbidden_patterns ? (metricsA.forbidden_patterns.total || 0) : 0;
+        var forbidden_b = metricsB.forbidden_patterns ? (metricsB.forbidden_patterns.total || 0) : 0;
+
+        // 승패 판정 (단순 점수: 처리시간 짧을수록 +1, 금지 패턴 적을수록 +1)
+        var scoreA = 0;
+        var scoreB = 0;
+        if (elapsed_a < elapsed_b) scoreA++;
+        else if (elapsed_b < elapsed_a) scoreB++;
+        if (forbidden_a < forbidden_b) scoreA++;
+        else if (forbidden_b < forbidden_a) scoreB++;
+
+        var judgeText = scoreA > scoreB ? "참고 스코어: A 우세 (" + scoreA + " vs " + scoreB + ")"
+            : scoreB > scoreA ? "참고 스코어: B 우세 (" + scoreB + " vs " + scoreA + ")"
+            : "참고 스코어: 무승부 (" + scoreA + " vs " + scoreB + ")";
+
+        section.innerHTML = [
+            '<div class="ab-metrics-grid">',
+            _metricCard("처리시간", elapsed_a.toFixed(1) + "s", elapsed_b.toFixed(1) + "s", elapsed_a <= elapsed_b ? "A" : "B"),
+            _metricCard("글자수", chars_a.toLocaleString(), chars_b.toLocaleString(), null),
+            _metricCard("금지 패턴 수",
+                forbidden_a.toString(), forbidden_b.toString(),
+                forbidden_a <= forbidden_b ? "A" : "B",
+                forbidden_a > 0 || forbidden_b > 0),
+            '</div>',
+            '<div class="ab-judge-note">' + App.escapeHtml(judgeText) + '<br><span style="font-size:11px;">자동 판정은 참고용입니다</span></div>',
+            (meta.status === "partial_failed" ? '<div class="ab-form-warning" style="margin-top:12px;">일부 variant 실행이 실패했습니다. 결과가 불완전할 수 있습니다.</div>' : ''),
+        ].join("\n");
+    };
+
+    /**
+     * 타이머를 모두 중단한다.
+     */
+    AbTestResultView.prototype._stopTimers = function () {
+        for (var i = 0; i < this._timers.length; i++) {
+            clearInterval(this._timers[i]);
+        }
+        this._timers = [];
+        if (this._elapsedTimer) {
+            clearInterval(this._elapsedTimer);
+            this._elapsedTimer = null;
+        }
+    };
+
+    /**
+     * 뷰 정리.
+     */
+    AbTestResultView.prototype.destroy = function () {
+        this._stopTimers();
+        var i;
+        for (i = 0; i < this._listeners.length; i++) {
+            var l = this._listeners[i];
+            l.el.removeEventListener(l.type, l.fn);
+        }
+        this._listeners = [];
+        var listPanel = document.getElementById("list-panel");
+        if (listPanel) listPanel.classList.remove("chat-mode");
+    };
+
+
+    // =================================================================
+    // === A/B 테스트 유틸리티 함수 (diff, 금지 패턴, 타임스탬프 매칭) ===
+    // =================================================================
+
+    /**
+     * 두 문자열의 단어 배열 LCS diff를 수행한다.
+     * @param {string} a - 원본 텍스트 (A)
+     * @param {string} b - 비교 텍스트 (B)
+     * @returns {Array} [{type: "equal"|"added"|"removed", text: "..."}]
+     */
+    function _diffWords(a, b) {
+        var wordsA = (a || "").split(/\s+/).filter(function (w) { return w.length > 0; });
+        var wordsB = (b || "").split(/\s+/).filter(function (w) { return w.length > 0; });
+
+        if (wordsA.length === 0 && wordsB.length === 0) return [];
+        if (wordsA.length === 0) {
+            return wordsB.map(function (w) { return { type: "added", text: w }; });
+        }
+        if (wordsB.length === 0) {
+            return wordsA.map(function (w) { return { type: "removed", text: w }; });
+        }
+
+        // LCS DP 테이블 구축
+        var n = wordsA.length;
+        var m = wordsB.length;
+        var dp = [];
+        var i, j;
+        for (i = 0; i <= n; i++) {
+            dp[i] = [];
+            for (j = 0; j <= m; j++) {
+                dp[i][j] = 0;
+            }
+        }
+        for (i = 1; i <= n; i++) {
+            for (j = 1; j <= m; j++) {
+                if (wordsA[i - 1] === wordsB[j - 1]) {
+                    dp[i][j] = dp[i - 1][j - 1] + 1;
+                } else {
+                    dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                }
+            }
+        }
+
+        // 역추적으로 diff 생성
+        var result = [];
+        i = n;
+        j = m;
+        while (i > 0 || j > 0) {
+            if (i > 0 && j > 0 && wordsA[i - 1] === wordsB[j - 1]) {
+                result.unshift({ type: "equal", text: wordsA[i - 1] });
+                i--;
+                j--;
+            } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                result.unshift({ type: "added", text: wordsB[j - 1] });
+                j--;
+            } else {
+                result.unshift({ type: "removed", text: wordsA[i - 1] });
+                i--;
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * diff 결과를 A측 HTML로 렌더링한다 (removed는 빨간 취소선, added는 무시).
+     * @param {Array} diffs - diff 결과
+     * @returns {string} HTML
+     */
+    function _renderDiffA(diffs) {
+        var parts = [];
+        diffs.forEach(function (d) {
+            if (d.type === "equal") {
+                parts.push(App.escapeHtml(d.text));
+            } else if (d.type === "removed") {
+                parts.push('<span class="ab-diff-removed">' + App.escapeHtml(d.text) + '</span>');
+            }
+            // added 는 A 측에 표시하지 않음
+        });
+        return parts.join(" ");
+    }
+
+    /**
+     * diff 결과를 B측 HTML로 렌더링한다 (added는 초록 밑줄, removed는 무시).
+     * @param {Array} diffs - diff 결과
+     * @returns {string} HTML
+     */
+    function _renderDiffB(diffs) {
+        var parts = [];
+        diffs.forEach(function (d) {
+            if (d.type === "equal") {
+                parts.push(App.escapeHtml(d.text));
+            } else if (d.type === "added") {
+                parts.push('<span class="ab-diff-added">' + App.escapeHtml(d.text) + '</span>');
+            }
+            // removed 는 B 측에 표시하지 않음
+        });
+        return parts.join(" ");
+    }
+
+    /**
+     * 금지 패턴(SPEAKER_XX, UNKNOWN, 한글(English))을 하이라이트한다.
+     * @param {string} html - 렌더링된 HTML
+     * @returns {string} 하이라이트된 HTML
+     */
+    function _highlightForbidden(html) {
+        // SPEAKER_XX 패턴
+        html = html.replace(/(SPEAKER_\d+)/g, '<mark class="forbidden-pattern">$1</mark>');
+        // UNKNOWN 패턴
+        html = html.replace(/(UNKNOWN)/g, '<mark class="forbidden-pattern">$1</mark>');
+        // 한글(English) 패턴 — 한글 뒤에 괄호 안 영어
+        html = html.replace(/([\uAC00-\uD7A3]+)\(([A-Za-z]+)\)/g,
+            '<mark class="forbidden-pattern">$1($2)</mark>');
+        return html;
+    }
+
+    /**
+     * 타임스탬프 기반 발화 매칭 (STT 비교용).
+     * 가까운 시간끼리 쌍을 만든다.
+     * @param {Array} uttA - A 발화 리스트
+     * @param {Array} uttB - B 발화 리스트
+     * @returns {Array} [{a: ..., b: ...}]
+     */
+    function _pairByTimestamp(uttA, uttB) {
+        var result = [];
+        var idxB = 0;
+
+        // A 기준으로 순회하며 B에서 가장 가까운 시간의 발화를 매칭
+        uttA.forEach(function (a) {
+            var bestIdx = idxB;
+            var bestDist = Infinity;
+            var startA = a.start || 0;
+
+            for (var j = idxB; j < uttB.length; j++) {
+                var dist = Math.abs((uttB[j].start || 0) - startA);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = j;
+                } else {
+                    break; // 거리가 커지기 시작하면 중단 (정렬 가정)
+                }
+            }
+
+            if (bestDist < 10) { // 10초 이내면 매칭
+                result.push({ a: a, b: uttB[bestIdx] });
+                idxB = bestIdx + 1;
+            } else {
+                result.push({ a: a, b: null });
+            }
+        });
+
+        // B에 남은 미매칭 발화 추가
+        for (var k = idxB; k < uttB.length; k++) {
+            result.push({ a: null, b: uttB[k] });
+        }
+
+        return result;
+    }
+
+    /**
+     * 초를 mm:ss 형식으로 변환한다.
+     * @param {number} sec - 초
+     * @returns {string}
+     */
+    function _fmtTime(sec) {
+        var s = Math.floor(sec || 0);
+        var m = Math.floor(s / 60);
+        var r = s % 60;
+        var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+        return pad(m) + ":" + pad(r);
+    }
+
+    /**
+     * 메트릭 카드 HTML을 생성한다.
+     * @param {string} title - 카드 제목
+     * @param {string} valA - A 값
+     * @param {string} valB - B 값
+     * @param {string|null} winner - "A", "B", 또는 null
+     * @param {boolean} isWarn - 경고 스타일 여부
+     * @returns {string} HTML
+     */
+    function _metricCard(title, valA, valB, winner, isWarn) {
+        var classA = winner === "A" ? " winner" : "";
+        var classB = winner === "B" ? " winner" : "";
+        if (isWarn) {
+            if (parseInt(valA, 10) > 0) classA = " warn";
+            if (parseInt(valB, 10) > 0) classB = " warn";
+            if (parseInt(valA, 10) === 0) classA = " good";
+            if (parseInt(valB, 10) === 0) classB = " good";
+        }
+        return [
+            '<div class="ab-metric-card">',
+            '  <div class="ab-metric-card-title">' + App.escapeHtml(title) + '</div>',
+            '  <div class="ab-metric-card-values">',
+            '    <div><div class="ab-metric-value' + classA + '">' + App.escapeHtml(valA) + '</div><div class="ab-metric-label">A</div></div>',
+            '    <div><div class="ab-metric-value' + classB + '">' + App.escapeHtml(valB) + '</div><div class="ab-metric-label">B</div></div>',
+            '  </div>',
+            '</div>',
+        ].join("");
+    }
+
+
+    // =================================================================
     // === GeneralSettingsPanel (기존 /api/settings) ===
     // =================================================================
 
@@ -4128,6 +5556,16 @@
             '    <button class="settings-save-btn" id="settingsSaveBtn">변경사항 저장</button>',
             '    <span class="settings-save-status" id="settingsSaveStatus"></span>',
             '  </div>',
+            '  <section class="settings-advanced">',
+            '    <h3 class="settings-advanced-title">고급 기능</h3>',
+            '    <div class="settings-advanced-item" id="settingsAbTestLink" tabindex="0" role="button">',
+            '      <div class="settings-advanced-item-text">',
+            '        <span class="settings-advanced-item-label">A/B 모델 테스트</span>',
+            '        <span class="settings-advanced-item-desc">동일 회의를 서로 다른 모델로 처리하여 결과를 비교합니다.</span>',
+            '      </div>',
+            '      <span class="settings-advanced-item-arrow">&#x203A;</span>',
+            '    </div>',
+            '  </section>',
             '</div>',
         ].join("\n");
 
@@ -4194,6 +5632,18 @@
 
         // STT 모델 목록 로드
         self._loadSttModels();
+
+        // 고급 기능 — A/B 테스트 링크
+        var abTestLink = document.getElementById("settingsAbTestLink");
+        if (abTestLink) {
+            var onAbTest = function () { Router.navigate("/app/ab-test"); };
+            abTestLink.addEventListener("click", onAbTest);
+            self._listeners.push({ el: abTestLink, type: "click", fn: onAbTest });
+            // 키보드 접근성
+            abTestLink.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onAbTest(); }
+            });
+        }
     };
 
     GeneralSettingsPanel.prototype._loadSettings = async function () {
