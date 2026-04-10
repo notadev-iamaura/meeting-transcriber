@@ -479,23 +479,46 @@ class TestLlmRunner:
 
 
 class TestSttRunner:
-    def test_run_stt_ab_test_diarize_체크포인트_없음_에러(
+    def test_run_stt_ab_test_diarize_체크포인트_없으면_자동실행(
         self,
         tmp_config: AppConfig,
         meeting_with_merge: str,
         dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        with pytest.raises(ValueError, match="diarize"):
-            _run(
-                run_stt_ab_test(
-                    config=tmp_config,
-                    source_meeting_id=meeting_with_merge,
-                    variant_a=ModelSpec(label="A", model_id="stt-a"),
-                    variant_b=ModelSpec(label="B", model_id="stt-b"),
-                    allow_diarize_rerun=False,
-                    model_manager=dummy_manager,
-                )
+        """diarize 체크포인트가 없으면 자동으로 화자분리를 실행한다."""
+        # Diarizer/Transcriber/Merger stub
+        stub_diarize = DiarizationResult(segments=[], num_speakers=1, audio_path="/fake")
+
+        class StubDiarizer:
+            def __init__(self, *a, **kw) -> None: pass
+            async def diarize(self, wav_path) -> DiarizationResult:
+                return stub_diarize
+
+        class StubTranscriber:
+            def __init__(self, *a, **kw) -> None: pass
+            async def transcribe(self, wav_path, **kwargs) -> TranscriptResult:
+                return TranscriptResult(segments=[], full_text="")
+
+        class StubMerger:
+            async def merge(self, *a, **kw) -> MergedResult:
+                return MergedResult(utterances=[], num_speakers=1, audio_path="")
+
+        monkeypatch.setattr(ab_test_runner, "Diarizer", StubDiarizer)
+        monkeypatch.setattr(ab_test_runner, "Transcriber", StubTranscriber)
+        monkeypatch.setattr(ab_test_runner, "Merger", StubMerger)
+
+        # 에러 없이 완료되어야 함 (자동 diarize 실행)
+        test_id = _run(
+            run_stt_ab_test(
+                config=tmp_config,
+                source_meeting_id=meeting_with_merge,
+                variant_a=ModelSpec(label="A", model_id="stt-a"),
+                variant_b=ModelSpec(label="B", model_id="stt-b"),
+                model_manager=dummy_manager,
             )
+        )
+        assert test_id is not None
 
     def test_run_stt_ab_test_diarize_재실행_허용(
         self,

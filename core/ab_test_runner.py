@@ -710,11 +710,10 @@ async def _ensure_diarize(
     """
     ckpt = meeting_dir / "diarize.json"
     if ckpt.exists():
+        logger.info(f"diarize 체크포인트 재사용: {ckpt}")
         return DiarizationResult.from_checkpoint(ckpt)
-    if not allow_diarize_rerun:
-        raise ValueError(
-            "diarize 체크포인트가 없습니다. allow_diarize_rerun=True 로 재실행 허용 필요"
-        )
+    # 체크포인트 없음 → 자동으로 1회 실행 (미전사 회의에서 필수)
+    logger.info("diarize 체크포인트 없음 → 화자분리 자동 실행")
     if not wav_path.exists():
         raise FileNotFoundError(f"WAV 파일이 없습니다: {wav_path}")
     diarizer = Diarizer(config, model_manager)

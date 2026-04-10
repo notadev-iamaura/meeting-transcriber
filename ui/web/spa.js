@@ -4290,7 +4290,7 @@
             // STT 옵션
             '  <div id="abSttOptions" style="display:none;">',
             '    <div class="ab-form-section">',
-            '      <div class="ab-form-checkbox-row"><input type="checkbox" id="abAllowDiarize" /><span>diarize 재실행 허용</span></div>',
+            '      <div class="ab-form-checkbox-row"><input type="checkbox" id="abAllowDiarize" checked /><span>화자분리 자동 실행 (미전사 회의는 필수)</span></div>',
             '      <div class="ab-form-hint">체크포인트가 없을 때만 필요합니다</div>',
             '    </div>',
             '  </div>',
