@@ -3929,19 +3929,38 @@ async def _make_ab_broadcaster(request: Request):
     return _broadcast
 
 
-def _validate_meeting_exists(config: Any, meeting_id: str) -> None:
-    """원본 회의 디렉터리가 존재하는지 검증한다.
+def _validate_meeting_exists(
+    config: Any, meeting_id: str, test_type: str = "llm"
+) -> None:
+    """원본 회의가 존재하는지 검증한다.
+
+    test_type 에 따라 검증 기준이 다르다:
+    - "stt": 오디오 파일(audio_input/{id}.wav) 만 있으면 됨 (미전사 회의 가능)
+    - "llm": outputs/{id}/ 또는 checkpoints/{id}/ 가 있어야 함 (전사 완료 필요)
 
     Args:
         config: AppConfig
         meeting_id: 회의 ID
+        test_type: "stt" | "llm"
 
     Raises:
-        HTTPException: 디렉터리가 없을 때 (404)
+        HTTPException: 필요한 파일/디렉터리가 없을 때 (404)
     """
     _validate_meeting_id(meeting_id)
-    meeting_dir = config.paths.resolved_outputs_dir / meeting_id
-    if not meeting_dir.exists():
+
+    if test_type == "stt":
+        wav = config.paths.resolved_audio_input_dir / f"{meeting_id}.wav"
+        if not wav.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"오디오 파일을 찾을 수 없습니다: {meeting_id}",
+            )
+        return
+
+    # LLM: checkpoints 또는 outputs 에 데이터가 있어야 함
+    ckpt_dir = config.paths.resolved_checkpoints_dir / meeting_id
+    out_dir = config.paths.resolved_outputs_dir / meeting_id
+    if not ckpt_dir.exists() and not out_dir.exists():
         raise HTTPException(
             status_code=404,
             detail=f"원본 회의를 찾을 수 없습니다: {meeting_id}",
@@ -4107,8 +4126,8 @@ async def start_stt_ab_test(
             detail="variant_a 와 variant_b 가 동일합니다.",
         )
 
-    # 사전 검증: 원본 회의 존재
-    _validate_meeting_exists(config, body.source_meeting_id)
+    # 사전 검증: 원본 회의 존재 (STT 는 오디오만 있으면 됨)
+    _validate_meeting_exists(config, body.source_meeting_id, test_type="stt")
 
     # test_id 선점
     selected_id = _runner_new_test_id()
