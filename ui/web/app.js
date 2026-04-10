@@ -184,6 +184,10 @@
             err.status = response.status;
             throw err;
         }
+        // 204 No Content 등 body 가 없는 응답 처리
+        if (response.status === 204 || response.headers.get("content-length") === "0") {
+            return null;
+        }
         return response.json();
     }
 
