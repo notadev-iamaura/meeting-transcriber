@@ -44,6 +44,14 @@ htmlcov/
 # 벤치마크/임시 (개발용)
 short_clip_comparison.json
 test_short_clip_comparison.py
+benchmark_*_results.json
+validate_settings_results.json
+
+# 내부 연구 메모 / 개인 배치 스크립트 (공개본은 docs/BENCHMARK.md)
+research.md
+scripts/batch_all.py
+scripts/batch_all_v2.py
+scripts/benchmark_llm_correct.py
 
 # Ralph 루프 (개발용)
 .ralph-logs/

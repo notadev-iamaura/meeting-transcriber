@@ -560,39 +560,50 @@ meeting-transcriber/
 | 체크포인트 | 단계별 JSON 저장 | 중단 시 마지막 성공 단계부터 재개 |
 | 동시 모델 | 최대 1개 | STT→화자분리→LLM 순차 로드/언로드 |
 
-### STT 품질 강화
+### STT 품질 처리
 
-| 기능 | 설명 |
-|------|------|
-| **VAD 전처리** | Silero VAD v5로 음성 구간만 추출, 무음 구간 제거 |
-| **환각 필터링** | 4중 기준 (no_speech_prob, avg_logprob, compression_ratio, 반복 패턴) |
-| **텍스트 정규화** | NFC 유니코드 정규화, 공백/줄바꿈 정리 |
-| **숫자 정규화** | 한국어 숫자 표현 통일 |
-| **한국어 최적화 모델** | whisper-medium-komixv2 (AI-Hub 다중 도메인 학습) |
+| 처리 단계 | 설명 |
+|-----------|------|
+| 한국어 STT 모델 | `whisper-medium-komixv2-mlx` (fp16) — 벤치마크에서 커버리지·순도 균형이 가장 좋아 기본값으로 선택 |
+| 환각 필터링 | 4단 (`avg_logprob`, `no_speech_prob`, 세그먼트 내부 반복, 크로스 세그먼트 반복) |
+| 텍스트 정규화 | NFC 유니코드 정규화, 공백/줄바꿈 정리 |
+| 숫자 정규화 | 한국어 숫자 표현 통일 |
+| VAD | 기본 OFF — 이 환경에서 VAD ON 시 실행시간 3배 증가·커버리지 저하 관찰됨. 필요 시 `vad.enabled: true` 로 전환 |
 
-### STT 벤치마크
+### 기본 설정의 근거 (벤치마크)
 
-A/B 비교 벤치마크 스크립트가 포함되어 있습니다:
+기본값(STT 모델, VAD, LLM, 필터 임계값 등)은 회의 오디오를 대상으로 한
+실험 결과에 근거해 선택했습니다. 표본이 작고 단일 하드웨어(M4 16GB)에서의
+측정이라 일반화에 한계가 있습니다. 상세 데이터·한계·재현 방법은
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md) 참조.
+
+요약:
+
+| 영역 | 기본값 | 관찰 |
+|------|--------|------|
+| STT 모델 | `whisper-medium-komixv2-mlx` (fp16) | 환각 필터 후 순도 100%, 커버리지 85.1% (단일 회의 425초) |
+| VAD | OFF | ON 시 실행 3.1배·커버리지 -13.2%p (이 환경) |
+| LLM 모델 | `gemma-4-e4b-it-4bit` | 정답지 44발화 대비 유사도 92.9% vs EXAONE 47.5% |
+| LLM temperature | 0.0 | MLX 4bit에서 0.0~0.5 결과 동일 관찰 |
+| 교정 batch_size | 5 | 파싱 100%, 원문 변형 최소 |
+
+주요 한계 (자세한 내용은 [`docs/BENCHMARK.md#한계`](docs/BENCHMARK.md#한계)):
+
+- 단일 하드웨어 측정 (M4 16GB)
+- 정답지 44 발화(2 샘플) — 통계적 유의성 확보엔 부족
+- 정답지는 Claude 가 수동 작성한 것으로, 편집 스타일 편향 가능성 있음
+- LLM 결과는 "회의록 교정" 태스크 한정. 다른 태스크(예: 한국어 QA)에서는
+  EXAONE 이 우수하다는 공개 벤치마크가 있음
+
+재현:
 
 ```bash
-# 기본 벤치마크 (Zeroth-Korean 데이터셋, 10샘플)
-python scripts/benchmark_ab_test.py
+# LLM 파라미터 스윕 (temperature × batch_size)
+python scripts/benchmark_llm_correct.py
 
-# 샘플 수 조정
-python scripts/benchmark_ab_test.py --samples 30
-
-# 결과 JSON 저장
-python scripts/benchmark_ab_test.py --output data/results.json
+# 설정 재검증 (3 샘플로 동일 설정 재적용)
+python scripts/validate_settings.py
 ```
-
-**측정 지표:**
-- **CER** (Character Error Rate) — 문자 오류율
-- **WER** (Word Error Rate) — 단어 오류율
-- **RTF** (Real-Time Factor) — 실시간 배수 (1.0 미만 = 실시간보다 빠름)
-
-**비교 대상:**
-- Baseline: 순수 mlx-whisper (기능 OFF)
-- Enhanced: VAD + initial_prompt + 숫자 정규화 (기능 ON)
 
 ## 개발
 

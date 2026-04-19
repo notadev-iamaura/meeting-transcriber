@@ -13,7 +13,7 @@ paths:
 
 # === STT 모델 설정 ===
 stt:
-  model_name: "youngouk/seastar-medium-ko-4bit-mlx"  # 한국어 최적화 모델 (HuggingFace, 자동 다운로드)
+  model_name: "youngouk/whisper-medium-komixv2-mlx"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §1). 속도 우선이면 seastar/ghost613 4bit 선택 가능
   language: "ko"  # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
@@ -28,16 +28,16 @@ diarization:
   max_speakers: 10                           # 최대 화자 수
   # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정
 
-# === LLM 설정 (EXAONE via Ollama) ===
+# === LLM 설정 ===
 llm:
   backend: "mlx"  # "ollama" (외부 서버) 또는 "mlx" (in-process Apple Silicon)
-  model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 모델명
+  model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 선택 시 사용될 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
-  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # MLX 모델명 (한국어 특화)
+  mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §4). EXAONE 전환 시 "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
   mlx_max_tokens: 2000                       # MLX 최대 생성 토큰
   max_context_tokens: 8192                   # 컨텍스트 윈도우
-  temperature: 0.3  # 생성 온도
-  correction_batch_size: 15                  # 보정 시 배치 크기 (발화 수, PERF: 8192 컨텍스트 윈도우 활용도 개선)
+  temperature: 0.0  # 생성 온도 (MLX 4bit 환경에서 0.0~0.5 출력 동일 관찰 → 결정성 최대, BENCHMARK.md §3)
+  correction_batch_size: 5                   # 보정 시 배치 크기 (발화 수). 원문 변형 최소화 관점에서 선택 (BENCHMARK.md §3)
   request_timeout_seconds: 120               # 요청 타임아웃
 
 # === 임베딩 모델 설정 ===
@@ -145,8 +145,10 @@ lifecycle:
   cold_action: "delete_audio"                # Cold 정책: delete_audio | archive
 
 # === VAD (Voice Activity Detection) 설정 ===
+# 주의: mlx-whisper + 외부 silero-vad 조합에서 VAD ON 은 실행시간을 약 3배 늘리고
+# 커버리지를 낮추는 관찰이 있음 (BENCHMARK.md §1). 기본 OFF. 필요 시 true 로 전환.
 vad:
-  enabled: true                              # VAD 활성화 여부
+  enabled: false                             # VAD 활성화 여부 (기본 OFF, BENCHMARK.md §1)
   threshold: 0.5                             # 음성 확률 임계값 (0.0~1.0)
   min_speech_duration_ms: 250                # 최소 음성 구간 길이 (ms)
   min_silence_duration_ms: 100               # 최소 무음 구간 길이 (ms)
