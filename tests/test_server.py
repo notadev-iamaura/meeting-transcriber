@@ -55,7 +55,7 @@ class TestAppCreation:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        assert app.title == "회의 전사 시스템 API"
+        assert app.title == "Recap API"
         assert app.version == "0.1.0"
 
     def test_create_app_config_state에_저장(self, tmp_path: Path) -> None:

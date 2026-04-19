@@ -37,7 +37,7 @@ class TestNativeWindowConfig:
         config = NativeWindowConfig(url="http://localhost:8765/app")
 
         assert config.url == "http://localhost:8765/app"
-        assert config.title == "회의 전사 시스템"
+        assert config.title == "Recap"
         assert config.width == 1200
         assert config.height == 800
         assert config.min_width == 800
@@ -86,7 +86,7 @@ class TestBuildWindowConfig:
         config = build_window_config(
             host="127.0.0.1",
             port=8765,
-            title="회의 전사 시스템",
+            title="Recap",
             width=1200,
             height=800,
             min_width=800,
@@ -273,7 +273,7 @@ class TestWindowConfigModel:
 
         config = WindowConfig()
 
-        assert config.title == "회의 전사 시스템"
+        assert config.title == "Recap"
         assert config.width == 1200
         assert config.height == 800
         assert config.min_width == 800
@@ -287,7 +287,7 @@ class TestWindowConfigModel:
         app_config = AppConfig()
 
         assert hasattr(app_config, "window")
-        assert app_config.window.title == "회의 전사 시스템"
+        assert app_config.window.title == "Recap"
         assert app_config.window.use_native is True
 
 
@@ -361,7 +361,7 @@ class TestMainBlock:
             args = _parse_args()
 
         assert args.url == "http://test:8080/app"
-        assert args.title == "회의 전사 시스템"
+        assert args.title == "Recap"
         assert args.width == 1200
         assert args.height == 800
         assert args.min_width == 800

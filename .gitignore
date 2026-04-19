@@ -53,6 +53,9 @@ scripts/batch_all.py
 scripts/batch_all_v2.py
 scripts/benchmark_llm_correct.py
 
+# 외부에서 받은 디자인 핸드오프 (레퍼런스 — 저장소에 커밋하지 않음)
+design_handoff_recap_rebrand/
+
 # Ralph 루프 (개발용)
 .ralph-logs/
 progress.md

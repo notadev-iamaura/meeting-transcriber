@@ -1,5 +1,5 @@
 /* =================================================================
- * 회의 전사 시스템 — macOS 네이티브 스타일 시트 (style.css)
+ * Recap (회의 전사 시스템) — macOS 네이티브 스타일 시트 (style.css)
  *
  * 목적: macOS 네이티브 앱(Apple Notes, Finder, Mail)의 디자인 언어를
  *       웹 UI에 충실히 재현한다.
@@ -484,6 +484,47 @@ button {
   padding: 1px 7px;
   border-radius: 10px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Recap 브랜드 락업 (리스트 헤더 좌측) */
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* 라이트/다크 모드에 따라 브랜드 마크 자동 전환 (기존 .theme-icon-* 토글 패턴 재사용) */
+.brand-mark-light { display: block; }
+.brand-mark-dark { display: none; }
+
+:root[data-theme="dark"] .brand-mark-light { display: none; }
+:root[data-theme="dark"] .brand-mark-dark { display: block; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-mark-light { display: none; }
+  :root:not([data-theme="light"]) .brand-mark-dark { display: block; }
+}
+
+:root[data-theme="light"] .brand-mark-light { display: block; }
+:root[data-theme="light"] .brand-mark-dark { display: none; }
+
+/* 리스트 상단 섹션 라벨 (회의록/검색/... 분류) */
+.list-section-label {
+  padding: 4px 16px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
 }
 
 /* 리스트 검색 입력 */

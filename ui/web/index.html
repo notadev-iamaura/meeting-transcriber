@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>회의록</title>
+  <title>Recap — 회의록</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -60,9 +61,14 @@
     <!-- 2. 리스트 패널 (280px, 회의 목록) -->
     <aside id="list-panel" aria-label="회의 목록 패널">
       <div class="list-header">
-        <h1 class="list-title">회의록</h1>
+        <div class="brand-lockup">
+          <img class="brand-mark brand-mark-light" src="/static/brand/app-icon-light.svg" width="20" height="20" alt="" aria-hidden="true">
+          <img class="brand-mark brand-mark-dark" src="/static/brand/app-icon-dark.svg" width="20" height="20" alt="" aria-hidden="true">
+          <h1 class="list-title">Recap</h1>
+        </div>
         <span class="list-count" id="listCount"></span>
       </div>
+      <div class="list-section-label">회의록</div>
       <div class="list-search">
         <input type="search" id="listSearchInput" placeholder="회의 검색..." aria-label="회의 검색">
       </div>

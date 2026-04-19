@@ -36,7 +36,7 @@ class NativeWindowConfig:
     """
 
     url: str
-    title: str = "회의 전사 시스템"
+    title: str = "Recap"
     width: int = 1200
     height: int = 800
     min_width: int = 800
@@ -165,7 +165,7 @@ def _parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description="네이티브 창으로 웹 UI 표시")
     parser.add_argument("--url", required=True, help="표시할 URL")
-    parser.add_argument("--title", default="회의 전사 시스템", help="창 제목")
+    parser.add_argument("--title", default="Recap", help="창 제목")
     parser.add_argument("--width", type=int, default=1200, help="창 너비")
     parser.add_argument("--height", type=int, default=800, help="창 높이")
     parser.add_argument("--min-width", type=int, default=800, help="최소 너비")
