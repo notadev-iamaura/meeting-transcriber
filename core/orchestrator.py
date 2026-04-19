@@ -106,15 +106,64 @@ class JobProcessor:
         """작업 루프를 시작한다.
 
         이미 실행 중이면 무시한다.
+        시작 전에 진행 중 상태에 남아 있는 orphaned 작업들을 queued로 복구한다.
         백그라운드 태스크로 _run_loop를 실행한다.
         """
         if self._running:
             logger.warning("JobProcessor가 이미 실행 중입니다.")
             return
 
+        await self._recover_orphaned_jobs()
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         logger.info("JobProcessor 시작")
+
+    async def _recover_orphaned_jobs(self) -> None:
+        """앱 비정상 종료로 진행 중 상태에 남은 작업을 queued로 복구한다.
+
+        앱이 죽으면 transcribing/diarizing/merging/embedding 등 진행 상태 작업이
+        rollback 되지 않아 영구 stuck 된다. 시작 시 이런 orphaned 작업을
+        force_set_status로 queued로 되돌려 재처리를 가능하게 한다.
+        개별 작업 복구가 실패해도 다른 작업의 복구는 계속 진행한다.
+        """
+        # 진행 중으로 간주되는 상태들 (JobStatus 가 str 을 상속하므로 값 비교 가능)
+        in_progress_statuses = {
+            JobStatus.TRANSCRIBING.value,
+            JobStatus.DIARIZING.value,
+            JobStatus.MERGING.value,
+            JobStatus.EMBEDDING.value,
+        }
+        try:
+            all_jobs = await self._job_queue.get_all_jobs()
+        except Exception as e:
+            logger.error(f"orphaned 작업 조회 실패: {e}")
+            return
+
+        orphaned = [j for j in all_jobs if j.status in in_progress_statuses]
+        if not orphaned:
+            return
+
+        recovered = 0
+        for job in orphaned:
+            try:
+                # VALID_TRANSITIONS 에 역방향 전이가 없으므로 force_set_status 사용
+                await asyncio.to_thread(
+                    self._job_queue.queue.force_set_status,
+                    job.id, JobStatus.QUEUED, error_message="",
+                )
+                logger.warning(
+                    f"orphaned 작업 복구: {job.meeting_id} "
+                    f"({job.status} → queued)"
+                )
+                recovered += 1
+            except Exception as e:
+                logger.error(
+                    f"orphaned 작업 복구 실패: job_id={job.id}, "
+                    f"meeting_id={job.meeting_id}, status={job.status}, error={e}"
+                )
+        logger.info(
+            f"orphaned 작업 복구 완료: {recovered}/{len(orphaned)}건"
+        )
 
     async def stop(self) -> None:
         """작업 루프를 중지한다.

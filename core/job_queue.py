@@ -502,10 +502,12 @@ class JobQueue:
         """모든 작업을 조회한다.
 
         Returns:
-            전체 Job 리스트 (created_at 내림차순, 최신순)
+            전체 Job 리스트 (meeting_id 내림차순, 최신순)
+            meeting_id에 녹음 시작 시각이 포함되어 있으므로 (meeting_YYYYMMDD_HHMMSS)
+            created_at(DB 등록 시각)보다 실제 회의 시간순 정렬에 적합하다.
         """
         conn = self._ensure_connection()
-        rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
+        rows = conn.execute("SELECT * FROM jobs ORDER BY meeting_id DESC").fetchall()
 
         return [self._row_to_job(row) for row in rows]
 

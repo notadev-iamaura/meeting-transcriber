@@ -94,6 +94,12 @@ def filter_hallucinations(
         else:
             filtered.append(seg)
 
+    # 크로스 세그먼트 반복 제거: 연속으로 동일 텍스트가 N회 이상 등장하면 환각
+    filtered, cross_removed = _remove_cross_segment_repetitions(
+        filtered, filter_config.repetition_threshold
+    )
+    removed.extend(cross_removed)
+
     if removed:
         logger.info(
             f"환각 필터링 완료: {len(removed)}개 제거, "
@@ -101,6 +107,62 @@ def filter_hallucinations(
         )
 
     return filtered, removed
+
+
+def _remove_cross_segment_repetitions(
+    segments: list[Any],
+    threshold: int,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """연속으로 동일한 텍스트가 반복되는 세그먼트를 제거한다.
+
+    Whisper가 침묵 구간에서 동일 문장을 수십 번 반복 생성하는 환각 패턴을 잡는다.
+    연속 N개 이상 동일 텍스트(정규화 기준)가 등장하면 해당 연속 구간 전체를 제거한다.
+
+    Args:
+        segments: 세그먼트 리스트
+        threshold: 연속 반복 임계값 (이 수 이상이면 제거)
+
+    Returns:
+        (정리된 세그먼트 리스트, 제거된 세그먼트 정보 리스트) 튜플
+    """
+    if not segments or threshold < 2:
+        return segments, []
+
+    def _normalize(text: str) -> str:
+        return " ".join(text.strip().split())
+
+    result: list[Any] = []
+    removed: list[dict[str, Any]] = []
+    i = 0
+
+    while i < len(segments):
+        current_text = _normalize(getattr(segments[i], "text", ""))
+        run_end = i + 1
+        while run_end < len(segments) and _normalize(getattr(segments[run_end], "text", "")) == current_text:
+            run_end += 1
+
+        run_length = run_end - i
+        if run_length >= threshold:
+            # 연속 반복 구간 전체 제거
+            for seg in segments[i:run_end]:
+                removed.append({
+                    "text": getattr(seg, "text", ""),
+                    "start": getattr(seg, "start", 0.0),
+                    "end": getattr(seg, "end", 0.0),
+                    "reason": f"cross_segment_repetition(run={run_length}>=threshold={threshold})",
+                })
+            logger.warning(
+                f"크로스 세그먼트 반복 제거: {run_length}회 연속 동일 텍스트 "
+                f"[{getattr(segments[i], 'start', 0.0):.1f}"
+                f"~{getattr(segments[run_end-1], 'end', 0.0):.1f}s] "
+                f"\"{current_text[:50]}\""
+            )
+        else:
+            result.extend(segments[i:run_end])
+
+        i = run_end
+
+    return result, removed
 
 
 def _check_segment(seg: Any, filter_config: Any) -> str | None:

@@ -956,20 +956,58 @@ def build_corrector_snapshot() -> CorrectorPromptSnapshot:
     )
 
 
+def _render_vocabulary_block_light(terms: list[VocabularyTerm]) -> tuple[str, int]:
+    """요약용 경량 용어 블록을 렌더링한다.
+
+    교정용 전체 블록(_render_vocabulary_block)과 달리, alias 목록 없이
+    올바른 표기만 나열한다. 요약 프롬프트가 길어지면 모델이 주요 안건 등
+    핵심 섹션을 스킵하는 리그레션이 확인되어 경량 버전을 사용한다.
+    (벤치마크 2026-04-15 리그레션 분석 결과)
+
+    Args:
+        terms: 전체 용어 목록 (enabled=False는 자동 제외)
+
+    Returns:
+        (렌더링된 텍스트, 활성 용어 개수) 튜플
+    """
+    active = [t for t in terms if t.enabled]
+    if not active:
+        return ("", 0)
+
+    term_list = ", ".join(t.term for t in active)
+    block = (
+        f"\n\n## 참고: 올바른 용어 표기\n"
+        f"{term_list}\n"
+        f"전사문에 위 용어의 오인식이 있을 수 있습니다. 요약 시 올바른 표기를 사용하세요."
+    )
+    return (block, len(active))
+
+
 def build_summarizer_system_prompt() -> str:
     """summarizer 단계용 시스템 프롬프트를 반환한다.
 
-    요약 단계는 용어집을 주입하지 않는다 (요약 품질에 미치는 영향 미미 +
-    컨텍스트 절약). 필요 시 향후 옵션으로 확장 가능.
+    경량 용어 블록을 주입하여 STT 오인식 용어가 요약에 전파되는 것을 방지한다.
+    전체 alias 목록 대신 올바른 표기만 나열하여 프롬프트를 짧게 유지한다.
 
     Returns:
-        시스템 프롬프트 문자열
+        시스템 프롬프트 문자열 (경량 용어집 포함)
     """
     try:
-        return load_prompts().summarizer.system_prompt
+        base = load_prompts().summarizer.system_prompt
     except Exception as e:
         logger.warning(f"요약 프롬프트 로드 실패, 기본값 사용: {e}")
-        return _load_default_prompts().summarizer.system_prompt
+        base = _load_default_prompts().summarizer.system_prompt
+
+    try:
+        vocab = load_vocabulary()
+        vocab_block, active_count = _render_vocabulary_block_light(vocab.terms)
+        if vocab_block:
+            logger.info(f"요약 프롬프트에 경량 용어집 주입: {active_count}개 용어")
+            return base + vocab_block
+    except Exception as e:
+        logger.warning(f"요약 용어집 로드 실패, 용어집 없이 진행: {e}")
+
+    return base
 
 
 def build_chat_system_prompt() -> str:
