@@ -108,11 +108,20 @@
     <button class="toast-close" id="errorClose" aria-label="닫기">&#x2715;</button>
   </div>
 
-  <!-- 녹음 상태 플로팅 바 -->
+  <!-- 녹음 상태 플로팅 바 (HUD) — 녹음 진행을 시각화하는 waveform + 즉시 정지 버튼 포함 -->
   <div id="recordingStatus" class="recording-status" role="status" aria-live="polite">
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
-    <span class="recording-duration" id="recordingDuration">00:00</span>
+    <div class="recording-waveform" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <span class="recording-duration" id="recordingDuration" aria-live="off">00:00</span>
+    <button type="button" id="recordingStopBtn" class="recording-stop-btn" aria-label="녹음 정지">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="5" y="5" width="10" height="10" rx="1"></rect>
+      </svg>
+    </button>
   </div>
 
   <script src="/static/app.js"></script>

@@ -455,6 +455,9 @@
                 var recStatus = document.getElementById("recordingStatus");
                 if (recStatus) recStatus.classList.add("visible");
                 _startRecTicker(0);
+                // 새 녹음 시작 시 HUD 내 정지 버튼을 다시 활성화
+                var recStopBtn = document.getElementById("recordingStopBtn");
+                if (recStopBtn) recStopBtn.disabled = false;
                 loadMeetings();
             });
             document.addEventListener("ws:recording_stopped", function () {
@@ -486,6 +489,26 @@
                 errorBanner.show(msg);
             });
 
+            // 녹음 HUD 의 즉시 정지 버튼: 클릭 시 /api/recording/stop 호출.
+            // POST 성공 시 pill 을 즉시 숨김 — WebSocket 이 끊긴 상태에서도 UI 가 멈추지 않도록.
+            // 백엔드의 ws:recording_stopped 가 뒤이어 도착해도 기존 핸들러의 동작(hide+ticker stop)은 멱등.
+            var _recStopBtn = document.getElementById("recordingStopBtn");
+            if (_recStopBtn) {
+                _recStopBtn.addEventListener("click", async function () {
+                    if (_recStopBtn.disabled) return;
+                    _recStopBtn.disabled = true;
+                    try {
+                        await App.apiRequest("/recording/stop", { method: "POST" });
+                        var recStatus = document.getElementById("recordingStatus");
+                        if (recStatus) recStatus.classList.remove("visible");
+                        _stopRecTicker();
+                    } catch (err) {
+                        errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
+                        _recStopBtn.disabled = false;
+                    }
+                });
+            }
+
             // 초기 데이터 로드
             loadMeetings();
             fetchStatus();
@@ -499,6 +522,10 @@
                         var recStatus = document.getElementById("recordingStatus");
                         if (recStatus) recStatus.classList.add("visible");
                         _startRecTicker(rec.duration_seconds || 0);
+                        // 새로고침으로 새 DOM 이 로드된 상태라 버튼은 기본 활성이지만,
+                        // 브라우저 form state 자동 복원에 대비해 명시적으로 리셋.
+                        var recStopBtn = document.getElementById("recordingStopBtn");
+                        if (recStopBtn) recStopBtn.disabled = false;
                     }
                 })
                 .catch(function () {
