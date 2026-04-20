@@ -84,6 +84,62 @@
   /* 참조 카드 */
   --ref-bg: rgba(0, 122, 255, 0.04);
   --ref-border: rgba(0, 122, 255, 0.15);
+
+  /* ---------------------------------------------------------------
+     1-B. 타이포·스페이싱 토큰 (colors_and_type.css 확장, 2026-04-20)
+     ---------------------------------------------------------------
+     모든 값은 기존 프로덕션 스타일시트에서 이미 사용하던 수치를 토큰화한
+     것이며, 새로운 시각적 의미를 만들지 않는다. 신규 컴포넌트는 이 토큰을
+     참조하고 기존 코드는 점진적으로 마이그레이션한다.
+     --------------------------------------------------------------- */
+
+  /* 폰트 패밀리 (모노는 기존 인라인 선언을 토큰화) */
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* 타입 스케일 — macOS 네이티브 */
+  --fs-10: 10px;   /* kbd, nav kbd */
+  --fs-11: 11px;   /* meta, count badges, captions, overline */
+  --fs-12: 12px;   /* secondary body, filter labels */
+  --fs-13: 13px;   /* body (default html font-size) */
+  --fs-14: 14px;   /* meeting id, card title */
+  --fs-15: 15px;   /* list title */
+  --fs-16: 16px;   /* empty state */
+  --fs-20: 20px;   /* section title */
+  --fs-22: 22px;   /* view title */
+
+  /* 폰트 웨이트 */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* 라인 하이트 */
+  --lh-tight: 1.2;
+  --lh-snug: 1.4;
+  --lh-base: 1.5;
+  --lh-relaxed: 1.6;
+  --lh-loose: 1.8;
+
+  /* 레터 스페이싱 (macOS SF Pro 권장) */
+  --ls-tight: -0.02em;
+  --ls-snug: -0.01em;
+  --ls-wide: 0.04em;
+
+  /* 스페이싱 스케일 (현재 사용 중인 수치를 토큰화) */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-8: 16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-16: 32px;
+  --space-20: 40px;
+
+  /* Pill/캡슐 radius */
+  --radius-pill: 10px;
 }
 
 
@@ -203,6 +259,39 @@ body {
   color: var(--text-primary);
   line-height: 1.5;
   overflow: hidden;
+}
+
+/* ------------------------------------------------------------------
+   공용 타이포 유틸리티 (신규 컴포넌트에서 재사용)
+   ------------------------------------------------------------------ */
+
+/* 섹션 오버라인 라벨 (SETTINGS, REFERENCES 등) */
+.overline {
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-secondary);
+  line-height: var(--lh-tight);
+}
+
+/* 보조 본문 — 12px, 약간 눅진한 line-height */
+.body-sm {
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+  color: var(--text-secondary);
+}
+
+/* 메타 캡션 — 11px, tabular-nums 로 숫자 정렬 안정화 */
+.caption {
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 숫자 전용 — tabular-nums 만 필요한 경우 */
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 /* SVG 아이콘 기본 스타일 */
