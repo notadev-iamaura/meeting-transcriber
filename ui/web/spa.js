@@ -489,6 +489,52 @@
                 errorBanner.show(msg);
             });
 
+            // 범용 안내 모달 (#infoModal) — 아직 구현되지 않은 기능 안내 등에 재사용.
+            // 사용: showInfoModal("제목", "본문")
+            function showInfoModal(title, message) {
+                var modal = document.getElementById("infoModal");
+                if (!modal) return;
+                var t = document.getElementById("infoModalTitle");
+                var m = document.getElementById("infoModalMessage");
+                if (t) App.safeText(t, title || "안내");
+                if (m) App.safeText(m, message || "");
+                modal.classList.remove("hidden");
+                var closeBtn = document.getElementById("infoModalClose");
+                if (closeBtn) closeBtn.focus();
+            }
+            function hideInfoModal() {
+                var modal = document.getElementById("infoModal");
+                if (!modal) return;
+                modal.classList.add("hidden");
+            }
+            // 닫기 버튼 + 배경 클릭 + ESC 키로 닫기
+            var _infoModalEl = document.getElementById("infoModal");
+            if (_infoModalEl) {
+                var _infoCloseBtn = document.getElementById("infoModalClose");
+                if (_infoCloseBtn) _infoCloseBtn.addEventListener("click", hideInfoModal);
+                _infoModalEl.addEventListener("click", function (e) {
+                    // 컨테이너(= overlay)를 직접 눌렀을 때만 — 내부 모달 콘텐츠 클릭은 무시
+                    if (e.target === _infoModalEl) hideInfoModal();
+                });
+                document.addEventListener("keydown", function (e) {
+                    if (e.key === "Escape" && !_infoModalEl.classList.contains("hidden")) {
+                        hideInfoModal();
+                    }
+                });
+            }
+
+            // 가져오기 버튼 (오디오 파일 import) — 현재는 준비 중 안내 모달만 표시.
+            // 실제 업로드는 백엔드 API 추가 후 연결 예정.
+            var _importBtn = document.getElementById("importBtn");
+            if (_importBtn) {
+                _importBtn.addEventListener("click", function () {
+                    showInfoModal(
+                        "가져오기",
+                        "곧 지원될 예정입니다.\n지금은 ~/.meeting-transcriber/audio_input 폴더에 오디오 파일을 넣으면 자동으로 처리됩니다."
+                    );
+                });
+            }
+
             // 녹음 HUD 의 즉시 정지 버튼: 클릭 시 /api/recording/stop 호출.
             // POST 성공 시 pill 을 즉시 숨김 — WebSocket 이 끊긴 상태에서도 UI 가 멈추지 않도록.
             // 백엔드의 ws:recording_stopped 가 뒤이어 도착해도 기존 핸들러의 동작(hide+ticker stop)은 멱등.

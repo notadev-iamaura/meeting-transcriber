@@ -486,6 +486,41 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* 리스트 헤더 우측 액션 영역 (가져오기 버튼 + 건수 배지) */
+.list-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 헤더 내 아이콘 버튼 (가져오기 등) */
+.list-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.list-header-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.list-header-btn:active {
+  transform: scale(0.95);
+}
+
 /* Recap 브랜드 락업 (리스트 헤더 좌측) */
 .brand-lockup {
   display: flex;
@@ -4553,6 +4588,15 @@ button {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 20px;
+}
+
+/* 안내 문구 (info 모달용) — 제목 아래 본문 문단 */
+.modal-message {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-line;
 }
 
 /* ============================================================

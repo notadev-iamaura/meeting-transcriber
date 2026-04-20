@@ -66,7 +66,16 @@
           <img class="brand-mark brand-mark-dark" src="/static/brand/app-icon-dark.svg" width="20" height="20" alt="" aria-hidden="true">
           <h1 class="list-title">Recap</h1>
         </div>
-        <span class="list-count" id="listCount"></span>
+        <div class="list-header-actions">
+          <button type="button" id="importBtn" class="list-header-btn" aria-label="오디오 가져오기" title="오디오 가져오기">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"></path>
+              <polyline points="6,7 10,3 14,7"></polyline>
+              <line x1="10" y1="3" x2="10" y2="13"></line>
+            </svg>
+          </button>
+          <span class="list-count" id="listCount"></span>
+        </div>
       </div>
       <div class="list-section-label">회의록</div>
       <div class="list-search">
@@ -122,6 +131,17 @@
         <rect x="5" y="5" width="10" height="10" rx="1"></rect>
       </svg>
     </button>
+  </div>
+
+  <!-- 범용 안내 모달 (정보/준비중 안내 등에 재사용, 기존 .modal-overlay 패턴 재사용) -->
+  <div id="infoModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+    <div class="modal-content">
+      <h3 class="modal-title" id="infoModalTitle">안내</h3>
+      <p class="modal-message" id="infoModalMessage"></p>
+      <div class="modal-actions">
+        <button type="button" class="settings-save-btn" id="infoModalClose">확인</button>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>
