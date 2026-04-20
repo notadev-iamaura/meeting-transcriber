@@ -77,7 +77,6 @@
           <span class="list-count" id="listCount"></span>
         </div>
       </div>
-      <div class="list-section-label">회의록</div>
       <div class="list-search">
         <input type="search" id="listSearchInput" placeholder="회의 검색..." aria-label="회의 검색">
       </div>
@@ -117,7 +116,7 @@
     <button class="toast-close" id="errorClose" aria-label="닫기">&#x2715;</button>
   </div>
 
-  <!-- 녹음 상태 플로팅 바 (HUD) — 녹음 진행을 시각화하는 waveform + 즉시 정지 버튼 포함 -->
+  <!-- 녹음 상태 플로팅 pill (HUD 최소화 상태) — overlay 가 최소화되었을 때 표시 -->
   <div id="recordingStatus" class="recording-status" role="status" aria-live="polite">
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
@@ -126,11 +125,75 @@
       <span></span><span></span><span></span><span></span>
     </div>
     <span class="recording-duration" id="recordingDuration" aria-live="off">00:00</span>
+    <button type="button" id="recordingExpandBtn" class="recording-expand-btn" aria-label="녹음 HUD 열기" title="녹음 패널 열기">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 10h12M10 4v12"></path>
+      </svg>
+    </button>
     <button type="button" id="recordingStopBtn" class="recording-stop-btn" aria-label="녹음 정지">
       <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="5" y="5" width="10" height="10" rx="1"></rect>
       </svg>
     </button>
+  </div>
+
+  <!-- 녹음 Full-viewport HUD (레퍼런스 RecordingOverlay.jsx) — 녹음 시작 시 표시 -->
+  <div id="recordingOverlay" class="recording-overlay" role="dialog" aria-modal="true" aria-labelledby="recordingOverlayTitle" aria-hidden="true">
+    <div class="recording-scrim" data-recording-action="minimize"></div>
+    <div class="recording-panel" role="document">
+      <div class="recording-source">
+        <span class="status-dot recording" aria-hidden="true"></span>
+        <span id="recordingSourceLabel">녹음 중 · 시스템 오디오</span>
+      </div>
+      <div class="recording-timer" id="recordingOverlayTimer" aria-live="off">00:00:00</div>
+      <div id="recordingOverlayTitle" class="sr-only">녹음 진행 중</div>
+      <div class="recording-wave" aria-hidden="true">
+        <!-- 48 bars — spa.js 가 마운트 시점에 생성 -->
+      </div>
+      <div class="recording-meta">
+        <span class="num" id="recordingOverlayMetaDuration">00:00:00</span>
+        <span>·</span>
+        <span id="recordingOverlayMetaLevel">실시간 음성 감지</span>
+      </div>
+      <div class="recording-actions">
+        <button type="button" class="rec-btn ghost" data-recording-action="minimize">최소화</button>
+        <button type="button" class="rec-btn ghost" data-recording-action="cancel" id="recordingOverlayCancelBtn">취소</button>
+        <button type="button" class="rec-btn primary" data-recording-action="stop" id="recordingOverlayStopBtn">녹음 정지 · 전사 시작</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 오디오 가져오기 모달 (레퍼런스 ImportPanel.jsx) — dropzone + 큐 스캐폴드 -->
+  <div id="importModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+    <div class="modal-content import-modal-content">
+      <h3 class="modal-title" id="importModalTitle">오디오 가져오기</h3>
+      <p class="modal-message">
+        파일을 끌어다 놓거나 클릭해 선택하세요.
+        선택된 파일은 <code class="mono-inline">~/.meeting-transcriber/audio_input</code>
+        폴더에 배치되어 파이프라인이 자동으로 시작됩니다.
+      </p>
+      <div class="import-dropzone" id="importDropzone" tabindex="0" role="button" aria-label="오디오 파일 드롭존">
+        <svg width="28" height="28" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"></path>
+          <polyline points="6,7 10,3 14,7"></polyline>
+          <line x1="10" y1="3" x2="10" y2="13"></line>
+        </svg>
+        <div class="import-dropzone-title">파일 드롭 또는 클릭해 선택</div>
+        <div class="import-dropzone-sub">.m4a · .wav · .mp3 · 최대 2 GB</div>
+        <input type="file" id="importFileInput" multiple accept="audio/*,.m4a,.wav,.mp3" hidden>
+      </div>
+      <div class="import-queue" id="importQueue" hidden>
+        <div class="overline import-queue-header">선택된 파일</div>
+        <div class="import-queue-list" id="importQueueList"></div>
+      </div>
+      <div class="import-notice" id="importNotice" hidden role="status" aria-live="polite">
+        업로드 API 는 아직 준비 중입니다. 현재는 위 폴더에 직접 배치해 주세요.
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="importModalCancel">닫기</button>
+        <button type="button" class="settings-save-btn" id="importModalStart" disabled>파이프라인 시작</button>
+      </div>
+    </div>
   </div>
 
   <!-- 범용 안내 모달 (정보/준비중 안내 등에 재사용, 기존 .modal-overlay 패턴 재사용) -->
