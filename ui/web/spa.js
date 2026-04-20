@@ -767,13 +767,13 @@
                 titleEl.className = "meeting-item-title";
                 titleEl.textContent = App.extractMeetingTitle(meeting);
 
-                // 요약 프리뷰 1줄
+                // 요약 프리뷰 1줄 — summary 가 있으면 우선, 없으면 상태 라벨
+                // 전체 요약을 native tooltip 으로 노출해 한 줄 잘림 보완.
                 var previewEl = document.createElement("div");
                 previewEl.className = "meeting-item-preview";
                 if (meeting.summary_preview) {
                     previewEl.textContent = meeting.summary_preview;
-                } else if (meeting.status === "completed") {
-                    previewEl.textContent = App.getStatusLabel(meeting.status);
+                    item.setAttribute("title", meeting.summary_preview);
                 } else {
                     previewEl.textContent = App.getStatusLabel(meeting.status);
                 }
