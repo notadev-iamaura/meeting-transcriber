@@ -8,7 +8,6 @@ variant 부분 실패, 취소, diarize 체크포인트 분기를 monkeypatch 기
 from __future__ import annotations
 
 import asyncio
-import json
 
 
 def _run(coro: Any) -> Any:
@@ -24,7 +23,8 @@ def _run(coro: Any) -> Any:
         return loop.run_until_complete(coro)
     finally:
         asyncio.set_event_loop(loop)
-from dataclasses import dataclass
+
+
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,6 @@ from core import ab_test_runner, ab_test_store
 from core.ab_test_runner import (
     LlmScope,
     ModelSpec,
-    compute_metrics,
     compute_winner_score,
     count_forbidden_patterns,
     determine_winner,
@@ -49,7 +48,6 @@ from steps.merger import MergedResult, MergedUtterance
 from steps.summarizer import SummaryResult
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
-
 # ============================================================
 # Fixtures
 # ============================================================
@@ -59,9 +57,7 @@ from steps.transcriber import TranscriptResult, TranscriptSegment
 def tmp_config(tmp_path: Path) -> AppConfig:
     """tmp_path 를 base_dir 로 하는 AppConfig."""
     cfg = AppConfig()
-    cfg = cfg.model_copy(
-        update={"paths": PathsConfig(base_dir=str(tmp_path))}
-    )
+    cfg = cfg.model_copy(update={"paths": PathsConfig(base_dir=str(tmp_path))})
     # outputs 디렉터리 생성
     cfg.paths.resolved_outputs_dir.mkdir(parents=True, exist_ok=True)
     return cfg
@@ -81,9 +77,7 @@ def sample_merged() -> MergedResult:
 
 
 @pytest.fixture
-def meeting_with_merge(
-    tmp_config: AppConfig, sample_merged: MergedResult
-) -> str:
+def meeting_with_merge(tmp_config: AppConfig, sample_merged: MergedResult) -> str:
     """merge.json 체크포인트가 준비된 가짜 회의 ID."""
     meeting_id = "meeting_20260409-000000"
     # 체크포인트 디렉터리 (merge.json, diarize.json 등)
@@ -491,12 +485,16 @@ class TestSttRunner:
         stub_diarize = DiarizationResult(segments=[], num_speakers=1, audio_path="/fake")
 
         class StubDiarizer:
-            def __init__(self, *a, **kw) -> None: pass
+            def __init__(self, *a, **kw) -> None:
+                pass
+
             async def diarize(self, wav_path) -> DiarizationResult:
                 return stub_diarize
 
         class StubTranscriber:
-            def __init__(self, *a, **kw) -> None: pass
+            def __init__(self, *a, **kw) -> None:
+                pass
+
             async def transcribe(self, wav_path, **kwargs) -> TranscriptResult:
                 return TranscriptResult(segments=[], full_text="")
 

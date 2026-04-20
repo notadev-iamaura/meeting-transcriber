@@ -22,7 +22,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from config import AppConfig
@@ -39,7 +39,7 @@ _COMPRESSIBLE_EXTENSIONS = {".wav"}
 _AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".webm"}
 
 
-class DataTier(str, Enum):
+class DataTier(StrEnum):
     """데이터 라이프사이클 등급을 정의하는 열거형.
 
     Hot: 최근 데이터, 원본 유지
@@ -52,7 +52,7 @@ class DataTier(str, Enum):
     COLD = "cold"
 
 
-class ColdAction(str, Enum):
+class ColdAction(StrEnum):
     """Cold 등급 데이터에 적용할 정책.
 
     delete_audio: 오디오 파일만 삭제, 메타데이터(JSON/MD) 보존

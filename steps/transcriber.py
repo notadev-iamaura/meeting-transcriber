@@ -174,9 +174,7 @@ class Transcriber:
         self._beam_size = self._config.stt.beam_size
         self._batch_size = self._config.stt.batch_size  # 향후 mlx-whisper batch 지원 대비 캐싱
         # 컨텍스트 바이어싱용 initial_prompt (None이면 미적용)
-        self._initial_prompt: str | None = getattr(
-            self._config.stt, "initial_prompt", None
-        )
+        self._initial_prompt: str | None = getattr(self._config.stt, "initial_prompt", None)
         # 이전 윈도우 텍스트 전파 제어 (False: 각 윈도우 독립 전사)
         self._condition_on_previous_text: bool = getattr(
             self._config.stt, "condition_on_previous_text", True
@@ -340,9 +338,7 @@ class Transcriber:
         # VAD clip_timestamps 전달 (None이면 전체 오디오 처리)
         if vad_clip_timestamps is not None:
             kwargs["clip_timestamps"] = vad_clip_timestamps
-            logger.debug(
-                f"VAD clip_timestamps 적용: {len(vad_clip_timestamps) // 2}개 구간"
-            )
+            logger.debug(f"VAD clip_timestamps 적용: {len(vad_clip_timestamps) // 2}개 구간")
 
         return kwargs
 
@@ -380,8 +376,7 @@ class Transcriber:
             )
         except NotImplementedError:
             logger.warning(
-                f"beam search(beam_size={self._beam_size}) 미지원 → "
-                "greedy decoding으로 폴백"
+                f"beam search(beam_size={self._beam_size}) 미지원 → greedy decoding으로 폴백"
             )
             return await asyncio.wait_for(
                 asyncio.to_thread(
@@ -432,7 +427,9 @@ class Transcriber:
             ) as whisper_module:
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
                 raw_result = await self._transcribe_with_fallback(
-                    whisper_module, audio_path, transcribe_timeout,
+                    whisper_module,
+                    audio_path,
+                    transcribe_timeout,
                     vad_clip_timestamps,
                 )
         except TimeoutError as e:

@@ -103,7 +103,7 @@ def check_disk_space(output_dir: Path, required_gb: float = REQUIRED_DISK_SPACE_
         check_path = check_path.parent
 
     usage = shutil.disk_usage(check_path)
-    free_gb = usage.free / (1024 ** 3)
+    free_gb = usage.free / (1024**3)
 
     if free_gb < required_gb:
         raise OSError(
@@ -165,9 +165,7 @@ def convert_to_mlx_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def process_weights(
-    state_dict: dict[str, Any], dtype_str: str = "float16"
-) -> dict[str, Any]:
+def process_weights(state_dict: dict[str, Any], dtype_str: str = "float16") -> dict[str, Any]:
     """가중치 텐서를 MLX 배열로 변환한다.
 
     처리 내용:
@@ -197,10 +195,7 @@ def process_weights(
             continue
 
         # PyTorch 텐서 → numpy 변환
-        if hasattr(value, "numpy"):
-            np_value = value.float().numpy()
-        else:
-            np_value = np.array(value)
+        np_value = value.float().numpy() if hasattr(value, "numpy") else np.array(value)
 
         # Conv1d 가중치 축 변환: (out_ch, in_ch, kernel) → (out_ch, kernel, in_ch)
         if "conv" in key and np_value.ndim == 3:
@@ -225,6 +220,7 @@ def build_mlx_config(hf_config: Any) -> dict[str, Any]:
     Returns:
         MLX 호환 config 딕셔너리 (10개 필수 필드 포함)
     """
+
     # 딕셔너리 또는 객체 속성 접근을 통합 처리
     def _get(key: str) -> Any:
         if isinstance(hf_config, dict):
@@ -284,8 +280,16 @@ def validate_output(output_dir: Path) -> bool:
 
     # 2. config.json 필수 필드 확인
     required_fields = [
-        "n_mels", "n_audio_ctx", "n_audio_state", "n_audio_head", "n_audio_layer",
-        "n_vocab", "n_text_ctx", "n_text_state", "n_text_head", "n_text_layer",
+        "n_mels",
+        "n_audio_ctx",
+        "n_audio_state",
+        "n_audio_head",
+        "n_audio_layer",
+        "n_vocab",
+        "n_text_ctx",
+        "n_text_state",
+        "n_text_head",
+        "n_text_layer",
     ]
     with open(config_path, encoding="utf-8") as f:
         config_data = json.load(f)
@@ -395,9 +399,7 @@ def load_flax_direct(source: str) -> tuple[dict[str, Any], dict[str, Any]]:
         config_path = hf_hub_download(source, "config.json")
     except Exception as e:
         raise RuntimeError(
-            f"모델 다운로드 실패: {source}\n"
-            f"원인: {e}\n"
-            f"HuggingFace 모델 ID가 올바른지 확인하세요."
+            f"모델 다운로드 실패: {source}\n원인: {e}\nHuggingFace 모델 ID가 올바른지 확인하세요."
         ) from e
 
     logger.info(f"flax_model.msgpack 다운로드 완료: {msgpack_path}")
@@ -447,9 +449,7 @@ def load_flax_direct(source: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return hf_state_dict, hf_config
 
 
-def save_mlx_model(
-    weights: dict[str, Any], config: dict[str, Any], output_dir: Path
-) -> None:
+def save_mlx_model(weights: dict[str, Any], config: dict[str, Any], output_dir: Path) -> None:
     """MLX 가중치와 설정을 파일로 저장한다.
 
     Args:
@@ -476,8 +476,7 @@ def save_mlx_model(
     config_size = config_path.stat().st_size
     weights_size = weights_path.stat().st_size
     logger.info(
-        f"출력 크기: config={config_size} bytes, "
-        f"weights={weights_size / (1024**2):.1f} MB"
+        f"출력 크기: config={config_size} bytes, weights={weights_size / (1024**2):.1f} MB"
     )
 
 

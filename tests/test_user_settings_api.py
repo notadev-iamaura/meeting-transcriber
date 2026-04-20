@@ -55,8 +55,7 @@ def test_get_prompts_returns_default(client: TestClient) -> None:
 def test_put_prompts_updates_corrector(client: TestClient) -> None:
     """PUT /api/prompts가 보정 프롬프트를 변경한다."""
     new_text = (
-        "새로운 보정 프롬프트입니다. "
-        "반드시 [번호] 텍스트 포맷으로 출력하세요. 추가 설명 없이."
+        "새로운 보정 프롬프트입니다. 반드시 [번호] 텍스트 포맷으로 출력하세요. 추가 설명 없이."
     )
     resp = client.put(
         "/api/prompts",
@@ -77,9 +76,7 @@ def test_put_prompts_rejects_missing_format_directive(client: TestClient) -> Non
         "/api/prompts",
         json={
             "corrector": {
-                "system_prompt": (
-                    "번호 없이 교정해주세요 이 프롬프트는 반드시 실패해야 합니다"
-                )
+                "system_prompt": ("번호 없이 교정해주세요 이 프롬프트는 반드시 실패해야 합니다")
             }
         },
     )
@@ -102,9 +99,7 @@ def test_put_prompts_partial_update_preserves_other_fields(
     before = client.get("/api/prompts").json()["prompts"]
     original_corrector = before["corrector"]["system_prompt"]
 
-    new_summarizer = (
-        "새로운 요약 프롬프트입니다. 회의록을 마크다운으로 작성하세요. 간결하게."
-    )
+    new_summarizer = "새로운 요약 프롬프트입니다. 회의록을 마크다운으로 작성하세요. 간결하게."
     resp = client.put(
         "/api/prompts",
         json={"summarizer": {"system_prompt": new_summarizer}},
@@ -205,9 +200,7 @@ def test_put_vocabulary_term_not_found(client: TestClient) -> None:
 
 def test_delete_vocabulary_term(client: TestClient) -> None:
     """용어 삭제 후 204, 목록에서 사라짐."""
-    created = client.post(
-        "/api/vocabulary/terms", json={"term": "삭제대상"}
-    ).json()
+    created = client.post("/api/vocabulary/terms", json={"term": "삭제대상"}).json()
 
     resp = client.delete(f"/api/vocabulary/terms/{created['id']}")
     assert resp.status_code == 204

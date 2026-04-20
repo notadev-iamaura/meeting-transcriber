@@ -21,7 +21,6 @@ import pytest
 
 from core import user_settings as us
 
-
 # === fixtures ===
 
 
@@ -103,6 +102,7 @@ def test_load_prompts_invalidates_cache_on_mtime_change(
     )
     # mtime이 확실히 달라지도록 약간 대기
     import time as _time
+
     _time.sleep(0.01)
     prompts_file.write_text(json.dumps(raw, ensure_ascii=False))
 
@@ -308,9 +308,7 @@ def test_vocabulary_aliases_dedup_and_strip(isolated_user_data: Path) -> None:
 # === 7. reset 동작 ===
 
 
-def test_reset_prompts_to_default(
-    isolated_user_data: Path, valid_corrector_prompt: str
-) -> None:
+def test_reset_prompts_to_default(isolated_user_data: Path, valid_corrector_prompt: str) -> None:
     """reset이 기본값을 복원한다."""
     initial = us.load_prompts()
     modified = initial.model_copy(
@@ -364,7 +362,7 @@ def test_build_corrector_snapshot_excludes_disabled(
     isolated_user_data: Path,
 ) -> None:
     """enabled=False 용어는 스냅샷에서 제외된다."""
-    active = us.add_vocabulary_term(term="활성용어")
+    us.add_vocabulary_term(term="활성용어")
     disabled = us.add_vocabulary_term(term="비활성용어")
     us.update_vocabulary_term(term_id=disabled.id, enabled=False)
 

@@ -39,14 +39,12 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_e2e_prompts_full_lifecycle(
-    client: TestClient, isolated_user_data: Path
-) -> None:
+def test_e2e_prompts_full_lifecycle(client: TestClient, isolated_user_data: Path) -> None:
     """프롬프트 전체 생명주기: 조회 → 편집 → 파일 영속성 → 재조회 → reset."""
     # 1. 초기 조회 (파일 자동 생성됨)
     resp = client.get("/api/prompts")
     assert resp.status_code == 200
-    initial = resp.json()["prompts"]
+    resp.json()["prompts"]
     assert (isolated_user_data / "prompts.json").exists()
 
     # 2. 3종 프롬프트 동시 편집
@@ -55,20 +53,17 @@ def test_e2e_prompts_full_lifecycle(
         json={
             "corrector": {
                 "system_prompt": (
-                    "E2E 보정 프롬프트. [번호] 텍스트 포맷으로 출력하세요. "
-                    "마커: E2E-CORRECTOR"
+                    "E2E 보정 프롬프트. [번호] 텍스트 포맷으로 출력하세요. 마커: E2E-CORRECTOR"
                 )
             },
             "summarizer": {
                 "system_prompt": (
-                    "E2E 요약 프롬프트. 회의록을 마크다운으로 작성하세요. "
-                    "마커: E2E-SUMMARIZER"
+                    "E2E 요약 프롬프트. 회의록을 마크다운으로 작성하세요. 마커: E2E-SUMMARIZER"
                 )
             },
             "chat": {
                 "system_prompt": (
-                    "E2E 채팅 프롬프트. 회의 내용을 기반으로 답변하세요. "
-                    "마커: E2E-CHAT"
+                    "E2E 채팅 프롬프트. 회의 내용을 기반으로 답변하세요. 마커: E2E-CHAT"
                 )
             },
         },
@@ -100,9 +95,7 @@ def test_e2e_prompts_full_lifecycle(
     assert "[번호]" in reset_data["corrector"]["system_prompt"]
 
 
-def test_e2e_vocabulary_full_crud(
-    client: TestClient, isolated_user_data: Path
-) -> None:
+def test_e2e_vocabulary_full_crud(client: TestClient, isolated_user_data: Path) -> None:
     """용어집 전체 CRUD: 추가 3개 → 수정 → 삭제 → reset."""
     # 추가
     ids: list[str] = []
@@ -158,9 +151,7 @@ def test_e2e_vocabulary_full_crud(
 def test_e2e_rejects_invalid_inputs(client: TestClient) -> None:
     """잘못된 입력에 대한 에러 응답 정합성."""
     # 너무 짧은 프롬프트 → 422 (Pydantic)
-    resp = client.put(
-        "/api/prompts", json={"corrector": {"system_prompt": "짧음"}}
-    )
+    resp = client.put("/api/prompts", json={"corrector": {"system_prompt": "짧음"}})
     assert resp.status_code == 422
 
     # [번호] 없는 프롬프트 → 400 (저장소 계층 검증)
@@ -168,9 +159,7 @@ def test_e2e_rejects_invalid_inputs(client: TestClient) -> None:
         "/api/prompts",
         json={
             "corrector": {
-                "system_prompt": (
-                    "포맷 지시가 없는 프롬프트입니다. 반드시 거부되어야 합니다."
-                )
+                "system_prompt": ("포맷 지시가 없는 프롬프트입니다. 반드시 거부되어야 합니다.")
             }
         },
     )
@@ -200,9 +189,7 @@ def test_e2e_atomic_write_leaves_no_tmp_files(
             "/api/prompts",
             json={
                 "corrector": {
-                    "system_prompt": (
-                        f"반복 저장 테스트 #{i}. [번호] 텍스트 포맷으로 출력하세요."
-                    )
+                    "system_prompt": (f"반복 저장 테스트 #{i}. [번호] 텍스트 포맷으로 출력하세요.")
                 }
             },
         )
@@ -224,27 +211,19 @@ def test_e2e_partial_update_does_not_affect_other_prompts(
         "/api/prompts",
         json={
             "corrector": {
-                "system_prompt": (
-                    "전용 보정 MARK-A. [번호] 텍스트 포맷으로 출력하세요."
-                )
+                "system_prompt": ("전용 보정 MARK-A. [번호] 텍스트 포맷으로 출력하세요.")
             }
         },
     )
     client.put(
         "/api/prompts",
         json={
-            "summarizer": {
-                "system_prompt": "전용 요약 MARK-B. 회의록을 마크다운으로 작성하세요."
-            }
+            "summarizer": {"system_prompt": "전용 요약 MARK-B. 회의록을 마크다운으로 작성하세요."}
         },
     )
     client.put(
         "/api/prompts",
-        json={
-            "chat": {
-                "system_prompt": "전용 채팅 MARK-C. 회의 내용 기반으로만 답변하세요."
-            }
-        },
+        json={"chat": {"system_prompt": "전용 채팅 MARK-C. 회의 내용 기반으로만 답변하세요."}},
     )
 
     resp = client.get("/api/prompts")

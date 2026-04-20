@@ -174,7 +174,9 @@ def convert_model(
     with open(config_out, "w") as f:
         json.dump(mlx_config, f, indent=2)
     logger.info(f"  MLX config 저장: {config_out}")
-    logger.info(f"  아키텍처: encoder {mlx_config['n_audio_layer']}층, decoder {mlx_config['n_text_layer']}층, d_model {mlx_config['n_audio_state']}")
+    logger.info(
+        f"  아키텍처: encoder {mlx_config['n_audio_layer']}층, decoder {mlx_config['n_text_layer']}층, d_model {mlx_config['n_audio_state']}"
+    )
 
     # 2단계: HF 가중치 로드
     logger.info(f"[2/4] HF 가중치 로드: {source}")
@@ -239,7 +241,9 @@ def convert_model(
     return output_path
 
 
-def validate_model(model_dir: str, reference_mlx: str = "mlx-community/whisper-large-v3-turbo") -> bool:
+def validate_model(
+    model_dir: str, reference_mlx: str = "mlx-community/whisper-large-v3-turbo"
+) -> bool:
     """변환된 모델의 무결성을 검증한다.
 
     Args:
@@ -271,8 +275,16 @@ def validate_model(model_dir: str, reference_mlx: str = "mlx-community/whisper-l
         config = json.load(f)
 
     required_fields = [
-        "n_mels", "n_audio_ctx", "n_audio_state", "n_audio_head", "n_audio_layer",
-        "n_vocab", "n_text_ctx", "n_text_state", "n_text_head", "n_text_layer",
+        "n_mels",
+        "n_audio_ctx",
+        "n_audio_state",
+        "n_audio_head",
+        "n_audio_layer",
+        "n_vocab",
+        "n_text_ctx",
+        "n_text_state",
+        "n_text_head",
+        "n_text_layer",
     ]
     for field in required_fields:
         if field not in config:
@@ -280,6 +292,7 @@ def validate_model(model_dir: str, reference_mlx: str = "mlx-community/whisper-l
 
     # 가중치 로드 테스트
     from safetensors.numpy import load_file as np_load_file
+
     try:
         tensors = np_load_file(str(weights_path))
         logger.info(f"가중치 키 {len(tensors)}개 로드 성공")
@@ -321,16 +334,19 @@ def validate_model(model_dir: str, reference_mlx: str = "mlx-community/whisper-l
 
 def main():
     parser = argparse.ArgumentParser(description="HuggingFace Whisper → MLX Whisper 변환")
-    parser.add_argument("--source", default="ghost613/whisper-large-v3-turbo-korean",
-                        help="HuggingFace 모델 ID")
-    parser.add_argument("--output", default="./converted_model",
-                        help="출력 디렉토리")
-    parser.add_argument("--reference-mlx", default="mlx-community/whisper-large-v3-turbo",
-                        help="alignment_heads 복사 및 검증용 레퍼런스 MLX 모델")
-    parser.add_argument("--dtype", choices=["float16", "float32"], default="float16",
-                        help="출력 데이터 타입")
-    parser.add_argument("--validate-only", action="store_true",
-                        help="변환 없이 기존 모델 검증만")
+    parser.add_argument(
+        "--source", default="ghost613/whisper-large-v3-turbo-korean", help="HuggingFace 모델 ID"
+    )
+    parser.add_argument("--output", default="./converted_model", help="출력 디렉토리")
+    parser.add_argument(
+        "--reference-mlx",
+        default="mlx-community/whisper-large-v3-turbo",
+        help="alignment_heads 복사 및 검증용 레퍼런스 MLX 모델",
+    )
+    parser.add_argument(
+        "--dtype", choices=["float16", "float32"], default="float16", help="출력 데이터 타입"
+    )
+    parser.add_argument("--validate-only", action="store_true", help="변환 없이 기존 모델 검증만")
     args = parser.parse_args()
 
     if args.validate_only:

@@ -2,6 +2,7 @@
 
 계획서 2.6 섹션 및 Phase 1 요구사항을 검증한다.
 """
+
 from __future__ import annotations
 
 
@@ -101,9 +102,7 @@ class TestSTTModelRegistry:
             assert not spec.model_path.startswith(("/", "~", "./")), (
                 f"{spec.id}: 로컬 경로 사용 금지 (사전 양자화 HF repo 만 허용)"
             )
-            assert spec.hf_source == spec.model_path, (
-                f"{spec.id}: hf_source와 model_path가 달라요"
-            )
+            assert spec.hf_source == spec.model_path, f"{spec.id}: hf_source와 model_path가 달라요"
 
     def test_spec은_frozen_dataclass여야_한다(self):
         """불변성 확인 — frozen=True."""

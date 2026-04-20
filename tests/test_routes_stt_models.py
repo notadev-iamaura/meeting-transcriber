@@ -24,11 +24,12 @@ from config import AppConfig, PathsConfig, ServerConfig, STTConfig
 from core.stt_model_downloader import DownloadConflictError, DownloadJob
 from core.stt_model_status import ModelStatus
 
-
 # === 헬퍼 ===
 
 
-def _make_test_config(tmp_path: Path, stt_model: str = "youngouk/whisper-medium-komixv2-mlx") -> AppConfig:
+def _make_test_config(
+    tmp_path: Path, stt_model: str = "youngouk/whisper-medium-komixv2-mlx"
+) -> AppConfig:
     """테스트용 AppConfig를 생성한다.
 
     Args:
@@ -119,9 +120,20 @@ class TestGetSTTModels:
 
         assert resp.status_code == 200
         required = {
-            "id", "label", "description", "base_model", "expected_size_mb",
-            "cer_percent", "wer_percent", "memory_gb", "rtf", "license",
-            "is_default", "is_recommended", "status", "is_active",
+            "id",
+            "label",
+            "description",
+            "base_model",
+            "expected_size_mb",
+            "cer_percent",
+            "wer_percent",
+            "memory_gb",
+            "rtf",
+            "license",
+            "is_default",
+            "is_recommended",
+            "status",
+            "is_active",
         }
         for m in resp.json()["models"]:
             missing = required - set(m.keys())
@@ -130,9 +142,7 @@ class TestGetSTTModels:
     def test_GET_stt_models_활성_모델_표시(self, tmp_path: Path) -> None:
         """config.stt.model_name과 매칭되는 모델만 is_active=True를 가진다."""
         # komixv2는 HF repo ID를 직접 model_path로 사용한다.
-        app = _make_test_app(
-            tmp_path, stt_model="youngouk/whisper-medium-komixv2-mlx"
-        )
+        app = _make_test_app(tmp_path, stt_model="youngouk/whisper-medium-komixv2-mlx")
         with TestClient(app) as client:
             _install_fake_downloader(app)
             resp = client.get("/api/stt-models")
@@ -198,13 +208,9 @@ class TestDownloadStatusSTTModel:
         with TestClient(app) as client:
             fake = _install_fake_downloader(app)
             fake.get_progress = MagicMock(
-                return_value=_make_download_job(
-                    "seastar-medium-4bit", ModelStatus.DOWNLOADING, 55
-                )
+                return_value=_make_download_job("seastar-medium-4bit", ModelStatus.DOWNLOADING, 55)
             )
-            resp = client.get(
-                "/api/stt-models/seastar-medium-4bit/download-status"
-            )
+            resp = client.get("/api/stt-models/seastar-medium-4bit/download-status")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -238,24 +244,18 @@ class TestActivateSTTModel:
         # 임시 config.yaml 준비 (주석 포함 — 보존 검증)
         tmp_config = tmp_path / "config.yaml"
         tmp_config.write_text(
-            'stt:\n'
+            "stt:\n"
             '  model_name: "youngouk/whisper-medium-komixv2-mlx"  # 기본 STT 모델\n'
             '  language: "ko"\n',
             encoding="utf-8",
         )
-        monkeypatch.setattr(
-            "api.routes._get_config_path", lambda: tmp_config
-        )
+        monkeypatch.setattr("api.routes._get_config_path", lambda: tmp_config)
 
         with TestClient(app) as client:
             _install_fake_downloader(app)
             # seastar 모델이 READY 상태라고 모킹
-            with patch(
-                "api.routes.get_model_status", return_value=ModelStatus.READY
-            ):
-                resp = client.post(
-                    "/api/stt-models/seastar-medium-4bit/activate"
-                )
+            with patch("api.routes.get_model_status", return_value=ModelStatus.READY):
+                resp = client.post("/api/stt-models/seastar-medium-4bit/activate")
 
         assert resp.status_code == 200
         body = resp.json()
@@ -277,9 +277,7 @@ class TestActivateSTTModel:
         # 런타임 config도 갱신됐는지 확인
         assert "seastar-medium-ko-4bit" in app.state.config.stt.model_name
 
-    def test_POST_activate_NOT_DOWNLOADED_400(
-        self, tmp_path: Path
-    ) -> None:
+    def test_POST_activate_NOT_DOWNLOADED_400(self, tmp_path: Path) -> None:
         """다운로드되지 않은 모델 활성화 시 400을 반환한다."""
         app = _make_test_app(tmp_path)
         with TestClient(app) as client:
@@ -288,8 +286,6 @@ class TestActivateSTTModel:
                 "api.routes.get_model_status",
                 return_value=ModelStatus.NOT_DOWNLOADED,
             ):
-                resp = client.post(
-                    "/api/stt-models/ghost613-turbo-4bit/activate"
-                )
+                resp = client.post("/api/stt-models/ghost613-turbo-4bit/activate")
 
         assert resp.status_code == 400

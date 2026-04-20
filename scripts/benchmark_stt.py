@@ -63,8 +63,8 @@ class TranscriptionResult:
     """단일 샘플의 전사 결과"""
 
     sample_id: str
-    reference: str        # 정답 텍스트
-    hypothesis: str       # 전사 결과
+    reference: str  # 정답 텍스트
+    hypothesis: str  # 전사 결과
     audio_duration: float  # 오디오 길이 (초)
     processing_time: float  # 처리 시간 (초)
 
@@ -77,11 +77,11 @@ class BenchmarkMetrics:
     model: str
     total_samples: int
     failed_samples: int
-    cer: float               # Character Error Rate
-    wer: float               # Word Error Rate
+    cer: float  # Character Error Rate
+    wer: float  # Word Error Rate
     avg_processing_time: float
     total_audio_duration: float
-    rtf: float               # Real-Time Factor
+    rtf: float  # Real-Time Factor
     results: list[TranscriptionResult] = field(default_factory=list)
 
 
@@ -124,6 +124,7 @@ class LocalSTTProvider:
         """mlx-whisper 모듈을 지연 로드한다."""
         if self._whisper is None:
             import mlx_whisper
+
             self._whisper = mlx_whisper
             logger.info("mlx-whisper 모듈 로드 완료")
 
@@ -286,14 +287,18 @@ def prepare_dataset(num_samples: int, cache_dir: Path) -> list[dict]:
 
         duration = len(audio_array) / sr
 
-        samples.append({
-            "id": f"zeroth_{i:04d}",
-            "audio_path": audio_path,
-            "reference": item["text"].strip(),
-            "duration": duration,
-        })
+        samples.append(
+            {
+                "id": f"zeroth_{i:04d}",
+                "audio_path": audio_path,
+                "reference": item["text"].strip(),
+                "duration": duration,
+            }
+        )
 
-    logger.info(f"데이터셋 준비 완료: {len(samples)}개 샘플, 총 {sum(s['duration'] for s in samples):.1f}초")
+    logger.info(
+        f"데이터셋 준비 완료: {len(samples)}개 샘플, 총 {sum(s['duration'] for s in samples):.1f}초"
+    )
     return samples
 
 
@@ -332,13 +337,15 @@ def run_benchmark(
             hypothesis = provider.transcribe(sample["audio_path"])
             elapsed = time.time() - start
 
-            results.append(TranscriptionResult(
-                sample_id=sample["id"],
-                reference=sample["reference"],
-                hypothesis=hypothesis,
-                audio_duration=sample["duration"],
-                processing_time=elapsed,
-            ))
+            results.append(
+                TranscriptionResult(
+                    sample_id=sample["id"],
+                    reference=sample["reference"],
+                    hypothesis=hypothesis,
+                    audio_duration=sample["duration"],
+                    processing_time=elapsed,
+                )
+            )
 
             total_audio += sample["duration"]
             total_time += elapsed
@@ -346,8 +353,7 @@ def run_benchmark(
             # 진행률 (10개마다 또는 마지막)
             if (i + 1) % 10 == 0 or i == len(samples) - 1:
                 logger.info(
-                    f"  [{provider_name}] {i + 1}/{len(samples)} 완료 "
-                    f"(누적 {total_time:.1f}초)"
+                    f"  [{provider_name}] {i + 1}/{len(samples)} 완료 (누적 {total_time:.1f}초)"
                 )
 
         except Exception as e:
@@ -357,10 +363,15 @@ def run_benchmark(
     if not results:
         logger.error(f"[{provider_name}] 모든 샘플 실패")
         return BenchmarkMetrics(
-            provider=provider_name, model=model_name,
-            total_samples=0, failed_samples=failed,
-            cer=1.0, wer=1.0,
-            avg_processing_time=0, total_audio_duration=0, rtf=0,
+            provider=provider_name,
+            model=model_name,
+            total_samples=0,
+            failed_samples=failed,
+            cer=1.0,
+            wer=1.0,
+            avg_processing_time=0,
+            total_audio_duration=0,
+            rtf=0,
         )
 
     # 텍스트 정규화 후 CER/WER 계산
@@ -398,8 +409,7 @@ def print_report(metrics_list: list[BenchmarkMetrics]) -> None:
 
     # 테이블 헤더
     header = (
-        f"{'프로바이더':<18} {'모델':<32} "
-        f"{'CER':>7} {'WER':>7} {'RTF':>7} {'성공':>4} {'실패':>4}"
+        f"{'프로바이더':<18} {'모델':<32} {'CER':>7} {'WER':>7} {'RTF':>7} {'성공':>4} {'실패':>4}"
     )
     print(f"\n{header}")
     print("-" * 85)
@@ -445,7 +455,7 @@ def print_report(metrics_list: list[BenchmarkMetrics]) -> None:
                     sample_cers.append((r.sample_id, s_cer, r.reference, r.hypothesis))
 
             sample_cers.sort(key=lambda x: x[1], reverse=True)
-            print(f"\n    오류율 높은 샘플 Top 5:")
+            print("\n    오류율 높은 샘플 Top 5:")
             for sid, s_cer, ref, hyp in sample_cers[:5]:
                 print(f"      {sid}: CER={s_cer:.2%}")
                 print(f"        정답: {ref[:60]}...")
@@ -525,24 +535,32 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--samples", type=int, default=50,
+        "--samples",
+        type=int,
+        default=50,
         help="벤치마크 샘플 수 (기본: 50, 최대: 457)",
     )
     parser.add_argument(
-        "--output", type=str, default=None,
+        "--output",
+        type=str,
+        default=None,
         help="결과 JSON 저장 경로 (기본: data/benchmark_results.json)",
     )
     parser.add_argument(
-        "--openai-model", type=str, default="whisper-1",
+        "--openai-model",
+        type=str,
+        default="whisper-1",
         choices=["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
         help="OpenAI 전사 모델 (기본: whisper-1)",
     )
     parser.add_argument(
-        "--skip-local", action="store_true",
+        "--skip-local",
+        action="store_true",
         help="로컬 STT 벤치마크 스킵",
     )
     parser.add_argument(
-        "--skip-api", action="store_true",
+        "--skip-api",
+        action="store_true",
         help="API STT 벤치마크 스킵",
     )
     args = parser.parse_args()
@@ -577,7 +595,10 @@ def main() -> None:
             language="ko",
         )
         local_metrics = run_benchmark(
-            local_provider, "로컬(Local)", "komixv2-mlx", samples,
+            local_provider,
+            "로컬(Local)",
+            "komixv2-mlx",
+            samples,
         )
         metrics_list.append(local_metrics)
 
@@ -597,7 +618,10 @@ def main() -> None:
             )
             try:
                 api_metrics = run_benchmark(
-                    api_provider, "OpenAI", args.openai_model, samples,
+                    api_provider,
+                    "OpenAI",
+                    args.openai_model,
+                    samples,
                 )
                 metrics_list.append(api_metrics)
             finally:
@@ -615,7 +639,10 @@ def main() -> None:
             router_provider = OpenRouterSTTProvider(api_key=openrouter_key)
             try:
                 router_metrics = run_benchmark(
-                    router_provider, "OpenRouter", "gpt-4o-audio", samples,
+                    router_provider,
+                    "OpenRouter",
+                    "gpt-4o-audio",
+                    samples,
                 )
                 metrics_list.append(router_metrics)
             finally:
@@ -632,8 +659,10 @@ def main() -> None:
     if metrics_list:
         print_report(metrics_list)
 
-        output_path = Path(args.output) if args.output else (
-            PROJECT_ROOT / "data" / "benchmark_results.json"
+        output_path = (
+            Path(args.output)
+            if args.output
+            else (PROJECT_ROOT / "data" / "benchmark_results.json")
         )
         save_results(metrics_list, output_path)
     else:

@@ -50,8 +50,6 @@ from steps.chunker import (
 from steps.corrector import CorrectedResult, CorrectedUtterance
 from steps.embedder import _FTS_TABLE_NAME
 
-
-
 # === FTS5 테이블 이름 ===
 FTS_TABLE = _FTS_TABLE_NAME
 

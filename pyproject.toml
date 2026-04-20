@@ -129,12 +129,22 @@ select = [
     "SIM",  # flake8-simplify (코드 간소화)
 ]
 ignore = [
-    "E501",   # 줄 길이는 formatter에 위임
-    "UP007",  # Union[X, Y] → X | Y 변환 비활성 (기존 코드 호환)
+    "E501",    # 줄 길이는 formatter에 위임
+    "UP007",   # Union[X, Y] → X | Y 변환 비활성 (기존 코드 호환)
+    # 아래 SIM 계열은 스타일 권장일 뿐이라 기존 코드베이스와의 일관성을 위해 비활성.
+    # 필요하면 개별 PR 에서 정리하고 이 ignore 를 제거.
+    "SIM102",  # collapsible-if (중첩 if 한 줄 결합)
+    "SIM105",  # suppressible-exception (try/except pass → contextlib.suppress)
+    "SIM108",  # if-else-block-instead-of-if-exp (삼항 연산자 권장)
+    "SIM115",  # open-file-with-context-handler (명시적 close 허용)
+    "SIM117",  # multiple-with-statements (중첩 with 한 줄 결합)
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S", "B011"]
+# 테스트는 monkeypatching / 조건부 import / sys.path 주입 패턴이 일반적이라 E402 허용.
+"tests/*" = ["S", "B011", "E402"]
+# scripts/ 는 실행형 유틸로 `sys.path.insert` 가 import 보다 선행해야 하므로 E402 허용.
+"scripts/*" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "core", "steps", "search", "api", "ui", "security"]

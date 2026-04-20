@@ -20,10 +20,10 @@ from core.stt_model_registry import (
     get_manual_import_dir,
 )
 from core.stt_model_status import (
+    ModelStatus,
     _check_manual_import,
     get_effective_model_path,
     get_model_status,
-    ModelStatus,
 )
 
 
@@ -165,9 +165,7 @@ def test_get_model_status_ready_via_manual_import(
         lambda s: str(manual_dir),
     )
     # HF 캐시 체크가 실제 경로를 스캔하지 않도록 monkeypatch
-    monkeypatch.setattr(
-        "core.stt_model_status._check_hf_cache", lambda repo_id: False
-    )
+    monkeypatch.setattr("core.stt_model_status._check_hf_cache", lambda repo_id: False)
 
     assert get_model_status(spec) == ModelStatus.READY
 
@@ -222,9 +220,7 @@ def test_import_manual_success(
     target_base = tmp_path / "app-data"
     monkeypatch.setattr(
         "core.stt_model_registry.get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            target_base / "stt_models" / f"{spec.id}-manual"
-        ),
+        lambda spec, base_dir=None: str(target_base / "stt_models" / f"{spec.id}-manual"),
     )
 
     resp = client.post(
@@ -244,9 +240,7 @@ def test_import_manual_success(
     assert (target_dir / "weights.safetensors").read_bytes() == b"fake-weights-data" * 100
 
 
-def test_import_manual_missing_source_dir(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_import_manual_missing_source_dir(client: TestClient, tmp_path: Path) -> None:
     """존재하지 않는 폴더는 400."""
     resp = client.post(
         "/api/stt-models/seastar-medium-4bit/import-manual",
@@ -256,9 +250,7 @@ def test_import_manual_missing_source_dir(
     assert "찾을 수 없" in resp.json()["detail"]
 
 
-def test_import_manual_missing_files(
-    client: TestClient, tmp_path: Path
-) -> None:
+def test_import_manual_missing_files(client: TestClient, tmp_path: Path) -> None:
     """필수 파일이 누락되면 400."""
     source = tmp_path / "incomplete"
     source.mkdir()
@@ -291,9 +283,10 @@ def test_import_manual_clears_stale_error_job(
     """
     from unittest.mock import MagicMock
 
+    from fastapi import FastAPI
+
     from core.stt_model_downloader import DownloadJob, STTModelDownloader
     from core.stt_model_status import ModelStatus
-    from fastapi import FastAPI
 
     # 소스 폴더 + 타겟 격리
     source = tmp_path / "downloads" / "seastar"
@@ -302,12 +295,13 @@ def test_import_manual_clears_stale_error_job(
     (source / "weights.safetensors").write_bytes(b"fake" * 100)
 
     target_base = tmp_path / "app-data"
-    monkeypatch.setattr(
-        "core.stt_model_registry.get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            target_base / "stt_models" / f"{spec.id}-manual"
-        ),
-    )
+    # `get_manual_import_dir` 는 `core.stt_model_registry` 원본 외에도 다음 모듈들이
+    # 모듈 로드 시점에 `from ... import get_manual_import_dir` 로 이름을 바인딩한다.
+    # monkeypatch 가 해당 참조들에도 반영되도록 각 모듈 네임스페이스를 모두 패치.
+    fake = lambda spec, base_dir=None: str(target_base / "stt_models" / f"{spec.id}-manual")  # noqa: E731
+    monkeypatch.setattr("core.stt_model_registry.get_manual_import_dir", fake)
+    monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", fake)
+    monkeypatch.setattr("core.stt_model_downloader.get_manual_import_dir", fake)
 
     # 실제 downloader 인스턴스에 stale ERROR job 주입
     downloader = STTModelDownloader(models_dir=tmp_path / "dl")
@@ -366,9 +360,10 @@ def test_list_stt_models_clears_stale_error_on_disk_ready(
     """
     from unittest.mock import MagicMock
 
+    from fastapi import FastAPI
+
     from core.stt_model_downloader import DownloadJob, STTModelDownloader
     from core.stt_model_status import ModelStatus
-    from fastapi import FastAPI
 
     # 수동 임포트 디렉토리에 파일 직접 배치 (디스크는 READY)
     manual_dir = tmp_path / "seastar-medium-4bit-manual"
@@ -378,9 +373,11 @@ def test_list_stt_models_clears_stale_error_on_disk_ready(
 
     monkeypatch.setattr(
         "core.stt_model_status.get_manual_import_dir",
-        lambda spec, base_dir=None: str(manual_dir)
-        if spec.id == "seastar-medium-4bit"
-        else str(tmp_path / f"{spec.id}-none"),
+        lambda spec, base_dir=None: (
+            str(manual_dir)
+            if spec.id == "seastar-medium-4bit"
+            else str(tmp_path / f"{spec.id}-none")
+        ),
     )
 
     # stale ERROR job 주입
@@ -427,10 +424,7 @@ def test_clear_job_refuses_active_download(tmp_path: Path) -> None:
     result = downloader.clear_job("seastar-medium-4bit")
     assert result is False
     # job 이 그대로 유지되어야 함
-    assert (
-        downloader.get_progress("seastar-medium-4bit").status
-        == ModelStatus.DOWNLOADING
-    )
+    assert downloader.get_progress("seastar-medium-4bit").status == ModelStatus.DOWNLOADING
 
 
 def test_manual_imported_model_is_active_after_activate(
@@ -451,9 +445,7 @@ def test_manual_imported_model_is_active_after_activate(
         포함하도록 변경.
     """
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
 
-    from core.stt_model_registry import get_by_id
     from fastapi import FastAPI
 
     # 수동 임포트 경로에 유효한 파일 배치 → 디스크 READY
@@ -463,27 +455,17 @@ def test_manual_imported_model_is_active_after_activate(
     (manual_dir / "weights.safetensors").write_bytes(b"x" * 100)
 
     def _fake_manual_dir(spec, base_dir=None):
-        return str(
-            tmp_path / "app-data" / "stt_models" / f"{spec.id}-manual"
-        )
+        return str(tmp_path / "app-data" / "stt_models" / f"{spec.id}-manual")
 
     # 세 모듈 모두 동일하게 패치 (import 시점에 각자 바인딩되므로)
-    monkeypatch.setattr(
-        "core.stt_model_registry.get_manual_import_dir", _fake_manual_dir
-    )
-    monkeypatch.setattr(
-        "core.stt_model_status.get_manual_import_dir", _fake_manual_dir
-    )
-    monkeypatch.setattr(
-        "core.stt_model_downloader.get_manual_import_dir", _fake_manual_dir
-    )
+    monkeypatch.setattr("core.stt_model_registry.get_manual_import_dir", _fake_manual_dir)
+    monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", _fake_manual_dir)
+    monkeypatch.setattr("core.stt_model_downloader.get_manual_import_dir", _fake_manual_dir)
 
     # config.stt.model_name 에 수동 임포트 절대 경로가 저장된 상태 시뮬레이션
     # (실제 activate 엔드포인트가 get_effective_model_path 로 이 값을 쓴다)
     active_path_on_disk = str(manual_dir)
-    config = SimpleNamespace(
-        stt=SimpleNamespace(model_name=active_path_on_disk)
-    )
+    config = SimpleNamespace(stt=SimpleNamespace(model_name=active_path_on_disk))
 
     app = FastAPI()
     app.include_router(router)
@@ -526,11 +508,7 @@ def test_hf_cache_model_is_active_when_set(
         lambda spec, base_dir=None: str(tmp_path / f"none-{spec.id}"),
     )
 
-    config = SimpleNamespace(
-        stt=SimpleNamespace(
-            model_name="youngouk/whisper-medium-komixv2-mlx"
-        )
-    )
+    config = SimpleNamespace(stt=SimpleNamespace(model_name="youngouk/whisper-medium-komixv2-mlx"))
 
     app = FastAPI()
     app.include_router(router)
@@ -565,9 +543,7 @@ def test_import_manual_ghost613_supported(
     target_base = tmp_path / "app-data"
     monkeypatch.setattr(
         "core.stt_model_registry.get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            target_base / "stt_models" / f"{spec.id}-manual"
-        ),
+        lambda spec, base_dir=None: str(target_base / "stt_models" / f"{spec.id}-manual"),
     )
 
     resp = client.post(

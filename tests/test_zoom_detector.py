@@ -29,8 +29,6 @@ from steps.zoom_detector import (
     ZoomDetectorError,
 )
 
-
-
 # === 테스트 픽스처 ===
 
 
@@ -440,9 +438,7 @@ class TestStartStop:
         await detector.stop()
 
     @pytest.mark.asyncio
-    async def test_시작_시_async_콜백도_정상_호출된다(
-        self, detector: ZoomDetector
-    ) -> None:
+    async def test_시작_시_async_콜백도_정상_호출된다(self, detector: ZoomDetector) -> None:
         """async 콜백 (api/server.py 의 _on_zoom_meeting_change 와 동일 형태) 도
         start() 안에서 정상 await 되는지 검증.
 
@@ -462,16 +458,12 @@ class TestStartStop:
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             await detector.start()
 
-        assert async_calls == [True], (
-            f"async 콜백이 발화되지 않음: {async_calls}"
-        )
+        assert async_calls == [True], f"async 콜백이 발화되지 않음: {async_calls}"
 
         await detector.stop()
 
     @pytest.mark.asyncio
-    async def test_시작_시_콜백_예외가_start를_막지_않는다(
-        self, detector: ZoomDetector
-    ) -> None:
+    async def test_시작_시_콜백_예외가_start를_막지_않는다(self, detector: ZoomDetector) -> None:
         """콜백 안에서 예외가 발생해도 start() 가 정상 완료되고
         polling 태스크가 생성되어야 한다 (실 환경에서 recorder 시작 실패 시나리오).
         """
@@ -497,9 +489,7 @@ class TestStartStop:
         await detector.stop()
 
     @pytest.mark.asyncio
-    async def test_시작_시_recorder_와의_통합_플로우(
-        self, detector: ZoomDetector
-    ) -> None:
+    async def test_시작_시_recorder_와의_통합_플로우(self, detector: ZoomDetector) -> None:
         """api/server.py 의 _on_zoom_meeting_change 와 동일한 시그니처의
         async 콜백이 ZoomDetector.start() 에서 한 번 발화되고, 이후 폴링
         사이클에서는 단락되어 중복 호출되지 않는지 확인한다.
@@ -539,9 +529,7 @@ class TestStartStop:
         recorder_mock.stop_recording.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_시작_시_미팅_없으면_콜백_호출_안함(
-        self, detector: ZoomDetector
-    ) -> None:
+    async def test_시작_시_미팅_없으면_콜백_호출_안함(self, detector: ZoomDetector) -> None:
         """대칭 검증: 초기에 미팅이 없으면 콜백이 호출되지 않는다 (False→False 전이 없음)."""
         callback_calls: list[bool] = []
 
@@ -598,9 +586,7 @@ class TestStartStop:
             call_count["n"] += 1
             return mock_active if call_count["n"] == 1 else mock_inactive
 
-        with patch(
-            "asyncio.create_subprocess_exec", side_effect=_create_subprocess
-        ):
+        with patch("asyncio.create_subprocess_exec", side_effect=_create_subprocess):
             await detector.start()
             # 폴링이 비활성을 감지하도록 대기
             await asyncio.sleep(2.5)
@@ -612,9 +598,7 @@ class TestStartStop:
         )
 
     @pytest.mark.asyncio
-    async def test_stop_후_재시작_시_콜백이_다시_호출된다(
-        self, detector: ZoomDetector
-    ) -> None:
+    async def test_stop_후_재시작_시_콜백이_다시_호출된다(self, detector: ZoomDetector) -> None:
         """회귀 방지: stop() 후 같은 detector 인스턴스로 start() 를 재호출하면
         시작 콜백이 다시 정상 발화되어야 한다.
 

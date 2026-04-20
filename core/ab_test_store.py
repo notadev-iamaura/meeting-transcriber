@@ -99,9 +99,7 @@ def resolve_test_dir(config: AppConfig, test_id: str) -> Path:
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise ValueError(
-            f"test_id 가 ab_tests 루트를 벗어났습니다: {test_id!r}"
-        ) from exc
+        raise ValueError(f"test_id 가 ab_tests 루트를 벗어났습니다: {test_id!r}") from exc
 
     return candidate
 
@@ -158,9 +156,7 @@ def read_metadata(config: AppConfig, test_id: str) -> dict[str, Any]:
         raise ValueError(f"metadata.json 파싱 실패: {exc}") from exc
 
 
-def write_metadata(
-    config: AppConfig, test_id: str, data: dict[str, Any]
-) -> None:
+def write_metadata(config: AppConfig, test_id: str, data: dict[str, Any]) -> None:
     """metadata.json 을 원자적으로 쓴다 (tmp → rename).
 
     Args:
@@ -193,9 +189,7 @@ def write_metadata(
         raise
 
 
-def update_metadata(
-    config: AppConfig, test_id: str, **patch: Any
-) -> dict[str, Any]:
+def update_metadata(config: AppConfig, test_id: str, **patch: Any) -> dict[str, Any]:
     """metadata.json 을 읽고 patch 를 병합한 뒤 다시 쓴다.
 
     단순한 read-modify-write 이며, 동시성 보호는 호출자의 asyncio.Lock
@@ -218,9 +212,7 @@ def update_metadata(
     return data
 
 
-def list_test_ids(
-    config: AppConfig, source_meeting_id: str | None = None
-) -> list[str]:
+def list_test_ids(config: AppConfig, source_meeting_id: str | None = None) -> list[str]:
     """저장된 모든 테스트 ID 를 최신순으로 반환한다.
 
     Args:

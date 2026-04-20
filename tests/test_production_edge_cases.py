@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # === Mock 데이터 클래스 ===
 
 
@@ -159,9 +158,7 @@ class TestVAD_Zero_Segments_Pipeline:
         mock_transcriber = MagicMock()
         mock_transcriber.transcribe = AsyncMock(return_value=mock_transcript)
 
-        with patch(
-            "steps.transcriber.Transcriber", return_value=mock_transcriber
-        ) as mock_cls:
+        with patch("steps.transcriber.Transcriber", return_value=mock_transcriber):
             result = await pipeline._run_step_transcribe(wav_path, checkpoint_path)
 
         mock_transcriber.transcribe.assert_called_once()
@@ -197,9 +194,7 @@ class TestVAD_Zero_Segments_Pipeline:
         mock_transcriber = MagicMock()
         mock_transcriber.transcribe = AsyncMock(return_value=mock_transcript)
 
-        with patch(
-            "steps.transcriber.Transcriber", return_value=mock_transcriber
-        ):
+        with patch("steps.transcriber.Transcriber", return_value=mock_transcriber):
             result = await pipeline._run_step_transcribe(wav_path, checkpoint_path)
 
         assert result.full_text == "정상"
@@ -211,8 +206,11 @@ class TestVAD_Zero_Segments_Pipeline:
 class TestLongAudioMemorySafety:
     """장시간 오디오 처리 시 메모리 안전성 검증."""
 
-    def _make_guard(self, tmp_path: Path) -> "ResourceGuard":
-        """테스트용 ResourceGuard를 생성한다."""
+    def _make_guard(self, tmp_path: Path) -> ResourceGuard:  # noqa: F821
+        """테스트용 ResourceGuard를 생성한다.
+
+        반환 타입은 런타임에 함수 내부에서 지연 import 되므로 문자열 주석 + noqa 처리.
+        """
         from core.pipeline import ResourceGuard
 
         config = MagicMock()
@@ -294,14 +292,20 @@ class TestLongAudioMemorySafety:
         ]
         # 몇 개의 환각 세그먼트 삽입
         segments[100] = MockSegment(
-            text="무음 구간", start=1000.0, end=1010.0,
+            text="무음 구간",
+            start=1000.0,
+            end=1010.0,
             no_speech_prob=0.9,
         )
         segments[500] = MockSegment(
-            text="확확확확확확확", start=5000.0, end=5010.0,
+            text="확확확확확확확",
+            start=5000.0,
+            end=5010.0,
         )
         segments[1000] = MockSegment(
-            text="저신뢰 전사", start=10000.0, end=10010.0,
+            text="저신뢰 전사",
+            start=10000.0,
+            end=10010.0,
             avg_logprob=-2.0,
         )
 
@@ -330,7 +334,8 @@ class TestHallucinationFilterPostprocessIntegration:
             MockSegment(text="정상  발화입니다", start=0.0, end=2.0),
             MockSegment(
                 text="환각 환각 환각 환각",
-                start=2.0, end=4.0,
+                start=2.0,
+                end=4.0,
             ),
             MockSegment(text="두번째\n발화", start=4.0, end=6.0),
         ]
@@ -359,11 +364,15 @@ class TestHallucinationFilterPostprocessIntegration:
 
         segments = [
             MockSegment(
-                text="무음", start=0.0, end=2.0,
+                text="무음",
+                start=0.0,
+                end=2.0,
                 no_speech_prob=0.9,
             ),
             MockSegment(
-                text="저신뢰", start=2.0, end=4.0,
+                text="저신뢰",
+                start=2.0,
+                end=4.0,
                 avg_logprob=-2.0,
             ),
         ]
@@ -386,7 +395,9 @@ class TestHallucinationFilterPostprocessIntegration:
 
         segments = [
             MockSegment(
-                text="  공백  많은  텍스트  ", start=0.0, end=2.0,
+                text="  공백  많은  텍스트  ",
+                start=0.0,
+                end=2.0,
                 no_speech_prob=0.9,  # 필터 비활성이므로 제거 안됨
             ),
         ]
@@ -447,7 +458,8 @@ class TestHallucinationFilterPostprocessIntegration:
             MockSegment(text="정상  발화입니다", start=0.0, end=2.0),
             MockSegment(
                 text="감사 감사 감사 감사",
-                start=2.0, end=4.0,
+                start=2.0,
+                end=4.0,
             ),
             MockSegment(text="  ", start=4.0, end=6.0),
         ]
@@ -460,9 +472,7 @@ class TestHallucinationFilterPostprocessIntegration:
         mock_transcriber = MagicMock()
         mock_transcriber.transcribe = AsyncMock(return_value=mock_transcript)
 
-        with patch(
-            "steps.transcriber.Transcriber", return_value=mock_transcriber
-        ):
+        with patch("steps.transcriber.Transcriber", return_value=mock_transcriber):
             result = await pipeline._run_step_transcribe(wav_path, checkpoint_path)
 
         # 환각 제거("감사 감사 감사 감사") + 후처리(공백 정규화 + 빈 세그먼트 제거)
@@ -476,11 +486,11 @@ class TestHallucinationFilterPostprocessIntegration:
 
     def test_NFC_유니코드_정규화_통합(self) -> None:
         """한글 자모 조합형이 NFC 정규화된다."""
-        from steps.hallucination_filter import filter_hallucinations
-        from steps.text_postprocessor import postprocess_segments
-
         # NFD 형식의 한글 (조합형 자모)
         import unicodedata
+
+        from steps.hallucination_filter import filter_hallucinations
+        from steps.text_postprocessor import postprocess_segments
 
         nfd_text = unicodedata.normalize("NFD", "안녕하세요")
 

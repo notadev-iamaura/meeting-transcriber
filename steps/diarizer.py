@@ -240,8 +240,7 @@ class Diarizer:
             return "cpu"
 
         mps_available = (
-            hasattr(torch_module.backends, "mps")
-            and torch_module.backends.mps.is_available()
+            hasattr(torch_module.backends, "mps") and torch_module.backends.mps.is_available()
         )
 
         if self._device == "auto":
@@ -305,7 +304,9 @@ class Diarizer:
         target_device = self._resolve_device(torch)
         try:
             pipeline.to(torch.device(target_device))
-            logger.info(f"pyannote 파이프라인 로드 완료: {self._model_name} (device={target_device})")
+            logger.info(
+                f"pyannote 파이프라인 로드 완료: {self._model_name} (device={target_device})"
+            )
         except (RuntimeError, ValueError) as e:
             if target_device != "cpu":
                 logger.warning(f"pyannote {target_device} 로드 실패, CPU 폴백: {e}")
@@ -460,10 +461,21 @@ class Diarizer:
             # 오디오 길이를 확인하여 친절한 에러 메시지 제공
             try:
                 import subprocess
+
                 probe = subprocess.run(
-                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                     "-of", "csv=p=0", str(audio_path)],
-                    capture_output=True, text=True, timeout=10,
+                    [
+                        "ffprobe",
+                        "-v",
+                        "quiet",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "csv=p=0",
+                        str(audio_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 duration = float(probe.stdout.strip()) if probe.stdout.strip() else 0
             except Exception:
@@ -476,8 +488,8 @@ class Diarizer:
                 )
             else:
                 raise EmptyAudioError(
-                    f"화자를 식별할 수 없습니다. "
-                    f"오디오에 명확한 음성이 포함되어 있는지 확인해주세요."
+                    "화자를 식별할 수 없습니다. "
+                    "오디오에 명확한 음성이 포함되어 있는지 확인해주세요."
                 )
 
         # 화자 수 계산

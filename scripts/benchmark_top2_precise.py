@@ -15,9 +15,8 @@ Top 2 한국어 Whisper 모델 정밀 메모리 측정
 
 각 모델을 별도 프로세스에서 실행해서 측정 노이즈를 최소화한다.
 """
-import gc
+
 import json
-import os
 import subprocess
 import sys
 import time
@@ -183,11 +182,11 @@ print(json.dumps(result_data, ensure_ascii=False))
 print('===RESULT_END===')
 """
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"  실행: {model['label']}")
     print(f"  베이스: {model['base']}")
     print(f"  경로: {model['path']}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # 별도 프로세스로 실행
     t_total = time.perf_counter()
@@ -200,7 +199,7 @@ print('===RESULT_END===')
     t_total = time.perf_counter() - t_total
 
     if result.returncode != 0:
-        print(f"  ❌ 실패")
+        print("  ❌ 실패")
         print(f"  stderr: {result.stderr[-1000:]}")
         return {"id": model["id"], "label": model["label"], "error": result.stderr[-500:]}
 
@@ -216,16 +215,24 @@ print('===RESULT_END===')
         print(f"  stdout 마지막 500자: {output[-500:]}")
         return {"id": model["id"], "label": model["label"], "error": str(e)}
 
-    print(f"\n  📊 측정 결과:")
+    print("\n  📊 측정 결과:")
     print(f"     베이스라인 RSS:       {data['mem_baseline_rss_gb']} GB")
-    print(f"     로드 후 RSS:          {data['mem_after_load_rss_gb']} GB (+{data['mem_load_delta_rss_gb']} GB)")
-    print(f"     추론 피크 RSS:        {data['mem_peak_rss_gb']} GB (+{data['mem_inference_delta_rss_gb']} GB)")
-    if data.get('mlx_peak_gb'):
+    print(
+        f"     로드 후 RSS:          {data['mem_after_load_rss_gb']} GB (+{data['mem_load_delta_rss_gb']} GB)"
+    )
+    print(
+        f"     추론 피크 RSS:        {data['mem_peak_rss_gb']} GB (+{data['mem_inference_delta_rss_gb']} GB)"
+    )
+    if data.get("mlx_peak_gb"):
         print(f"     MLX GPU 로드 후:      {data['mlx_after_load_gb']} GB")
         print(f"     MLX GPU 피크:         {data['mlx_peak_gb']} GB")
-    print(f"     시스템 메모리 변화:    {data['mem_baseline_sys_gb']} → {data['mem_peak_sys_gb']} GB")
+    print(
+        f"     시스템 메모리 변화:    {data['mem_baseline_sys_gb']} → {data['mem_peak_sys_gb']} GB"
+    )
     print(f"     CER: {data['cer_percent']}% | WER: {data['wer_percent']}%")
-    print(f"     RTF: {data['rtf']}x | 로드: {data['load_time_s']}s | 추론: {data['total_time_s']}s")
+    print(
+        f"     RTF: {data['rtf']}x | 로드: {data['load_time_s']}s | 추론: {data['total_time_s']}s"
+    )
     print(f"     총 실행 시간: {t_total:.1f}초")
 
     return data
@@ -254,9 +261,9 @@ def get_disk_size_mb(path: str) -> float:
 
 def print_comparison(results: list):
     """비교 표 출력."""
-    print(f"\n\n{'='*100}")
+    print(f"\n\n{'=' * 100}")
     print(f"  🎯 정밀 비교 결과 (별도 프로세스, 메모리 격리, {NUM_SAMPLES}개 샘플)")
-    print(f"{'='*100}\n")
+    print(f"{'=' * 100}\n")
 
     if len(results) < 2 or any("error" in r for r in results):
         print("일부 모델 실패")
@@ -269,10 +276,28 @@ def print_comparison(results: list):
 
     rows = [
         ("디스크 크기 (MB)", a.get("disk_mb", 0), b.get("disk_mb", 0), "MB", "lower"),
-        ("로드 후 RSS (GB)", a["mem_after_load_rss_gb"], b["mem_after_load_rss_gb"], "GB", "lower"),
-        ("로드 시 RSS 증가 (GB)", a["mem_load_delta_rss_gb"], b["mem_load_delta_rss_gb"], "GB", "lower"),
+        (
+            "로드 후 RSS (GB)",
+            a["mem_after_load_rss_gb"],
+            b["mem_after_load_rss_gb"],
+            "GB",
+            "lower",
+        ),
+        (
+            "로드 시 RSS 증가 (GB)",
+            a["mem_load_delta_rss_gb"],
+            b["mem_load_delta_rss_gb"],
+            "GB",
+            "lower",
+        ),
         ("추론 피크 RSS (GB)", a["mem_peak_rss_gb"], b["mem_peak_rss_gb"], "GB", "lower"),
-        ("MLX GPU 로드 후 (GB)", a.get("mlx_after_load_gb"), b.get("mlx_after_load_gb"), "GB", "lower"),
+        (
+            "MLX GPU 로드 후 (GB)",
+            a.get("mlx_after_load_gb"),
+            b.get("mlx_after_load_gb"),
+            "GB",
+            "lower",
+        ),
         ("MLX GPU 피크 (GB)", a.get("mlx_peak_gb"), b.get("mlx_peak_gb"), "GB", "lower"),
         ("로드 시간 (초)", a["load_time_s"], b["load_time_s"], "s", "lower"),
         ("RTF (실시간 배수)", a["rtf"], b["rtf"], "x", "lower"),
@@ -323,7 +348,9 @@ def main():
     print("=" * 80)
 
     import platform
+
     import psutil
+
     sys_mem_gb = psutil.virtual_memory().total / (1024**3)
     print(f"\n시스템: {platform.processor()} | RAM: {sys_mem_gb:.0f}GB")
 

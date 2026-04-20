@@ -8,8 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
-import pytest
-
 from steps.text_postprocessor import postprocess_segments, postprocess_text
 
 

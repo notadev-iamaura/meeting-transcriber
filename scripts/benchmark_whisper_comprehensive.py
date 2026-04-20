@@ -25,9 +25,9 @@
     [현재 시스템]
     10. youngouk/whisper-medium-komixv2-mlx (현재, MLX fp16)
 """
+
 import gc
 import json
-import os
 import subprocess
 import sys
 import time
@@ -75,7 +75,6 @@ MODELS = [
         "path": str(MODELS_DIR / "jangmin-medium-ko-4bit"),
         "needs_convert": True,
     },
-
     # 그룹 2: 일반 Whisper - 베이스라인 비교
     {
         "id": "general-turbo-fp16",
@@ -109,7 +108,6 @@ MODELS = [
         "path": "mlx-community/whisper-medium-mlx-q4",
         "needs_convert": False,
     },
-
     # 그룹 3: 현재 사용 중
     {
         "id": "current-komixv2",
@@ -132,6 +130,7 @@ def clear_memory():
     gc.collect()
     try:
         import mlx.core as mx
+
         mx.clear_cache()
     except Exception:
         pass
@@ -153,11 +152,15 @@ def convert_model(source: str, output_path: str) -> tuple[bool, str]:
     cmd = [
         sys.executable,
         str(MLX_EXAMPLES / "convert.py"),
-        "--torch-name-or-path", source,
-        "--mlx-path", output_path,
+        "--torch-name-or-path",
+        source,
+        "--mlx-path",
+        output_path,
         "-q",
-        "--q-bits", "4",
-        "--q-group-size", "64",
+        "--q-bits",
+        "4",
+        "--q-group-size",
+        "64",
     ]
     print(f"  변환 중... ({source})")
     t0 = time.perf_counter()
@@ -210,17 +213,20 @@ def get_dir_size_mb(path) -> float:
 def load_test_samples(num_samples: int):
     """Zeroth Korean test set에서 샘플을 로드한다."""
     from datasets import load_dataset
+
     print(f"\nZeroth Korean test set 로드 ({num_samples}개 샘플)...")
     ds = load_dataset("kresnik/zeroth_korean", split="test", streaming=True)
     samples = []
     for i, s in enumerate(ds.take(num_samples)):
-        samples.append({
-            "index": i + 1,
-            "audio_array": s["audio"]["array"],
-            "sample_rate": s["audio"]["sampling_rate"],
-            "duration": len(s["audio"]["array"]) / s["audio"]["sampling_rate"],
-            "reference": s["text"],
-        })
+        samples.append(
+            {
+                "index": i + 1,
+                "audio_array": s["audio"]["array"],
+                "sample_rate": s["audio"]["sampling_rate"],
+                "duration": len(s["audio"]["array"]) / s["audio"]["sampling_rate"],
+                "reference": s["text"],
+            }
+        )
     total_dur = sum(s["duration"] for s in samples)
     print(f"  총 {len(samples)}개 샘플, 총 길이 {total_dur:.1f}초")
     return samples
@@ -257,13 +263,15 @@ def transcribe_samples(model_path: str, samples: list, verbose: bool = False) ->
             if verbose:
                 print(f"    ❌ 샘플 {s['index']} 실패: {str(e)[:80]}")
 
-        results["transcripts"].append({
-            "index": s["index"],
-            "reference": s["reference"],
-            "hypothesis": text,
-            "time_s": round(elapsed, 2),
-            "audio_s": round(s["duration"], 2),
-        })
+        results["transcripts"].append(
+            {
+                "index": s["index"],
+                "reference": s["reference"],
+                "hypothesis": text,
+                "time_s": round(elapsed, 2),
+                "audio_s": round(s["duration"], 2),
+            }
+        )
         results["total_time_s"] += elapsed
         results["total_audio_s"] += s["duration"]
         if verbose and (s["index"] % 5 == 0 or s["index"] == 1):
@@ -275,6 +283,7 @@ def transcribe_samples(model_path: str, samples: list, verbose: bool = False) ->
 def compute_metrics(transcripts: list) -> dict:
     """CER/WER 메트릭 계산."""
     from jiwer import cer, wer
+
     refs = [t["reference"] for t in transcripts if t["hypothesis"]]
     hyps = [t["hypothesis"] for t in transcripts if t["hypothesis"]]
     if not refs:
@@ -288,10 +297,10 @@ def compute_metrics(transcripts: list) -> dict:
 
 def benchmark_model(model: dict, samples: list) -> dict:
     """단일 모델 벤치마크."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"  [{model['group']}] {model['label']}")
     print(f"  소스: {model['source']}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     result = {
         "id": model["id"],
@@ -344,8 +353,10 @@ def benchmark_model(model: dict, samples: list) -> dict:
         result["rtf"] = 0.0
     result["transcripts"] = transcribe_result["transcripts"]
 
-    print(f"  [4] 결과: CER={result['cer_percent']}% | WER={result['wer_percent']}% | "
-          f"RTF={result['rtf']}x | 메모리={result['mem_delta_gb']}GB | 에러={result['errors']}")
+    print(
+        f"  [4] 결과: CER={result['cer_percent']}% | WER={result['wer_percent']}% | "
+        f"RTF={result['rtf']}x | 메모리={result['mem_delta_gb']}GB | 에러={result['errors']}"
+    )
 
     clear_memory()
     return result
@@ -353,9 +364,9 @@ def benchmark_model(model: dict, samples: list) -> dict:
 
 def print_comparison(results: list):
     """결과 비교 표 출력."""
-    print(f"\n\n{'='*120}")
+    print(f"\n\n{'=' * 120}")
     print(f"  종합 비교 결과 (Zeroth Korean test set, {NUM_SAMPLES}개 샘플)")
-    print(f"{'='*120}\n")
+    print(f"{'=' * 120}\n")
 
     # 그룹별 정렬
     groups = {}
@@ -363,14 +374,18 @@ def print_comparison(results: list):
         g = r.get("group", "기타")
         groups.setdefault(g, []).append(r)
 
-    print(f"{'그룹':<20} {'모델':<45} {'디스크':>10} {'메모리':>10} {'CER':>8} {'WER':>8} {'RTF':>10}")
+    print(
+        f"{'그룹':<20} {'모델':<45} {'디스크':>10} {'메모리':>10} {'CER':>8} {'WER':>8} {'RTF':>10}"
+    )
     print("-" * 120)
 
     for group_name, group_results in groups.items():
         for r in group_results:
             label = r["label"]
             if "error" in r and r.get("cer_percent") is None:
-                print(f"{group_name:<20} {label:<45} {'ERROR':>10} {'-':>10} {'-':>8} {'-':>8} {'-':>10}")
+                print(
+                    f"{group_name:<20} {label:<45} {'ERROR':>10} {'-':>10} {'-':>8} {'-':>8} {'-':>10}"
+                )
                 continue
             print(
                 f"{group_name:<20} {label:<45} "
@@ -387,7 +402,9 @@ def print_comparison(results: list):
     if valid:
         best = min(valid, key=lambda x: x["cer_percent"])
         print(f"\n🏆 최고 정확도: {best['label']}")
-        print(f"   CER: {best['cer_percent']}% | WER: {best['wer_percent']}% | RTF: {best['rtf']}x")
+        print(
+            f"   CER: {best['cer_percent']}% | WER: {best['wer_percent']}% | RTF: {best['rtf']}x"
+        )
         print(f"   디스크: {best['disk_size_mb']}MB | 메모리: {best['mem_delta_gb']}GB")
 
 
@@ -397,6 +414,7 @@ def main():
     print("=" * 80)
 
     import platform
+
     sys_mem_gb = psutil.virtual_memory().total / (1024**3)
     print(f"\n시스템: {platform.processor()} | RAM: {sys_mem_gb:.0f}GB")
     print(f"모델 수: {len(MODELS)}개")
@@ -418,15 +436,18 @@ def main():
         except Exception as e:
             print(f"\n❌ {model['label']} 실패: {e}")
             import traceback
+
             traceback.print_exc()
-            results.append({
-                "id": model["id"],
-                "label": model["label"],
-                "group": model["group"],
-                "error": str(e),
-                "cer_percent": None,
-                "wer_percent": None,
-            })
+            results.append(
+                {
+                    "id": model["id"],
+                    "label": model["label"],
+                    "group": model["group"],
+                    "error": str(e),
+                    "cer_percent": None,
+                    "wer_percent": None,
+                }
+            )
 
     print_comparison(results)
 

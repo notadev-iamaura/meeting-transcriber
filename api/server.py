@@ -27,7 +27,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import AppConfig, get_config
@@ -549,12 +549,11 @@ def _setup_spa_routes(app: FastAPI) -> None:
                 return "0"
 
         # /static/spa.js, /static/app.js, /static/style.css 에 ?v=mtime 추가
+        # 람다는 기본 인자(v=v)로 현재 루프 반복의 버전 값을 바인딩해 B023 오보 회피 + 의도 명시
         for fname in ("spa.js", "app.js", "style.css"):
             v = _ver(fname)
-            pattern = re.compile(
-                r'(/static/' + re.escape(fname) + r')(\?[^"\'>\s]*)?'
-            )
-            html = pattern.sub(lambda m: f"{m.group(1)}?v={v}", html)
+            pattern = re.compile(r"(/static/" + re.escape(fname) + r')(\?[^"\'>\s]*)?')
+            html = pattern.sub(lambda m, v=v: f"{m.group(1)}?v={v}", html)
         return html
 
     @app.get("/app", response_class=HTMLResponse)

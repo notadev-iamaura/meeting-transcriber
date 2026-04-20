@@ -14,8 +14,6 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from core.preflight import (
     PreflightResult,
     _check_apple_silicon,
@@ -25,7 +23,6 @@ from core.preflight import (
     reset_preflight_cache,
     run_preflight,
 )
-
 
 # === PreflightResult 테스트 ===
 

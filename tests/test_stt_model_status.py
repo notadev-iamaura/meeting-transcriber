@@ -2,6 +2,7 @@
 
 get_model_status() 와 get_actual_size_mb() 의 동작을 검증한다.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace

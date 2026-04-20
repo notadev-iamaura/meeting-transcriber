@@ -2,10 +2,10 @@
 
 EMA 업데이트, 예측 fallback, 칩 스케일링, 이상 탐지, 영속화를 검증한다.
 """
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -16,7 +16,6 @@ from core.perf_stats import (
     RateEntry,
     detect_chip_id,
 )
-
 
 # ============================================================
 # detect_chip_id
@@ -127,7 +126,7 @@ class TestPerfStatsLoadSave:
         stats.save()
 
         loaded = PerfStats.load(stats_path=stats_file, defaults_path=defaults_file)
-        key = PerfStats.make_key("transcribe", "seastar", stats.chip_id)
+        PerfStats.make_key("transcribe", "seastar", stats.chip_id)
         # 로드 시 chip_id는 실제 시스템 값이지만 entries는 저장된 키 그대로 유지
         assert any("transcribe|seastar" in k for k in loaded.entries)
 
@@ -188,9 +187,7 @@ class TestPredict:
         stats = PerfStats.load(stats_path=stats_file, defaults_path=defaults_file)
         stats.chip_id = "M3 Pro"
         # seastar by_model=0.12, overhead=8 → 100초 오디오 = 12 + 8 = 20
-        eta = stats.predict(
-            "transcribe", model_id="seastar-medium-4bit", input_size=100.0
-        )
+        eta = stats.predict("transcribe", model_id="seastar-medium-4bit", input_size=100.0)
         assert abs(eta - 20.0) < 0.1
 
     def test_by_model_도_없으면_default_사용(self, stats_file, defaults_file):

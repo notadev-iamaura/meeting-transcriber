@@ -100,8 +100,8 @@ class MLXBackend:
             MLXLoadError: mlx-vlm 미설치 또는 모델 로드 실패 시
         """
         try:
-            from mlx_vlm import load as vlm_load  # type: ignore[import-untyped]
             from mlx_vlm import generate as vlm_generate  # type: ignore[import-untyped]
+            from mlx_vlm import load as vlm_load  # type: ignore[import-untyped]
 
             self._vlm_generate = vlm_generate
 
@@ -119,9 +119,7 @@ class MLXBackend:
                 "'pip install mlx-vlm' 으로 설치하세요."
             ) from e
         except Exception as e:
-            raise MLXLoadError(
-                f"MLX-VLM 모델 로드 실패: {self._model_name} — {e}"
-            ) from e
+            raise MLXLoadError(f"MLX-VLM 모델 로드 실패: {self._model_name} — {e}") from e
 
     def _load_lm_model(self) -> None:
         """mlx-lm으로 일반 LLM 모델을 로드한다 (EXAONE 등).
@@ -219,6 +217,7 @@ class MLXBackend:
                 }
                 try:
                     from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
+
                     gen_kwargs["sampler"] = make_sampler(temp=temp)
                 except ImportError:
                     gen_kwargs["temp"] = temp
@@ -287,6 +286,7 @@ class MLXBackend:
                 }
                 try:
                     from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
+
                     stream_kwargs["sampler"] = make_sampler(temp=temp)
                 except ImportError:
                     stream_kwargs["temp"] = temp

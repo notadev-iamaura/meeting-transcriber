@@ -78,8 +78,7 @@ def _check_python_version() -> tuple[bool, list[str]]:
 
     if ver < (3, 11):
         warnings.append(
-            f"Python {ver.major}.{ver.minor}은 지원하지 않습니다. "
-            "3.11 이상이 필요합니다."
+            f"Python {ver.major}.{ver.minor}은 지원하지 않습니다. 3.11 이상이 필요합니다."
         )
         return False, warnings
 
@@ -100,8 +99,7 @@ def _check_metal_availability() -> bool:
             [
                 sys.executable,
                 "-c",
-                "import mlx.core as mx; "
-                "assert mx.metal.is_available(), 'Metal not available'",
+                "import mlx.core as mx; assert mx.metal.is_available(), 'Metal not available'",
             ],
             capture_output=True,
             timeout=15,
@@ -194,8 +192,7 @@ def run_preflight(*, force: bool = False) -> PreflightResult:
                 )
         else:
             all_warnings.append(
-                "mlx 패키지가 설치되지 않았습니다. "
-                "'pip install mlx mlx-whisper'로 설치하세요."
+                "mlx 패키지가 설치되지 않았습니다. 'pip install mlx mlx-whisper'로 설치하세요."
             )
 
     result = PreflightResult(

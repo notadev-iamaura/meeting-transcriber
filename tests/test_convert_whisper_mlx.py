@@ -11,12 +11,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 # 변환 스크립트에서 순수 로직 함수만 임포트
 from scripts.convert_whisper_mlx import (
-    HF_TO_OPENAI_KEY_MAP,
-    OPENAI_TO_MLX_KEY_MAP,
     build_mlx_config,
     convert_to_mlx_keys,
     remap_hf_to_openai,
@@ -134,8 +131,16 @@ class TestMLXConfigGeneration:
 
         # Then: 10개 필수 필드 존재 확인
         required_fields = [
-            "n_mels", "n_audio_ctx", "n_audio_state", "n_audio_head", "n_audio_layer",
-            "n_vocab", "n_text_ctx", "n_text_state", "n_text_head", "n_text_layer",
+            "n_mels",
+            "n_audio_ctx",
+            "n_audio_state",
+            "n_audio_head",
+            "n_audio_layer",
+            "n_vocab",
+            "n_text_ctx",
+            "n_text_state",
+            "n_text_head",
+            "n_text_layer",
         ]
         for field in required_fields:
             assert field in config, f"필수 필드 누락: {field}"
@@ -227,6 +232,7 @@ class TestOutputDirectoryStructure:
             "decoder.token_embedding.weight": np.zeros((51865, 1024), dtype=np.float16),
         }
         from safetensors.numpy import save_file
+
         save_file(weights, str(output_dir / "weights.safetensors"))
 
         # When & Then
@@ -247,6 +253,7 @@ class TestMissingFileDetection:
             "encoder.conv1.weight": np.zeros((1,), dtype=np.float16),
         }
         from safetensors.numpy import save_file
+
         save_file(weights, str(output_dir / "weights.safetensors"))
 
         # When & Then: config.json 없으므로 실패
@@ -258,10 +265,18 @@ class TestMissingFileDetection:
         output_dir = tmp_path / "no-weights-model"
         output_dir.mkdir()
 
-        config = {"n_mels": 80, "n_audio_ctx": 1500, "n_audio_state": 1024,
-                  "n_audio_head": 16, "n_audio_layer": 24, "n_vocab": 51865,
-                  "n_text_ctx": 448, "n_text_state": 1024, "n_text_head": 16,
-                  "n_text_layer": 24}
+        config = {
+            "n_mels": 80,
+            "n_audio_ctx": 1500,
+            "n_audio_state": 1024,
+            "n_audio_head": 16,
+            "n_audio_layer": 24,
+            "n_vocab": 51865,
+            "n_text_ctx": 448,
+            "n_text_state": 1024,
+            "n_text_head": 16,
+            "n_text_layer": 24,
+        }
         with open(output_dir / "config.json", "w", encoding="utf-8") as f:
             json.dump(config, f)
 

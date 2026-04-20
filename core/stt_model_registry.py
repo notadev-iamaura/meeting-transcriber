@@ -11,11 +11,11 @@
 
 의존성: 표준 라이브러리만 사용 (dataclasses, typing).
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +32,20 @@ class STTModelSpec:
     frozen=True로 불변성을 보장해 전역 레지스트리의 안전한 공유가 가능하다.
     """
 
-    id: str                       # 내부 식별자 (URL safe)
-    label: str                    # UI 표시명
-    description: str              # 한 줄 설명
-    hf_source: str                # HuggingFace repo ID (사전 양자화된 mlx-whisper 호환 repo)
-    model_path: str               # mlx-whisper 에 전달할 경로 (= hf_source 와 동일)
-    base_model: str               # "medium" | "large-v3-turbo"
-    expected_size_mb: int         # 예상 디스크 크기 (MB)
-    cer_percent: float            # Zeroth Korean test 측정 CER (%)
-    wer_percent: float            # Zeroth Korean test 측정 WER (%)
-    memory_gb: float              # 추론 피크 RSS (GB)
-    rtf: float                    # Real-time factor
-    license: str                  # 라이선스 식별 문자열
-    is_default: bool              # 기본값 플래그 (정확히 한 모델만 True)
-    is_recommended: bool          # 추천 플래그 (정확히 한 모델만 True)
+    id: str  # 내부 식별자 (URL safe)
+    label: str  # UI 표시명
+    description: str  # 한 줄 설명
+    hf_source: str  # HuggingFace repo ID (사전 양자화된 mlx-whisper 호환 repo)
+    model_path: str  # mlx-whisper 에 전달할 경로 (= hf_source 와 동일)
+    base_model: str  # "medium" | "large-v3-turbo"
+    expected_size_mb: int  # 예상 디스크 크기 (MB)
+    cer_percent: float  # Zeroth Korean test 측정 CER (%)
+    wer_percent: float  # Zeroth Korean test 측정 WER (%)
+    memory_gb: float  # 추론 피크 RSS (GB)
+    rtf: float  # Real-time factor
+    license: str  # 라이선스 식별 문자열
+    is_default: bool  # 기본값 플래그 (정확히 한 모델만 True)
+    is_recommended: bool  # 추천 플래그 (정확히 한 모델만 True)
 
 
 # 지원 STT 모델 레지스트리.
@@ -107,7 +107,7 @@ STT_MODELS: list[STTModelSpec] = [
 ]
 
 
-def get_by_id(model_id: str) -> Optional[STTModelSpec]:
+def get_by_id(model_id: str) -> STTModelSpec | None:
     """모델 ID로 Spec을 조회한다.
 
     Args:

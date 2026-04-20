@@ -10,9 +10,8 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -20,7 +19,6 @@ from starlette.testclient import TestClient
 
 from api.routes import router
 from core.io_utils import atomic_write_json, atomic_write_text
-
 
 # === core/io_utils 단위 테스트 ===
 
@@ -53,9 +51,8 @@ class TestAtomicWriteText:
     def test_쓰기_실패_시_tmp_파일_정리(self, tmp_path: Path) -> None:
         """os.replace 가 실패해도 .tmp 파일이 남지 않아야 한다."""
         target = tmp_path / "out.txt"
-        with patch("os.replace", side_effect=OSError("simulated")):
-            with pytest.raises(OSError):
-                atomic_write_text(target, "x")
+        with patch("os.replace", side_effect=OSError("simulated")), pytest.raises(OSError):
+            atomic_write_text(target, "x")
         # .tmp 잔존 파일 없음
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == [], f"임시 파일 잔존: {tmp_files}"
@@ -65,9 +62,8 @@ class TestAtomicWriteText:
         target = tmp_path / "f.txt"
         target.write_text("original")
 
-        with patch("os.fsync", side_effect=OSError("disk full")):
-            with pytest.raises(OSError):
-                atomic_write_text(target, "would-be-new")
+        with patch("os.fsync", side_effect=OSError("disk full")), pytest.raises(OSError):
+            atomic_write_text(target, "would-be-new")
 
         # 원본 보존
         assert target.read_text() == "original"
@@ -148,10 +144,8 @@ pipeline:
 
     # cfg + 각 하위 네임스페이스가 Pydantic model_copy 를 지원해야 함
     def _add_model_copy(ns: SimpleNamespace) -> None:
-        ns.model_copy = lambda update, _ns=ns: (
-            _add_model_copy_and_return(
-                SimpleNamespace(**{**_ns.__dict__, **update})
-            )
+        ns.model_copy = lambda update, _ns=ns: _add_model_copy_and_return(
+            SimpleNamespace(**{**_ns.__dict__, **update})
         )
 
     def _add_model_copy_and_return(ns: SimpleNamespace) -> SimpleNamespace:
@@ -183,7 +177,7 @@ class TestSTTLanguageInjection:
         [
             'en": y\n#',
             "ko\nstt:\n  evil: 1",
-            "ko\"",
+            'ko"',
             'ko" #comment',
             "ko: x",
             "../../etc/passwd",
@@ -198,9 +192,7 @@ class TestSTTLanguageInjection:
             "ko_KR",  # 언더스코어 금지 (BCP-47 은 hyphen)
         ],
     )
-    def test_악성_언어_코드_거부(
-        self, client: TestClient, lang: str
-    ) -> None:
+    def test_악성_언어_코드_거부(self, client: TestClient, lang: str) -> None:
         resp = client.put("/api/settings", json={"stt_language": lang})
         assert resp.status_code == 400, (
             f"악성 입력 {lang!r} 이 거부되지 않음. 응답: {resp.status_code} {resp.text}"
@@ -246,9 +238,7 @@ class TestHallucinationFilterSettings:
         assert "hf_no_speech_threshold" in body["changed_fields"]
         assert body["settings"]["hf_no_speech_threshold"] == 0.85
 
-    def test_put_settings_가_hf_4필드_동시_저장(
-        self, client: TestClient
-    ) -> None:
+    def test_put_settings_가_hf_4필드_동시_저장(self, client: TestClient) -> None:
         resp = client.put(
             "/api/settings",
             json={

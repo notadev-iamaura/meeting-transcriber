@@ -21,7 +21,6 @@ VAD 음성 구간 감지기 모듈 테스트 (VAD Detector Module Tests)
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,8 +30,6 @@ from steps.vad_detector import (
     VADResult,
     VoiceActivityDetector,
 )
-
-
 
 # === 픽스처 ===
 
@@ -110,9 +107,7 @@ class TestFileValidation:
     """오디오 파일 유효성 검증 테스트."""
 
     @pytest.mark.asyncio
-    async def test_파일_미존재시_FileNotFoundError(
-        self, detector: VoiceActivityDetector
-    ) -> None:
+    async def test_파일_미존재시_FileNotFoundError(self, detector: VoiceActivityDetector) -> None:
         """존재하지 않는 파일 경로에 대해 FileNotFoundError를 발생시킨다."""
         with pytest.raises(FileNotFoundError, match="찾을 수 없습니다"):
             await detector.detect(Path("/nonexistent/audio.wav"))
@@ -182,9 +177,7 @@ class TestEmptySpeech:
     ) -> None:
         """음성 구간이 없으면 detect()가 None을 반환한다."""
         # _run_vad가 빈 결과를 반환하도록 모킹
-        with patch.object(
-            detector, "_run_vad", return_value=([], 10.0)
-        ):
+        with patch.object(detector, "_run_vad", return_value=([], 10.0)):
             result = await detector.detect(audio_file)
             assert result is None
 
@@ -221,10 +214,13 @@ class TestCPU강제실행:
             mock_silero_module.load_silero_vad = mock_load_vad
             mock_silero_module.get_speech_timestamps = mock_get_timestamps
 
-            with patch.dict("sys.modules", {
-                "silero_vad": mock_silero_module,
-                "torch": mock_torch,
-            }):
+            with patch.dict(
+                "sys.modules",
+                {
+                    "silero_vad": mock_silero_module,
+                    "torch": mock_torch,
+                },
+            ):
                 detector._model = None
                 detector._load_model()
 
@@ -275,14 +271,12 @@ class TestVADResult데이터:
     ) -> None:
         """total_speech + total_silence가 전체 duration과 근사하다."""
         speech_segments = [
-            {"start": 1.0, "end": 3.0},   # 2초
-            {"start": 5.0, "end": 8.0},   # 3초
+            {"start": 1.0, "end": 3.0},  # 2초
+            {"start": 5.0, "end": 8.0},  # 3초
         ]
         duration = 10.0
 
-        with patch.object(
-            detector, "_run_vad", return_value=(speech_segments, duration)
-        ):
+        with patch.object(detector, "_run_vad", return_value=(speech_segments, duration)):
             result = await detector.detect(audio_file)
 
             assert result is not None
@@ -333,10 +327,13 @@ class TestSileroMissing:
         mock_torch = MagicMock()
 
         with (
-            patch.dict("sys.modules", {
-                "torch": mock_torch,
-                "silero_vad": None,  # import 실패 시뮬레이션
-            }),
+            patch.dict(
+                "sys.modules",
+                {
+                    "torch": mock_torch,
+                    "silero_vad": None,  # import 실패 시뮬레이션
+                },
+            ),
             pytest.raises(VADError, match="silero-vad가 설치되어 있지 않습니다"),
         ):
             detector._load_model()
@@ -387,9 +384,7 @@ class TestMultipleSegments:
             {"start": 7.0, "end": 9.0},
         ]
 
-        with patch.object(
-            detector, "_run_vad", return_value=(speech_segments, 20.0)
-        ):
+        with patch.object(detector, "_run_vad", return_value=(speech_segments, 20.0)):
             result = await detector.detect(audio_file)
 
             assert result is not None
@@ -419,9 +414,7 @@ class TestSingleSegment:
         """1개 음성 구간에 대한 detect() 전체 흐름 검증."""
         speech_segments = [{"start": 2.0, "end": 7.0}]
 
-        with patch.object(
-            detector, "_run_vad", return_value=(speech_segments, 10.0)
-        ):
+        with patch.object(detector, "_run_vad", return_value=(speech_segments, 10.0)):
             result = await detector.detect(audio_file)
 
             assert result is not None

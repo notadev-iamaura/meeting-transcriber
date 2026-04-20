@@ -37,8 +37,6 @@ from search.hybrid_search import (
     _search_fts,
 )
 
-
-
 # === 헬퍼 함수 ===
 
 
@@ -1115,9 +1113,21 @@ class TestPerformanceOptimizations:
 
     @pytest.mark.asyncio
     async def test_PERF010_병렬_검색_실행(self) -> None:
-        """PERF-010: 벡터 검색과 FTS5 검색이 병렬로 실행되는지 확인한다."""
+        """PERF-010: 벡터 검색과 FTS5 검색이 병렬로 실행되는지 확인한다.
+
+        각 검색에 `SLEEP` 만큼 지연을 주고 전체 소요 시간을 측정한다.
+        - 순차 실행: 약 2*SLEEP
+        - 병렬 실행: 약 SLEEP
+
+        threshold 는 `SLEEP * 1.75` 로 두어 CI 러너(특히 macOS runner) 의
+        추가 오버헤드(스케줄링·GC·I/O)를 흡수하면서도 순차 실행(2.0×)은
+        확실히 걸러낸다. 이전 threshold(0.18) 는 로컬 전용 수치라 CI 에서
+        flaky 했음.
+        """
         import time
 
+        SLEEP = 0.2  # 각 검색 지연 (초)
+        THRESHOLD = SLEEP * 1.75  # 병렬 판정 임계 — 순차(2×)와 병렬(1×) 사이
         engine = self._create_engine_with_caching()
 
         # mock 임베딩 모델 설정
@@ -1125,13 +1135,12 @@ class TestPerformanceOptimizations:
         mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
         engine._embed_model = mock_model
 
-        # 각 검색에 0.1초 지연을 추가하여 병렬 실행 확인
         def slow_vector_search(*args: Any, **kwargs: Any) -> list:
-            time.sleep(0.1)
+            time.sleep(SLEEP)
             return _make_vector_results(2)
 
         def slow_fts_search(*args: Any, **kwargs: Any) -> list:
-            time.sleep(0.1)
+            time.sleep(SLEEP)
             return _make_fts_results(2)
 
         with (
@@ -1148,11 +1157,10 @@ class TestPerformanceOptimizations:
             response = await engine.search("테스트 쿼리")
             elapsed = time.monotonic() - start
 
-        # 순차 실행이면 약 0.2초 이상, 병렬이면 약 0.1초
-        # 여유를 두고 0.18초 이내면 병렬로 판정
-        assert elapsed < 0.18, (
+        assert elapsed < THRESHOLD, (
             f"검색이 병렬로 실행되지 않음: {elapsed:.3f}초 "
-            f"(순차 실행 예상: ~0.2초, 병렬 예상: ~0.1초)"
+            f"(순차 실행 예상: ~{2 * SLEEP:.2f}초, 병렬 예상: ~{SLEEP:.2f}초, "
+            f"임계값: {THRESHOLD:.2f}초)"
         )
         assert response.vector_count == 2
         assert response.fts_count == 2

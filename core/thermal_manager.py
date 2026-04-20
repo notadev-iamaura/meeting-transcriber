@@ -20,14 +20,14 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from config import AppConfig, ThermalConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ThermalState(str, Enum):
+class ThermalState(StrEnum):
     """서멀 상태를 나타내는 열거형.
 
     Attributes:

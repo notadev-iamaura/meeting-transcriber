@@ -21,10 +21,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core import user_settings as us
-from steps.corrector import Corrector
+from steps.corrector import CorrectedResult, CorrectedUtterance, Corrector
 from steps.merger import MergedResult, MergedUtterance
 from steps.summarizer import Summarizer
-from steps.corrector import CorrectedResult, CorrectedUtterance
 
 
 @pytest.fixture(autouse=True)
@@ -89,9 +88,7 @@ async def test_corrector_uses_user_edited_prompt(isolated_user_data: Path) -> No
         "존댓말로 통일하세요. 테스트용 고유 마커: XYZ-CUSTOM-777"
     )
     initial = us.load_prompts()
-    updated = initial.model_copy(
-        update={"corrector": us.PromptEntry(system_prompt=custom_prompt)}
-    )
+    updated = initial.model_copy(update={"corrector": us.PromptEntry(system_prompt=custom_prompt)})
     us.save_prompts(updated)
 
     # 목 백엔드로 Corrector 실행
@@ -123,9 +120,7 @@ async def test_corrector_injects_vocabulary_into_system_prompt(
     isolated_user_data: Path,
 ) -> None:
     """용어집 항목이 corrector의 시스템 프롬프트에 주입되어 백엔드에 전달된다."""
-    us.add_vocabulary_term(
-        term="FastAPI", aliases=["패스트api"], note="웹 프레임워크"
-    )
+    us.add_vocabulary_term(term="FastAPI", aliases=["패스트api"], note="웹 프레임워크")
     us.add_vocabulary_term(term="Pyannote", aliases=["파이아노트"])
 
     recording = _RecordingBackend()
@@ -214,9 +209,7 @@ async def test_corrector_job_snapshot_immutable_during_processing(
     assert len(recording.calls) >= 3
     for call in recording.calls:
         system_content = call[0]["content"]
-        assert initial_marker in system_content, (
-            f"잡 중간에 스냅샷이 바뀜: {system_content[:100]}"
-        )
+        assert initial_marker in system_content, f"잡 중간에 스냅샷이 바뀜: {system_content[:100]}"
         assert "CHANGED-MARKER-222" not in system_content
 
 
@@ -235,9 +228,7 @@ def _make_corrected(texts: list[str]) -> CorrectedResult:
         )
         for i, t in enumerate(texts)
     ]
-    return CorrectedResult(
-        utterances=utterances, num_speakers=1, audio_path="/tmp/test.wav"
-    )
+    return CorrectedResult(utterances=utterances, num_speakers=1, audio_path="/tmp/test.wav")
 
 
 @pytest.mark.asyncio
@@ -246,8 +237,7 @@ async def test_summarizer_single_uses_user_edited_prompt(
 ) -> None:
     """단일 요약 경로가 사용자 편집 요약 프롬프트를 사용한다."""
     custom_summary_prompt = (
-        "커스텀 요약 프롬프트 SUMMARY-MARKER-333. "
-        "회의록을 한 문장으로 요약하세요. 마크다운 형식."
+        "커스텀 요약 프롬프트 SUMMARY-MARKER-333. 회의록을 한 문장으로 요약하세요. 마크다운 형식."
     )
     initial = us.load_prompts()
     us.save_prompts(
@@ -338,15 +328,9 @@ async def test_summarizer_chunked_merge_uses_user_edited_prompt(
 
 def test_chat_uses_user_edited_prompt(isolated_user_data: Path) -> None:
     """ChatEngine의 _get_system_prompt가 사용자 편집값을 반환한다."""
-    custom_chat = (
-        "커스텀 채팅 프롬프트 CHAT-MARKER-555. 회의 내용을 기반으로만 답변하세요."
-    )
+    custom_chat = "커스텀 채팅 프롬프트 CHAT-MARKER-555. 회의 내용을 기반으로만 답변하세요."
     initial = us.load_prompts()
-    us.save_prompts(
-        initial.model_copy(
-            update={"chat": us.PromptEntry(system_prompt=custom_chat)}
-        )
-    )
+    us.save_prompts(initial.model_copy(update={"chat": us.PromptEntry(system_prompt=custom_chat)}))
 
     from search.chat import ChatEngine
 

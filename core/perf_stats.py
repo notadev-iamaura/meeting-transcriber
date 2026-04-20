@@ -21,6 +21,7 @@
 >>> stats.update("transcribe", model_id="seastar-medium-4bit", input_size=300.0, elapsed=38.5)
 >>> stats.save()
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,7 @@ import platform
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class RateEntry:
         return {"rate": round(self.rate, 6), "samples": self.samples}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RateEntry":
+    def from_dict(cls, data: dict[str, Any]) -> RateEntry:
         return cls(rate=float(data.get("rate", 0.0)), samples=int(data.get("samples", 0)))
 
 
@@ -119,16 +120,16 @@ class PerfStats:
     entries: dict[str, RateEntry] = field(default_factory=dict)
     defaults: dict[str, Any] = field(default_factory=dict)
     chip_id: str = "unknown"
-    stats_path: Optional[Path] = None
+    stats_path: Path | None = None
 
     # ====================== 로드/저장 ======================
 
     @classmethod
     def load(
         cls,
-        stats_path: Optional[Path] = None,
-        defaults_path: Optional[Path] = None,
-    ) -> "PerfStats":
+        stats_path: Path | None = None,
+        defaults_path: Path | None = None,
+    ) -> PerfStats:
         """기본값 + 사용자 통계를 읽어 인스턴스를 생성한다.
 
         Args:
@@ -227,9 +228,7 @@ class PerfStats:
             entry = RateEntry(rate=0.0, samples=0)
             self.entries[key] = entry
         entry.update(rate)
-        logger.debug(
-            f"perf_stats 업데이트: {key} rate={entry.rate:.4f} samples={entry.samples}"
-        )
+        logger.debug(f"perf_stats 업데이트: {key} rate={entry.rate:.4f} samples={entry.samples}")
 
     # ====================== 예측 ======================
 
@@ -292,7 +291,7 @@ class PerfStats:
         if my_perf <= 0:
             return 0.0
 
-        best: Optional[tuple[float, int]] = None  # (scaled_rate, samples)
+        best: tuple[float, int] | None = None  # (scaled_rate, samples)
         for key, entry in self.entries.items():
             if not key.startswith(prefix) or entry.samples < 1:
                 continue
