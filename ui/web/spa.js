@@ -899,7 +899,7 @@
         ].join("\n");
 
         contentEl.innerHTML = html;
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
 
         // 일괄 요약 버튼 이벤트
         var self = this;
@@ -1051,7 +1051,7 @@
             searchHint: document.getElementById("searchHint"),
         };
 
-        document.title = "검색 — 회의록";
+        document.title = "검색 · Recap";
     };
 
     /**
@@ -1435,7 +1435,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = this._meetingId + " — 전사문 뷰어";
+        document.title = this._meetingId + " · 전사문 · Recap";
     };
 
     /**
@@ -2234,7 +2234,7 @@
         titleEl.appendChild(editBtn);
 
         // 페이지 타이틀도 갱신
-        document.title = displayTitle + " — 전사문 뷰어";
+        document.title = displayTitle + " · 전사문 · Recap";
     };
 
     /**
@@ -3364,7 +3364,7 @@
         this._timers = [];
 
         // 페이지 타이틀 복원
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -3498,7 +3498,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = "채팅 — 회의록";
+        document.title = "채팅 · Recap";
     };
 
     /**
@@ -3956,7 +3956,7 @@
         if (listPanel) listPanel.classList.remove("chat-mode");
 
         // 페이지 타이틀 복원
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -3989,7 +3989,7 @@
         self._currentTab = null;
         self._render();
         self._showTab(self._opts.initialTab || "general");
-        document.title = "설정 — 회의록";
+        document.title = "설정 · Recap";
 
         // 브라우저 탭 닫기/새로고침 가드: 편집 중이면 네이티브 경고 표시
         self._beforeUnloadHandler = function (e) {
@@ -4108,7 +4108,7 @@
         }
         var listPanel = document.getElementById("list-panel");
         if (listPanel) listPanel.classList.remove("chat-mode");
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -4126,7 +4126,7 @@
         self._timers = [];
         self._render();
         self._loadTests();
-        document.title = "A/B 테스트 — 회의록";
+        document.title = "A/B 테스트 · Recap";
     }
 
     /**
@@ -4311,7 +4311,7 @@
         self._render();
         self._bind();
         self._loadData();
-        document.title = "새 A/B 테스트 — 회의록";
+        document.title = "새 A/B 테스트 · Recap";
     }
 
     /**
@@ -4772,7 +4772,7 @@
         self._render();
         self._loadData();
         self._bindWs();
-        document.title = "A/B 테스트 — 회의록";
+        document.title = "A/B 테스트 · Recap";
     }
 
     /**
