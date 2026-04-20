@@ -641,16 +641,6 @@ button {
 :root[data-theme="light"] .brand-mark-light { display: block; }
 :root[data-theme="light"] .brand-mark-dark { display: none; }
 
-/* 리스트 상단 섹션 라벨 (회의록/검색/... 분류) */
-.list-section-label {
-  padding: 4px 16px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-secondary);
-}
-
 /* 리스트 검색 입력 */
 .list-search {
   padding: 0 12px 8px;
