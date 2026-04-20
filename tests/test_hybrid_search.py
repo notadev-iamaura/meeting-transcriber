@@ -37,8 +37,6 @@ from search.hybrid_search import (
     _search_fts,
 )
 
-
-
 # === 헬퍼 함수 ===
 
 

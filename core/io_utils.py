@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -84,10 +85,8 @@ def atomic_write_text(
         tmp_name = None  # 성공 — finally 에서 unlink 안 함
     finally:
         if tmp_name is not None:
-            try:
+            with contextlib.suppress(OSError):
                 Path(tmp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def atomic_write_json(

@@ -18,7 +18,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # === 작업 상태 정의 ===
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     """작업 큐의 상태를 정의하는 열거형.
 
     상태 전이 규칙:
@@ -55,7 +55,11 @@ VALID_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.RECORDING: {JobStatus.TRANSCRIBING, JobStatus.FAILED},
     JobStatus.TRANSCRIBING: {JobStatus.DIARIZING, JobStatus.FAILED},
     JobStatus.DIARIZING: {JobStatus.MERGING, JobStatus.FAILED},
-    JobStatus.MERGING: {JobStatus.EMBEDDING, JobStatus.COMPLETED, JobStatus.FAILED},  # skip_llm_steps 시 merging→completed 직행
+    JobStatus.MERGING: {
+        JobStatus.EMBEDDING,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+    },  # skip_llm_steps 시 merging→completed 직행
     JobStatus.EMBEDDING: {JobStatus.COMPLETED, JobStatus.FAILED},
     JobStatus.COMPLETED: set(),  # 완료 후 전이 불가
     JobStatus.FAILED: {JobStatus.QUEUED},  # 재시도만 가능
@@ -313,9 +317,7 @@ class JobQueue:
             JobQueueError: initialize() 가 호출되지 않았을 때
         """
         if not self._initialized:
-            raise JobQueueError(
-                "DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요."
-            )
+            raise JobQueueError("DB 연결이 초기화되지 않았습니다. initialize()를 먼저 호출하세요.")
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = self._create_connection()
@@ -354,9 +356,7 @@ class JobQueue:
 
         if "title" not in existing_columns:
             logger.info("JobQueue 마이그레이션: jobs.title 컬럼 추가")
-            conn.execute(
-                "ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''"
-            )
+            conn.execute("ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''")
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
@@ -430,7 +430,9 @@ class JobQueue:
                 conn.commit()
                 job_id = cursor.lastrowid
 
-            logger.info(f"작업 등록: id={job_id}, meeting_id={meeting_id}, status={initial_status}, audio={audio_path}")
+            logger.info(
+                f"작업 등록: id={job_id}, meeting_id={meeting_id}, status={initial_status}, audio={audio_path}"
+            )
             return job_id
 
         except sqlite3.IntegrityError as e:
@@ -533,9 +535,7 @@ class JobQueue:
         # 정제 + 검증
         cleaned = (title or "").strip()
         if len(cleaned) > 200:
-            raise JobQueueError(
-                f"제목이 너무 깁니다 ({len(cleaned)}자, 최대 200자)"
-            )
+            raise JobQueueError(f"제목이 너무 깁니다 ({len(cleaned)}자, 최대 200자)")
 
         # 대상 작업 조회
         job = self.get_job_by_meeting_id(meeting_id)
@@ -555,9 +555,7 @@ class JobQueue:
             )
             conn.commit()
 
-        logger.info(
-            "제목 업데이트: meeting_id=%s, title=%r", meeting_id, cleaned
-        )
+        logger.info("제목 업데이트: meeting_id=%s, title=%r", meeting_id, cleaned)
         return self.get_job_by_meeting_id(meeting_id)  # type: ignore[return-value]
 
     def update_status(

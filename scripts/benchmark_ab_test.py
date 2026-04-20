@@ -17,7 +17,6 @@ CER/WER 차이를 Zeroth-Korean 데이터셋으로 정량 측정한다.
 """
 
 import argparse
-import asyncio
 import json
 import logging
 import re
@@ -46,10 +45,10 @@ class SampleResult:
     """개별 샘플 전사 결과"""
 
     sample_id: str
-    reference: str          # 정답 텍스트
-    hypothesis: str         # 전사 결과
-    cer: float              # 샘플별 CER
-    audio_duration: float   # 오디오 길이 (초)
+    reference: str  # 정답 텍스트
+    hypothesis: str  # 전사 결과
+    cer: float  # 샘플별 CER
+    audio_duration: float  # 오디오 길이 (초)
     processing_time: float  # 처리 시간 (초)
 
 
@@ -57,7 +56,7 @@ class SampleResult:
 class ABResult:
     """A/B 테스트 결과"""
 
-    mode: str               # "baseline" 또는 "enhanced"
+    mode: str  # "baseline" 또는 "enhanced"
     total_samples: int
     cer: float
     wer: float
@@ -117,12 +116,14 @@ def prepare_dataset(num_samples: int, cache_dir: Path) -> list[dict]:
             sf.write(str(audio_path), audio_array, sr)
 
         duration = len(audio_array) / sr
-        samples.append({
-            "id": f"zeroth_{i:04d}",
-            "audio_path": audio_path,
-            "reference": item["text"].strip(),
-            "duration": duration,
-        })
+        samples.append(
+            {
+                "id": f"zeroth_{i:04d}",
+                "audio_path": audio_path,
+                "reference": item["text"].strip(),
+                "duration": duration,
+            }
+        )
 
     total_dur = sum(s["duration"] for s in samples)
     logger.info(f"데이터셋 준비 완료: {len(samples)}개 샘플, 총 {total_dur:.1f}초")
@@ -145,6 +146,7 @@ class BaselineProvider:
     def _load(self) -> None:
         if self._whisper is None:
             import mlx_whisper
+
             self._whisper = mlx_whisper
             logger.info("[Baseline] mlx-whisper 로드 완료")
 
@@ -189,6 +191,7 @@ class EnhancedProvider:
     def _load(self) -> None:
         if self._whisper is None:
             import mlx_whisper
+
             self._whisper = mlx_whisper
             logger.info("[Enhanced] mlx-whisper 로드 완료")
 
@@ -217,16 +220,13 @@ class EnhancedProvider:
         if not self.vad_enabled or self._vad is None:
             return None
 
-        import torch
         import torchaudio
 
         waveform, sample_rate = torchaudio.load(str(audio_path))
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
         if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(
-                orig_freq=sample_rate, new_freq=16000
-            )
+            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
             waveform = resampler(waveform)
             sample_rate = 16000
 
@@ -284,11 +284,14 @@ class EnhancedProvider:
         # beam search → greedy 폴백
         try:
             result = self._whisper.transcribe(
-                str(audio_path), beam_size=5, **kwargs,
+                str(audio_path),
+                beam_size=5,
+                **kwargs,
             )
         except NotImplementedError:
             result = self._whisper.transcribe(
-                str(audio_path), **kwargs,
+                str(audio_path),
+                **kwargs,
             )
 
         text = result.get("text", "").strip()
@@ -296,6 +299,7 @@ class EnhancedProvider:
         # 숫자 정규화 적용
         try:
             from steps.number_normalizer import normalize_numbers
+
             text = normalize_numbers(text, level=1)
         except Exception as e:
             logger.debug(f"숫자 정규화 실패 (원본 유지): {e}")
@@ -331,32 +335,36 @@ def run_ab_test(
             hyp_n = normalize_korean(hypothesis)
             sample_cer = jiwer.cer(ref_n, hyp_n) if ref_n else 0.0
 
-            results.append(SampleResult(
-                sample_id=sample["id"],
-                reference=sample["reference"],
-                hypothesis=hypothesis,
-                cer=sample_cer,
-                audio_duration=sample["duration"],
-                processing_time=elapsed,
-            ))
+            results.append(
+                SampleResult(
+                    sample_id=sample["id"],
+                    reference=sample["reference"],
+                    hypothesis=hypothesis,
+                    cer=sample_cer,
+                    audio_duration=sample["duration"],
+                    processing_time=elapsed,
+                )
+            )
 
             total_audio += sample["duration"]
             total_time += elapsed
 
             # 진행률
             if (i + 1) % 5 == 0 or i == len(samples) - 1:
-                logger.info(
-                    f"  [{mode}] {i + 1}/{len(samples)} 완료 "
-                    f"(누적 {total_time:.1f}초)"
-                )
+                logger.info(f"  [{mode}] {i + 1}/{len(samples)} 완료 (누적 {total_time:.1f}초)")
 
         except Exception as e:
             logger.warning(f"  [{mode}] 샘플 {sample['id']} 실패: {e}")
 
     if not results:
         return ABResult(
-            mode=mode, total_samples=0,
-            cer=1.0, wer=1.0, avg_time=0, total_audio=0, rtf=0,
+            mode=mode,
+            total_samples=0,
+            cer=1.0,
+            wer=1.0,
+            avg_time=0,
+            total_audio=0,
+            rtf=0,
         )
 
     # 전체 CER/WER 계산
@@ -424,38 +432,48 @@ def print_report(baseline: ABResult, enhanced: ABResult) -> None:
     # 샘플별 비교 (CER 변화가 큰 순서)
     if baseline.samples and enhanced.samples:
         diffs = []
-        for b, e in zip(baseline.samples, enhanced.samples):
-            diffs.append({
-                "id": b.sample_id,
-                "cer_diff": e.cer - b.cer,
-                "baseline_cer": b.cer,
-                "enhanced_cer": e.cer,
-                "ref": b.reference,
-                "baseline_hyp": b.hypothesis,
-                "enhanced_hyp": e.hypothesis,
-            })
+        for b, e in zip(baseline.samples, enhanced.samples, strict=False):
+            diffs.append(
+                {
+                    "id": b.sample_id,
+                    "cer_diff": e.cer - b.cer,
+                    "baseline_cer": b.cer,
+                    "enhanced_cer": e.cer,
+                    "ref": b.reference,
+                    "baseline_hyp": b.hypothesis,
+                    "enhanced_hyp": e.hypothesis,
+                }
+            )
 
         # 개선된 샘플
         improved = sorted([d for d in diffs if d["cer_diff"] < -0.01], key=lambda x: x["cer_diff"])
-        degraded = sorted([d for d in diffs if d["cer_diff"] > 0.01], key=lambda x: x["cer_diff"], reverse=True)
+        degraded = sorted(
+            [d for d in diffs if d["cer_diff"] > 0.01], key=lambda x: x["cer_diff"], reverse=True
+        )
 
         if improved:
-            print(f"\n  개선된 샘플 Top 5:")
+            print("\n  개선된 샘플 Top 5:")
             for d in improved[:5]:
-                print(f"    {d['id']}: CER {d['baseline_cer']:.2%} → {d['enhanced_cer']:.2%} ({d['cer_diff']:+.2%}p)")
+                print(
+                    f"    {d['id']}: CER {d['baseline_cer']:.2%} → {d['enhanced_cer']:.2%} ({d['cer_diff']:+.2%}p)"
+                )
                 print(f"      정답:     {d['ref'][:70]}")
                 print(f"      기존:     {d['baseline_hyp'][:70]}")
                 print(f"      개선:     {d['enhanced_hyp'][:70]}")
 
         if degraded:
-            print(f"\n  악화된 샘플 Top 5:")
+            print("\n  악화된 샘플 Top 5:")
             for d in degraded[:5]:
-                print(f"    {d['id']}: CER {d['baseline_cer']:.2%} → {d['enhanced_cer']:.2%} ({d['cer_diff']:+.2%}p)")
+                print(
+                    f"    {d['id']}: CER {d['baseline_cer']:.2%} → {d['enhanced_cer']:.2%} ({d['cer_diff']:+.2%}p)"
+                )
                 print(f"      정답:     {d['ref'][:70]}")
                 print(f"      기존:     {d['baseline_hyp'][:70]}")
                 print(f"      개선:     {d['enhanced_hyp'][:70]}")
 
-        print(f"\n  요약: 개선 {len(improved)}건 / 악화 {len(degraded)}건 / 동일 {len(diffs) - len(improved) - len(degraded)}건")
+        print(
+            f"\n  요약: 개선 {len(improved)}건 / 악화 {len(degraded)}건 / 동일 {len(diffs) - len(improved) - len(degraded)}건"
+        )
 
     print("\n" + "=" * 75)
 
@@ -522,20 +540,26 @@ def main() -> None:
         description="STT 개선 A/B 비교 벤치마크",
     )
     parser.add_argument(
-        "--samples", type=int, default=10,
+        "--samples",
+        type=int,
+        default=10,
         help="벤치마크 샘플 수 (기본: 10)",
     )
     parser.add_argument(
-        "--output", type=str, default=None,
+        "--output",
+        type=str,
+        default=None,
         help="결과 JSON 저장 경로",
     )
     parser.add_argument(
-        "--initial-prompt", type=str,
+        "--initial-prompt",
+        type=str,
         default="회의, 안녕하세요, 감사합니다, 네, 말씀, 진행, 공유, 확인, 검토, 일정, 프로젝트",
         help="Enhanced 모드의 initial_prompt",
     )
     parser.add_argument(
-        "--no-vad", action="store_true",
+        "--no-vad",
+        action="store_true",
         help="Enhanced 모드에서 VAD 비활성화 (initial_prompt만 테스트)",
     )
     args = parser.parse_args()
@@ -576,8 +600,8 @@ def main() -> None:
     # ── 리포트 ──
     print_report(baseline_result, enhanced_result)
 
-    output_path = Path(args.output) if args.output else (
-        PROJECT_ROOT / "data" / "ab_test_results.json"
+    output_path = (
+        Path(args.output) if args.output else (PROJECT_ROOT / "data" / "ab_test_results.json")
     )
     save_results(baseline_result, enhanced_result, output_path)
 

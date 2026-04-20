@@ -13,8 +13,11 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import jiwer
 import pytest
+
+# jiwer 는 STT 벤치마크 전용 선택 의존성. 설치돼 있지 않으면 이 테스트 모듈 전체를 스킵한다
+# (pyproject.toml 의 dev deps 에는 포함되지 않아 CI 기본 환경에서는 자연스럽게 스킵됨).
+jiwer = pytest.importorskip("jiwer")
 
 # 프로젝트 루트를 PYTHONPATH에 추가
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +33,6 @@ from scripts.benchmark_stt import (
     run_benchmark,
     save_results,
 )
-
 
 # ============================================================
 # 텍스트 정규화 테스트
@@ -277,7 +279,9 @@ class TestOpenRouterSTTProvider:
 
     @patch("httpx.Client.post")
     def test_transcribe_sends_base64_audio(
-        self, mock_post: MagicMock, tmp_path: Path,
+        self,
+        mock_post: MagicMock,
+        tmp_path: Path,
     ) -> None:
         """transcribe가 base64 인코딩된 오디오를 전송한다."""
         audio_file = tmp_path / "test.wav"

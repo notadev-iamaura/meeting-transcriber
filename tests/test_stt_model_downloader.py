@@ -4,12 +4,12 @@ STTModelDownloader 의 비동기 HF 다운로드 + 검증 파이프라인을 검
 모든 지원 모델은 사전 양자화된 HF repo 를 사용하므로 로컬 양자화 경로는 없다.
 huggingface_hub 호출은 전부 mock 처리한다.
 """
+
 from __future__ import annotations
 
 import asyncio
 
 import pytest
-
 
 # ============================================================
 # Fixtures
@@ -38,6 +38,7 @@ def downloader(tmp_models_dir):
 class TestSTTModelDownloader:
     async def test_다운로드_시작시_job_id_반환(self, downloader, monkeypatch):
         """start_download 호출 시 job_id를 즉시 반환해야 한다."""
+
         async def fake_hf(spec, job):
             await asyncio.sleep(0.05)
 
@@ -88,9 +89,7 @@ class TestSTTModelDownloader:
         assert progress.completed_at is not None
         assert progress.error_message is None
 
-    async def test_HF_실패시_direct_URL_폴백_후_성공(
-        self, downloader, monkeypatch
-    ):
+    async def test_HF_실패시_direct_URL_폴백_후_성공(self, downloader, monkeypatch):
         """HF 다운로드 실패 시 direct URL 로 자동 폴백하여 성공해야 한다.
 
         구체적인 폴백 시나리오는 test_stt_direct_download.py 에서 더 상세히 검증한다.

@@ -12,14 +12,11 @@
 
 import unicodedata
 
-import pytest
-
 from steps.number_normalizer import (
     _korean_number_to_int,
     _normalize_mixed,
     normalize_numbers,
 )
-
 
 # ============================================================
 # 내부 함수 테스트: _korean_number_to_int

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -251,7 +251,9 @@ class TestUpdateJobStatusSafe:
         """정상적인 상태 업데이트가 큐에 전달되어야 한다."""
         await processor._update_job_status_safe(1, "transcribing")
         mock_job_queue.update_status.assert_called_once_with(
-            1, "transcribing", error_message="",
+            1,
+            "transcribing",
+            error_message="",
         )
 
     async def test_에러_메시지와_함께_업데이트(
@@ -261,10 +263,14 @@ class TestUpdateJobStatusSafe:
     ) -> None:
         """에러 메시지가 포함된 상태 업데이트가 전달되어야 한다."""
         await processor._update_job_status_safe(
-            1, "failed", error_message="파이프라인 실패",
+            1,
+            "failed",
+            error_message="파이프라인 실패",
         )
         mock_job_queue.update_status.assert_called_once_with(
-            1, "failed", error_message="파이프라인 실패",
+            1,
+            "failed",
+            error_message="파이프라인 실패",
         )
 
     async def test_업데이트_실패시_예외_전파_안함(
@@ -390,10 +396,7 @@ class TestProcessJobSuccess:
         # broadcast_event 호출 확인
         assert mock_ws_manager.broadcast_event.called
         # job_completed 이벤트 포함 확인
-        event_types = [
-            c[0][0].event_type
-            for c in mock_ws_manager.broadcast_event.call_args_list
-        ]
+        event_types = [c[0][0].event_type for c in mock_ws_manager.broadcast_event.call_args_list]
         assert "job_completed" in event_types
 
 
@@ -454,10 +457,7 @@ class TestProcessJobFailure:
         await processor._process_job(job)
 
         # job_failed 이벤트 포함 확인
-        event_types = [
-            c[0][0].event_type
-            for c in mock_ws_manager.broadcast_event.call_args_list
-        ]
+        event_types = [c[0][0].event_type for c in mock_ws_manager.broadcast_event.call_args_list]
         assert "job_failed" in event_types
 
     async def test_실패시에도_서멀_notify_job_completed_호출(
@@ -665,10 +665,7 @@ class TestStepToStatus:
         await processor._process_job(job)
 
         # pipeline_status 이벤트 확인
-        event_types = [
-            c[0][0].event_type
-            for c in mock_ws_manager.broadcast_event.call_args_list
-        ]
+        event_types = [c[0][0].event_type for c in mock_ws_manager.broadcast_event.call_args_list]
         assert "pipeline_status" in event_types
 
 

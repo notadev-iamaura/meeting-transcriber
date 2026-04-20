@@ -13,9 +13,9 @@
     C. komixv2 → 4bit 양자화 (직접 변환)
     D. ghost613 turbo-korean → 4bit 양자화 (직접 변환)
 """
+
 import gc
 import json
-import os
 import subprocess
 import sys
 import time
@@ -73,6 +73,7 @@ def clear_memory():
     gc.collect()
     try:
         import mlx.core as mx
+
         mx.clear_cache()
     except Exception:
         pass
@@ -99,11 +100,15 @@ def convert_model(source: str, output_path: str) -> bool:
     cmd = [
         sys.executable,
         str(MLX_EXAMPLES / "convert.py"),
-        "--torch-name-or-path", source,
-        "--mlx-path", output_path,
+        "--torch-name-or-path",
+        source,
+        "--mlx-path",
+        output_path,
         "-q",
-        "--q-bits", "4",
-        "--q-group-size", "64",
+        "--q-bits",
+        "4",
+        "--q-group-size",
+        "64",
     ]
     print(f"  변환 명령: {' '.join(cmd)}")
     t0 = time.perf_counter()
@@ -119,7 +124,7 @@ def convert_model(source: str, output_path: str) -> bool:
     model_file = out / "model.safetensors"
     if model_file.exists() and not weights_link.exists():
         weights_link.symlink_to("model.safetensors")
-        print(f"  심볼릭 링크 생성: weights.safetensors → model.safetensors")
+        print("  심볼릭 링크 생성: weights.safetensors → model.safetensors")
 
     print(f"  ✅ 변환 완료 ({elapsed:.1f}초)")
     return True
@@ -138,18 +143,21 @@ def get_dir_size_mb(path: Path) -> float:
 def load_test_samples(num_samples: int = 5):
     """Zeroth Korean test set에서 샘플을 로드한다."""
     from datasets import load_dataset
+
     print(f"\nZeroth Korean test set 로드 ({num_samples}개)...")
     ds = load_dataset("kresnik/zeroth_korean", split="test", streaming=True)
     samples = []
     for i, s in enumerate(ds.take(num_samples)):
-        samples.append({
-            "index": i + 1,
-            "audio_array": s["audio"]["array"],
-            "sample_rate": s["audio"]["sampling_rate"],
-            "duration": len(s["audio"]["array"]) / s["audio"]["sampling_rate"],
-            "reference": s["text"],
-        })
-        print(f"  [{i+1}] {samples[-1]['duration']:.1f}s | {s['text'][:60]}")
+        samples.append(
+            {
+                "index": i + 1,
+                "audio_array": s["audio"]["array"],
+                "sample_rate": s["audio"]["sampling_rate"],
+                "duration": len(s["audio"]["array"]) / s["audio"]["sampling_rate"],
+                "reference": s["text"],
+            }
+        )
+        print(f"  [{i + 1}] {samples[-1]['duration']:.1f}s | {s['text'][:60]}")
     return samples
 
 
@@ -184,13 +192,15 @@ def transcribe_samples(model_path: str, samples: list) -> dict:
             text = ""
             elapsed = 0.0
 
-        results["transcripts"].append({
-            "index": s["index"],
-            "reference": s["reference"],
-            "hypothesis": text,
-            "time_s": round(elapsed, 2),
-            "audio_s": round(s["duration"], 2),
-        })
+        results["transcripts"].append(
+            {
+                "index": s["index"],
+                "reference": s["reference"],
+                "hypothesis": text,
+                "time_s": round(elapsed, 2),
+                "audio_s": round(s["duration"], 2),
+            }
+        )
         results["total_time_s"] += elapsed
         results["total_audio_s"] += s["duration"]
         print(f"    [{s['index']}] {elapsed:.1f}s | {text[:60]}")
@@ -201,6 +211,7 @@ def transcribe_samples(model_path: str, samples: list) -> dict:
 def compute_metrics(transcripts: list) -> dict:
     """CER/WER 메트릭을 계산한다."""
     from jiwer import cer, wer
+
     refs = [t["reference"] for t in transcripts]
     hyps = [t["hypothesis"] for t in transcripts]
     return {
@@ -212,10 +223,10 @@ def compute_metrics(transcripts: list) -> dict:
 
 def benchmark_model(model: dict, samples: list) -> dict:
     """단일 모델 벤치마크를 실행한다."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {model['label']}")
     print(f"  경로: {model['path']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     result = {
         "label": model["label"],
@@ -225,7 +236,7 @@ def benchmark_model(model: dict, samples: list) -> dict:
 
     # 1. 양자화 (필요 시)
     if model["needs_convert"]:
-        print(f"\n[1] 양자화 변환...")
+        print("\n[1] 양자화 변환...")
         if not convert_model(model["source"], model["path"]):
             result["error"] = "변환 실패"
             return result
@@ -236,7 +247,7 @@ def benchmark_model(model: dict, samples: list) -> dict:
     print(f"\n[2] 디스크 크기: {size_mb:.1f}MB")
 
     # 3. 전사 + 메모리 측정
-    print(f"\n[3] 전사 시작...")
+    print("\n[3] 전사 시작...")
     clear_memory()
     mem_before = get_memory_gb()
     print(f"    메모리 (전): {mem_before:.2f}GB")
@@ -259,7 +270,7 @@ def benchmark_model(model: dict, samples: list) -> dict:
     )
     result["transcripts"] = transcribe_result["transcripts"]
 
-    print(f"\n[4] 결과:")
+    print("\n[4] 결과:")
     print(f"    CER: {result['cer_percent']}%")
     print(f"    WER: {result['wer_percent']}%")
     print(f"    총 전사 시간: {result['total_time_s']}초")
@@ -272,9 +283,9 @@ def benchmark_model(model: dict, samples: list) -> dict:
 
 def print_comparison(results: list):
     """결과 비교 표를 출력한다."""
-    print(f"\n\n{'='*100}")
-    print(f"  최종 비교 결과 (Zeroth Korean test set)")
-    print(f"{'='*100}\n")
+    print(f"\n\n{'=' * 100}")
+    print("  최종 비교 결과 (Zeroth Korean test set)")
+    print(f"{'=' * 100}\n")
 
     header = f"{'모델':<40} {'디스크':>10} {'메모리':>10} {'CER':>8} {'WER':>8} {'RTF':>8}"
     print(header)
@@ -306,7 +317,10 @@ def main():
 
     # 시스템 정보
     import platform
-    print(f"\n시스템: {platform.processor()} | RAM: {psutil.virtual_memory().total/(1024**3):.0f}GB")
+
+    print(
+        f"\n시스템: {platform.processor()} | RAM: {psutil.virtual_memory().total / (1024**3):.0f}GB"
+    )
 
     # 테스트 샘플 로드
     samples = load_test_samples(num_samples=5)
@@ -320,11 +334,14 @@ def main():
         except Exception as e:
             print(f"\n❌ {model['label']} 실패: {e}")
             import traceback
+
             traceback.print_exc()
-            results.append({
-                "label": model["label"],
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "label": model["label"],
+                    "error": str(e),
+                }
+            )
 
     # 비교 표 출력
     print_comparison(results)

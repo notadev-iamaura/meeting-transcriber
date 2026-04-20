@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -149,21 +150,18 @@ class JobProcessor:
                 # VALID_TRANSITIONS 에 역방향 전이가 없으므로 force_set_status 사용
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
-                    job.id, JobStatus.QUEUED, error_message="",
+                    job.id,
+                    JobStatus.QUEUED,
+                    error_message="",
                 )
-                logger.warning(
-                    f"orphaned 작업 복구: {job.meeting_id} "
-                    f"({job.status} → queued)"
-                )
+                logger.warning(f"orphaned 작업 복구: {job.meeting_id} ({job.status} → queued)")
                 recovered += 1
             except Exception as e:
                 logger.error(
                     f"orphaned 작업 복구 실패: job_id={job.id}, "
                     f"meeting_id={job.meeting_id}, status={job.status}, error={e}"
                 )
-        logger.info(
-            f"orphaned 작업 복구 완료: {recovered}/{len(orphaned)}건"
-        )
+        logger.info(f"orphaned 작업 복구 완료: {recovered}/{len(orphaned)}건")
 
     async def stop(self) -> None:
         """작업 루프를 중지한다.
@@ -177,10 +175,8 @@ class JobProcessor:
         self._running = False
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         logger.info("JobProcessor 중지")
 
@@ -240,7 +236,9 @@ class JobProcessor:
         try:
             job_status = JobStatus(status) if isinstance(status, str) else status
             await self._job_queue.update_status(
-                job_id, job_status, error_message=error_message,
+                job_id,
+                job_status,
+                error_message=error_message,
             )
         except Exception as e:
             logger.error(f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}")
@@ -381,9 +379,7 @@ class JobProcessor:
                 }
 
                 if phase == "start":
-                    eta = self._perf_stats.predict(
-                        step, model_id=model_id, input_size=input_size
-                    )
+                    eta = self._perf_stats.predict(step, model_id=model_id, input_size=input_size)
                     payload["eta_seconds"] = eta
                     payload["anomaly"] = "normal"
                 elif phase == "complete":
@@ -397,9 +393,7 @@ class JobProcessor:
                     )
                     self._perf_stats.save()
                     # 완료 시점의 이상 탐지 (사후 기록용)
-                    eta = self._perf_stats.predict(
-                        step, model_id=model_id, input_size=input_size
-                    )
+                    eta = self._perf_stats.predict(step, model_id=model_id, input_size=input_size)
                     payload["eta_seconds"] = eta
                     payload["elapsed_seconds"] = elapsed
                     payload["anomaly"] = self._perf_stats.classify_anomaly(
@@ -412,7 +406,7 @@ class JobProcessor:
 
         try:
             # 파이프라인 실행 (LLM 단계는 온디맨드로 실행하므로 스킵)
-            result = await self._pipeline.run(
+            await self._pipeline.run(
                 Path(audio_path),
                 meeting_id=meeting_id,
                 on_step_start=on_step_start,
@@ -455,7 +449,9 @@ class JobProcessor:
             # 실패 상태 업데이트
             error_msg = str(e)
             await self._update_job_status_safe(
-                job_id, "failed", error_message=error_msg,
+                job_id,
+                "failed",
+                error_message=error_msg,
             )
             await self._thermal_manager.notify_job_completed()
             await self._broadcast_event(

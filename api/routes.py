@@ -21,7 +21,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
@@ -660,7 +660,7 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
 class MeetingPatchRequest(BaseModel):
     """PATCH /api/meetings/{meeting_id} 요청 본문 (부분 업데이트)."""
 
-    title: Optional[str] = Field(
+    title: str | None = Field(
         default=None,
         max_length=200,
         description="사용자 정의 제목 (빈 문자열이면 자동 타임스탬프 복귀)",
@@ -689,26 +689,18 @@ async def patch_meeting(
     try:
         # 기존 라우트들과 동일 패턴: queue.queue 로 raw JobQueue 접근
         raw_queue = getattr(queue, "queue", queue)
-        job = await asyncio.to_thread(
-            raw_queue.get_job_by_meeting_id, meeting_id
-        )
+        job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
         if job is None:
-            raise HTTPException(
-                status_code=404, detail=f"회의를 찾을 수 없습니다: {meeting_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"회의를 찾을 수 없습니다: {meeting_id}")
 
         if body.title is not None:
             try:
-                job = await asyncio.to_thread(
-                    raw_queue.update_title, meeting_id, body.title
-                )
+                job = await asyncio.to_thread(raw_queue.update_title, meeting_id, body.title)
             except Exception as exc:  # JobQueueError 또는 기타 검증 오류
                 from core.job_queue import JobQueueError as _JQErr
 
                 if isinstance(exc, _JQErr):
-                    raise HTTPException(
-                        status_code=400, detail=str(exc)
-                    ) from exc
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
                 raise
 
         return MeetingItem(
@@ -1032,9 +1024,7 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
                         logger.warning(f"재전사: {fname} 삭제 실패: {exc}")
 
         # 3) job 상태 강제 리셋
-        updated_job = await asyncio.to_thread(
-            queue.queue.reset_for_retranscribe, job.id
-        )
+        updated_job = await asyncio.to_thread(queue.queue.reset_for_retranscribe, job.id)
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
         job_processor = getattr(request.app.state, "job_processor", None)
@@ -1097,9 +1087,7 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
         )
 
     try:
-        data = await asyncio.to_thread(
-            lambda: json.loads(state_path.read_text(encoding="utf-8"))
-        )
+        data = await asyncio.to_thread(lambda: json.loads(state_path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as e:
         logger.exception(f"pipeline_state.json 읽기 실패: {e}")
         raise HTTPException(
@@ -1109,9 +1097,7 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
 
     # 편의: 총 소요시간 계산 (step_results 의 elapsed_seconds 합산)
     step_results = data.get("step_results", []) or []
-    total_elapsed = sum(
-        float(step.get("elapsed_seconds") or 0.0) for step in step_results
-    )
+    total_elapsed = sum(float(step.get("elapsed_seconds") or 0.0) for step in step_results)
     data["total_elapsed_seconds"] = round(total_elapsed, 2)
     return data
 
@@ -1299,10 +1285,19 @@ async def get_summary(
     summary_json_path = meeting_dir / "summary.json"
     # 체크포인트 폴백
     config = getattr(request.app.state, "config", None)
-    checkpoints_dir = config.paths.resolved_checkpoints_dir if config else meeting_dir.parent.parent / "checkpoints"
+    checkpoints_dir = (
+        config.paths.resolved_checkpoints_dir
+        if config
+        else meeting_dir.parent.parent / "checkpoints"
+    )
     checkpoint_path = checkpoints_dir / meeting_id / "summarize.json"
 
-    if not summary_md_path.is_file() and not minutes_md_path.is_file() and not summary_json_path.is_file() and not checkpoint_path.is_file():
+    if (
+        not summary_md_path.is_file()
+        and not minutes_md_path.is_file()
+        and not summary_json_path.is_file()
+        and not checkpoint_path.is_file()
+    ):
         raise HTTPException(
             status_code=404,
             detail=f"회의록을 찾을 수 없습니다: {meeting_id}",
@@ -1322,8 +1317,10 @@ async def get_summary(
             md_file = minutes_md_path
 
         if md_file:
+
             def _read_md() -> str:
                 return md_file.read_text(encoding="utf-8")
+
             markdown = await asyncio.to_thread(_read_md)
 
         # PERF: mtime 기반 JSON 캐시 사용
@@ -1375,7 +1372,6 @@ async def get_summary(
 # 기존 두 곳에 분산되어 있던 패턴을 통합하기 위해 thin alias 로 유지.
 from core.io_utils import atomic_write_json as _atomic_write_json  # noqa: E402
 from core.io_utils import atomic_write_text as _atomic_write_text  # noqa: E402
-
 
 # === 요약 편집 ===
 
@@ -1487,12 +1483,8 @@ class TranscriptUpdateRequest(BaseModel):
 class TranscriptReplaceRequest(BaseModel):
     """POST /api/meetings/{meeting_id}/transcript/replace 요청."""
 
-    find: str = Field(
-        ..., min_length=1, max_length=500, description="치환 대상 패턴 (정확 매칭)"
-    )
-    replace: str = Field(
-        ..., min_length=1, max_length=500, description="치환 후 문자열"
-    )
+    find: str = Field(..., min_length=1, max_length=500, description="치환 대상 패턴 (정확 매칭)")
+    replace: str = Field(..., min_length=1, max_length=500, description="치환 후 문자열")
     add_to_vocabulary: bool = Field(
         default=False,
         description="True면 자동으로 용어집에 등록 (replace=term, find=alias)",
@@ -1504,13 +1496,11 @@ class TranscriptReplaceResponse(BaseModel):
 
     changes: int = 0
     updated_utterances: int = 0
-    vocabulary_action: Optional[str] = None
-    vocabulary_term_id: Optional[str] = None
+    vocabulary_action: str | None = None
+    vocabulary_term_id: str | None = None
 
 
-def _find_transcript_file(
-    config: Any, meeting_id: str
-) -> tuple[Optional[Path], str]:
+def _find_transcript_file(config: Any, meeting_id: str) -> tuple[Path | None, str]:
     """전사 편집 대상 파일을 찾는다.
 
     편집 시에는 readonly 폴백(merge.json)을 사용하지 않고,
@@ -1554,9 +1544,7 @@ async def update_transcript(
     _validate_meeting_id(meeting_id)
     config = getattr(request.app.state, "config", None)
     if config is None:
-        raise HTTPException(
-            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
     target, _ = _find_transcript_file(config, meeting_id)
     if target is None:
@@ -1645,9 +1633,7 @@ async def replace_transcript_pattern(
     _validate_meeting_id(meeting_id)
     config = getattr(request.app.state, "config", None)
     if config is None:
-        raise HTTPException(
-            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
     if body.find == body.replace:
         raise HTTPException(
@@ -1663,6 +1649,7 @@ async def replace_transcript_pattern(
         )
 
     try:
+
         def _load() -> dict[str, Any]:
             with open(target, encoding="utf-8") as f:
                 return json.load(f)
@@ -1695,8 +1682,8 @@ async def replace_transcript_pattern(
         _json_cache.invalidate(target)
 
         # 용어집 자동 등록
-        vocab_action: Optional[str] = None
-        vocab_term_id: Optional[str] = None
+        vocab_action: str | None = None
+        vocab_term_id: str | None = None
         if body.add_to_vocabulary:
             try:
                 from core import user_settings as _us
@@ -1712,9 +1699,7 @@ async def replace_transcript_pattern(
                 if existing_term is not None:
                     if body.find not in existing_term.aliases:
                         new_aliases = list(existing_term.aliases) + [body.find]
-                        _us.update_vocabulary_term(
-                            term_id=existing_term.id, aliases=new_aliases
-                        )
+                        _us.update_vocabulary_term(term_id=existing_term.id, aliases=new_aliases)
                         vocab_action = "alias_added"
                     else:
                         vocab_action = "alias_already_exists"
@@ -1980,7 +1965,7 @@ async def summarize_meeting(
     """
     import asyncio
 
-    from core.pipeline import PipelineError, PipelineStep
+    from core.pipeline import PipelineStep
 
     _validate_meeting_id(meeting_id)
     pipeline = _get_pipeline_manager(request)
@@ -2006,7 +1991,10 @@ async def summarize_meeting(
             outputs_dir = _get_outputs_dir(request)
             # 체크포인트 삭제
             for cp_name in ("correct.json", "summarize.json"):
-                cp_path = pipeline._get_checkpoint_path(meeting_id, PipelineStep.CORRECT if "correct" in cp_name else PipelineStep.SUMMARIZE)
+                cp_path = pipeline._get_checkpoint_path(
+                    meeting_id,
+                    PipelineStep.CORRECT if "correct" in cp_name else PipelineStep.SUMMARIZE,
+                )
                 if cp_path.exists():
                     cp_path.unlink()
                     logger.info(f"기존 체크포인트 삭제: {cp_path}")
@@ -2074,7 +2062,6 @@ async def summarize_batch(
     Returns:
         요약 시작 확인 메시지 및 대상 회의 목록
     """
-    from core.pipeline import PipelineStep
 
     pipeline = _get_pipeline_manager(request)
     config = getattr(request.app.state, "config", None)
@@ -2436,17 +2423,17 @@ class SettingsUpdateRequest(BaseModel):
         stt_language: STT 언어 코드
     """
 
-    llm_backend: Optional[str] = None
-    llm_mlx_model_name: Optional[str] = None
-    llm_temperature: Optional[float] = None
-    llm_mlx_max_tokens: Optional[int] = None
-    llm_skip_steps: Optional[bool] = None
-    stt_language: Optional[str] = None
+    llm_backend: str | None = None
+    llm_mlx_model_name: str | None = None
+    llm_temperature: float | None = None
+    llm_mlx_max_tokens: int | None = None
+    llm_skip_steps: bool | None = None
+    stt_language: str | None = None
     # 환각 필터
-    hf_enabled: Optional[bool] = None
-    hf_no_speech_threshold: Optional[float] = None
-    hf_compression_ratio_threshold: Optional[float] = None
-    hf_repetition_threshold: Optional[int] = None
+    hf_enabled: bool | None = None
+    hf_no_speech_threshold: float | None = None
+    hf_compression_ratio_threshold: float | None = None
+    hf_repetition_threshold: int | None = None
 
 
 class SettingsUpdateResponse(BaseModel):
@@ -2487,18 +2474,18 @@ def _replace_yaml_value(text: str, section: str, key: str, new_val: str) -> str:
     Returns:
         값이 교체된 YAML 텍스트. 섹션/키를 찾지 못하면 원본 반환.
     """
-    section_pattern = re.compile(rf'^{re.escape(section)}:', re.MULTILINE)
+    section_pattern = re.compile(rf"^{re.escape(section)}:", re.MULTILINE)
     section_match = section_pattern.search(text)
     if not section_match:
         return text
 
     start = section_match.end()
-    next_section = re.search(r'^\S', text[start:], re.MULTILINE)
+    next_section = re.search(r"^\S", text[start:], re.MULTILINE)
     end = start + next_section.start() if next_section else len(text)
 
     section_text = text[start:end]
     key_pattern = re.compile(
-        rf'^(  {re.escape(key)}:)\s*[^\n#]*(#[^\n]*)?$',
+        rf"^(  {re.escape(key)}:)\s*[^\n#]*(#[^\n]*)?$",
         re.MULTILINE,
     )
     key_match = key_pattern.search(section_text)
@@ -2508,12 +2495,8 @@ def _replace_yaml_value(text: str, section: str, key: str, new_val: str) -> str:
     comment = key_match.group(2) or ""
     if comment:
         comment = "  " + comment.strip()
-    replacement = f'{key_match.group(1)} {new_val}{comment}'
-    new_section = (
-        section_text[: key_match.start()]
-        + replacement
-        + section_text[key_match.end():]
-    )
+    replacement = f"{key_match.group(1)} {new_val}{comment}"
+    new_section = section_text[: key_match.start()] + replacement + section_text[key_match.end() :]
     return text[:start] + new_section + text[end:]
 
 
@@ -2603,12 +2586,11 @@ async def update_settings(
         )
 
     # === 입력 검증 ===
-    if "llm_backend" in updates:
-        if updates["llm_backend"] not in ("mlx", "ollama"):
-            raise HTTPException(
-                status_code=400,
-                detail="llm_backend는 'mlx' 또는 'ollama'만 허용됩니다.",
-            )
+    if "llm_backend" in updates and updates["llm_backend"] not in ("mlx", "ollama"):
+        raise HTTPException(
+            status_code=400,
+            detail="llm_backend는 'mlx' 또는 'ollama'만 허용됩니다.",
+        )
 
     if "llm_mlx_model_name" in updates:
         if updates["llm_mlx_model_name"] not in _ALLOWED_MLX_MODELS:
@@ -2625,12 +2607,11 @@ async def update_settings(
                 detail="llm_temperature는 0.0~2.0 범위여야 합니다.",
             )
 
-    if "llm_mlx_max_tokens" in updates:
-        if updates["llm_mlx_max_tokens"] < 100:
-            raise HTTPException(
-                status_code=400,
-                detail="llm_mlx_max_tokens는 100 이상이어야 합니다.",
-            )
+    if "llm_mlx_max_tokens" in updates and updates["llm_mlx_max_tokens"] < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="llm_mlx_max_tokens는 100 이상이어야 합니다.",
+        )
 
     if "stt_language" in updates:
         lang = updates["stt_language"]
@@ -2712,13 +2693,19 @@ async def update_settings(
         yaml_data.setdefault("hallucination_filter", {})["enabled"] = updates["hf_enabled"]
         changed_fields.append("hf_enabled")
     if "hf_no_speech_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["no_speech_threshold"] = updates["hf_no_speech_threshold"]
+        yaml_data.setdefault("hallucination_filter", {})["no_speech_threshold"] = updates[
+            "hf_no_speech_threshold"
+        ]
         changed_fields.append("hf_no_speech_threshold")
     if "hf_compression_ratio_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["compression_ratio_threshold"] = updates["hf_compression_ratio_threshold"]
+        yaml_data.setdefault("hallucination_filter", {})["compression_ratio_threshold"] = updates[
+            "hf_compression_ratio_threshold"
+        ]
         changed_fields.append("hf_compression_ratio_threshold")
     if "hf_repetition_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["repetition_threshold"] = updates["hf_repetition_threshold"]
+        yaml_data.setdefault("hallucination_filter", {})["repetition_threshold"] = updates[
+            "hf_repetition_threshold"
+        ]
         changed_fields.append("hf_repetition_threshold")
 
     # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
@@ -2730,32 +2717,46 @@ async def update_settings(
         if "llm_backend" in updates:
             content = _replace_yaml_value(content, "llm", "backend", f'"{updates["llm_backend"]}"')
         if "llm_mlx_model_name" in updates:
-            content = _replace_yaml_value(content, "llm", "mlx_model_name", f'"{updates["llm_mlx_model_name"]}"')
+            content = _replace_yaml_value(
+                content, "llm", "mlx_model_name", f'"{updates["llm_mlx_model_name"]}"'
+            )
         if "llm_temperature" in updates:
-            content = _replace_yaml_value(content, "llm", "temperature", str(updates["llm_temperature"]))
+            content = _replace_yaml_value(
+                content, "llm", "temperature", str(updates["llm_temperature"])
+            )
         if "llm_mlx_max_tokens" in updates:
-            content = _replace_yaml_value(content, "llm", "mlx_max_tokens", str(updates["llm_mlx_max_tokens"]))
+            content = _replace_yaml_value(
+                content, "llm", "mlx_max_tokens", str(updates["llm_mlx_max_tokens"])
+            )
         if "llm_skip_steps" in updates:
             val = "true" if updates["llm_skip_steps"] else "false"
             content = _replace_yaml_value(content, "pipeline", "skip_llm_steps", val)
         if "stt_language" in updates:
-            content = _replace_yaml_value(content, "stt", "language", f'"{updates["stt_language"]}"')
+            content = _replace_yaml_value(
+                content, "stt", "language", f'"{updates["stt_language"]}"'
+            )
         if "hf_enabled" in updates:
             val = "true" if updates["hf_enabled"] else "false"
             content = _replace_yaml_value(content, "hallucination_filter", "enabled", val)
         if "hf_no_speech_threshold" in updates:
             content = _replace_yaml_value(
-                content, "hallucination_filter", "no_speech_threshold",
+                content,
+                "hallucination_filter",
+                "no_speech_threshold",
                 str(updates["hf_no_speech_threshold"]),
             )
         if "hf_compression_ratio_threshold" in updates:
             content = _replace_yaml_value(
-                content, "hallucination_filter", "compression_ratio_threshold",
+                content,
+                "hallucination_filter",
+                "compression_ratio_threshold",
                 str(updates["hf_compression_ratio_threshold"]),
             )
         if "hf_repetition_threshold" in updates:
             content = _replace_yaml_value(
-                content, "hallucination_filter", "repetition_threshold",
+                content,
+                "hallucination_filter",
+                "repetition_threshold",
                 str(updates["hf_repetition_threshold"]),
             )
 
@@ -2787,7 +2788,9 @@ async def update_settings(
         config = config.model_copy(update={"llm": new_llm})
 
     if "llm_skip_steps" in updates:
-        new_pipeline = config.pipeline.model_copy(update={"skip_llm_steps": updates["llm_skip_steps"]})
+        new_pipeline = config.pipeline.model_copy(
+            update={"skip_llm_steps": updates["llm_skip_steps"]}
+        )
         config = config.model_copy(update={"pipeline": new_pipeline})
 
     if "stt_language" in updates:
@@ -2851,10 +2854,8 @@ from core.user_settings import (  # noqa: E402
     UserSettingsIOError,
     UserSettingsLockError,
     UserSettingsValidationError,
-    VocabularyData,
     VocabularyTerm,
 )
-
 
 # --- 요청/응답 스키마 ---
 
@@ -2962,9 +2963,7 @@ def _map_user_settings_error(exc: UserSettingsError) -> HTTPException:
     if isinstance(exc, UserSettingsValidationError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, UserSettingsLockError):
-        return HTTPException(
-            status_code=503, detail=f"{exc}. 잠시 후 다시 시도해 주세요."
-        )
+        return HTTPException(status_code=503, detail=f"{exc}. 잠시 후 다시 시도해 주세요.")
     if isinstance(exc, UserSettingsIOError):
         return HTTPException(status_code=500, detail=str(exc))
     return HTTPException(status_code=500, detail=f"내부 저장소 오류: {exc}")
@@ -3010,13 +3009,9 @@ async def update_prompts(body: PromptsUpdateRequest) -> PromptsResponse:
 
     updates: dict[str, Any] = {}
     if body.corrector is not None:
-        updates["corrector"] = PromptEntry(
-            system_prompt=body.corrector.system_prompt
-        )
+        updates["corrector"] = PromptEntry(system_prompt=body.corrector.system_prompt)
     if body.summarizer is not None:
-        updates["summarizer"] = PromptEntry(
-            system_prompt=body.summarizer.system_prompt
-        )
+        updates["summarizer"] = PromptEntry(system_prompt=body.summarizer.system_prompt)
     if body.chat is not None:
         updates["chat"] = PromptEntry(system_prompt=body.chat.system_prompt)
 
@@ -3175,13 +3170,14 @@ async def reset_vocabulary_endpoint() -> VocabularyResponse:
 # ============================================================
 
 # 모듈 레벨 임포트 — 테스트에서 monkeypatch 하기 쉽도록 이름을 고정한다.
-from core.stt_model_registry import STT_MODELS, get_by_id as _stt_get_by_id  # noqa: E402
+from core.stt_model_downloader import DownloadConflictError  # noqa: E402
+from core.stt_model_registry import STT_MODELS, STTModelSpec  # noqa: E402
+from core.stt_model_registry import get_by_id as _stt_get_by_id  # noqa: E402
 from core.stt_model_status import (  # noqa: E402
     ModelStatus,
     get_actual_size_mb,
     get_model_status,
 )
-from core.stt_model_downloader import DownloadConflictError  # noqa: E402
 
 
 class STTModelInfo(BaseModel):
@@ -3192,7 +3188,7 @@ class STTModelInfo(BaseModel):
     description: str
     base_model: str
     expected_size_mb: int
-    actual_size_mb: Optional[float] = None
+    actual_size_mb: float | None = None
     cer_percent: float
     wer_percent: float
     memory_gb: float
@@ -3202,8 +3198,8 @@ class STTModelInfo(BaseModel):
     is_recommended: bool
     status: str
     is_active: bool
-    download_progress: Optional[int] = None
-    error_message: Optional[str] = None
+    download_progress: int | None = None
+    error_message: str | None = None
 
 
 class STTModelsResponse(BaseModel):
@@ -3214,7 +3210,7 @@ class STTModelsResponse(BaseModel):
     active_model_path: str
 
 
-def _is_active_stt_model(spec: "STTModelSpec", active_path: str) -> bool:
+def _is_active_stt_model(spec: STTModelSpec, active_path: str) -> bool:
     """spec 이 현재 활성 STT 모델인지 판정한다.
 
     다음 세 경로 중 하나라도 `active_path` (config.stt.model_name) 와 일치하면
@@ -3264,15 +3260,13 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
     """
     config = getattr(request.app.state, "config", None)
     if config is None:
-        raise HTTPException(
-            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
     downloader = getattr(request.app.state, "stt_downloader", None)
     active_path = config.stt.model_name
 
     models: list[STTModelInfo] = []
-    active_id: Optional[str] = None
+    active_id: str | None = None
 
     for spec in STT_MODELS:
         # 1차: 디스크/HF 캐시 기반 상태
@@ -3289,9 +3283,7 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
             and runtime_status == ModelStatus.ERROR
             and downloader is not None
         ):
-            logger.info(
-                "stale ERROR job 제거 (디스크는 READY): %s", spec.id
-            )
+            logger.info("stale ERROR job 제거 (디스크는 READY): %s", spec.id)
             downloader.clear_job(spec.id)
             job = None
             runtime_status = disk_status
@@ -3300,7 +3292,7 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
         if is_active:
             active_id = spec.id
 
-        actual_size: Optional[float] = None
+        actual_size: float | None = None
         if disk_status == ModelStatus.READY:
             try:
                 actual_size = get_actual_size_mb(spec.model_path)
@@ -3348,15 +3340,11 @@ async def download_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     # 보안: model_id 화이트리스트 검증 (레지스트리에 등록된 ID만 허용)
     spec = _stt_get_by_id(model_id)
     if spec is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     downloader = getattr(request.app.state, "stt_downloader", None)
     if downloader is None:
-        raise HTTPException(
-            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="STT 다운로더가 초기화되지 않았습니다.")
 
     try:
         job_id = await downloader.start_download(model_id)
@@ -3376,9 +3364,7 @@ async def download_stt_model(request: Request, model_id: str) -> dict[str, Any]:
 
 
 @router.post("/stt-models/{model_id}/download-direct", status_code=202)
-async def download_stt_model_direct(
-    request: Request, model_id: str
-) -> dict[str, Any]:
+async def download_stt_model_direct(request: Request, model_id: str) -> dict[str, Any]:
     """HF 직접 URL 로 STT 모델을 다운로드한다 (huggingface_hub 건너뜀).
 
     기업 프록시·MITM SSL 검사·ISP 필터링 등으로 `huggingface_hub` 가 실패하는
@@ -3395,15 +3381,11 @@ async def download_stt_model_direct(
     """
     spec = _stt_get_by_id(model_id)
     if spec is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     downloader = getattr(request.app.state, "stt_downloader", None)
     if downloader is None:
-        raise HTTPException(
-            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="STT 다운로더가 초기화되지 않았습니다.")
 
     try:
         job_id = await downloader.start_download(model_id, prefer_direct=True)
@@ -3412,9 +3394,7 @@ async def download_stt_model_direct(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    logger.info(
-        "STT 모델 직접 URL 다운로드 요청 수락: %s (%s)", model_id, job_id
-    )
+    logger.info("STT 모델 직접 URL 다운로드 요청 수락: %s (%s)", model_id, job_id)
     return {
         "job_id": job_id,
         "model_id": model_id,
@@ -3425,9 +3405,7 @@ async def download_stt_model_direct(
 
 
 @router.get("/stt-models/{model_id}/download-status")
-async def get_stt_download_status(
-    request: Request, model_id: str
-) -> dict[str, Any]:
+async def get_stt_download_status(request: Request, model_id: str) -> dict[str, Any]:
     """STT 모델 다운로드 작업의 진행 상태를 반환한다.
 
     Raises:
@@ -3436,21 +3414,15 @@ async def get_stt_download_status(
     """
     # 화이트리스트 검증 (알 수 없는 ID로 downloader 내부 상태를 노출하지 않음)
     if _stt_get_by_id(model_id) is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     downloader = getattr(request.app.state, "stt_downloader", None)
     if downloader is None:
-        raise HTTPException(
-            status_code=503, detail="STT 다운로더가 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="STT 다운로더가 초기화되지 않았습니다.")
 
     job = downloader.get_progress(model_id)
     if job is None:
-        raise HTTPException(
-            status_code=404, detail="다운로드 작업을 찾을 수 없습니다."
-        )
+        raise HTTPException(status_code=404, detail="다운로드 작업을 찾을 수 없습니다.")
 
     return {
         "model_id": model_id,
@@ -3465,9 +3437,7 @@ async def get_stt_download_status(
 
 
 @router.post("/stt-models/{model_id}/activate")
-async def activate_stt_model(
-    request: Request, model_id: str
-) -> dict[str, Any]:
+async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     """활성 STT 모델을 변경하고 config.yaml 을 업데이트한다.
 
     모델은 반드시 READY 상태여야 하며, config.yaml 의 stt.model_name 필드를
@@ -3481,15 +3451,11 @@ async def activate_stt_model(
     """
     spec = _stt_get_by_id(model_id)
     if spec is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     config = getattr(request.app.state, "config", None)
     if config is None:
-        raise HTTPException(
-            status_code=503, detail="서버 설정이 초기화되지 않았습니다."
-        )
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
     # 다운로드 완료 상태 검증
     if get_model_status(spec) != ModelStatus.READY:
@@ -3514,9 +3480,7 @@ async def activate_stt_model(
     try:
         with open(config_path, encoding="utf-8") as f:
             content = f.read()
-        content = _replace_yaml_value(
-            content, "stt", "model_name", f'"{new_path}"'
-        )
+        content = _replace_yaml_value(content, "stt", "model_name", f'"{new_path}"')
         # 도중 죽어도 config.yaml 손상 방지 — _atomic_write_text 가 .bak 자동 생성
         await asyncio.to_thread(_atomic_write_text, config_path, content)
         logger.info(
@@ -3557,7 +3521,7 @@ class STTManualDownloadFile(BaseModel):
 
     name: str
     url: str
-    size_bytes: Optional[int] = None
+    size_bytes: int | None = None
 
 
 class STTManualDownloadInfo(BaseModel):
@@ -3610,16 +3574,12 @@ async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
 
     spec = _stt_get_by_id(model_id)
     if spec is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     urls = get_hf_download_urls(spec)
 
     target_dir = get_manual_import_dir(spec)
-    files = [
-        STTManualDownloadFile(name=u["name"], url=u["url"]) for u in urls
-    ]
+    files = [STTManualDownloadFile(name=u["name"], url=u["url"]) for u in urls]
 
     return STTManualDownloadInfo(
         model_id=model_id,
@@ -3661,9 +3621,7 @@ async def import_stt_manual(
 
     spec = _stt_get_by_id(model_id)
     if spec is None:
-        raise HTTPException(
-            status_code=404, detail=f"알 수 없는 STT 모델: {model_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"알 수 없는 STT 모델: {model_id}")
 
     # source_dir 검증
     source = Path(body.source_dir).expanduser().resolve()
@@ -3697,9 +3655,7 @@ async def import_stt_manual(
             shutil.copy2(str(src_file), str(tmp_file))
             tmp_file.replace(dst_file)
             copied.append(name)
-        logger.info(
-            "STT 모델 수동 가져오기 완료: %s ← %s", target_dir, source
-        )
+        logger.info("STT 모델 수동 가져오기 완료: %s ← %s", target_dir, source)
     except OSError as exc:
         logger.exception("STT 모델 수동 가져오기 실패: %s", exc)
         raise HTTPException(
@@ -3716,9 +3672,7 @@ async def import_stt_manual(
         try:
             downloader.clear_job(model_id)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "수동 가져오기 후 stale job 정리 실패 (무시): %s", exc
-            )
+            logger.warning("수동 가져오기 후 stale job 정리 실패 (무시): %s", exc)
 
     return STTImportResponse(
         model_id=model_id,
@@ -3736,21 +3690,37 @@ async def import_stt_manual(
 # ============================================================
 
 
-from typing import Literal
+# A/B 테스트 관련 심볼 — 파일 상단이 아닌 이 위치에 두는 이유는 테스트에서 monkeypatch 로
+# 이름을 교체할 수 있게 하기 위함. 파일 최상단으로 옮기면 순환 import / 모듈 초기화 순서
+# 문제가 발생한다. 각 import 에 E402 noqa 를 명시적으로 달아 의도를 표시한다.
+from typing import Literal  # noqa: E402
 
-from core import ab_test_store
-from core.ab_test_runner import (
+from core import ab_test_store  # noqa: E402
+from core.ab_test_runner import (  # noqa: E402
     LlmScope,
     ModelSpec,
+)
+from core.ab_test_runner import (  # noqa: E402
     cancel_test as _runner_cancel_test,
+)
+from core.ab_test_runner import (  # noqa: E402
     delete_test as _runner_delete_test,
+)
+from core.ab_test_runner import (  # noqa: E402
     get_test_result as _runner_get_test_result,
+)
+from core.ab_test_runner import (  # noqa: E402
     list_tests as _runner_list_tests,
+)
+from core.ab_test_runner import (  # noqa: E402
     new_test_id as _runner_new_test_id,
+)
+from core.ab_test_runner import (  # noqa: E402
     run_llm_ab_test as _runner_run_llm_ab_test,
+)
+from core.ab_test_runner import (  # noqa: E402
     run_stt_ab_test as _runner_run_stt_ab_test,
 )
-
 
 # --- Pydantic 모델 ---
 
@@ -3929,9 +3899,7 @@ async def _make_ab_broadcaster(request: Request):
     return _broadcast
 
 
-def _validate_meeting_exists(
-    config: Any, meeting_id: str, test_type: str = "llm"
-) -> None:
+def _validate_meeting_exists(config: Any, meeting_id: str, test_type: str = "llm") -> None:
     """원본 회의가 존재하는지 검증한다.
 
     test_type 에 따라 검증 기준이 다르다:
@@ -3999,10 +3967,7 @@ def _check_hf_cache_exists(repo_id: str) -> bool:
     if not cache_dir.exists():
         return False
     # snapshots 아래에 실제 파일이 있는 디렉터리가 하나라도 있으면 캐시됨
-    for snap in cache_dir.iterdir():
-        if snap.is_dir() and any(snap.iterdir()):
-            return True
-    return False
+    return any(snap.is_dir() and any(snap.iterdir()) for snap in cache_dir.iterdir())
 
 
 @router.get(
@@ -4015,11 +3980,13 @@ async def list_available_llm_models() -> list[dict]:
     result = []
     for preset in _LLM_PRESETS:
         available = _check_hf_cache_exists(preset["id"])
-        result.append({
-            "label": preset["label"],
-            "model_id": preset["id"],
-            "available": available,
-        })
+        result.append(
+            {
+                "label": preset["label"],
+                "model_id": preset["id"],
+                "available": available,
+            }
+        )
     return result
 
 
@@ -4049,7 +4016,10 @@ async def start_llm_ab_test(
     config = _get_config(request)
 
     # 사전 검증: 동일 모델 거부
-    if body.variant_a.model_id == body.variant_b.model_id and body.variant_a.backend == body.variant_b.backend:
+    if (
+        body.variant_a.model_id == body.variant_b.model_id
+        and body.variant_a.backend == body.variant_b.backend
+    ):
         raise HTTPException(
             status_code=400,
             detail="variant_a 와 variant_b 가 동일합니다.",
@@ -4214,7 +4184,7 @@ async def get_ab_test(
         raise HTTPException(
             status_code=404,
             detail=f"A/B 테스트를 찾을 수 없습니다: {test_id}",
-        )
+        ) from None
 
 
 @router.get(
@@ -4286,7 +4256,7 @@ async def delete_ab_test(
         raise HTTPException(
             status_code=404,
             detail=f"A/B 테스트를 찾을 수 없습니다: {test_id}",
-        )
+        ) from None
     return None
 
 
@@ -4315,5 +4285,5 @@ async def cancel_ab_test(
     try:
         await _runner_cancel_test(config, test_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ABTestStartedResponse(test_id=test_id, status="cancelling")

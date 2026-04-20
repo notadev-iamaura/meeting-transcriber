@@ -23,7 +23,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -205,7 +205,7 @@ class ResourceGuard:
 # === 파이프라인 단계 정의 ===
 
 
-class PipelineStep(str, Enum):
+class PipelineStep(StrEnum):
     """파이프라인 실행 단계를 정의하는 열거형.
 
     각 단계는 순서대로 실행되며, 이전 단계의 출력이
@@ -296,7 +296,9 @@ class PipelineState:
     degraded: bool = False
     skipped_steps: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    wav_paths: dict[str, str] = field(default_factory=dict)  # {"system": "/path/system.wav", "mic": "/path/mic.wav"}
+    wav_paths: dict[str, str] = field(
+        default_factory=dict
+    )  # {"system": "/path/system.wav", "mic": "/path/mic.wav"}
     is_multitrack: bool = False
 
     def __post_init__(self) -> None:
@@ -523,10 +525,7 @@ class PipelineManager:
                     norm_count += 1
                     logger.debug(f"숫자 정규화: '{original}' → '{utt.text}'")
             if norm_count > 0:
-                logger.info(
-                    f"숫자 정규화 완료: {norm_count}개 발화 변환 "
-                    f"(level={norm_level})"
-                )
+                logger.info(f"숫자 정규화 완료: {norm_count}개 발화 변환 (level={norm_level})")
         except Exception as e:
             # 숫자 정규화 실패 시 원본 유지 (파이프라인 중단하지 않음)
             logger.warning(f"숫자 정규화 처리 실패, 원본 유지: {e}")
@@ -580,8 +579,8 @@ class PipelineManager:
 
     def _compute_step_input_size(
         self,
-        step: "PipelineStep",
-        state: "PipelineState",
+        step: PipelineStep,
+        state: PipelineState,
         audio_path: Path,
         merged_result: Any,
         corrected_result: Any,
@@ -686,17 +685,13 @@ class PipelineManager:
                 vad_clip_timestamps = None
 
         transcriber = Transcriber(self._config, self._model_manager)
-        result = await transcriber.transcribe(
-            wav_path, vad_clip_timestamps=vad_clip_timestamps
-        )
+        result = await transcriber.transcribe(wav_path, vad_clip_timestamps=vad_clip_timestamps)
 
         # 환각 필터링 (hallucination_filter 설정에 따라)
         try:
             from steps.hallucination_filter import filter_hallucinations
 
-            filtered_segments, removed = filter_hallucinations(
-                result.segments, self._config
-            )
+            filtered_segments, removed = filter_hallucinations(result.segments, self._config)
             result.segments = filtered_segments
             if removed:
                 # 환각 제거 시 전체 텍스트 재구성
@@ -710,13 +705,9 @@ class PipelineManager:
         try:
             from steps.text_postprocessor import postprocess_segments
 
-            result.segments = postprocess_segments(
-                result.segments, self._config
-            )
+            result.segments = postprocess_segments(result.segments, self._config)
             # 전체 텍스트 재구성
-            result.full_text = " ".join(
-                seg.text for seg in result.segments if seg.text
-            ).strip()
+            result.full_text = " ".join(seg.text for seg in result.segments if seg.text).strip()
         except Exception as e:
             logger.warning(f"텍스트 후처리 중 오류, 원본 유지: {e}")
 
@@ -925,7 +916,9 @@ class PipelineManager:
             raise PipelineError(state.error_message)
 
         # skip_llm_steps 결정: 명시적 파라미터 > config 설정
-        _skip_llm = skip_llm_steps if skip_llm_steps is not None else self._config.pipeline.skip_llm_steps
+        _skip_llm = (
+            skip_llm_steps if skip_llm_steps is not None else self._config.pipeline.skip_llm_steps
+        )
 
         # 메모리 부족 시 degraded 모드 설정
         degraded = not resource_status.memory_ok
@@ -1014,7 +1007,9 @@ class PipelineManager:
                     if _skip_llm:
                         skip_msg = f"설정에 의해 {step.value} 단계 건너뜀 (skip_llm_steps=True)"
                     elif not mem_ok:
-                        skip_msg = f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
+                        skip_msg = (
+                            f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
+                        )
                     else:
                         skip_msg = f"degraded 모드로 {step.value} 단계 건너뜀"
                     logger.warning(skip_msg)
@@ -1154,9 +1149,7 @@ class PipelineManager:
             # MERGE 완료 시 발화 수를 상태에 저장 (이후 correct/summarize 예측용)
             if success and step == PipelineStep.MERGE and merged_result is not None:
                 try:
-                    state.utterance_count = len(
-                        getattr(merged_result, "utterances", []) or []
-                    )
+                    state.utterance_count = len(getattr(merged_result, "utterances", []) or [])
                 except Exception:
                     state.utterance_count = 0
 
@@ -1177,9 +1170,7 @@ class PipelineManager:
                             }
                         )
                     except Exception as e:
-                        logger.warning(
-                            f"on_step_progress 콜백 예외 (complete, 무시): {e}"
-                        )
+                        logger.warning(f"on_step_progress 콜백 예외 (complete, 무시): {e}")
             else:
                 # 실패 시 파이프라인 중단
                 state.status = "failed"
@@ -1369,8 +1360,7 @@ class PipelineManager:
         merge_cp = self._get_checkpoint_path(meeting_id, PipelineStep.MERGE)
         if not merge_cp.exists():
             raise PipelineError(
-                f"merge 체크포인트를 찾을 수 없습니다: {merge_cp}. "
-                f"파이프라인을 먼저 실행하세요."
+                f"merge 체크포인트를 찾을 수 없습니다: {merge_cp}. 파이프라인을 먼저 실행하세요."
             )
 
         from steps.merger import MergedResult

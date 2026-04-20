@@ -572,9 +572,7 @@ class TestMultiTrackRecording:
     """멀티트랙 녹음 테스트."""
 
     @pytest.mark.asyncio
-    async def test_select_devices_멀티트랙_BlackHole_AND_마이크(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_select_devices_멀티트랙_BlackHole_AND_마이크(self, tmp_path: Path) -> None:
         """BlackHole + mic가 동시 반환된다."""
         config = _make_multitrack_config(tmp_path)
         recorder = AudioRecorder(config=config)
@@ -592,9 +590,7 @@ class TestMultiTrackRecording:
         assert selected["mic"].is_blackhole is False
 
     @pytest.mark.asyncio
-    async def test_select_devices_BlackHole_없으면_마이크만(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_select_devices_BlackHole_없으면_마이크만(self, tmp_path: Path) -> None:
         """BlackHole이 없으면 마이크만 반환된다."""
         config = _make_multitrack_config(tmp_path)
         recorder = AudioRecorder(config=config)
@@ -609,9 +605,7 @@ class TestMultiTrackRecording:
         assert "system" not in selected
 
     @pytest.mark.asyncio
-    async def test_start_recording_멀티트랙_두_프로세스(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_start_recording_멀티트랙_두_프로세스(self, tmp_path: Path) -> None:
         """멀티트랙 모드에서 2개 ffmpeg 프로세스가 시작된다."""
         config = _make_multitrack_config(tmp_path)
         recorder = AudioRecorder(config=config)

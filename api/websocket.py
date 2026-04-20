@@ -19,7 +19,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -36,7 +36,7 @@ _DEFAULT_MAX_CONNECTIONS = 10
 _DEFAULT_HEARTBEAT_INTERVAL = 30  # 초
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """WebSocket 이벤트 타입을 정의하는 열거형.
 
     Attributes:

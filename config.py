@@ -95,18 +95,14 @@ class VADConfig(BaseModel):
     """
 
     enabled: bool = False
-    threshold: float = Field(
-        default=0.5, ge=0.0, le=1.0, description="음성 확률 임계값"
-    )
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="음성 확률 임계값")
     min_speech_duration_ms: int = Field(
         default=250, ge=50, le=2000, description="최소 음성 구간 길이(ms)"
     )
     min_silence_duration_ms: int = Field(
         default=100, ge=30, le=2000, description="최소 무음 구간 길이(ms)"
     )
-    speech_pad_ms: int = Field(
-        default=30, ge=0, le=500, description="음성 구간 전후 패딩(ms)"
-    )
+    speech_pad_ms: int = Field(default=30, ge=0, le=500, description="음성 구간 전후 패딩(ms)")
 
 
 class HallucinationFilterConfig(BaseModel):
@@ -118,15 +114,21 @@ class HallucinationFilterConfig(BaseModel):
 
     enabled: bool = False
     compression_ratio_threshold: float = Field(
-        default=2.4, ge=1.0, le=10.0,
+        default=2.4,
+        ge=1.0,
+        le=10.0,
         description="압축비 임계값 (초과 시 환각으로 판정)",
     )
     logprob_threshold: float = Field(
-        default=-1.0, ge=-5.0, le=0.0,
+        default=-1.0,
+        ge=-5.0,
+        le=0.0,
         description="평균 로그 확률 임계값 (미만 시 저신뢰도)",
     )
     no_speech_threshold: float = Field(
-        default=0.9, ge=0.0, le=1.0,
+        default=0.9,
+        ge=0.0,
+        le=1.0,
         description=(
             "무음 확률 임계값 (초과 시 무음 세그먼트 제거). "
             "0.6은 너무 공격적이라 실제 발화도 대량 삭제되는 문제가 있어 0.9로 상향. "
@@ -134,7 +136,9 @@ class HallucinationFilterConfig(BaseModel):
         ),
     )
     repetition_threshold: int = Field(
-        default=3, ge=2, le=10,
+        default=3,
+        ge=2,
+        le=10,
         description="반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)",
     )
 
@@ -431,9 +435,7 @@ class RecordingConfig(BaseModel):
     min_duration_seconds: int = Field(default=5, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
-    silence_threshold_rms: float = Field(
-        default=0.001, ge=0.0, le=1.0
-    )  # 무음 판정 RMS 임계값
+    silence_threshold_rms: float = Field(default=0.001, ge=0.0, le=1.0)  # 무음 판정 RMS 임계값
 
 
 class LifecycleConfig(BaseModel):
@@ -492,9 +494,7 @@ class AppConfig(BaseModel):
     hallucination_filter: HallucinationFilterConfig = Field(
         default_factory=HallucinationFilterConfig
     )
-    text_postprocessing: TextPostprocessingConfig = Field(
-        default_factory=TextPostprocessingConfig
-    )
+    text_postprocessing: TextPostprocessingConfig = Field(default_factory=TextPostprocessingConfig)
     number_normalization: NumberNormalizationConfig = Field(
         default_factory=NumberNormalizationConfig
     )

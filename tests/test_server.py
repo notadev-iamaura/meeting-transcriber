@@ -372,17 +372,19 @@ class TestLifespanPartialFailure:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        with patch(
-            "search.hybrid_search.HybridSearchEngine",
-            side_effect=RuntimeError("검색 엔진 초기화 실패"),
+        with (
+            patch(
+                "search.hybrid_search.HybridSearchEngine",
+                side_effect=RuntimeError("검색 엔진 초기화 실패"),
+            ),
+            TestClient(app) as client,
         ):
-            with TestClient(app) as client:
-                # 서버가 정상 작동하는지 헬스체크로 확인
-                response = client.get("/api/health")
-                assert response.status_code == 200
+            # 서버가 정상 작동하는지 헬스체크로 확인
+            response = client.get("/api/health")
+            assert response.status_code == 200
 
-                # search_engine이 None으로 설정되어야 함
-                assert app.state.search_engine is None
+            # search_engine이 None으로 설정되어야 함
+            assert app.state.search_engine is None
 
     def test_chat_engine_초기화_실패(self, tmp_path: Path) -> None:
         """ChatEngine 초기화 실패 시 서버가 정상 시작되고 chat_engine이 None인지 확인한다."""
@@ -391,17 +393,19 @@ class TestLifespanPartialFailure:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        with patch(
-            "search.chat.ChatEngine",
-            side_effect=RuntimeError("Chat 엔진 초기화 실패"),
+        with (
+            patch(
+                "search.chat.ChatEngine",
+                side_effect=RuntimeError("Chat 엔진 초기화 실패"),
+            ),
+            TestClient(app) as client,
         ):
-            with TestClient(app) as client:
-                # 서버가 정상 작동하는지 헬스체크로 확인
-                response = client.get("/api/health")
-                assert response.status_code == 200
+            # 서버가 정상 작동하는지 헬스체크로 확인
+            response = client.get("/api/health")
+            assert response.status_code == 200
 
-                # chat_engine이 None으로 설정되어야 함
-                assert app.state.chat_engine is None
+            # chat_engine이 None으로 설정되어야 함
+            assert app.state.chat_engine is None
 
     def test_search_engine과_chat_engine_동시_실패(self, tmp_path: Path) -> None:
         """검색/Chat 엔진 모두 초기화 실패해도 서버가 정상 시작되는지 확인한다."""
@@ -410,19 +414,22 @@ class TestLifespanPartialFailure:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        with patch(
-            "search.hybrid_search.HybridSearchEngine",
-            side_effect=RuntimeError("검색 엔진 실패"),
-        ), patch(
-            "search.chat.ChatEngine",
-            side_effect=RuntimeError("Chat 엔진 실패"),
+        with (
+            patch(
+                "search.hybrid_search.HybridSearchEngine",
+                side_effect=RuntimeError("검색 엔진 실패"),
+            ),
+            patch(
+                "search.chat.ChatEngine",
+                side_effect=RuntimeError("Chat 엔진 실패"),
+            ),
+            TestClient(app) as client,
         ):
-            with TestClient(app) as client:
-                response = client.get("/api/health")
-                assert response.status_code == 200
+            response = client.get("/api/health")
+            assert response.status_code == 200
 
-                assert app.state.search_engine is None
-                assert app.state.chat_engine is None
+            assert app.state.search_engine is None
+            assert app.state.chat_engine is None
 
 
 # === TestExceptionHandler ===
@@ -746,22 +753,27 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                assert hasattr(app.state, "thermal_manager")
-                assert app.state.thermal_manager is not None
+            assert hasattr(app.state, "thermal_manager")
+            assert app.state.thermal_manager is not None
 
     def test_folder_watcher_초기화_및_시작(self, tmp_path: Path) -> None:
         """app.state.folder_watcher가 존재하고 start가 호출되었는지 확인한다."""
@@ -771,23 +783,28 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                assert hasattr(app.state, "folder_watcher")
-                assert app.state.folder_watcher is not None
-                mocks["watcher"].start.assert_called_once()
+            assert hasattr(app.state, "folder_watcher")
+            assert app.state.folder_watcher is not None
+            mocks["watcher"].start.assert_called_once()
 
     def test_pipeline_manager_초기화(self, tmp_path: Path) -> None:
         """app.state.pipeline_manager가 존재하는지 확인한다."""
@@ -797,22 +814,27 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                assert hasattr(app.state, "pipeline_manager")
-                assert app.state.pipeline_manager is not None
+            assert hasattr(app.state, "pipeline_manager")
+            assert app.state.pipeline_manager is not None
 
     def test_job_processor_초기화_및_시작(self, tmp_path: Path) -> None:
         """app.state.job_processor가 존재하고 start가 호출되었는지 확인한다."""
@@ -822,23 +844,28 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                assert hasattr(app.state, "job_processor")
-                assert app.state.job_processor is not None
-                mocks["processor"].start.assert_called_once()
+            assert hasattr(app.state, "job_processor")
+            assert app.state.job_processor is not None
+            mocks["processor"].start.assert_called_once()
 
     def test_shutdown시_job_processor_stop(self, tmp_path: Path) -> None:
         """종료 시 JobProcessor.stop()이 호출되는지 확인한다."""
@@ -848,21 +875,26 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                pass  # TestClient __exit__에서 shutdown 실행
+            pass  # TestClient __exit__에서 shutdown 실행
 
         mocks["processor"].stop.assert_called_once()
 
@@ -874,21 +906,26 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            mocks["pipeline_cls"],
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                mocks["pipeline_cls"],
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
+            TestClient(app) as _client,
         ):
-            with TestClient(app) as _client:
-                pass  # TestClient __exit__에서 shutdown 실행
+            pass  # TestClient __exit__에서 shutdown 실행
 
         mocks["watcher"].stop.assert_called_once()
 
@@ -899,24 +936,28 @@ class TestLifespanOrchestration:
         config = _make_test_config(tmp_path)
         app = create_app(config)
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            side_effect=RuntimeError("ThermalManager 실패"),
-        ), patch(
-            "core.pipeline.PipelineManager",
-            side_effect=RuntimeError("PipelineManager 실패"),
-        ), patch(
-            "core.watcher.FolderWatcher",
-            side_effect=RuntimeError("FolderWatcher 실패"),
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                side_effect=RuntimeError("ThermalManager 실패"),
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                side_effect=RuntimeError("PipelineManager 실패"),
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                side_effect=RuntimeError("FolderWatcher 실패"),
+            ),
+            TestClient(app) as client,
         ):
-            with TestClient(app) as client:
-                response = client.get("/api/health")
-                assert response.status_code == 200
+            response = client.get("/api/health")
+            assert response.status_code == 200
 
-                assert app.state.thermal_manager is None
-                assert app.state.pipeline_manager is None
-                assert app.state.folder_watcher is None
-                assert app.state.job_processor is None
+            assert app.state.thermal_manager is None
+            assert app.state.pipeline_manager is None
+            assert app.state.folder_watcher is None
+            assert app.state.job_processor is None
 
     def test_pipeline_없으면_job_processor_비활성(self, tmp_path: Path) -> None:
         """PipelineManager가 None이면 JobProcessor가 생성되지 않는지 확인한다."""
@@ -926,18 +967,23 @@ class TestLifespanOrchestration:
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
-        with patch(
-            "core.thermal_manager.ThermalManager",
-            mocks["thermal_cls"],
-        ), patch(
-            "core.pipeline.PipelineManager",
-            side_effect=RuntimeError("PipelineManager 실패"),
-        ), patch(
-            "core.watcher.FolderWatcher",
-            mocks["watcher_cls"],
-        ), patch(
-            "core.orchestrator.JobProcessor",
-            mocks["processor_cls"],
+        with (
+            patch(
+                "core.thermal_manager.ThermalManager",
+                mocks["thermal_cls"],
+            ),
+            patch(
+                "core.pipeline.PipelineManager",
+                side_effect=RuntimeError("PipelineManager 실패"),
+            ),
+            patch(
+                "core.watcher.FolderWatcher",
+                mocks["watcher_cls"],
+            ),
+            patch(
+                "core.orchestrator.JobProcessor",
+                mocks["processor_cls"],
+            ),
         ):
             with TestClient(app) as _client:
                 assert app.state.pipeline_manager is None

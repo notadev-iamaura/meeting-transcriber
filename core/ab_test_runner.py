@@ -29,19 +29,20 @@ import math
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
-from config import AppConfig, get_config
+from config import AppConfig
 from core import ab_test_store
 from core.model_manager import ModelLoadManager, get_model_manager
 from steps.corrector import CorrectedResult, Corrector
 from steps.diarizer import DiarizationResult, Diarizer
 from steps.merger import MergedResult, Merger
-from steps.summarizer import SummaryResult, Summarizer
-from steps.transcriber import TranscriptResult, Transcriber
+from steps.summarizer import Summarizer, SummaryResult
+from steps.transcriber import Transcriber, TranscriptResult
 
 logger = logging.getLogger(__name__)
 
@@ -225,16 +226,10 @@ def compute_winner_score(metrics: dict[str, Any]) -> float:
         metrics.get("char_count", {}).get("correct", 0)
         + metrics.get("char_count", {}).get("summary", 0)
     )
-    return (
-        -2.0 * forbidden_total
-        - 0.01 * elapsed_total
-        + 0.5 * math.log1p(max(char_count, 0))
-    )
+    return -2.0 * forbidden_total - 0.01 * elapsed_total + 0.5 * math.log1p(max(char_count, 0))
 
 
-def determine_winner(
-    metrics_a: dict[str, Any], metrics_b: dict[str, Any]
-) -> str:
+def determine_winner(metrics_a: dict[str, Any], metrics_b: dict[str, Any]) -> str:
     """두 variant 의 메트릭을 비교하여 참고용 승자를 결정한다.
 
     Args:
@@ -333,9 +328,7 @@ def _write_summary_markdown(dir_path: Path, markdown: str) -> None:
         f.write(markdown)
 
 
-def _build_llm_temp_config(
-    base_config: AppConfig, spec: ModelSpec
-) -> AppConfig:
+def _build_llm_temp_config(base_config: AppConfig, spec: ModelSpec) -> AppConfig:
     """variant 별 LLM 임시 설정을 생성한다 (원본 비오염).
 
     ADR-9: pydantic `model_copy(update=...)` 체이닝.
@@ -350,9 +343,7 @@ def _build_llm_temp_config(
     return base_config.model_copy(update={"llm": new_llm})
 
 
-def _build_stt_temp_config(
-    base_config: AppConfig, spec: ModelSpec
-) -> AppConfig:
+def _build_stt_temp_config(base_config: AppConfig, spec: ModelSpec) -> AppConfig:
     """variant 별 STT 임시 설정을 생성한다 (원본 비오염).
 
     spec.model_id 가 레지스트리 짧은 ID (예: "seastar-medium-4bit")이면
@@ -640,9 +631,7 @@ async def run_llm_ab_test(
                         },
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        f"A/B 테스트 variant {variant} 실패: {exc}", exc_info=True
-                    )
+                    logger.error(f"A/B 테스트 variant {variant} 실패: {exc}", exc_info=True)
                     variant_errors[variant] = str(exc)
                     # 에러 로그도 variant 디렉터리에 남긴다
                     try:
@@ -947,9 +936,7 @@ async def run_stt_ab_test(
                         },
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        f"STT A/B variant {variant} 실패: {exc}", exc_info=True
-                    )
+                    logger.error(f"STT A/B variant {variant} 실패: {exc}", exc_info=True)
                     variant_errors[variant] = str(exc)
                     try:
                         variant_dir.mkdir(parents=True, exist_ok=True)
@@ -1068,9 +1055,7 @@ def get_test_result(config: AppConfig, test_id: str) -> dict[str, Any]:
     }
 
 
-def list_tests(
-    config: AppConfig, source_meeting_id: str | None = None
-) -> list[dict[str, Any]]:
+def list_tests(config: AppConfig, source_meeting_id: str | None = None) -> list[dict[str, Any]]:
     """저장된 테스트 목록을 최신순 요약으로 반환한다."""
     result: list[dict[str, Any]] = []
     for tid in ab_test_store.list_test_ids(config, source_meeting_id):

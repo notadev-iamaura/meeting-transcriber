@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChipsetInfo:
     """감지된 칩셋 정보."""
+
     is_apple_silicon: bool
     chip_name: str | None  # "M1", "M2", "M3", "M4" 등
     ram_gb: int
@@ -34,6 +35,7 @@ class ChipsetInfo:
 @dataclass
 class OptimalProfile:
     """칩셋+RAM 기반 최적 설정 프로파일."""
+
     batch_size: int
 
 
@@ -98,7 +100,9 @@ class ChipsetDetector:
         try:
             result = subprocess.run(
                 ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 brand = result.stdout.strip()
@@ -117,7 +121,7 @@ class ChipsetDetector:
             시스템 RAM 크기 (GB 단위, 반올림)
         """
         total_bytes = psutil.virtual_memory().total
-        return round(total_bytes / (1024 ** 3))
+        return round(total_bytes / (1024**3))
 
     @staticmethod
     def _compute_batch_size(info: ChipsetInfo) -> int:

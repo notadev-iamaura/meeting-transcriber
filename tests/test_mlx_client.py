@@ -8,7 +8,6 @@ mlx-lm 패키지 없이도 동작하도록 mock 기반으로 검증한다.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +18,6 @@ from core.mlx_client import (
     MLXGenerationError,
     MLXLoadError,
 )
-
 
 # === 에러 계층 테스트 ===
 
@@ -94,13 +92,15 @@ class TestMLXBackendInit:
         """mlx-lm 패키지 미설치 시 MLXLoadError를 발생시킨다."""
         config = MockLLMConfig()
 
-        with patch.dict("sys.modules", {"mlx_lm": None}):
-            with patch(
+        with (
+            patch.dict("sys.modules", {"mlx_lm": None}),
+            patch(
                 "builtins.__import__",
                 side_effect=ImportError("No module named 'mlx_lm'"),
-            ):
-                with pytest.raises(MLXLoadError, match="mlx-lm 패키지"):
-                    MLXBackend(config)
+            ),
+            pytest.raises(MLXLoadError, match="mlx-lm 패키지"),
+        ):
+            MLXBackend(config)
 
     def test_기본_max_tokens_설정(self) -> None:
         """mlx_max_tokens 설정이 없으면 기본값 2000을 사용한다."""
@@ -141,9 +141,7 @@ class TestMLXBackendChat:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
-        backend._tokenizer.apply_chat_template = MagicMock(
-            return_value="formatted prompt"
-        )
+        backend._tokenizer.apply_chat_template = MagicMock(return_value="formatted prompt")
         return backend
 
     def test_모델_미로드시_에러(self) -> None:
@@ -209,9 +207,7 @@ class TestMLXBackendChatStream:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
-        backend._tokenizer.apply_chat_template = MagicMock(
-            return_value="formatted prompt"
-        )
+        backend._tokenizer.apply_chat_template = MagicMock(return_value="formatted prompt")
         return backend
 
     def test_모델_미로드시_에러(self) -> None:

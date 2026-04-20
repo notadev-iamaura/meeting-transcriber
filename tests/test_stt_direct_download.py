@@ -7,7 +7,6 @@ urllib.request 호출은 mock 처리한다.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,27 +34,23 @@ def downloader(tmp_models_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(
         stt_model_registry,
         "get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            manual_base / "stt_models" / f"{spec.id}-manual"
-        ),
+        lambda spec, base_dir=None: str(manual_base / "stt_models" / f"{spec.id}-manual"),
     )
     # downloader 모듈 내부에서도 동일하게 참조되도록 패치
     import core.stt_model_downloader as dl_mod
+
     monkeypatch.setattr(
         dl_mod,
         "get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            manual_base / "stt_models" / f"{spec.id}-manual"
-        ),
+        lambda spec, base_dir=None: str(manual_base / "stt_models" / f"{spec.id}-manual"),
     )
     # stt_model_status 에서도 패치 (verify 경로)
     import core.stt_model_status as status_mod
+
     monkeypatch.setattr(
         status_mod,
         "get_manual_import_dir",
-        lambda spec, base_dir=None: str(
-            manual_base / "stt_models" / f"{spec.id}-manual"
-        ),
+        lambda spec, base_dir=None: str(manual_base / "stt_models" / f"{spec.id}-manual"),
     )
     return STTModelDownloader(models_dir=tmp_models_dir)
 
@@ -179,9 +174,7 @@ class TestDownloadFallback:
 
 
 class TestPreferDirect:
-    async def test_prefer_direct_True_이면_huggingface_hub_건너뜀(
-        self, downloader, monkeypatch
-    ):
+    async def test_prefer_direct_True_이면_huggingface_hub_건너뜀(self, downloader, monkeypatch):
         """prefer_direct=True 이면 HF 호출 없이 바로 direct URL 로 간다."""
         hf_called = {"n": 0}
         direct_called = {"n": 0}
@@ -216,11 +209,11 @@ class TestPreferDirect:
 class TestDirectURLDownload:
     async def test_urllib_스트리밍_다운로드(self, downloader):
         """실제 _direct_url_download 가 urllib 로 두 파일을 받아 배치한다."""
+        from core.stt_model_downloader import DownloadJob
         from core.stt_model_registry import (
             get_by_id,
             get_manual_import_dir,
         )
-        from core.stt_model_downloader import DownloadJob
 
         spec = get_by_id("seastar-medium-4bit")
         job = DownloadJob(
@@ -242,10 +235,9 @@ class TestDirectURLDownload:
 
         target = Path(get_manual_import_dir(spec))
         assert (target / "config.json").read_bytes() == fake_contents["config.json"]
-        assert (
-            (target / "weights.safetensors").read_bytes()
-            == fake_contents["weights.safetensors"]
-        )
+        assert (target / "weights.safetensors").read_bytes() == fake_contents[
+            "weights.safetensors"
+        ]
         # 임시 파일이 남아있지 않아야 함
         assert not list(target.glob("*.tmp"))
 
@@ -253,8 +245,8 @@ class TestDirectURLDownload:
         """HTTPError 가 발생하면 한국어 메시지 RuntimeError 로 변환된다."""
         from urllib.error import HTTPError
 
-        from core.stt_model_registry import get_by_id
         from core.stt_model_downloader import DownloadJob
+        from core.stt_model_registry import get_by_id
 
         spec = get_by_id("seastar-medium-4bit")
         job = DownloadJob(
@@ -285,14 +277,10 @@ class TestDownloadDirectEndpoint:
     def client_with_downloader(self, tmp_models_dir):
         app = FastAPI()
         app.include_router(router)
-        app.state.stt_downloader = STTModelDownloader(
-            models_dir=tmp_models_dir
-        )
+        app.state.stt_downloader = STTModelDownloader(models_dir=tmp_models_dir)
         return TestClient(app)
 
-    def test_download_direct_엔드포인트_202_반환(
-        self, client_with_downloader, monkeypatch
-    ):
+    def test_download_direct_엔드포인트_202_반환(self, client_with_downloader, monkeypatch):
         """POST /download-direct 가 prefer_direct=True 로 다운로더를 호출한다."""
         calls = []
 
@@ -300,13 +288,9 @@ class TestDownloadDirectEndpoint:
             calls.append({"model_id": model_id, "prefer_direct": prefer_direct})
             return "stt-download-test-1"
 
-        monkeypatch.setattr(
-            STTModelDownloader, "start_download", fake_start
-        )
+        monkeypatch.setattr(STTModelDownloader, "start_download", fake_start)
 
-        resp = client_with_downloader.post(
-            "/api/stt-models/seastar-medium-4bit/download-direct"
-        )
+        resp = client_with_downloader.post("/api/stt-models/seastar-medium-4bit/download-direct")
         assert resp.status_code == 202
         data = resp.json()
         assert data["method"] == "direct_url"
@@ -316,10 +300,6 @@ class TestDownloadDirectEndpoint:
         assert calls[0]["model_id"] == "seastar-medium-4bit"
         assert calls[0]["prefer_direct"] is True
 
-    def test_download_direct_404_for_unknown_model(
-        self, client_with_downloader
-    ):
-        resp = client_with_downloader.post(
-            "/api/stt-models/nonexistent/download-direct"
-        )
+    def test_download_direct_404_for_unknown_model(self, client_with_downloader):
+        resp = client_with_downloader.post("/api/stt-models/nonexistent/download-direct")
         assert resp.status_code == 404

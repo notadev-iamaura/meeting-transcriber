@@ -32,8 +32,6 @@ from steps.transcriber import (
     TranscriptSegment,
 )
 
-
-
 # === 픽스처 ===
 
 
@@ -304,13 +302,9 @@ class TestTranscriberInit:
         t = Transcriber(config=config, model_manager=mock_manager)
         assert t._condition_on_previous_text is True
 
-    def test_condition_on_previous_text_False(
-        self, mock_manager: MagicMock
-    ) -> None:
+    def test_condition_on_previous_text_False(self, mock_manager: MagicMock) -> None:
         """condition_on_previous_text=False가 올바르게 전파된다."""
-        custom_config = AppConfig(
-            stt={"condition_on_previous_text": False}
-        )
+        custom_config = AppConfig(stt={"condition_on_previous_text": False})
         t = Transcriber(config=custom_config, model_manager=mock_manager)
         assert t._condition_on_previous_text is False
 

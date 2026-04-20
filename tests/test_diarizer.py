@@ -33,8 +33,6 @@ from steps.diarizer import (
     TokenNotConfiguredError,
 )
 
-
-
 # === Fixture ===
 
 
@@ -768,7 +766,9 @@ class TestResolveDevice:
         mock_pyannote_pipeline.from_pretrained.return_value = mock_pipeline_instance
 
         with (
-            patch.dict("sys.modules", {"pyannote.audio": MagicMock(Pipeline=mock_pyannote_pipeline)}),
+            patch.dict(
+                "sys.modules", {"pyannote.audio": MagicMock(Pipeline=mock_pyannote_pipeline)}
+            ),
             patch.dict("sys.modules", {"torch": mock_torch}),
             patch("steps.diarizer.logger") as mock_logger,
         ):

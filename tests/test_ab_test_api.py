@@ -22,8 +22,6 @@ from fastapi import FastAPI
 from config import AppConfig, PathsConfig
 from core import ab_test_runner, ab_test_store
 from core.ab_test_runner import (
-    LlmScope,
-    ModelSpec,
     new_test_id,
 )
 from steps.corrector import CorrectedResult, CorrectedUtterance
@@ -31,7 +29,6 @@ from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.merger import MergedResult, MergedUtterance
 from steps.summarizer import SummaryResult
 from steps.transcriber import TranscriptResult, TranscriptSegment
-
 
 # ============================================================
 # 헬퍼: 최소 FastAPI 앱 생성 (lifespan 생략, 라우터만 등록)
@@ -66,9 +63,7 @@ def _make_minimal_app(config: AppConfig) -> FastAPI:
 def tmp_config(tmp_path: Path) -> AppConfig:
     """tmp_path 기반 AppConfig."""
     cfg = AppConfig()
-    cfg = cfg.model_copy(
-        update={"paths": PathsConfig(base_dir=str(tmp_path))}
-    )
+    cfg = cfg.model_copy(update={"paths": PathsConfig(base_dir=str(tmp_path))})
     cfg.paths.resolved_outputs_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.resolved_checkpoints_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.resolved_audio_input_dir.mkdir(parents=True, exist_ok=True)
@@ -97,15 +92,11 @@ def meeting_id_with_merge(tmp_config: AppConfig, sample_merged: MergedResult) ->
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     sample_merged.save_checkpoint(ckpt_dir / "merge.json")
     # WAV 는 audio_input/ 에 저장
-    (tmp_config.paths.resolved_audio_input_dir / f"{mid}.wav").write_bytes(
-        b"RIFF....WAVEfmt "
-    )
+    (tmp_config.paths.resolved_audio_input_dir / f"{mid}.wav").write_bytes(b"RIFF....WAVEfmt ")
     # outputs 에 metadata (기존 회의 조회용)
     out_dir = tmp_config.paths.resolved_outputs_dir / mid
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "metadata.json").write_text(
-        json.dumps({"meeting_id": mid}), encoding="utf-8"
-    )
+    (out_dir / "metadata.json").write_text(json.dumps({"meeting_id": mid}), encoding="utf-8")
     return mid
 
 
@@ -320,9 +311,7 @@ class TestPostLlmAbTest:
         """202 + test_id 반환 + metadata 파일 생성 확인."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         assert resp.status_code == 202
         data = resp.json()
         assert "test_id" in data
@@ -375,9 +364,7 @@ class TestPostSttAbTest:
         """202 + test_id 반환."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/stt", json=_stt_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/stt", json=_stt_body(meeting_id_with_merge))
         assert resp.status_code == 202
         data = resp.json()
         assert "test_id" in data
@@ -427,9 +414,7 @@ class TestListAbTests:
         """테스트 생성 후 목록 조회."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
@@ -451,15 +436,11 @@ class TestListAbTests:
         """source_meeting_id 쿼리로 필터링."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
-        resp2 = await async_client.get(
-            f"/api/ab-tests?source_meeting_id={meeting_id_with_merge}"
-        )
+        resp2 = await async_client.get(f"/api/ab-tests?source_meeting_id={meeting_id_with_merge}")
         assert len(resp2.json()["tests"]) >= 1
 
         resp3 = await async_client.get("/api/ab-tests?source_meeting_id=nonexistent")
@@ -484,9 +465,7 @@ class TestGetAbTestById:
         """완료된 테스트 상세 조회."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
@@ -514,9 +493,7 @@ class TestGetAbTestById:
             "ab_20260409-143000_A1B2C3D4",  # 대문자 16진수
         ],
     )
-    async def test_path_traversal_거부(
-        self, async_client: httpx.AsyncClient, bad_id: str
-    ) -> None:
+    async def test_path_traversal_거부(self, async_client: httpx.AsyncClient, bad_id: str) -> None:
         """유효하지 않은 test_id 형식은 400."""
         resp = await async_client.get(f"/api/ab-tests/{bad_id}")
         assert resp.status_code == 400
@@ -540,9 +517,7 @@ class TestGetSummary:
         """summary.md 가 text/markdown 으로 반환되는지 확인."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
@@ -577,9 +552,7 @@ class TestDeleteAbTest:
         """삭제 후 204 + 디렉터리 제거 확인."""
         app.state.model_manager = _DummyManager()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
@@ -654,9 +627,7 @@ class TestOriginalMeetingUnchanged:
                     if f.is_file():
                         before[str(f)] = f.read_bytes()
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
 
@@ -695,9 +666,7 @@ class TestWebSocketBroadcast:
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-            )
+            resp = await client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
             assert resp.status_code == 202
             tid = resp.json()["test_id"]
             await _wait_for_task_completion(tmp_config, tid)
@@ -729,9 +698,7 @@ class TestWebSocketBroadcast:
         app.state.model_manager = _DummyManager()
         app.state.ws_manager = None
 
-        resp = await async_client.post(
-            "/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge)
-        )
+        resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         assert resp.status_code == 202
         tid = resp.json()["test_id"]
         meta = await _wait_for_task_completion(tmp_config, tid)

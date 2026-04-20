@@ -19,12 +19,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def get_memory_mb() -> float:
     """현재 프로세스의 RSS 메모리(MB)를 반환한다."""
     import resource
+
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
 
 def get_system_memory() -> dict:
     """시스템 메모리 상태를 반환한다."""
     import psutil
+
     mem = psutil.virtual_memory()
     return {
         "total_gb": round(mem.total / (1024**3), 1),
@@ -39,6 +41,7 @@ def clear_memory():
     gc.collect()
     try:
         import mlx.core as mx
+
         mx.clear_cache()
     except Exception:
         pass
@@ -85,28 +88,32 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
     """
     results = {"model": model_name, "label": label}
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {label}: {model_name}")
     print(f"  (backend: {'mlx-vlm' if use_vlm else 'mlx-lm'})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # 시스템 메모리 (로드 전)
     sys_mem_before = get_system_memory()
-    print(f"\n[메모리] 로드 전: {sys_mem_before['used_gb']}GB / {sys_mem_before['total_gb']}GB ({sys_mem_before['percent']}%)")
+    print(
+        f"\n[메모리] 로드 전: {sys_mem_before['used_gb']}GB / {sys_mem_before['total_gb']}GB ({sys_mem_before['percent']}%)"
+    )
     results["mem_before_gb"] = sys_mem_before["used_gb"]
 
     # 모델 로드
-    print(f"\n[1/4] 모델 로드 중...")
+    print("\n[1/4] 모델 로드 중...")
     t0 = time.perf_counter()
     try:
         if use_vlm:
             from mlx_vlm import generate as vlm_generate
             from mlx_vlm import load as vlm_load
+
             model, processor = vlm_load(model_name)
             tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
         else:
             from mlx_lm import generate as lm_generate
             from mlx_lm import load as lm_load
+
             model, tokenizer = lm_load(
                 model_name,
                 tokenizer_config={"trust_remote_code": True},
@@ -126,13 +133,16 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
     mem_delta = sys_mem_after["used_gb"] - sys_mem_before["used_gb"]
     results["mem_after_gb"] = sys_mem_after["used_gb"]
     results["mem_delta_gb"] = round(mem_delta, 2)
-    print(f"  메모리 증가: +{mem_delta:.2f}GB (현재: {sys_mem_after['used_gb']}GB, {sys_mem_after['percent']}%)")
+    print(
+        f"  메모리 증가: +{mem_delta:.2f}GB (현재: {sys_mem_after['used_gb']}GB, {sys_mem_after['percent']}%)"
+    )
 
-    # 생성 함수
+    # 생성 함수 — tokenizer/model/processor 는 위 try 블록에서 바인딩된 outer scope 변수
+    # (ruff 의 정적 분석이 try/except 내 할당을 추적 못해 F821 오보가 나지만 런타임 정상)
     def run_generation(prompt_text: str, task_name: str, max_tokens: int = 300) -> dict:
         """프롬프트를 실행하고 속도를 측정한다."""
         messages = [{"role": "user", "content": prompt_text}]
-        formatted = tokenizer.apply_chat_template(
+        formatted = tokenizer.apply_chat_template(  # noqa: F821
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -142,7 +152,8 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
         t_start = time.perf_counter()
         if use_vlm:
             result = vlm_generate(
-                model, processor,
+                model,  # noqa: F821
+                processor,  # noqa: F821
                 prompt=formatted,
                 max_tokens=max_tokens,
                 verbose=False,
@@ -152,12 +163,13 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
             tok_per_sec = result.generation_tps
         else:
             output_text = lm_generate(
-                model, tokenizer,
+                model,  # noqa: F821
+                tokenizer,  # noqa: F821
                 prompt=formatted,
                 max_tokens=max_tokens,
                 verbose=False,
             )
-            output_tokens = len(tokenizer.encode(output_text))
+            output_tokens = len(tokenizer.encode(output_text))  # noqa: F821
             elapsed_inner = time.perf_counter() - t_start
             tok_per_sec = output_tokens / elapsed_inner if elapsed_inner > 0 else 0
 
@@ -165,7 +177,9 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
         elapsed = t_end - t_start
 
         print(f"  [{task_name}]")
-        print(f"    생성 시간: {elapsed:.2f}초 | 토큰: {output_tokens}개 | 속도: {tok_per_sec:.1f} tok/s")
+        print(
+            f"    생성 시간: {elapsed:.2f}초 | 토큰: {output_tokens}개 | 속도: {tok_per_sec:.1f} tok/s"
+        )
         print(f"    출력 (처음 200자): {output_text[:200]}...")
 
         return {
@@ -176,13 +190,13 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
         }
 
     # 벤치마크 실행
-    print(f"\n[2/4] 한국어 전사 보정...")
+    print("\n[2/4] 한국어 전사 보정...")
     results["correction"] = run_generation(CORRECTION_PROMPT, "전사 보정")
 
-    print(f"\n[3/4] 한국어 요약...")
+    print("\n[3/4] 한국어 요약...")
     results["summary"] = run_generation(SUMMARY_PROMPT, "회의 요약", max_tokens=200)
 
-    print(f"\n[4/4] 영어 추론...")
+    print("\n[4/4] 영어 추론...")
     results["reasoning"] = run_generation(REASONING_PROMPT, "영어 추론", max_tokens=200)
 
     # 평균 속도
@@ -194,7 +208,7 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
     results["avg_tok_per_sec"] = round(avg_tps, 1)
 
     # 모델 언로드
-    print(f"\n[정리] 모델 언로드 중...")
+    print("\n[정리] 모델 언로드 중...")
     del model, tokenizer, processor
     clear_memory()
 
@@ -206,9 +220,9 @@ def benchmark_model(model_name: str, label: str, use_vlm: bool = False) -> dict:
 
 def print_comparison(r1: dict, r2: dict):
     """두 모델의 결과를 비교 테이블로 출력한다."""
-    print(f"\n\n{'='*70}")
-    print(f"  벤치마크 결과 비교")
-    print(f"{'='*70}")
+    print(f"\n\n{'=' * 70}")
+    print("  벤치마크 결과 비교")
+    print(f"{'=' * 70}")
 
     def row(label, v1, v2, unit="", better="lower"):
         """비교 행을 출력한다."""
@@ -224,37 +238,55 @@ def print_comparison(r1: dict, r2: dict):
         print(f"  {label:<20s}  {s1:>15s}  {s2:>15s}  {winner}")
 
     print(f"\n  {'항목':<20s}  {'EXAONE 3.5':>15s}  {'Gemma 4 E4B':>15s}  승자")
-    print(f"  {'-'*20}  {'-'*15}  {'-'*15}  ---")
+    print(f"  {'-' * 20}  {'-' * 15}  {'-' * 15}  ---")
 
     row("로드 시간", r1.get("load_time_s"), r2.get("load_time_s"), "초", "lower")
     row("메모리 증가", r1.get("mem_delta_gb"), r2.get("mem_delta_gb"), "GB", "lower")
 
     if "correction" in r1 and "correction" in r2:
-        row("보정 속도", r1["correction"]["tok_per_sec"], r2["correction"]["tok_per_sec"], " tok/s", "higher")
+        row(
+            "보정 속도",
+            r1["correction"]["tok_per_sec"],
+            r2["correction"]["tok_per_sec"],
+            " tok/s",
+            "higher",
+        )
         row("보정 시간", r1["correction"]["time_s"], r2["correction"]["time_s"], "초", "lower")
 
     if "summary" in r1 and "summary" in r2:
-        row("요약 속도", r1["summary"]["tok_per_sec"], r2["summary"]["tok_per_sec"], " tok/s", "higher")
+        row(
+            "요약 속도",
+            r1["summary"]["tok_per_sec"],
+            r2["summary"]["tok_per_sec"],
+            " tok/s",
+            "higher",
+        )
         row("요약 시간", r1["summary"]["time_s"], r2["summary"]["time_s"], "초", "lower")
 
     if "reasoning" in r1 and "reasoning" in r2:
-        row("추론 속도", r1["reasoning"]["tok_per_sec"], r2["reasoning"]["tok_per_sec"], " tok/s", "higher")
+        row(
+            "추론 속도",
+            r1["reasoning"]["tok_per_sec"],
+            r2["reasoning"]["tok_per_sec"],
+            " tok/s",
+            "higher",
+        )
         row("추론 시간", r1["reasoning"]["time_s"], r2["reasoning"]["time_s"], "초", "lower")
 
     row("평균 속도", r1.get("avg_tok_per_sec"), r2.get("avg_tok_per_sec"), " tok/s", "higher")
 
     # 한국어 출력 비교
-    print(f"\n\n{'='*70}")
-    print(f"  한국어 출력 비교")
-    print(f"{'='*70}")
+    print(f"\n\n{'=' * 70}")
+    print("  한국어 출력 비교")
+    print(f"{'=' * 70}")
 
     for task, task_label in [("correction", "전사 보정"), ("summary", "회의 요약")]:
         print(f"\n--- {task_label} ---")
         if task in r1:
-            print(f"\n[EXAONE 3.5]")
+            print("\n[EXAONE 3.5]")
             print(f"{r1[task]['output'][:400]}")
         if task in r2:
-            print(f"\n[Gemma 4 E4B]")
+            print("\n[Gemma 4 E4B]")
             print(f"{r2[task]['output'][:400]}")
 
 
@@ -267,12 +299,16 @@ def main():
 
     # 시스템 정보
     import platform
+
     sys_mem = get_system_memory()
-    print(f"\n시스템: {platform.processor()} | RAM: {sys_mem['total_gb']}GB | macOS {platform.mac_ver()[0]}")
+    print(
+        f"\n시스템: {platform.processor()} | RAM: {sys_mem['total_gb']}GB | macOS {platform.mac_ver()[0]}"
+    )
     print(f"Python: {platform.python_version()}")
 
     try:
         import mlx.core as mx
+
         print(f"MLX: {mx.__version__}")
     except Exception:
         print("MLX: 미설치")

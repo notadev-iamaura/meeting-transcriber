@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Union
 
@@ -54,7 +54,7 @@ class AudioDeviceError(RecorderError):
 # === 상태 및 결과 ===
 
 
-class RecordingState(str, Enum):
+class RecordingState(StrEnum):
     """녹음 상태를 정의하는 열거형.
 
     Attributes:
@@ -353,13 +353,14 @@ class AudioRecorder:
                         is_blackhole = "blackhole" in name.lower()
                         # 가상 장치 감지 (BlackHole은 별도 is_blackhole로 처리)
                         virtual_keywords = [
-                            "zoom", "virtual", "aggregate",
-                            "soundflower", "loopback",
+                            "zoom",
+                            "virtual",
+                            "aggregate",
+                            "soundflower",
+                            "loopback",
                         ]
                         name_lower = name.lower()
-                        is_virtual = any(
-                            kw in name_lower for kw in virtual_keywords
-                        )
+                        is_virtual = any(kw in name_lower for kw in virtual_keywords)
                         devices.append(
                             AudioDevice(
                                 index=idx,
@@ -412,9 +413,7 @@ class AudioRecorder:
                     return dev
 
         # 2단계: 가상 장치 제외한 실제 장치 목록
-        real_devices = [
-            d for d in devices if not d.is_virtual and not d.is_blackhole
-        ]
+        real_devices = [d for d in devices if not d.is_virtual and not d.is_blackhole]
 
         # 3단계: 마이크 키워드 매칭
         mic_keywords = ["microphone", "마이크", "built-in", "internal", "macbook"]
@@ -489,7 +488,8 @@ class AudioRecorder:
 
         # WebSocket 이벤트 브로드캐스트
         device_name = (
-            self._current_device.name if self._current_device
+            self._current_device.name
+            if self._current_device
             else ", ".join(d.name for d in self._current_devices.values())
         )
         await self._broadcast_event(
@@ -521,11 +521,18 @@ class AudioRecorder:
         self._current_file = output_file
 
         cmd = [
-            "ffmpeg", "-y", "-f", "avfoundation",
-            "-i", f":{device.index}",
-            "-acodec", "pcm_s16le",
-            "-ar", str(self._sample_rate),
-            "-ac", str(self._channels),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "avfoundation",
+            "-i",
+            f":{device.index}",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(self._sample_rate),
+            "-ac",
+            str(self._channels),
             str(output_file),
         ]
 
@@ -581,9 +588,7 @@ class AudioRecorder:
             )
         elif mic is not None:
             result["mic"] = mic
-            logger.warning(
-                f"BlackHole 미감지, 마이크만 사용: [{mic.index}] {mic.name}"
-            )
+            logger.warning(f"BlackHole 미감지, 마이크만 사용: [{mic.index}] {mic.name}")
         elif blackhole is not None:
             result["system"] = blackhole
             logger.warning(
@@ -615,11 +620,18 @@ class AudioRecorder:
             output_file = self._temp_dir / f"{meeting_id}.wav"
             self._current_file = output_file
             cmd = [
-                "ffmpeg", "-y", "-f", "avfoundation",
-                "-i", f":{device.index}",
-                "-acodec", "pcm_s16le",
-                "-ar", str(self._sample_rate),
-                "-ac", str(self._channels),
+                "ffmpeg",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-i",
+                f":{device.index}",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                str(self._sample_rate),
+                "-ac",
+                str(self._channels),
                 str(output_file),
             ]
             try:
@@ -630,9 +642,7 @@ class AudioRecorder:
                     stderr=asyncio.subprocess.PIPE,
                 )
             except FileNotFoundError as e:
-                raise FFmpegRecordError(
-                    "ffmpeg가 설치되어 있지 않습니다."
-                ) from e
+                raise FFmpegRecordError("ffmpeg가 설치되어 있지 않습니다.") from e
             except OSError as e:
                 raise FFmpegRecordError(f"ffmpeg 프로세스 시작 실패: {e}") from e
             return
@@ -644,11 +654,18 @@ class AudioRecorder:
             self._current_files[track_name] = output_file
 
             cmd = [
-                "ffmpeg", "-y", "-f", "avfoundation",
-                "-i", f":{device.index}",
-                "-acodec", "pcm_s16le",
-                "-ar", str(self._sample_rate),
-                "-ac", str(self._channels),
+                "ffmpeg",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-i",
+                f":{device.index}",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                str(self._sample_rate),
+                "-ac",
+                str(self._channels),
                 str(output_file),
             ]
 
@@ -910,7 +927,9 @@ class AudioRecorder:
         if self._start_time is not None:
             started_at = datetime.fromtimestamp(self._start_time).isoformat()
 
-        logger.info(f"멀티트랙 ffmpeg 종료 시도: {len(self._processes)}개 프로세스, 녹음 시간={duration:.1f}초")
+        logger.info(
+            f"멀티트랙 ffmpeg 종료 시도: {len(self._processes)}개 프로세스, 녹음 시간={duration:.1f}초"
+        )
 
         # 모든 프로세스 종료
         for track_name, proc in self._processes.items():
@@ -954,9 +973,7 @@ class AudioRecorder:
 
         # 첫 번째 파일을 file_path로 (하위 호환)
         first_file = next(iter(moved_files.values()))
-        device_names = ", ".join(
-            d.name for d in self._current_devices.values()
-        )
+        device_names = ", ".join(d.name for d in self._current_devices.values())
 
         return RecordingResult(
             file_path=first_file,

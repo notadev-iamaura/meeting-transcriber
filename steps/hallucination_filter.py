@@ -79,17 +79,19 @@ def filter_hallucinations(
     for seg in segments:
         removal_reason = _check_segment(seg, filter_config)
         if removal_reason:
-            removed.append({
-                "text": getattr(seg, "text", ""),
-                "start": getattr(seg, "start", 0.0),
-                "end": getattr(seg, "end", 0.0),
-                "reason": removal_reason,
-            })
+            removed.append(
+                {
+                    "text": getattr(seg, "text", ""),
+                    "start": getattr(seg, "start", 0.0),
+                    "end": getattr(seg, "end", 0.0),
+                    "reason": removal_reason,
+                }
+            )
             logger.warning(
                 f"환각 세그먼트 제거: [{getattr(seg, 'start', 0.0):.1f}"
                 f"~{getattr(seg, 'end', 0.0):.1f}s] "
                 f"사유={removal_reason}, "
-                f"텍스트=\"{getattr(seg, 'text', '')[:50]}\""
+                f'텍스트="{getattr(seg, "text", "")[:50]}"'
             )
         else:
             filtered.append(seg)
@@ -138,24 +140,29 @@ def _remove_cross_segment_repetitions(
     while i < len(segments):
         current_text = _normalize(getattr(segments[i], "text", ""))
         run_end = i + 1
-        while run_end < len(segments) and _normalize(getattr(segments[run_end], "text", "")) == current_text:
+        while (
+            run_end < len(segments)
+            and _normalize(getattr(segments[run_end], "text", "")) == current_text
+        ):
             run_end += 1
 
         run_length = run_end - i
         if run_length >= threshold:
             # 연속 반복 구간 전체 제거
             for seg in segments[i:run_end]:
-                removed.append({
-                    "text": getattr(seg, "text", ""),
-                    "start": getattr(seg, "start", 0.0),
-                    "end": getattr(seg, "end", 0.0),
-                    "reason": f"cross_segment_repetition(run={run_length}>=threshold={threshold})",
-                })
+                removed.append(
+                    {
+                        "text": getattr(seg, "text", ""),
+                        "start": getattr(seg, "start", 0.0),
+                        "end": getattr(seg, "end", 0.0),
+                        "reason": f"cross_segment_repetition(run={run_length}>=threshold={threshold})",
+                    }
+                )
             logger.warning(
                 f"크로스 세그먼트 반복 제거: {run_length}회 연속 동일 텍스트 "
                 f"[{getattr(segments[i], 'start', 0.0):.1f}"
-                f"~{getattr(segments[run_end-1], 'end', 0.0):.1f}s] "
-                f"\"{current_text[:50]}\""
+                f"~{getattr(segments[run_end - 1], 'end', 0.0):.1f}s] "
+                f'"{current_text[:50]}"'
             )
         else:
             result.extend(segments[i:run_end])

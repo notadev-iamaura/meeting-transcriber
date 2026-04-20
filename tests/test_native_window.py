@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import argparse
 import runpy
 import subprocess
 import sys
@@ -22,7 +21,6 @@ from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # === TestNativeWindowConfig ===
 
@@ -214,12 +212,14 @@ class TestLaunchNativeWindow:
 
         config = NativeWindowConfig(url="http://localhost:8765/app")
 
-        with patch(
-            "ui.native_window.subprocess.Popen",
-            side_effect=OSError("실행 불가"),
+        with (
+            patch(
+                "ui.native_window.subprocess.Popen",
+                side_effect=OSError("실행 불가"),
+            ),
+            pytest.raises(OSError, match="실행 불가"),
         ):
-            with pytest.raises(OSError, match="실행 불가"):
-                launch_native_window(config)
+            launch_native_window(config)
 
 
 # === TestRunWebviewWindow ===
@@ -375,12 +375,18 @@ class TestMainBlock:
             "sys.argv",
             [
                 "native_window",
-                "--url", "http://localhost:9999/app",
-                "--title", "커스텀 제목",
-                "--width", "1600",
-                "--height", "1000",
-                "--min-width", "1024",
-                "--min-height", "768",
+                "--url",
+                "http://localhost:9999/app",
+                "--title",
+                "커스텀 제목",
+                "--width",
+                "1600",
+                "--height",
+                "1000",
+                "--min-width",
+                "1024",
+                "--min-height",
+                "768",
             ],
         ):
             args = _parse_args()
@@ -398,16 +404,21 @@ class TestMainBlock:
 
         test_argv = [
             "native_window",
-            "--url", "http://test:8080/app",
-            "--title", "테스트",
-            "--width", "1200",
-            "--height", "800",
-            "--min-width", "800",
-            "--min-height", "600",
+            "--url",
+            "http://test:8080/app",
+            "--title",
+            "테스트",
+            "--width",
+            "1200",
+            "--height",
+            "800",
+            "--min-width",
+            "800",
+            "--min-height",
+            "600",
         ]
 
-        with patch("sys.argv", test_argv), \
-             patch.dict("sys.modules", {"webview": mock_webview}):
+        with patch("sys.argv", test_argv), patch.dict("sys.modules", {"webview": mock_webview}):
             # runpy로 __main__ 블록 실행 (새 네임스페이스에서 실행됨)
             runpy.run_module("ui.native_window", run_name="__main__")
 

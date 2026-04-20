@@ -513,7 +513,9 @@ class FolderWatcher:
                     initial_status=JobStatus.RECORDED.value,
                 )
                 registered_ids.append(job_id)
-                logger.info(f"기존 파일 등록 (녹음 완료, 전사 대기): {file_path.name} → job_id={job_id}")
+                logger.info(
+                    f"기존 파일 등록 (녹음 완료, 전사 대기): {file_path.name} → job_id={job_id}"
+                )
             except JobQueueError as e:
                 logger.error(f"기존 파일 등록 실패: {file_path.name} — {e}")
 

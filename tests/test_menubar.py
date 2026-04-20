@@ -738,18 +738,20 @@ class TestToggleRecording:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
-            with patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req:
-                app._on_toggle_recording(None)
+        with (
+            patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp),
+            patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req,
+        ):
+            app._on_toggle_recording(None)
 
-                # Request가 POST 메서드로 호출되었는지 확인
-                mock_req.assert_called_once()
-                call_kwargs = mock_req.call_args
-                created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
-                assert created_url.endswith("/api/recording/start")
-                assert call_kwargs[1].get("method") == "POST" or (
-                    len(call_kwargs[0]) > 0 and mock_req.call_args[1].get("method") == "POST"
-                )
+            # Request가 POST 메서드로 호출되었는지 확인
+            mock_req.assert_called_once()
+            call_kwargs = mock_req.call_args
+            created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
+            assert created_url.endswith("/api/recording/start")
+            assert call_kwargs[1].get("method") == "POST" or (
+                len(call_kwargs[0]) > 0 and mock_req.call_args[1].get("method") == "POST"
+            )
 
     @patch("ui.menubar.rumps.App.__init__", return_value=None)
     def test_녹음_정지_호출(
@@ -769,15 +771,17 @@ class TestToggleRecording:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
 
-        with patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp):
-            with patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req:
-                app._on_toggle_recording(None)
+        with (
+            patch("ui.menubar.urllib.request.urlopen", return_value=mock_resp),
+            patch("ui.menubar.urllib.request.Request", wraps=urllib.request.Request) as mock_req,
+        ):
+            app._on_toggle_recording(None)
 
-                # URL이 /api/recording/stop으로 끝나는지 확인
-                mock_req.assert_called_once()
-                call_kwargs = mock_req.call_args
-                created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
-                assert created_url.endswith("/api/recording/stop")
+            # URL이 /api/recording/stop으로 끝나는지 확인
+            mock_req.assert_called_once()
+            call_kwargs = mock_req.call_args
+            created_url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url", "")
+            assert created_url.endswith("/api/recording/stop")
 
     @patch("ui.menubar.rumps.alert")
     @patch("ui.menubar.rumps.App.__init__", return_value=None)
@@ -814,16 +818,18 @@ class TestToggleRecording:
         app.config = config
         app._is_recording = False
 
-        with patch(
-            "ui.menubar.urllib.request.urlopen",
-            side_effect=RuntimeError("unexpected"),
+        with (
+            patch(
+                "ui.menubar.urllib.request.urlopen",
+                side_effect=RuntimeError("unexpected"),
+            ),
+            patch("ui.menubar.logger") as mock_logger,
         ):
-            with patch("ui.menubar.logger") as mock_logger:
-                # 크래시 없이 정상 종료되어야 함
-                app._on_toggle_recording(None)
+            # 크래시 없이 정상 종료되어야 함
+            app._on_toggle_recording(None)
 
-                # logger.error가 호출되었는지 확인
-                mock_logger.error.assert_called_once()
+            # logger.error가 호출되었는지 확인
+            mock_logger.error.assert_called_once()
 
 
 # === TestPollStatus ===

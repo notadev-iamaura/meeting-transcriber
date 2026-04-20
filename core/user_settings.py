@@ -25,13 +25,13 @@ import logging
 import os
 import secrets
 import shutil
-import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from filelock import FileLock, Timeout
 from pydantic import BaseModel, Field, field_validator
@@ -320,7 +320,7 @@ _cache_lock = threading.RLock()
 
 def _now_utc_iso() -> str:
     """현재 시각을 ISO 8601 UTC 문자열로 반환한다."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 # === 경로 헬퍼 ===
@@ -411,8 +411,7 @@ def _load_default_prompts() -> PromptsData:
         return PromptsData.model_validate(raw)
     except (OSError, json.JSONDecodeError, ValueError) as e:
         raise UserSettingsIOError(
-            f"기본 프롬프트 파일을 읽을 수 없습니다 (배포 오류): "
-            f"{_DEFAULT_PROMPTS_FILE} — {e}"
+            f"기본 프롬프트 파일을 읽을 수 없습니다 (배포 오류): {_DEFAULT_PROMPTS_FILE} — {e}"
         ) from e
 
 
@@ -458,9 +457,7 @@ def _cache_hit(cached: _CacheEntry | None, mtime_ns: int, size: int) -> bool:
         return False
     if cached.mtime_ns != mtime_ns or cached.size != size:
         return False
-    if (time.monotonic() - cached.cached_at) > _CACHE_TTL_SECONDS:
-        return False
-    return True
+    return not time.monotonic() - cached.cached_at > _CACHE_TTL_SECONDS
 
 
 def _load_generic(
@@ -512,9 +509,7 @@ def _load_generic(
                 default = model_cls.model_validate(payload)
                 logger.info(f"사용자 설정 파일을 기본값으로 생성: {path.name}")
             except OSError as e:
-                logger.warning(
-                    f"기본값 파일 생성 실패 ({path.name}), 메모리 기본값만 사용: {e}"
-                )
+                logger.warning(f"기본값 파일 생성 실패 ({path.name}), 메모리 기본값만 사용: {e}")
 
             _cache[key] = _CacheEntry(default, mtime_ns, size)
             return default
@@ -525,9 +520,7 @@ def _load_generic(
             raw = json.loads(raw_text)
             data = model_cls.model_validate(raw)
         except (OSError, json.JSONDecodeError, ValueError) as e:
-            logger.error(
-                f"{path.name} 파일 파싱 실패, 백업에서 복구 시도: {e}"
-            )
+            logger.error(f"{path.name} 파일 파싱 실패, 백업에서 복구 시도: {e}")
             data = _recover_from_backup(path, model_cls, default_factory)
             mtime_ns, size = _stat_mtime_size(path)
 
@@ -779,9 +772,7 @@ def add_vocabulary_term(
     # 중복 검사
     for existing in vocab.terms:
         if existing.term.strip().lower() == normalized_term:
-            raise UserSettingsValidationError(
-                f"이미 등록된 용어입니다: {term}"
-            )
+            raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
 
     # 최대 개수 검사
     if len(vocab.terms) >= _VOCAB_MAX_TERMS:
@@ -847,9 +838,7 @@ def update_vocabulary_term(
         normalized = term.strip().lower()
         for other in vocab.terms:
             if other.id != term_id and other.term.strip().lower() == normalized:
-                raise UserSettingsValidationError(
-                    f"이미 등록된 용어입니다: {term}"
-                )
+                raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
 
     # 부분 업데이트
     updates: dict[str, Any] = {}
@@ -917,9 +906,7 @@ def _render_vocabulary_block(terms: list[VocabularyTerm]) -> tuple[str, int]:
         if t.note:
             line += f" — {t.note}"
         lines.append(line)
-    lines.append(
-        "위 목록에 등재된 단어가 전사문에 등장하면 정답 표기로 교정하세요."
-    )
+    lines.append("위 목록에 등재된 단어가 전사문에 등장하면 정답 표기로 교정하세요.")
     return ("\n".join(lines), len(active))
 
 
@@ -952,7 +939,7 @@ def build_corrector_snapshot() -> CorrectorPromptSnapshot:
         system_prompt=final_prompt,
         base_prompt=base,
         vocab_term_count=active_count,
-        snapshot_at=datetime.now(timezone.utc),
+        snapshot_at=datetime.now(UTC),
     )
 
 

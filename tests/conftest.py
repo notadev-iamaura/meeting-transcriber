@@ -41,12 +41,8 @@ def _isolate_stt_manual_import_dir(tmp_path_factory, monkeypatch):
         return str(fake_base / f"{spec.id}-manual")
 
     # 모든 호출 지점을 한 번에 덮어쓴다
-    monkeypatch.setattr(
-        "core.stt_model_status.get_manual_import_dir", _isolated, raising=False
-    )
-    monkeypatch.setattr(
-        "core.stt_model_registry.get_manual_import_dir", _isolated, raising=False
-    )
+    monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", _isolated, raising=False)
+    monkeypatch.setattr("core.stt_model_registry.get_manual_import_dir", _isolated, raising=False)
     monkeypatch.setattr(
         "core.stt_model_downloader.get_manual_import_dir", _isolated, raising=False
     )

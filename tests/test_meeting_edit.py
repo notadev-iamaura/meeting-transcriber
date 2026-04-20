@@ -20,7 +20,6 @@ from api.routes import router
 from core import user_settings as us
 from core.job_queue import JobQueue, JobStatus
 
-
 # === 공용 fixture ===
 
 
@@ -45,9 +44,7 @@ def job_queue(tmp_path: Path) -> JobQueue:
 
 
 @pytest.fixture
-def app_with_state(
-    job_queue: JobQueue, isolated_base: Path
-) -> FastAPI:
+def app_with_state(job_queue: JobQueue, isolated_base: Path) -> FastAPI:
     """FastAPI 앱 + 필수 state 설정."""
     from types import SimpleNamespace
 
@@ -83,9 +80,7 @@ def client(app_with_state: FastAPI) -> TestClient:
 
 
 @pytest.fixture
-def seeded_meeting(
-    job_queue: JobQueue, isolated_base: Path
-) -> str:
+def seeded_meeting(job_queue: JobQueue, isolated_base: Path) -> str:
     """테스트용 회의 1개 + correct.json + meeting_minutes.md 생성."""
     meeting_id = "meeting_20260101_120000"
     job_queue.add_job(
@@ -149,9 +144,7 @@ def seeded_meeting(
 
 
 class TestPatchMeetingTitle:
-    def test_제목_수정(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_제목_수정(self, client: TestClient, seeded_meeting: str) -> None:
         resp = client.patch(
             f"/api/meetings/{seeded_meeting}",
             json={"title": "Q1 제품 로드맵 회의"},
@@ -164,37 +157,23 @@ class TestPatchMeetingTitle:
         get_resp = client.get(f"/api/meetings/{seeded_meeting}")
         assert get_resp.json()["title"] == "Q1 제품 로드맵 회의"
 
-    def test_빈_제목으로_초기화(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_빈_제목으로_초기화(self, client: TestClient, seeded_meeting: str) -> None:
         """빈 문자열을 보내면 자동 타임스탬프 폴백으로 돌아간다."""
-        client.patch(
-            f"/api/meetings/{seeded_meeting}", json={"title": "임시"}
-        )
-        resp = client.patch(
-            f"/api/meetings/{seeded_meeting}", json={"title": ""}
-        )
+        client.patch(f"/api/meetings/{seeded_meeting}", json={"title": "임시"})
+        resp = client.patch(f"/api/meetings/{seeded_meeting}", json={"title": ""})
         assert resp.status_code == 200
         assert resp.json()["title"] == ""
 
-    def test_너무_긴_제목_거부(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
-        resp = client.patch(
-            f"/api/meetings/{seeded_meeting}", json={"title": "가" * 201}
-        )
+    def test_너무_긴_제목_거부(self, client: TestClient, seeded_meeting: str) -> None:
+        resp = client.patch(f"/api/meetings/{seeded_meeting}", json={"title": "가" * 201})
         # Pydantic max_length=200 또는 저장소 검증 → 400/422
         assert resp.status_code in (400, 422)
 
     def test_존재하지_않는_회의(self, client: TestClient) -> None:
-        resp = client.patch(
-            "/api/meetings/meeting_20260101_000000", json={"title": "test"}
-        )
+        resp = client.patch("/api/meetings/meeting_20260101_000000", json={"title": "test"})
         assert resp.status_code == 404
 
-    def test_공백_제목은_trim(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_공백_제목은_trim(self, client: TestClient, seeded_meeting: str) -> None:
         resp = client.patch(
             f"/api/meetings/{seeded_meeting}",
             json={"title": "  여백 테스트  "},
@@ -222,9 +201,7 @@ class TestUpdateSummary:
         assert resp.json()["markdown"] == new_md
 
         # 파일 내용 확인
-        minutes = (
-            isolated_base / "outputs" / seeded_meeting / "meeting_minutes.md"
-        )
+        minutes = isolated_base / "outputs" / seeded_meeting / "meeting_minutes.md"
         assert minutes.read_text() == new_md
 
         # .bak 생성 확인
@@ -232,9 +209,7 @@ class TestUpdateSummary:
         assert backup.exists()
         assert "## 회의 개요" in backup.read_text()  # 원본 내용
 
-    def test_GET으로_수정본_재조회(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_GET으로_수정본_재조회(self, client: TestClient, seeded_meeting: str) -> None:
         new_md = "## E2E\n한 줄 요약."
         client.put(
             f"/api/meetings/{seeded_meeting}/summary",
@@ -244,12 +219,8 @@ class TestUpdateSummary:
         assert resp.status_code == 200
         assert "E2E" in resp.json()["markdown"]
 
-    def test_빈_본문_거부(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
-        resp = client.put(
-            f"/api/meetings/{seeded_meeting}/summary", json={"markdown": ""}
-        )
+    def test_빈_본문_거부(self, client: TestClient, seeded_meeting: str) -> None:
+        resp = client.put(f"/api/meetings/{seeded_meeting}/summary", json={"markdown": ""})
         assert resp.status_code == 422  # Pydantic min_length
 
     def test_존재하지_않는_회의(self, client: TestClient) -> None:
@@ -290,9 +261,7 @@ class TestUpdateTranscript:
         assert data["utterances"][0]["text"] == "새로운 내용입니다."
 
         # 파일 확인
-        cp = (
-            isolated_base / "checkpoints" / seeded_meeting / "correct.json"
-        )
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
         raw = json.loads(cp.read_text())
         assert len(raw["utterances"]) == 1
         assert raw["utterances"][0]["text"] == "새로운 내용입니다."
@@ -347,9 +316,7 @@ class TestTranscriptReplace:
         assert data["vocabulary_action"] is None
 
         # 파일 확인
-        cp = (
-            isolated_base / "checkpoints" / seeded_meeting / "correct.json"
-        )
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
         raw = json.loads(cp.read_text())
         assert "파이선" not in raw["utterances"][0]["text"]
         assert "FastAPI" in raw["utterances"][0]["text"]
@@ -358,9 +325,7 @@ class TestTranscriptReplace:
         assert raw["utterances"][2]["text"] == "다른 얘기도 해볼까요."
         assert raw["utterances"][2]["was_corrected"] is False
 
-    def test_패턴_없음_0_changes(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_패턴_없음_0_changes(self, client: TestClient, seeded_meeting: str) -> None:
         resp = client.post(
             f"/api/meetings/{seeded_meeting}/transcript/replace",
             json={
@@ -373,18 +338,14 @@ class TestTranscriptReplace:
         assert resp.json()["changes"] == 0
         assert resp.json()["updated_utterances"] == 0
 
-    def test_find과_replace_동일_거부(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_find과_replace_동일_거부(self, client: TestClient, seeded_meeting: str) -> None:
         resp = client.post(
             f"/api/meetings/{seeded_meeting}/transcript/replace",
             json={"find": "같음", "replace": "같음"},
         )
         assert resp.status_code == 400
 
-    def test_용어집_자동_등록_신규(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_용어집_자동_등록_신규(self, client: TestClient, seeded_meeting: str) -> None:
         """기존에 term 이 없으면 새로 생성하고 find 를 alias 로 등록."""
         resp = client.post(
             f"/api/meetings/{seeded_meeting}/transcript/replace",
@@ -406,9 +367,7 @@ class TestTranscriptReplace:
         assert len(terms) == 1
         assert "파이선" in terms[0].aliases
 
-    def test_용어집_기존_term에_alias_추가(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_용어집_기존_term에_alias_추가(self, client: TestClient, seeded_meeting: str) -> None:
         """기존 term 이 있으면 alias 에 find 추가."""
         # 미리 용어집에 등록
         us.add_vocabulary_term(term="FastAPI", aliases=["fastapi"])
@@ -431,9 +390,7 @@ class TestTranscriptReplace:
         assert "파이선" in terms[0].aliases
         assert "fastapi" in terms[0].aliases  # 기존 alias 유지
 
-    def test_용어집_중복_alias_재등록_무해(
-        self, client: TestClient, seeded_meeting: str
-    ) -> None:
+    def test_용어집_중복_alias_재등록_무해(self, client: TestClient, seeded_meeting: str) -> None:
         """이미 같은 alias 가 있으면 alias_already_exists 반환."""
         us.add_vocabulary_term(term="FastAPI", aliases=["파이선"])
 

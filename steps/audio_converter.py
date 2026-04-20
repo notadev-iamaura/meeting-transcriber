@@ -347,12 +347,17 @@ class AudioConverter:
 
         n_tracks = len(track_paths)
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg",
+            "-y",
             *inputs,
-            "-filter_complex", f"amerge=inputs={n_tracks},pan=mono|c0=0.5*c0+0.5*c1",
-            "-acodec", "pcm_s16le",
-            "-ar", str(self._target_sample_rate),
-            "-ac", "1",
+            "-filter_complex",
+            f"amerge=inputs={n_tracks},pan=mono|c0=0.5*c0+0.5*c1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(self._target_sample_rate),
+            "-ac",
+            "1",
             str(output_path),
         ]
 
@@ -362,12 +367,16 @@ class AudioConverter:
         if result.returncode != 0:
             if output_path.exists():
                 output_path.unlink()
-            raise ConversionFailedError(f"트랙 병합 실패 (코드 {result.returncode}): {result.stderr.strip()}")
+            raise ConversionFailedError(
+                f"트랙 병합 실패 (코드 {result.returncode}): {result.stderr.strip()}"
+            )
 
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise ConversionFailedError(f"병합 파일이 생성되지 않았습니다: {output_path}")
 
-        logger.info(f"멀티트랙 병합 완료: {output_path} ({output_path.stat().st_size / 1024:.1f}KB)")
+        logger.info(
+            f"멀티트랙 병합 완료: {output_path} ({output_path.stat().st_size / 1024:.1f}KB)"
+        )
         return output_path
 
     async def convert_async(

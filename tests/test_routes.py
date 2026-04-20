@@ -1245,7 +1245,11 @@ class TestRetryMeetingEndpoint:
 
         mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed")
         mock_retried = MockJob(
-            1, "meeting_001", "/audio/001.m4a", "queued", retry_count=1,
+            1,
+            "meeting_001",
+            "/audio/001.m4a",
+            "queued",
+            retry_count=1,
         )
 
         with TestClient(app) as client:
@@ -1489,7 +1493,10 @@ class TestSummarizeMeetingEndpoint:
 
         with TestClient(app) as client:
             self._setup_pipeline(
-                app, tmp_path, "nonexistent", create_state=False,
+                app,
+                tmp_path,
+                "nonexistent",
+                create_state=False,
             )
             response = client.post("/api/meetings/nonexistent/summarize")
 
@@ -1502,7 +1509,10 @@ class TestSummarizeMeetingEndpoint:
 
         with TestClient(app) as client:
             self._setup_pipeline(
-                app, tmp_path, "meeting_002", create_merge_cp=False,
+                app,
+                tmp_path,
+                "meeting_002",
+                create_merge_cp=False,
             )
             response = client.post("/api/meetings/meeting_002/summarize")
 

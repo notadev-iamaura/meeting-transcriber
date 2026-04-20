@@ -10,10 +10,11 @@
 
 의존성: 표준 라이브러리만 사용 (enum, pathlib).
 """
+
 from __future__ import annotations
 
 import logging
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from .stt_model_registry import STTModelSpec, get_manual_import_dir
@@ -21,7 +22,7 @@ from .stt_model_registry import STTModelSpec, get_manual_import_dir
 logger = logging.getLogger(__name__)
 
 
-class ModelStatus(str, Enum):
+class ModelStatus(StrEnum):
     """STT 모델의 런타임 상태.
 
     str 혼합 Enum이므로 JSON 직렬화 시 문자열 값이 사용된다.
@@ -38,9 +39,7 @@ def _is_hf_repo_id(model_path: str) -> bool:
     if "/" not in model_path:
         return False
     # 로컬 경로(절대 경로 또는 ~ 로 시작)는 제외
-    if model_path.startswith(("/", "~", "./", "../")):
-        return False
-    return True
+    return not model_path.startswith(("/", "~", "./", "../"))
 
 
 def _check_hf_cache(repo_id: str) -> bool:
@@ -162,8 +161,12 @@ def get_actual_size_mb(model_path: str) -> float:
     """
     # HF repo ID 형식(owner/name)은 로컬 경로가 아니라 HuggingFace 캐시를 조회한다.
     if _is_hf_repo_id(model_path):
-        cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / (
-            "models--" + model_path.replace("/", "--")
+        cache_dir = (
+            Path.home()
+            / ".cache"
+            / "huggingface"
+            / "hub"
+            / ("models--" + model_path.replace("/", "--"))
         )
         if not cache_dir.exists():
             return 0.0
@@ -176,21 +179,19 @@ def get_actual_size_mb(model_path: str) -> float:
         except OSError as exc:
             logger.warning("HF 캐시 크기 계산 실패 (%s): %s", cache_dir, exc)
             return 0.0
-        return round(total / (1024 ** 2), 1)
+        return round(total / (1024**2), 1)
 
     path = Path(model_path).expanduser()
     if not path.exists():
         return 0.0
     if path.is_file():
-        return round(path.stat().st_size / (1024 ** 2), 1)
+        return round(path.stat().st_size / (1024**2), 1)
     try:
         # 심볼릭 링크는 중복 계산을 피하려 제외
         total = sum(
-            f.stat().st_size
-            for f in path.rglob("*")
-            if f.is_file() and not f.is_symlink()
+            f.stat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink()
         )
     except OSError as exc:
         logger.warning("디스크 크기 계산 실패 (%s): %s", path, exc)
         return 0.0
-    return round(total / (1024 ** 2), 1)
+    return round(total / (1024**2), 1)

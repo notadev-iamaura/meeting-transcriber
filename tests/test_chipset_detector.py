@@ -16,10 +16,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.chipset_detector import (
+    _DEFAULT_BATCH_SIZE,
     ChipsetDetector,
     ChipsetInfo,
     OptimalProfile,
-    _DEFAULT_BATCH_SIZE,
 )
 
 

@@ -92,8 +92,11 @@ class VoiceActivityDetector:
 
         if vad_config is None:
             from config import VADConfig
+
             vad_config = VADConfig()
-            logger.info("VoiceActivityDetector 초기화: VAD 설정 없음, VADConfig 기본값 사용 (비활성)")
+            logger.info(
+                "VoiceActivityDetector 초기화: VAD 설정 없음, VADConfig 기본값 사용 (비활성)"
+            )
 
         self._enabled = vad_config.enabled
         self._threshold = vad_config.threshold
@@ -135,11 +138,13 @@ class VoiceActivityDetector:
 
         # silero-vad 임포트 확인
         try:
-            from silero_vad import get_speech_timestamps, load_silero_vad  # type: ignore[import-untyped]
+            from silero_vad import (  # type: ignore[import-untyped]
+                get_speech_timestamps,
+                load_silero_vad,
+            )
         except ImportError as e:
             raise VADError(
-                "silero-vad가 설치되어 있지 않습니다. "
-                "'pip install silero-vad'로 설치하세요."
+                "silero-vad가 설치되어 있지 않습니다. 'pip install silero-vad'로 설치하세요."
             ) from e
 
         try:
@@ -169,7 +174,6 @@ class VoiceActivityDetector:
             VADError: 오디오 로드 실패 시
         """
         try:
-            import torch  # type: ignore[import-untyped]
             import torchaudio  # type: ignore[import-untyped]
 
             waveform, sample_rate = torchaudio.load(str(audio_path))
@@ -206,7 +210,6 @@ class VoiceActivityDetector:
             self._load_model()
 
         try:
-            import torch  # type: ignore[import-untyped]
             import torchaudio  # type: ignore[import-untyped]
 
             # 오디오 로드 (16kHz mono로 변환)
@@ -218,18 +221,13 @@ class VoiceActivityDetector:
 
             # 16kHz로 리샘플링 (Silero VAD 요구사항)
             if sample_rate != 16000:
-                resampler = torchaudio.transforms.Resample(
-                    orig_freq=sample_rate, new_freq=16000
-                )
+                resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
                 waveform = resampler(waveform)
                 sample_rate = 16000
 
             duration = float(waveform.shape[1] / sample_rate)
 
-            logger.info(
-                f"VAD 분석 시작: {audio_path.name} | "
-                f"길이: {duration:.1f}초"
-            )
+            logger.info(f"VAD 분석 시작: {audio_path.name} | 길이: {duration:.1f}초")
 
             # Silero VAD 실행 — return_seconds=True로 초 단위 타임스탬프 반환
             speech_timestamps = self._utils(
@@ -243,8 +241,7 @@ class VoiceActivityDetector:
             )
 
             logger.info(
-                f"VAD 분석 완료: {audio_path.name} | "
-                f"음성 구간 수: {len(speech_timestamps)}"
+                f"VAD 분석 완료: {audio_path.name} | 음성 구간 수: {len(speech_timestamps)}"
             )
 
             return speech_timestamps, duration
@@ -285,9 +282,7 @@ class VoiceActivityDetector:
             end = float(seg["end"])
             # start >= end인 역전/영길이 세그먼트는 제외 (잘못된 VAD 출력 방어)
             if start >= end:
-                logger.warning(
-                    f"역전된 세그먼트 무시: start={start:.3f} >= end={end:.3f}"
-                )
+                logger.warning(f"역전된 세그먼트 무시: start={start:.3f} >= end={end:.3f}")
                 continue
             clip_timestamps.append(start)
             clip_timestamps.append(end)
@@ -336,9 +331,7 @@ class VoiceActivityDetector:
 
         # VAD를 별도 스레드에서 실행 (CPU 집약 작업)
         try:
-            speech_segments, duration = await asyncio.to_thread(
-                self._run_vad, audio_path
-            )
+            speech_segments, duration = await asyncio.to_thread(self._run_vad, audio_path)
         except (FileNotFoundError, VADError):
             raise
         except Exception as e:
@@ -346,19 +339,14 @@ class VoiceActivityDetector:
 
         # 음성 구간이 없으면 None 반환 (전체 오디오 폴백)
         if not speech_segments:
-            logger.warning(
-                f"VAD 결과 음성 구간 없음: {audio_path.name} | "
-                "전체 오디오 처리로 폴백"
-            )
+            logger.warning(f"VAD 결과 음성 구간 없음: {audio_path.name} | 전체 오디오 처리로 폴백")
             return None
 
         # clip_timestamps 변환
         clip_timestamps = self._to_clip_timestamps(speech_segments, duration)
 
         # 음성/무음 시간 계산
-        total_speech = sum(
-            float(seg["end"]) - float(seg["start"]) for seg in speech_segments
-        )
+        total_speech = sum(float(seg["end"]) - float(seg["start"]) for seg in speech_segments)
         total_silence = max(0.0, duration - total_speech)
 
         result = VADResult(
