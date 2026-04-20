@@ -626,15 +626,145 @@
                 });
             }
 
-            // 가져오기 버튼 (오디오 파일 import) — 현재는 준비 중 안내 모달만 표시.
-            // 실제 업로드는 백엔드 API 추가 후 연결 예정.
+            // 가져오기 모달 (#importModal) — 레퍼런스 ImportPanel.jsx 기준 dropzone + 큐.
+            // 실제 업로드 엔드포인트는 아직 없음 → 선택된 파일 큐만 시각화하고
+            // "파이프라인 시작" 버튼은 안내 메시지를 노출한다.
+            var _importModalEl = document.getElementById("importModal");
+            var _importDropzone = document.getElementById("importDropzone");
+            var _importFileInput = document.getElementById("importFileInput");
+            var _importQueue = document.getElementById("importQueue");
+            var _importQueueList = document.getElementById("importQueueList");
+            var _importNotice = document.getElementById("importNotice");
+            var _importCancelBtn = document.getElementById("importModalCancel");
+            var _importStartBtn = document.getElementById("importModalStart");
+            var _importFiles = [];
+
+            function _importFormatSize(bytes) {
+                if (!bytes || bytes < 0) return "—";
+                if (bytes < 1024) return bytes + " B";
+                if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+                if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+                return (bytes / 1024 / 1024 / 1024).toFixed(2) + " GB";
+            }
+
+            function _renderImportQueue() {
+                if (!_importQueueList) return;
+                _importQueueList.innerHTML = "";
+                _importFiles.forEach(function (f, idx) {
+                    var row = document.createElement("div");
+                    row.className = "import-queue-item";
+
+                    var name = document.createElement("span");
+                    name.className = "import-queue-item-name";
+                    name.textContent = f.name;
+                    name.setAttribute("title", f.name);
+
+                    var meta = document.createElement("span");
+                    meta.className = "import-queue-item-meta";
+                    meta.textContent = _importFormatSize(f.size);
+
+                    var remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.className = "import-queue-item-remove";
+                    remove.setAttribute("aria-label", "제거");
+                    remove.innerHTML = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="5" x2="15" y2="15"></line><line x1="15" y1="5" x2="5" y2="15"></line></svg>';
+                    remove.addEventListener("click", function () {
+                        _importFiles.splice(idx, 1);
+                        _renderImportQueue();
+                    });
+
+                    row.appendChild(name);
+                    row.appendChild(meta);
+                    row.appendChild(remove);
+                    _importQueueList.appendChild(row);
+                });
+
+                if (_importQueue) _importQueue.hidden = _importFiles.length === 0;
+                if (_importStartBtn) _importStartBtn.disabled = _importFiles.length === 0;
+                if (_importNotice) _importNotice.hidden = _importFiles.length === 0;
+            }
+
+            function _addImportFiles(fileList) {
+                if (!fileList) return;
+                for (var i = 0; i < fileList.length; i++) {
+                    _importFiles.push(fileList[i]);
+                }
+                _renderImportQueue();
+            }
+
+            function _openImportModal() {
+                if (!_importModalEl) return;
+                _importModalEl.classList.remove("hidden");
+                if (_importDropzone) _importDropzone.focus();
+            }
+
+            function _closeImportModal() {
+                if (!_importModalEl) return;
+                _importModalEl.classList.add("hidden");
+            }
+
             var _importBtn = document.getElementById("importBtn");
             if (_importBtn) {
-                _importBtn.addEventListener("click", function () {
+                _importBtn.addEventListener("click", _openImportModal);
+            }
+
+            if (_importDropzone && _importFileInput) {
+                _importDropzone.addEventListener("click", function () {
+                    _importFileInput.click();
+                });
+                _importDropzone.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        _importFileInput.click();
+                    }
+                });
+                _importDropzone.addEventListener("dragover", function (e) {
+                    e.preventDefault();
+                    _importDropzone.classList.add("dragging");
+                });
+                _importDropzone.addEventListener("dragleave", function () {
+                    _importDropzone.classList.remove("dragging");
+                });
+                _importDropzone.addEventListener("drop", function (e) {
+                    e.preventDefault();
+                    _importDropzone.classList.remove("dragging");
+                    _addImportFiles(e.dataTransfer && e.dataTransfer.files);
+                });
+                _importFileInput.addEventListener("change", function () {
+                    _addImportFiles(_importFileInput.files);
+                    _importFileInput.value = ""; // 같은 파일 재선택 허용
+                });
+            }
+
+            if (_importCancelBtn) {
+                _importCancelBtn.addEventListener("click", function () {
+                    _importFiles = [];
+                    _renderImportQueue();
+                    _closeImportModal();
+                });
+            }
+            if (_importStartBtn) {
+                _importStartBtn.addEventListener("click", function () {
+                    _closeImportModal();
                     showInfoModal(
                         "가져오기",
-                        "곧 지원될 예정입니다.\n지금은 ~/.meeting-transcriber/audio_input 폴더에 오디오 파일을 넣으면 자동으로 처리됩니다."
+                        "업로드 API 는 아직 준비 중입니다.\n" +
+                        "현재는 ~/.meeting-transcriber/audio_input 폴더에 파일을 직접 복사해 주세요. " +
+                        "파이프라인이 자동으로 감지해 처리합니다."
                     );
+                    _importFiles = [];
+                    _renderImportQueue();
+                });
+            }
+            // importModal 배경 클릭으로 닫기 + ESC 로 닫기 (infoModal 과 동일 패턴)
+            if (_importModalEl) {
+                _importModalEl.addEventListener("click", function (e) {
+                    if (e.target === _importModalEl) _closeImportModal();
+                });
+                document.addEventListener("keydown", function (e) {
+                    if (e.key === "Escape" && !_importModalEl.classList.contains("hidden")) {
+                        _closeImportModal();
+                    }
                 });
             }
 

@@ -4679,6 +4679,130 @@ button {
   white-space: pre-line;
 }
 
+/* 가져오기 모달 (레퍼런스 ImportPanel.jsx) */
+.import-modal-content {
+  max-width: 560px;
+  width: 92vw;
+}
+
+.mono-inline {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  background: var(--bg-secondary);
+  padding: 1px 5px;
+  border-radius: var(--radius);
+}
+
+.import-dropzone {
+  margin-top: 16px;
+  padding: 36px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.import-dropzone:hover,
+.import-dropzone:focus-visible,
+.import-dropzone.dragging {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.import-dropzone-title {
+  font-size: var(--fs-14);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+}
+
+.import-dropzone-sub {
+  font-size: var(--fs-11);
+  color: var(--text-muted);
+}
+
+.import-queue {
+  margin-top: 16px;
+}
+
+.import-queue-header {
+  margin-bottom: 8px;
+}
+
+.import-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.import-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+}
+
+.import-queue-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-queue-item-meta {
+  font-size: var(--fs-11);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-queue-item-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.import-queue-item-remove:hover {
+  background: var(--bg-hover);
+  color: var(--error);
+}
+
+.import-notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 149, 0, 0.08);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  line-height: var(--lh-snug);
+}
+
 /* ============================================================
    STT 모델 카드 UI (Phase 6)
    설정 > 일반 탭의 "음성 인식 모델 (STT)" 섹션에서 사용

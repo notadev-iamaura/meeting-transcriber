@@ -163,6 +163,39 @@
     </div>
   </div>
 
+  <!-- 오디오 가져오기 모달 (레퍼런스 ImportPanel.jsx) — dropzone + 큐 스캐폴드 -->
+  <div id="importModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+    <div class="modal-content import-modal-content">
+      <h3 class="modal-title" id="importModalTitle">오디오 가져오기</h3>
+      <p class="modal-message">
+        파일을 끌어다 놓거나 클릭해 선택하세요.
+        선택된 파일은 <code class="mono-inline">~/.meeting-transcriber/audio_input</code>
+        폴더에 배치되어 파이프라인이 자동으로 시작됩니다.
+      </p>
+      <div class="import-dropzone" id="importDropzone" tabindex="0" role="button" aria-label="오디오 파일 드롭존">
+        <svg width="28" height="28" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"></path>
+          <polyline points="6,7 10,3 14,7"></polyline>
+          <line x1="10" y1="3" x2="10" y2="13"></line>
+        </svg>
+        <div class="import-dropzone-title">파일 드롭 또는 클릭해 선택</div>
+        <div class="import-dropzone-sub">.m4a · .wav · .mp3 · 최대 2 GB</div>
+        <input type="file" id="importFileInput" multiple accept="audio/*,.m4a,.wav,.mp3" hidden>
+      </div>
+      <div class="import-queue" id="importQueue" hidden>
+        <div class="overline import-queue-header">선택된 파일</div>
+        <div class="import-queue-list" id="importQueueList"></div>
+      </div>
+      <div class="import-notice" id="importNotice" hidden role="status" aria-live="polite">
+        업로드 API 는 아직 준비 중입니다. 현재는 위 폴더에 직접 배치해 주세요.
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="importModalCancel">닫기</button>
+        <button type="button" class="settings-save-btn" id="importModalStart" disabled>파이프라인 시작</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 범용 안내 모달 (정보/준비중 안내 등에 재사용, 기존 .modal-overlay 패턴 재사용) -->
   <div id="infoModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
     <div class="modal-content">
