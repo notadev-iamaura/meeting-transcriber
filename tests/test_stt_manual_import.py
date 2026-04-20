@@ -295,10 +295,13 @@ def test_import_manual_clears_stale_error_job(
     (source / "weights.safetensors").write_bytes(b"fake" * 100)
 
     target_base = tmp_path / "app-data"
-    monkeypatch.setattr(
-        "core.stt_model_registry.get_manual_import_dir",
-        lambda spec, base_dir=None: str(target_base / "stt_models" / f"{spec.id}-manual"),
-    )
+    # `get_manual_import_dir` 는 `core.stt_model_registry` 원본 외에도 다음 모듈들이
+    # 모듈 로드 시점에 `from ... import get_manual_import_dir` 로 이름을 바인딩한다.
+    # monkeypatch 가 해당 참조들에도 반영되도록 각 모듈 네임스페이스를 모두 패치.
+    fake = lambda spec, base_dir=None: str(target_base / "stt_models" / f"{spec.id}-manual")  # noqa: E731
+    monkeypatch.setattr("core.stt_model_registry.get_manual_import_dir", fake)
+    monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", fake)
+    monkeypatch.setattr("core.stt_model_downloader.get_manual_import_dir", fake)
 
     # 실제 downloader 인스턴스에 stale ERROR job 주입
     downloader = STTModelDownloader(models_dir=tmp_path / "dl")
