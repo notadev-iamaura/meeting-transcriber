@@ -306,8 +306,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         config = get_config()
 
     app = FastAPI(
-        title="회의 전사 시스템 API",
-        description="한국어 로컬 AI 회의 전사 + RAG + AI Chat 시스템",
+        title="Recap API",
+        description="Recap — 한국어 로컬 AI 회의 전사 + RAG + AI Chat 시스템",
         version=__version__,
         docs_url="/api/docs",
         redoc_url="/api/redoc",

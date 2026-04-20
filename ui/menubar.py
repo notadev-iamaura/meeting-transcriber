@@ -312,7 +312,7 @@ class MeetingTranscriberApp(rumps.App):
         initial_title = get_status_title(self._current_status)
 
         super().__init__(
-            name="회의 전사",
+            name="Recap",
             title=initial_title,
             quit_button=None,  # 커스텀 종료 버튼 사용
         )
@@ -573,7 +573,7 @@ class MeetingTranscriberApp(rumps.App):
             status_str = "서버 연결 안됨"
 
         rumps.alert(
-            title="회의 전사 시스템 정보",
+            title="Recap 정보",
             message=(
                 f"📡 서버: http://{host}:{port}\n"
                 f"🌐 웹 UI: {self._web_url}\n"

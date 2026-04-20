@@ -1,11 +1,15 @@
-# Meeting Transcriber
+# Recap
+
+> **한국어 로컬 AI 회의 전사·요약·지식화 도구**
+> _Local meeting recorder, transcriber, and knowledge base for Apple Silicon._
 
 [![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11~3.12](https://img.shields.io/badge/python-3.11~3.12-blue.svg)](https://www.python.org/downloads/)
 
-**한국어 로컬 AI 회의 전사 시스템** — 100% 오프라인, Apple Silicon 최적화
-
-회의 녹음 파일을 넣으면 자동으로 텍스트 변환, 화자 분리, AI 교정, 요약까지 처리합니다.
+100% 오프라인, Apple Silicon 최적화. 회의 녹음 → 전사 → 화자 분리 → AI 요약 → 검색·채팅 지식화를 한 곳에서.
 모든 데이터는 로컬에서만 처리되며, 외부 서버로 전송되지 않습니다.
+
+> **About the name** — 앱은 UI (앱 아이콘·윈도우 타이틀·메뉴바) 에서 **Recap** 으로 브랜딩되어 있습니다.
+> 저장소 슬러그와 Python 패키지는 연속성을 위해 `meeting-transcriber` 그대로 유지됩니다.
 
 > **⚠️ Apple Silicon Mac 전용** — 이 프로젝트는 MLX 프레임워크를 사용하며, Apple Silicon(M1/M2/M3/M4) Mac에서만 동작합니다.
 > Intel Mac, Linux, Windows에서는 MLX 기반 STT가 지원되지 않습니다.

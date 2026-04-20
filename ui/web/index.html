@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>회의록</title>
+  <title>Recap — 회의록</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -60,9 +61,23 @@
     <!-- 2. 리스트 패널 (280px, 회의 목록) -->
     <aside id="list-panel" aria-label="회의 목록 패널">
       <div class="list-header">
-        <h1 class="list-title">회의록</h1>
-        <span class="list-count" id="listCount"></span>
+        <div class="brand-lockup">
+          <img class="brand-mark brand-mark-light" src="/static/brand/app-icon-light.svg" width="20" height="20" alt="" aria-hidden="true">
+          <img class="brand-mark brand-mark-dark" src="/static/brand/app-icon-dark.svg" width="20" height="20" alt="" aria-hidden="true">
+          <h1 class="list-title">Recap</h1>
+        </div>
+        <div class="list-header-actions">
+          <button type="button" id="importBtn" class="list-header-btn" aria-label="오디오 가져오기" title="오디오 가져오기">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"></path>
+              <polyline points="6,7 10,3 14,7"></polyline>
+              <line x1="10" y1="3" x2="10" y2="13"></line>
+            </svg>
+          </button>
+          <span class="list-count" id="listCount"></span>
+        </div>
       </div>
+      <div class="list-section-label">회의록</div>
       <div class="list-search">
         <input type="search" id="listSearchInput" placeholder="회의 검색..." aria-label="회의 검색">
       </div>
@@ -102,11 +117,31 @@
     <button class="toast-close" id="errorClose" aria-label="닫기">&#x2715;</button>
   </div>
 
-  <!-- 녹음 상태 플로팅 바 -->
+  <!-- 녹음 상태 플로팅 바 (HUD) — 녹음 진행을 시각화하는 waveform + 즉시 정지 버튼 포함 -->
   <div id="recordingStatus" class="recording-status" role="status" aria-live="polite">
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
-    <span class="recording-duration" id="recordingDuration">00:00</span>
+    <div class="recording-waveform" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <span class="recording-duration" id="recordingDuration" aria-live="off">00:00</span>
+    <button type="button" id="recordingStopBtn" class="recording-stop-btn" aria-label="녹음 정지">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="5" y="5" width="10" height="10" rx="1"></rect>
+      </svg>
+    </button>
+  </div>
+
+  <!-- 범용 안내 모달 (정보/준비중 안내 등에 재사용, 기존 .modal-overlay 패턴 재사용) -->
+  <div id="infoModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+    <div class="modal-content">
+      <h3 class="modal-title" id="infoModalTitle">안내</h3>
+      <p class="modal-message" id="infoModalMessage"></p>
+      <div class="modal-actions">
+        <button type="button" class="settings-save-btn" id="infoModalClose">확인</button>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

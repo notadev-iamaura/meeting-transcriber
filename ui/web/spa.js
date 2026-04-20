@@ -455,6 +455,9 @@
                 var recStatus = document.getElementById("recordingStatus");
                 if (recStatus) recStatus.classList.add("visible");
                 _startRecTicker(0);
+                // 새 녹음 시작 시 HUD 내 정지 버튼을 다시 활성화
+                var recStopBtn = document.getElementById("recordingStopBtn");
+                if (recStopBtn) recStopBtn.disabled = false;
                 loadMeetings();
             });
             document.addEventListener("ws:recording_stopped", function () {
@@ -486,6 +489,72 @@
                 errorBanner.show(msg);
             });
 
+            // 범용 안내 모달 (#infoModal) — 아직 구현되지 않은 기능 안내 등에 재사용.
+            // 사용: showInfoModal("제목", "본문")
+            function showInfoModal(title, message) {
+                var modal = document.getElementById("infoModal");
+                if (!modal) return;
+                var t = document.getElementById("infoModalTitle");
+                var m = document.getElementById("infoModalMessage");
+                if (t) App.safeText(t, title || "안내");
+                if (m) App.safeText(m, message || "");
+                modal.classList.remove("hidden");
+                var closeBtn = document.getElementById("infoModalClose");
+                if (closeBtn) closeBtn.focus();
+            }
+            function hideInfoModal() {
+                var modal = document.getElementById("infoModal");
+                if (!modal) return;
+                modal.classList.add("hidden");
+            }
+            // 닫기 버튼 + 배경 클릭 + ESC 키로 닫기
+            var _infoModalEl = document.getElementById("infoModal");
+            if (_infoModalEl) {
+                var _infoCloseBtn = document.getElementById("infoModalClose");
+                if (_infoCloseBtn) _infoCloseBtn.addEventListener("click", hideInfoModal);
+                _infoModalEl.addEventListener("click", function (e) {
+                    // 컨테이너(= overlay)를 직접 눌렀을 때만 — 내부 모달 콘텐츠 클릭은 무시
+                    if (e.target === _infoModalEl) hideInfoModal();
+                });
+                document.addEventListener("keydown", function (e) {
+                    if (e.key === "Escape" && !_infoModalEl.classList.contains("hidden")) {
+                        hideInfoModal();
+                    }
+                });
+            }
+
+            // 가져오기 버튼 (오디오 파일 import) — 현재는 준비 중 안내 모달만 표시.
+            // 실제 업로드는 백엔드 API 추가 후 연결 예정.
+            var _importBtn = document.getElementById("importBtn");
+            if (_importBtn) {
+                _importBtn.addEventListener("click", function () {
+                    showInfoModal(
+                        "가져오기",
+                        "곧 지원될 예정입니다.\n지금은 ~/.meeting-transcriber/audio_input 폴더에 오디오 파일을 넣으면 자동으로 처리됩니다."
+                    );
+                });
+            }
+
+            // 녹음 HUD 의 즉시 정지 버튼: 클릭 시 /api/recording/stop 호출.
+            // POST 성공 시 pill 을 즉시 숨김 — WebSocket 이 끊긴 상태에서도 UI 가 멈추지 않도록.
+            // 백엔드의 ws:recording_stopped 가 뒤이어 도착해도 기존 핸들러의 동작(hide+ticker stop)은 멱등.
+            var _recStopBtn = document.getElementById("recordingStopBtn");
+            if (_recStopBtn) {
+                _recStopBtn.addEventListener("click", async function () {
+                    if (_recStopBtn.disabled) return;
+                    _recStopBtn.disabled = true;
+                    try {
+                        await App.apiRequest("/recording/stop", { method: "POST" });
+                        var recStatus = document.getElementById("recordingStatus");
+                        if (recStatus) recStatus.classList.remove("visible");
+                        _stopRecTicker();
+                    } catch (err) {
+                        errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
+                        _recStopBtn.disabled = false;
+                    }
+                });
+            }
+
             // 초기 데이터 로드
             loadMeetings();
             fetchStatus();
@@ -499,6 +568,10 @@
                         var recStatus = document.getElementById("recordingStatus");
                         if (recStatus) recStatus.classList.add("visible");
                         _startRecTicker(rec.duration_seconds || 0);
+                        // 새로고침으로 새 DOM 이 로드된 상태라 버튼은 기본 활성이지만,
+                        // 브라우저 form state 자동 복원에 대비해 명시적으로 리셋.
+                        var recStopBtn = document.getElementById("recordingStopBtn");
+                        if (recStopBtn) recStopBtn.disabled = false;
                     }
                 })
                 .catch(function () {
@@ -826,7 +899,7 @@
         ].join("\n");
 
         contentEl.innerHTML = html;
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
 
         // 일괄 요약 버튼 이벤트
         var self = this;
@@ -978,7 +1051,7 @@
             searchHint: document.getElementById("searchHint"),
         };
 
-        document.title = "검색 — 회의록";
+        document.title = "검색 · Recap";
     };
 
     /**
@@ -1362,7 +1435,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = this._meetingId + " — 전사문 뷰어";
+        document.title = this._meetingId + " · 전사문 · Recap";
     };
 
     /**
@@ -2161,7 +2234,7 @@
         titleEl.appendChild(editBtn);
 
         // 페이지 타이틀도 갱신
-        document.title = displayTitle + " — 전사문 뷰어";
+        document.title = displayTitle + " · 전사문 · Recap";
     };
 
     /**
@@ -3291,7 +3364,7 @@
         this._timers = [];
 
         // 페이지 타이틀 복원
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -3425,7 +3498,7 @@
         };
 
         // 페이지 타이틀 업데이트
-        document.title = "채팅 — 회의록";
+        document.title = "채팅 · Recap";
     };
 
     /**
@@ -3883,7 +3956,7 @@
         if (listPanel) listPanel.classList.remove("chat-mode");
 
         // 페이지 타이틀 복원
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -3916,7 +3989,7 @@
         self._currentTab = null;
         self._render();
         self._showTab(self._opts.initialTab || "general");
-        document.title = "설정 — 회의록";
+        document.title = "설정 · Recap";
 
         // 브라우저 탭 닫기/새로고침 가드: 편집 중이면 네이티브 경고 표시
         self._beforeUnloadHandler = function (e) {
@@ -4035,7 +4108,7 @@
         }
         var listPanel = document.getElementById("list-panel");
         if (listPanel) listPanel.classList.remove("chat-mode");
-        document.title = "회의록";
+        document.title = "회의록 · Recap";
     };
 
 
@@ -4053,7 +4126,7 @@
         self._timers = [];
         self._render();
         self._loadTests();
-        document.title = "A/B 테스트 — 회의록";
+        document.title = "A/B 테스트 · Recap";
     }
 
     /**
@@ -4238,7 +4311,7 @@
         self._render();
         self._bind();
         self._loadData();
-        document.title = "새 A/B 테스트 — 회의록";
+        document.title = "새 A/B 테스트 · Recap";
     }
 
     /**
@@ -4699,7 +4772,7 @@
         self._render();
         self._loadData();
         self._bindWs();
-        document.title = "A/B 테스트 — 회의록";
+        document.title = "A/B 테스트 · Recap";
     }
 
     /**

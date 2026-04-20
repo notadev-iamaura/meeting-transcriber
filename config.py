@@ -389,7 +389,7 @@ class WindowConfig(BaseModel):
     use_native=False이면 기본 브라우저로 폴백한다.
     """
 
-    title: str = "회의 전사 시스템"
+    title: str = "Recap"
     width: int = Field(default=1200, ge=400)
     height: int = Field(default=800, ge=300)
     min_width: int = Field(default=800, ge=400)

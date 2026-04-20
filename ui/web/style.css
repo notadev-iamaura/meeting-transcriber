@@ -1,5 +1,5 @@
 /* =================================================================
- * 회의 전사 시스템 — macOS 네이티브 스타일 시트 (style.css)
+ * Recap (회의 전사 시스템) — macOS 네이티브 스타일 시트 (style.css)
  *
  * 목적: macOS 네이티브 앱(Apple Notes, Finder, Mail)의 디자인 언어를
  *       웹 UI에 충실히 재현한다.
@@ -486,6 +486,82 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* 리스트 헤더 우측 액션 영역 (가져오기 버튼 + 건수 배지) */
+.list-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 헤더 내 아이콘 버튼 (가져오기 등) */
+.list-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.list-header-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.list-header-btn:active {
+  transform: scale(0.95);
+}
+
+/* Recap 브랜드 락업 (리스트 헤더 좌측) */
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* 라이트/다크 모드에 따라 브랜드 마크 자동 전환 (기존 .theme-icon-* 토글 패턴 재사용) */
+.brand-mark-light { display: block; }
+.brand-mark-dark { display: none; }
+
+:root[data-theme="dark"] .brand-mark-light { display: none; }
+:root[data-theme="dark"] .brand-mark-dark { display: block; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-mark-light { display: none; }
+  :root:not([data-theme="light"]) .brand-mark-dark { display: block; }
+}
+
+:root[data-theme="light"] .brand-mark-light { display: block; }
+:root[data-theme="light"] .brand-mark-dark { display: none; }
+
+/* 리스트 상단 섹션 라벨 (회의록/검색/... 분류) */
+.list-section-label {
+  padding: 4px 16px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
 /* 리스트 검색 입력 */
 .list-search {
   padding: 0 12px 8px;
@@ -905,21 +981,30 @@ button {
   z-index: 999;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 6px;
+  padding: 8px 14px;
   background: rgba(255, 59, 48, 0.92);
   color: #FFFFFF;
   font-size: 12px;
   font-weight: 500;
   border-radius: 20px;
   box-shadow: var(--shadow-lg);
-  transition: top var(--duration-slow) var(--ease-macos);
+  /* 비가시 상태에서 내부 버튼의 Tab 포커스·클릭을 완전 차단 */
+  visibility: hidden;
+  pointer-events: none;
+  transition: top var(--duration-slow) var(--ease-macos),
+              visibility 0s linear var(--duration-slow);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
 
 .recording-status.visible {
   top: 12px;
+  visibility: visible;
+  pointer-events: auto;
+  /* visible 로 복귀할 때는 transition delay 없이 즉시 노출 */
+  transition: top var(--duration-slow) var(--ease-macos),
+              visibility 0s linear 0s;
 }
 
 /* 녹음 빨간 점 */
@@ -945,8 +1030,72 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* 녹음 HUD 내 waveform 진행 표시 (실제 오디오 amplitude 아닌 상태 애니메이션) */
+/* 백엔드에서 실시간 audio-level 스트림이 추가되면 여기에 연결 예정 — 현 단계는 녹음 진행 중임을 나타내는 시각 신호 */
+.recording-waveform {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  padding: 0 4px;
+}
 
-/* ══════════════════════���═══════════════════
+.recording-waveform span {
+  display: block;
+  width: 2px;
+  height: 40%;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 1px;
+  animation: recording-wave 1.1s ease-in-out infinite;
+}
+
+.recording-waveform span:nth-child(1) { animation-delay: -0.10s; }
+.recording-waveform span:nth-child(2) { animation-delay: -0.55s; }
+.recording-waveform span:nth-child(3) { animation-delay: -0.30s; }
+.recording-waveform span:nth-child(4) { animation-delay: -0.75s; }
+.recording-waveform span:nth-child(5) { animation-delay: -0.20s; }
+.recording-waveform span:nth-child(6) { animation-delay: -0.65s; }
+.recording-waveform span:nth-child(7) { animation-delay: -0.40s; }
+.recording-waveform span:nth-child(8) { animation-delay: -0.85s; }
+
+@keyframes recording-wave {
+  0%, 100% { height: 30%; }
+  50% { height: 90%; }
+}
+
+/* 녹음 정지 버튼 (pill 우측) */
+.recording-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              transform var(--duration-fast) var(--ease-macos);
+}
+
+.recording-stop-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.recording-stop-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.recording-stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
+/* ═════════════════════════════════════════
    10. 로딩 / 빈 상태
    ═══��════════════════════════���═════════════ */
 
@@ -4439,6 +4588,15 @@ button {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 20px;
+}
+
+/* 안내 문구 (info 모달용) — 제목 아래 본문 문단 */
+.modal-message {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-line;
 }
 
 /* ============================================================
