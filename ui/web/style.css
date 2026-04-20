@@ -1173,6 +1173,203 @@ button {
   cursor: not-allowed;
 }
 
+/* HUD 최소화 → 전체 패널 펼치기 버튼 (pill 내부) */
+.recording-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              transform var(--duration-fast) var(--ease-macos);
+}
+
+.recording-expand-btn:hover { background: rgba(255, 255, 255, 0.3); }
+.recording-expand-btn:active { transform: scale(0.92); }
+
+
+/* ──────────────────────────────────────────
+   9-B. 녹음 Full-viewport HUD (레퍼런스 RecordingOverlay.jsx)
+   ──────────────────────────────────────────
+   녹음 시작 시 자동 표시. 사용자는 "최소화" 로 작은 pill 로 축약 가능.
+   backdrop 은 어두운 색 + blur, 패널은 520px 카드. 타이머는 48px SF Mono.
+   waveform 은 48-bar CSS keyframe 애니메이션(실제 amplitude 가 아닌 상태 신호).
+*/
+.recording-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-base) var(--ease-macos),
+              visibility 0s linear var(--duration-base);
+}
+
+.recording-overlay.visible {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity var(--duration-base) var(--ease-macos),
+              visibility 0s linear 0s;
+}
+
+.recording-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.recording-panel {
+  position: relative;
+  width: 520px;
+  max-width: 92vw;
+  padding: 32px 36px 28px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 20px;
+}
+
+/* 소스 라벨 줄: 빨간 점 + "녹음 중 · 시스템 오디오" */
+.recording-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-13);
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.status-dot.recording {
+  background: var(--recording);
+  animation: blink-recording 1s ease-in-out infinite;
+}
+
+/* 48px 타이머 — SF Mono, 매초 갱신 */
+.recording-timer {
+  font-family: var(--font-mono);
+  font-size: 48px;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  line-height: 1.1;
+}
+
+/* 48-bar waveform */
+.recording-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 56px;
+  padding: 0 8px;
+}
+
+.recording-wave span {
+  display: block;
+  width: 3px;
+  height: 30%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: recording-wave-bar 1.2s ease-in-out infinite;
+  opacity: 0.85;
+}
+
+@keyframes recording-wave-bar {
+  0%, 100% { height: 20%; opacity: 0.5; }
+  50% { height: 90%; opacity: 1; }
+}
+
+/* 메타 행 (시간 · 상태) */
+.recording-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+/* 액션 버튼 행 */
+.recording-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.rec-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: var(--fs-13);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              transform var(--duration-fast) var(--ease-macos);
+}
+
+.rec-btn.ghost {
+  background: transparent;
+}
+
+.rec-btn.ghost:hover {
+  background: var(--bg-secondary);
+}
+
+.rec-btn.primary {
+  background: var(--error);
+  border-color: var(--error);
+  color: #FFFFFF;
+}
+
+.rec-btn.primary:hover {
+  background: #D70015;
+  border-color: #D70015;
+}
+
+.rec-btn:active {
+  transform: scale(0.97);
+}
+
+.rec-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 
 /* ═════════════════════════════════════════
    10. 로딩 / 빈 상태

@@ -428,12 +428,25 @@
                 var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
                 return pad(m) + ":" + pad(s);
             }
+            // Overlay 타이머용 HH:MM:SS 포맷 (레퍼런스 RecordingOverlay 스펙)
+            function _formatRecDurationLong(sec) {
+                var s0 = Math.floor(sec);
+                if (s0 < 0) s0 = 0;
+                var h = Math.floor(s0 / 3600);
+                var m = Math.floor((s0 % 3600) / 60);
+                var s = s0 % 60;
+                var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+                return pad(h) + ":" + pad(m) + ":" + pad(s);
+            }
             function _renderRecDuration() {
-                var recDuration = document.getElementById("recordingDuration");
-                if (!recDuration) return;
                 var elapsedMs = Date.now() - _recBaseWallClock;
                 var cur = _recBaseSeconds + elapsedMs / 1000;
-                App.safeText(recDuration, _formatRecDuration(cur));
+                var pillDur = document.getElementById("recordingDuration");
+                if (pillDur) App.safeText(pillDur, _formatRecDuration(cur));
+                var overlayTimer = document.getElementById("recordingOverlayTimer");
+                if (overlayTimer) App.safeText(overlayTimer, _formatRecDurationLong(cur));
+                var overlayMeta = document.getElementById("recordingOverlayMetaDuration");
+                if (overlayMeta) App.safeText(overlayMeta, _formatRecDurationLong(cur));
             }
             function _startRecTicker(initialSeconds) {
                 _recBaseSeconds = initialSeconds || 0;
@@ -451,18 +464,61 @@
                 _recBaseWallClock = 0;
             }
 
+            // 녹음 HUD 상태 제어 — overlay(기본) ↔ pill(최소화) 배타 표시.
+            // _recOverlayShown 이 true 면 pill 은 숨김, false 면 pill 표시.
+            function _showRecHUD(mode) {
+                // mode: "overlay" | "pill" | "none"
+                var pill = document.getElementById("recordingStatus");
+                var overlay = document.getElementById("recordingOverlay");
+                if (mode === "overlay") {
+                    if (pill) pill.classList.remove("visible");
+                    if (overlay) {
+                        overlay.classList.add("visible");
+                        overlay.setAttribute("aria-hidden", "false");
+                    }
+                } else if (mode === "pill") {
+                    if (overlay) {
+                        overlay.classList.remove("visible");
+                        overlay.setAttribute("aria-hidden", "true");
+                    }
+                    if (pill) pill.classList.add("visible");
+                } else {
+                    if (pill) pill.classList.remove("visible");
+                    if (overlay) {
+                        overlay.classList.remove("visible");
+                        overlay.setAttribute("aria-hidden", "true");
+                    }
+                }
+            }
+
+            // 48-bar waveform 마운트 — 레퍼런스 RecordingOverlay.jsx 기준.
+            // 백엔드 실시간 audio-level 스트림이 없어 CSS keyframe 기반 시각 신호.
+            (function mountRecordingWaveBars() {
+                var wave = document.querySelector("#recordingOverlay .recording-wave");
+                if (!wave || wave.childElementCount > 0) return;
+                for (var i = 0; i < 48; i++) {
+                    var span = document.createElement("span");
+                    // 각 bar 에 다른 animation-delay 로 자연스러운 파도 효과
+                    span.style.animationDelay = (-(Math.random() * 1.2)).toFixed(2) + "s";
+                    wave.appendChild(span);
+                }
+            })();
+
             document.addEventListener("ws:recording_started", function () {
-                var recStatus = document.getElementById("recordingStatus");
-                if (recStatus) recStatus.classList.add("visible");
+                // 새 녹음 → overlay 기본 표시
+                _showRecHUD("overlay");
                 _startRecTicker(0);
-                // 새 녹음 시작 시 HUD 내 정지 버튼을 다시 활성화
+                // 버튼 disabled 초기화
                 var recStopBtn = document.getElementById("recordingStopBtn");
                 if (recStopBtn) recStopBtn.disabled = false;
+                var overlayStop = document.getElementById("recordingOverlayStopBtn");
+                if (overlayStop) overlayStop.disabled = false;
+                var overlayCancel = document.getElementById("recordingOverlayCancelBtn");
+                if (overlayCancel) overlayCancel.disabled = false;
                 loadMeetings();
             });
             document.addEventListener("ws:recording_stopped", function () {
-                var recStatus = document.getElementById("recordingStatus");
-                if (recStatus) recStatus.classList.remove("visible");
+                _showRecHUD("none");
                 _stopRecTicker();
                 loadMeetings();
             });
@@ -474,20 +530,67 @@
                 _recBaseWallClock = Date.now();
                 // 싱크가 왔는데 타이머가 없다면(복원 누락 등) 새로 시작
                 if (!_recTickTimer) {
-                    var recStatus = document.getElementById("recordingStatus");
-                    if (recStatus) recStatus.classList.add("visible");
+                    var overlay = document.getElementById("recordingOverlay");
+                    var pill = document.getElementById("recordingStatus");
+                    // 현재 어느 쪽이 표시 중인지 확인 — overlay 우선, 없으면 pill
+                    var mode = (overlay && overlay.classList.contains("visible")) ? "overlay"
+                             : (pill && pill.classList.contains("visible")) ? "pill"
+                             : "overlay";
+                    _showRecHUD(mode);
                     _recTickTimer = setInterval(_renderRecDuration, 1000);
                 }
                 _renderRecDuration();
             });
             document.addEventListener("ws:recording_error", function (e) {
                 var detail = e.detail || {};
-                var recStatus = document.getElementById("recordingStatus");
-                if (recStatus) recStatus.classList.remove("visible");
+                _showRecHUD("none");
                 _stopRecTicker();
                 var msg = detail.error || detail.message || "녹음 중 오류가 발생했습니다";
                 errorBanner.show(msg);
             });
+
+            // Overlay ↔ pill 전환 버튼들
+            (function bindRecOverlayControls() {
+                var expandBtn = document.getElementById("recordingExpandBtn");
+                if (expandBtn) {
+                    expandBtn.addEventListener("click", function () {
+                        _showRecHUD("overlay");
+                    });
+                }
+
+                async function sendStop() {
+                    try {
+                        await App.apiRequest("/recording/stop", { method: "POST" });
+                        _showRecHUD("none");
+                        _stopRecTicker();
+                    } catch (err) {
+                        errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
+                        var ob = document.getElementById("recordingOverlayStopBtn");
+                        var oc = document.getElementById("recordingOverlayCancelBtn");
+                        if (ob) ob.disabled = false;
+                        if (oc) oc.disabled = false;
+                    }
+                }
+
+                // Overlay 내부 버튼들 — data-recording-action 속성으로 delegate
+                var overlay = document.getElementById("recordingOverlay");
+                if (overlay) {
+                    overlay.addEventListener("click", function (e) {
+                        var t = e.target.closest("[data-recording-action]");
+                        if (!t) return;
+                        var action = t.getAttribute("data-recording-action");
+                        if (action === "minimize") {
+                            _showRecHUD("pill");
+                        } else if (action === "cancel" || action === "stop") {
+                            var stopBtn = document.getElementById("recordingOverlayStopBtn");
+                            var cancelBtn = document.getElementById("recordingOverlayCancelBtn");
+                            if (stopBtn) stopBtn.disabled = true;
+                            if (cancelBtn) cancelBtn.disabled = true;
+                            sendStop();
+                        }
+                    });
+                }
+            })();
 
             // 범용 안내 모달 (#infoModal) — 아직 구현되지 않은 기능 안내 등에 재사용.
             // 사용: showInfoModal("제목", "본문")
@@ -565,13 +668,18 @@
             App.apiRequest("/recording/status")
                 .then(function (rec) {
                     if (rec && rec.is_recording) {
-                        var recStatus = document.getElementById("recordingStatus");
-                        if (recStatus) recStatus.classList.add("visible");
+                        // 복원 시엔 최소화(pill) 모드로 표시해 작업 중이던 뷰를 가리지 않는다.
+                        // 사용자가 pill 의 확장 버튼을 눌러 overlay 로 볼 수 있음.
+                        _showRecHUD("pill");
                         _startRecTicker(rec.duration_seconds || 0);
                         // 새로고침으로 새 DOM 이 로드된 상태라 버튼은 기본 활성이지만,
                         // 브라우저 form state 자동 복원에 대비해 명시적으로 리셋.
                         var recStopBtn = document.getElementById("recordingStopBtn");
                         if (recStopBtn) recStopBtn.disabled = false;
+                        var overlayStop = document.getElementById("recordingOverlayStopBtn");
+                        if (overlayStop) overlayStop.disabled = false;
+                        var overlayCancel = document.getElementById("recordingOverlayCancelBtn");
+                        if (overlayCancel) overlayCancel.disabled = false;
                     }
                 })
                 .catch(function () {
