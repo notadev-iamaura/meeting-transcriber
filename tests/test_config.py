@@ -58,7 +58,8 @@ class TestConfigYamlParsing:
         assert config.server.port == 8765
         # 환각 필터링 설정 검증
         assert config.hallucination_filter.enabled is True
-        assert config.hallucination_filter.no_speech_threshold == 0.6
+        # 벤치마크 결과에 따라 0.9 로 상향 (docs/BENCHMARK.md §6 · config.yaml 주석 참조)
+        assert config.hallucination_filter.no_speech_threshold == 0.9
         assert config.hallucination_filter.repetition_threshold == 3
         # 텍스트 후처리 설정 검증
         assert config.text_postprocessing.enabled is True
