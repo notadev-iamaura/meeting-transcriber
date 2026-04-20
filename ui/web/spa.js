@@ -6128,13 +6128,13 @@
             if (m.is_recommended) {
                 var rec = document.createElement("span");
                 rec.className = "stt-model-badge recommended";
-                rec.textContent = "⭐ 추천";
+                rec.textContent = "추천";
                 header.appendChild(rec);
             }
             if (m.is_active) {
                 var act = document.createElement("span");
                 act.className = "stt-model-badge active";
-                act.textContent = "● 활성";
+                act.textContent = "활성";
                 header.appendChild(act);
             }
 

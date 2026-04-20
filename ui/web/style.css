@@ -3689,10 +3689,10 @@ button {
 }
 
 .settings-section-title {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semibold);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ls-wide);
   color: var(--text-secondary);
   padding: 12px 0 4px;
   margin: 0;
@@ -4521,23 +4521,22 @@ button {
   border: 0.5px solid var(--border);
   border-radius: 8px;
   padding: 16px;
-  background: var(--bg-input);
-  transition: border-color var(--duration-base) var(--ease-macos), background var(--duration-base) var(--ease-macos), box-shadow var(--duration-base) var(--ease-macos);
+  background: var(--bg-card);
+  transition: border-color var(--duration-base) var(--ease-macos),
+              background var(--duration-base) var(--ease-macos);
 }
 
+/* 활성(현재 사용 중) — 레퍼런스 Settings.jsx 의 선택 카드처럼
+   accent border 만 강조하고 내부 inset shadow 는 제거해 톤을 가볍게. */
 .stt-model-card.active {
   border-color: var(--accent);
-  background: rgba(0, 122, 255, 0.06);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+  background: var(--accent-light);
 }
 
+/* 추천 — 별도 border 강조 없이 badge 로만 표시 (accent pill).
+   활성/추천 배타가 아니라 함께 있을 수 있으므로 border 는 accent 유지. */
 .stt-model-card.recommended {
-  border-color: var(--warning);
-}
-
-.stt-model-card.recommended.active {
-  /* 활성이 우선. 추천이어도 activ이면 accent 보더 */
-  border-color: var(--accent);
+  /* border 변경 없음 — badge 가 의미 전달을 담당 */
 }
 
 .stt-model-header {
@@ -4566,8 +4565,8 @@ button {
 }
 
 .stt-model-badge.recommended {
-  background: rgba(255, 149, 0, 0.15);
-  color: var(--warning);
+  background: var(--accent-light);
+  color: var(--accent);
 }
 
 .stt-model-badge.active {
