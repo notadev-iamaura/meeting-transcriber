@@ -2147,6 +2147,40 @@ button {
   margin-bottom: 12px;
 }
 
+/* 타임라인 밀도 토글 — 뷰어 헤더 우측. 상태 pill 다음에 위치. */
+.density-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.density-toggle:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.density-toggle[aria-pressed="true"] {
+  background: var(--accent-light);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.density-toggle:active {
+  transform: scale(0.95);
+}
+
 .viewer-title {
   font-size: 22px;
   font-weight: 700;
@@ -2402,14 +2436,38 @@ button {
   display: flex;
   flex-direction: column;
   gap: 0;
+
+  /* Density 토큰 — Comfortable (기본) 프리셋.
+     사용자는 뷰어 헤더의 density 토글로 Compact 로 전환해
+     레퍼런스 Viewer.jsx 에 준하는 조밀한 레이아웃을 선택할 수 있다. */
+  --utt-pad-y: 20px;
+  --utt-pad-x: 24px;
+  --utt-gap: 16px;
+  --utt-badge: 32px;
+  --utt-badge-fs: 14px;
+  --utt-speaker-fs: 14px;
+  --utt-text-fs: 14px;
+  --utt-text-lh: 1.8;
+}
+
+/* Compact 프리셋 — 레퍼런스 Viewer.jsx 수치 (26px 배지 / 13px 본문 / lh 1.6) */
+.timeline.density-compact {
+  --utt-pad-y: 14px;
+  --utt-pad-x: 20px;
+  --utt-gap: 12px;
+  --utt-badge: 26px;
+  --utt-badge-fs: 11px;
+  --utt-speaker-fs: 13px;
+  --utt-text-fs: 13px;
+  --utt-text-lh: 1.6;
 }
 
 /* 개별 발화 항목: Clova Note 스타일 (번호 배지 + 콘텐츠) */
 .utterance {
   display: flex;
   align-items: flex-start;
-  gap: 16px;
-  padding: 20px 24px;
+  gap: var(--utt-gap);
+  padding: var(--utt-pad-y) var(--utt-pad-x);
   border-bottom: 0.5px solid var(--border);
   transition: background var(--duration-fast) var(--ease-macos);
 }
@@ -2424,13 +2482,13 @@ button {
 
 /* 화자 번호 배지 (원형, 좌측 고정) */
 .utterance-badge {
-  width: 32px;
-  height: 32px;
+  width: var(--utt-badge);
+  height: var(--utt-badge);
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: var(--utt-badge-fs);
   font-weight: 700;
   color: #fff;
   flex-shrink: 0;
@@ -2453,7 +2511,7 @@ button {
 }
 
 .utterance-speaker {
-  font-size: 14px;
+  font-size: var(--utt-speaker-fs);
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -2465,10 +2523,10 @@ button {
   flex-shrink: 0;
 }
 
-/* 전사 내용: 가독성 강화 (14px/1.75) */
+/* 전사 내용: 가독성 강화 (Comfortable 기본 14/1.8, Compact 13/1.6) */
 .utterance-text {
-  font-size: 14px;
-  line-height: 1.8;
+  font-size: var(--utt-text-fs);
+  line-height: var(--utt-text-lh);
   color: var(--text-primary);
   word-break: break-word;
   max-width: 720px;

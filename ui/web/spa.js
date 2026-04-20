@@ -1314,6 +1314,15 @@
             '  <div class="viewer-header-top">',
             '    <h2 class="viewer-title" id="viewerMeetingTitle"></h2>',
             '    <span class="viewer-status" id="viewerMeetingStatus"></span>',
+            '    <button type="button" class="density-toggle" id="viewerDensityToggle"',
+            '            aria-label="타임라인 밀도 전환" title="밀도 전환 (조밀/편안)"',
+            '            aria-pressed="false">',
+            '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '        <line x1="3" y1="5" x2="17" y2="5"></line>',
+            '        <line x1="3" y1="10" x2="17" y2="10"></line>',
+            '        <line x1="3" y1="15" x2="17" y2="15"></line>',
+            '      </svg>',
+            '    </button>',
             '  </div>',
             '  <div class="viewer-meta">',
             '    <span class="viewer-meta-item" id="viewerMetaFile"></span>',
@@ -1432,7 +1441,33 @@
             searchPrev: document.getElementById("viewerSearchPrev"),
             searchNext: document.getElementById("viewerSearchNext"),
             summarizeBtn: document.getElementById("viewerSummarizeBtn"),
+            densityToggle: document.getElementById("viewerDensityToggle"),
         };
+
+        // Density 토글 — localStorage 에 'viewer-density' 키로 저장, 기본은 Comfortable.
+        // 저장값이 'compact' 면 .timeline 에 .density-compact 클래스를 붙여 레퍼런스
+        // Viewer.jsx 수치(26px 배지 / 13px 본문 / lh 1.6) 를 적용한다.
+        (function initDensityToggle() {
+            var btn = els.densityToggle;
+            var tl = els.timeline;
+            if (!btn || !tl) return;
+            var saved = (function () {
+                try { return localStorage.getItem("viewer-density") || "comfortable"; }
+                catch (e) { return "comfortable"; }
+            })();
+            function apply(mode) {
+                var compact = mode === "compact";
+                tl.classList.toggle("density-compact", compact);
+                btn.setAttribute("aria-pressed", compact ? "true" : "false");
+                btn.title = compact ? "밀도: 조밀 (클릭 → 편안)" : "밀도: 편안 (클릭 → 조밀)";
+            }
+            apply(saved);
+            btn.addEventListener("click", function () {
+                var now = tl.classList.contains("density-compact") ? "comfortable" : "compact";
+                try { localStorage.setItem("viewer-density", now); } catch (e) { /* private mode */ }
+                apply(now);
+            });
+        })();
 
         // 페이지 타이틀 업데이트
         document.title = this._meetingId + " · 전사문 · Recap";
@@ -3724,6 +3759,12 @@
                 // 본체
                 var bodyEl = document.createElement("div");
                 bodyEl.className = "ref-card-body";
+
+                // REFERENCE 오버라인 (레퍼런스 Chat.jsx 기준 citation 문서화)
+                var overline = document.createElement("div");
+                overline.className = "overline ref-card-overline";
+                overline.textContent = "REFERENCE";
+                bodyEl.appendChild(overline);
 
                 // 메타 정보
                 var meta = document.createElement("div");
