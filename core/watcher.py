@@ -442,9 +442,7 @@ class FolderWatcher:
                     result = await asyncio.to_thread(self._audio_validator, resolved)
                 except Exception as e:
                     # 품질 측정 자체 예외는 보수적 통과 (판단 보류)
-                    logger.warning(
-                        f"품질 측정 예외, 보수적 진행: {resolved} ({e})"
-                    )
+                    logger.warning(f"품질 측정 예외, 보수적 진행: {resolved} ({e})")
                     result = None
 
                 if result is not None and result.status == AudioQualityStatus.REJECT:
@@ -611,9 +609,7 @@ class FolderWatcher:
                 try:
                     result = await asyncio.to_thread(self._audio_validator, resolved)
                 except Exception as e:  # noqa: BLE001 — 품질 측정 예외는 보수적 통과
-                    logger.warning(
-                        f"기존 파일 품질 측정 예외, 보수적 진행: {resolved} ({e})"
-                    )
+                    logger.warning(f"기존 파일 품질 측정 예외, 보수적 진행: {resolved} ({e})")
                     result = None
 
                 if result is not None and result.status.value == "reject":

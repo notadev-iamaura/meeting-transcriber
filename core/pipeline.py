@@ -740,9 +740,7 @@ class PipelineManager:
                 )
             except AudioMeasurementError as e:
                 # duration 측정 실패 시 config 기본값으로 폴백 (전사는 계속 진행)
-                logger.warning(
-                    f"duration 측정 실패, 기본 타임아웃 사용: {e}"
-                )
+                logger.warning(f"duration 측정 실패, 기본 타임아웃 사용: {e}")
 
         result = await transcriber.transcribe(
             wav_path,
@@ -1190,9 +1188,7 @@ class PipelineManager:
                     )
                     # Phase 1: NonRetryableError(타임아웃 등) 감지 시 즉시 중단
                     # (STAB: MLX Metal 상태 오염 재시도로 인한 SIGSEGV 크래시 차단)
-                    if not should_retry(
-                        e, attempt=attempt, max_attempts=self._retry_max
-                    ):
+                    if not should_retry(e, attempt=attempt, max_attempts=self._retry_max):
                         logger.info(
                             f"재시도 중단 (타입={type(e).__name__}, "
                             f"시도={attempt}/{self._retry_max})"

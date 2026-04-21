@@ -10,13 +10,11 @@ Phase 1 의 5개 방어막이 실제 유스케이스에서 협력하는지 end-t
 각 방어막의 개별 테스트는 해당 모듈의 test_*.py 에 있고,
 이 파일은 **시나리오 레벨 협력**을 검증한다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
 
 # === 시나리오 1: 저볼륨 파일 (이번 크래시의 실제 트리거) ===
 
@@ -97,44 +95,59 @@ def test_동적_타임아웃_경계값_시나리오():
     from core.pipeline import compute_dynamic_timeout
 
     # 15분 오디오 × 3 = 45분 (하한 10분 이상, 상한 3시간 이하)
-    assert compute_dynamic_timeout(
-        duration_seconds=900.0,
-        multiplier=3.0,
-        min_seconds=600,
-        max_seconds=10800,
-    ) == 2700
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=900.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 2700
+    )
 
     # 1시간 오디오 × 3 = 3시간 (상한 정확히 도달)
-    assert compute_dynamic_timeout(
-        duration_seconds=3600.0,
-        multiplier=3.0,
-        min_seconds=600,
-        max_seconds=10800,
-    ) == 10800
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=3600.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 10800
+    )
 
     # 3시간 오디오 × 3 = 9시간 → 상한 3시간으로 절단
-    assert compute_dynamic_timeout(
-        duration_seconds=10800.0,
-        multiplier=3.0,
-        min_seconds=600,
-        max_seconds=10800,
-    ) == 10800
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=10800.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 10800
+    )
 
     # 30초 오디오 × 3 = 90s → 하한 600s로 상승
-    assert compute_dynamic_timeout(
-        duration_seconds=30.0,
-        multiplier=3.0,
-        min_seconds=600,
-        max_seconds=10800,
-    ) == 600
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=30.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 600
+    )
 
     # 실측 크래시 파일 22분 × 3 = 66분 (경계 안쪽)
-    assert compute_dynamic_timeout(
-        duration_seconds=1359.87,
-        multiplier=3.0,
-        min_seconds=600,
-        max_seconds=10800,
-    ) == 4079  # int(1359.87 * 3.0) = int(4079.61) = 4079
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=1359.87,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 4079
+    )  # int(1359.87 * 3.0) = int(4079.61) = 4079
 
 
 # === 시나리오 4: 정상 파일 통과 ===

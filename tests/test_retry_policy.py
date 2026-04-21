@@ -1,7 +1,6 @@
 """재시도 정책 예외 계층 테스트."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from core.retry_policy import (
     NonRetryableError,

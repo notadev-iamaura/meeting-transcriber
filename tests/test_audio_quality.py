@@ -1,4 +1,5 @@
 """오디오 품질 검증 모듈 테스트."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +8,6 @@ from unittest.mock import patch
 import pytest
 
 from core.audio_quality import (
-    AudioQualityResult,
     AudioQualityStatus,
     validate_audio_quality,
 )
@@ -214,9 +214,9 @@ def test_get_validation_stats_는_복사본_반환():
 
 def test_reset_validation_stats_는_모든_키_초기화():
     from core.audio_quality import (
+        _increment_stats,
         get_validation_stats,
         reset_validation_stats,
-        _increment_stats,
     )
 
     _increment_stats("accept")
