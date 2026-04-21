@@ -93,6 +93,24 @@ def validate_audio_quality(
     )
 
 
+def measure_audio_duration(audio_path: Path) -> float:
+    """오디오 파일의 재생 시간(초)을 측정한다.
+
+    동적 타임아웃 계산 등 다른 모듈에서 duration만 필요할 때 사용하는
+    공개 헬퍼. 내부적으로 ffprobe 를 호출한다.
+
+    Args:
+        audio_path: 측정 대상 오디오 파일 경로
+
+    Returns:
+        재생 시간 (초)
+
+    Raises:
+        AudioMeasurementError: ffprobe 미설치 또는 측정 실패
+    """
+    return _measure_duration_seconds(audio_path)
+
+
 def _measure_mean_volume_db(audio_path: Path) -> float:
     """ffmpeg volumedetect 필터로 mean_volume을 측정한다.
 

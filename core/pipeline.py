@@ -35,6 +35,38 @@ from core.model_manager import ModelLoadManager, get_model_manager
 logger = logging.getLogger(__name__)
 
 
+# === 동적 타임아웃 계산 ===
+
+
+def compute_dynamic_timeout(
+    *,
+    duration_seconds: float,
+    multiplier: float,
+    min_seconds: int,
+    max_seconds: int,
+) -> int:
+    """오디오 길이에 비례한 전사 타임아웃을 계산한다.
+
+    공식: clamp(duration × multiplier, min, max)
+
+    짧은 파일은 모델 로드 시간까지 고려한 최소값으로 클램핑하고,
+    지나치게 긴 파일은 폭주 방지를 위해 상한으로 클램핑한다.
+    RTF 1.19(관측치) 기준 multiplier=3.0은 약 2.5배의 여유를 제공한다.
+
+    Args:
+        duration_seconds: 오디오 재생 시간 (초)
+        multiplier: RTF 여유 배수 (예: 3.0)
+        min_seconds: 최소 타임아웃 (짧은 파일 보호, 모델 로드 시간 포함)
+        max_seconds: 최대 타임아웃 (폭주 방지 안전판)
+
+    Returns:
+        계산된 타임아웃 (정수 초). `int()` 절삭 방식.
+    """
+    computed = duration_seconds * multiplier
+    clamped = max(float(min_seconds), min(float(max_seconds), computed))
+    return int(clamped)
+
+
 # === 리소스 모니터링 ===
 
 
@@ -685,7 +717,41 @@ class PipelineManager:
                 vad_clip_timestamps = None
 
         transcriber = Transcriber(self._config, self._model_manager)
-        result = await transcriber.transcribe(wav_path, vad_clip_timestamps=vad_clip_timestamps)
+
+        # Phase 1: 동적 타임아웃 계산 — 오디오 길이에 비례
+        # 짧은 파일은 1800s 고정 타임아웃보다 빠르게 실패하고,
+        # 긴 파일은 충분한 여유를 확보해 불필요한 타임아웃을 방지한다.
+        timeout_override: int | None = None
+        if self._config.pipeline.dynamic_timeout_enabled:
+            try:
+                from core.audio_quality import (
+                    AudioMeasurementError,
+                    measure_audio_duration,
+                )
+
+                duration = measure_audio_duration(wav_path)
+                timeout_override = compute_dynamic_timeout(
+                    duration_seconds=duration,
+                    multiplier=self._config.pipeline.dynamic_timeout_multiplier,
+                    min_seconds=self._config.pipeline.dynamic_timeout_min_seconds,
+                    max_seconds=self._config.pipeline.dynamic_timeout_max_seconds,
+                )
+                logger.info(
+                    f"동적 타임아웃: {timeout_override}초 "
+                    f"(duration={duration:.1f}s, "
+                    f"multiplier={self._config.pipeline.dynamic_timeout_multiplier})"
+                )
+            except AudioMeasurementError as e:
+                # duration 측정 실패 시 config 기본값으로 폴백 (전사는 계속 진행)
+                logger.warning(
+                    f"duration 측정 실패, 기본 타임아웃 사용: {e}"
+                )
+
+        result = await transcriber.transcribe(
+            wav_path,
+            vad_clip_timestamps=vad_clip_timestamps,
+            timeout_override=timeout_override,
+        )
 
         # 환각 필터링 (hallucination_filter 설정에 따라)
         try:
@@ -1121,13 +1187,25 @@ class PipelineManager:
                     break  # 성공 시 재시도 루프 탈출
 
                 except Exception as e:  # noqa: BLE001 — 재시도 루프 catch-all
+                    from core.retry_policy import should_retry
+
                     last_error = e
                     logger.warning(
                         f"단계 {step.value} 실패 (시도 {attempt}/{self._retry_max}): {e}"
                     )
+                    # Phase 1: NonRetryableError(타임아웃 등) 감지 시 즉시 중단
+                    # (STAB: MLX Metal 상태 오염 재시도로 인한 SIGSEGV 크래시 차단)
+                    if not should_retry(
+                        e, attempt=attempt, max_attempts=self._retry_max
+                    ):
+                        logger.info(
+                            f"재시도 중단 (타입={type(e).__name__}, "
+                            f"시도={attempt}/{self._retry_max})"
+                        )
+                        break
+                    # 재시도 백오프: 1초 → 2초 → 4초 → ...
+                    # (STAB: 지수 백오프로 일시적 장애 복구 확률 향상)
                     if attempt < self._retry_max:
-                        # 지수 백오프: 1초 → 2초 → 4초 → ...
-                        # (STAB: 지수 백오프로 일시적 장애 복구 확률 향상)
                         backoff_seconds = min(2 ** (attempt - 1), 30)
                         logger.info(
                             f"재시도 대기: {backoff_seconds}초 (지수 백오프, 시도 {attempt})"
