@@ -192,7 +192,10 @@ async def test_corrector_job_snapshot_immutable_during_processing(
     recording.chat = chat_with_midway_edit
 
     corrector = Corrector()
-    corrector._batch_size = 1  # 배치 여러 번 돌도록
+    # 배치 여러 번 돌도록 _batch_size=1 로 강제. 2-C 적응형 배치(_resolve_batch_size)
+    # 가 _base_batch_size 기반으로 재계산하므로 두 필드 모두 설정해야 한다.
+    corrector._base_batch_size = 1
+    corrector._batch_size = 1
 
     with patch.object(corrector, "_create_backend", return_value=recording):
         from contextlib import asynccontextmanager
