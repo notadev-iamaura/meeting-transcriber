@@ -270,12 +270,16 @@ class TestPlistGeneration:
             data = plistlib.load(f)
         assert data["RunAtLoad"] is True
 
-    def test_plist_KeepAlive_비활성(self, mock_env: dict[str, str]) -> None:
-        """KeepAlive가 false인지 확인한다 (안전)."""
+    def test_plist_KeepAlive_크래시_시에만_재기동(self, mock_env: dict[str, str]) -> None:
+        """KeepAlive 가 dict 형태로 Crashed=true, SuccessfulExit=false 인지 확인한다.
+
+        Phase 1 (2026-04-21): 크래시 시에만 자동 재기동하여 orphan job 복구가
+        작동하도록 한다. 정상 종료(사용자 수동 Quit)는 재기동하지 않는다.
+        """
         plist_path = _generate_plist(mock_env)
         with open(plist_path, "rb") as f:
             data = plistlib.load(f)
-        assert data["KeepAlive"] is False
+        assert data["KeepAlive"] == {"Crashed": True, "SuccessfulExit": False}
 
     def test_plist_ProgramArguments_경로(self, mock_env: dict[str, str]) -> None:
         """ProgramArguments에 올바른 Python, main.py 경로가 포함되는지 확인한다."""
