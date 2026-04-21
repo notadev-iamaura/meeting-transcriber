@@ -439,6 +439,8 @@ class TestCorrector정상보정:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert len(result.utterances) == 1
@@ -468,6 +470,8 @@ class TestCorrector정상보정:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert len(result.utterances) == 3
@@ -496,6 +500,8 @@ class TestCorrector정상보정:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert result.utterances[0].was_corrected is False
@@ -522,6 +528,8 @@ class TestCorrector배치처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert len(result.utterances) == 3
@@ -544,6 +552,8 @@ class TestCorrector배치처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert len(result.utterances) == 15
@@ -563,6 +573,8 @@ class TestCorrector배치처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
+
+        corrector._base_batch_size = 10
 
         result = await corrector.correct(merged)
 
@@ -590,6 +602,8 @@ class TestCorrector에러처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         with pytest.raises(EmptyInputError):
             await corrector.correct(merged)
 
@@ -613,6 +627,8 @@ class TestCorrector에러처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         with pytest.raises(LLMConnectionError):
             await corrector.correct(merged)
 
@@ -633,6 +649,8 @@ class TestCorrector에러처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
+
+        corrector._base_batch_size = 10
 
         result = await corrector.correct(merged)
 
@@ -661,6 +679,8 @@ class TestCorrector에러처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         # 타임아웃 시 원본 유지
@@ -684,6 +704,8 @@ class TestCorrector에러처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         # 파싱 실패 → 원본 유지
@@ -706,6 +728,8 @@ class TestCorrector에러처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
+
+        corrector._base_batch_size = 10
 
         result = await corrector.correct(merged)
 
@@ -743,6 +767,8 @@ class TestCorrector한국어처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         # NFC 정규화 확인
@@ -765,6 +791,8 @@ class TestCorrector한국어처리:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert result.utterances[0].text == "프로젝트 진행 상황을 말씀해 주세요"
@@ -786,6 +814,8 @@ class TestCorrector한국어처리:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
+
+        corrector._base_batch_size = 10
 
         result = await corrector.correct(merged)
 
@@ -978,6 +1008,8 @@ class TestModelManagerIntegration:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         await corrector.correct(merged)
 
         # acquire가 "exaone" 이름으로 호출되었는지 확인
@@ -1003,6 +1035,8 @@ class TestModelManagerIntegration:
         corrector._manager = manager
         corrector._batch_size = 10
 
+        corrector._base_batch_size = 10
+
         result = await corrector.correct(merged)
 
         assert result.utterances[0].speaker == "SPEAKER_00"
@@ -1025,6 +1059,8 @@ class TestModelManagerIntegration:
         corrector = Corrector.__new__(Corrector)
         corrector._manager = manager
         corrector._batch_size = 10
+
+        corrector._base_batch_size = 10
 
         result = await corrector.correct(merged)
 

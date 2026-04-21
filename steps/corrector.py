@@ -279,12 +279,39 @@ class Corrector:
         self._config = config or get_config()
         self._manager = model_manager or get_model_manager()
 
-        # LLM 설정 캐시
-        self._batch_size = self._config.llm.correction_batch_size
+        # LLM 설정 캐시 — config 값은 "base" 배치 크기로 사용하고,
+        # correct() 에서 발화 수에 따라 동적으로 조정한다 (적응형, §2-C).
+        self._base_batch_size = self._config.llm.correction_batch_size
+        self._batch_size = self._base_batch_size
 
         logger.info(
-            f"Corrector 초기화: backend={self._config.llm.backend}, batch_size={self._batch_size}"
+            f"Corrector 초기화: backend={self._config.llm.backend}, "
+            f"batch_size={self._batch_size} (base)"
         )
+
+    # 발화 수 기반 적응형 배치 크기 임계값.
+    # MLXBackend 의 prompt_cache 로 시스템 프롬프트 재사용이 자동화된 이후
+    # (§1-A), 큰 배치의 상대 이득이 줄었다. 다만 발화 수가 많으면 여전히
+    # 호출 횟수 자체를 줄이는 이득이 있어 중간 배치(10) 로 전환한다.
+    _ADAPTIVE_BATCH_THRESHOLD = 20  # 이 발화 수 이상이면 큰 배치 사용
+    _ADAPTIVE_LARGE_BATCH = 10  # 큰 배치 크기 (발화 수)
+
+    def _resolve_batch_size(self, total_utterances: int) -> int:
+        """발화 수에 따라 적절한 배치 크기를 반환한다.
+
+        - 사용자가 config 에서 명시적으로 batch=5 이외 값을 설정했으면 그 값을
+          존중 (적응 비활성화)
+        - config=5 (기본 권장값) + 발화 >=20 이면 10 으로 자동 상향
+        - 그 외에는 base 사용
+
+        이 로직은 "config 가 기본값(5)일 때만 적응" 이라 사용자 설정이
+        우선권을 가진다.
+        """
+        if self._base_batch_size != 5:
+            return self._base_batch_size
+        if total_utterances >= self._ADAPTIVE_BATCH_THRESHOLD:
+            return self._ADAPTIVE_LARGE_BATCH
+        return self._base_batch_size
 
     def _create_backend(self) -> LLMBackend:
         """LLM 백엔드를 생성하여 반환한다.
@@ -427,6 +454,14 @@ class Corrector:
         """
         if not merged.utterances:
             raise EmptyInputError("보정할 발화가 비어있습니다.")
+
+        # 적응형 배치 크기 선택 (발화 수 기반)
+        self._batch_size = self._resolve_batch_size(len(merged.utterances))
+        if self._batch_size != self._base_batch_size:
+            logger.info(
+                f"배치 크기 적응 조정: {self._base_batch_size} → {self._batch_size} "
+                f"(발화 {len(merged.utterances)} >= 임계값 {self._ADAPTIVE_BATCH_THRESHOLD})"
+            )
 
         logger.info(f"보정 시작: 발화 {len(merged.utterances)}개, 배치 크기 {self._batch_size}")
 
