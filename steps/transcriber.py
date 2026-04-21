@@ -391,6 +391,8 @@ class Transcriber:
         self,
         audio_path: Path,
         vad_clip_timestamps: list[float] | None = None,
+        *,
+        timeout_override: int | None = None,
     ) -> TranscriptResult:
         """오디오 파일을 한국어로 전사한다.
 
@@ -402,6 +404,8 @@ class Transcriber:
             audio_path: 전사할 오디오 파일 경로 (16kHz mono WAV 권장)
             vad_clip_timestamps: VAD가 감지한 음성 구간 경계 타임스탬프 리스트.
                 [start1, end1, start2, end2, ...] 형식. None이면 전체 오디오 처리.
+            timeout_override: 타임아웃 오버라이드 (초). None이면 config에서 읽는다.
+                파이프라인에서 동적 타임아웃(오디오 길이 기반)을 주입할 때 사용.
 
         Returns:
             전사 결과 (TranscriptResult)
@@ -411,15 +415,20 @@ class Transcriber:
             EmptyAudioError: 오디오가 비어있거나 전사 결과가 없을 때
             ModelNotAvailableError: mlx-whisper를 사용할 수 없을 때
             TranscriptionError: 전사 처리 중 오류 발생 시
+            TranscriptionTimeoutError: 타임아웃 시 (재시도 금지, NonRetryableError)
         """
         self._validate_audio(audio_path)
 
         logger.info(f"전사 시작: {audio_path.name} (beam_size={self._beam_size})")
 
-        # 전사 타임아웃: 오디오 길이에 비례하여 설정
-        # 기본 30분 타임아웃 (매우 긴 오디오 고려)
+        # 전사 타임아웃: 파라미터 우선, 없으면 config 기본값 사용
+        # 파이프라인에서 오디오 길이 기반 동적 타임아웃을 주입할 수 있다.
         # (STAB: 전사 작업 무한 대기 방지)
-        transcribe_timeout = self._config.stt.transcribe_timeout_seconds
+        transcribe_timeout = (
+            timeout_override
+            if timeout_override is not None
+            else self._config.stt.transcribe_timeout_seconds
+        )
 
         try:
             async with self._manager.acquire(
@@ -433,8 +442,16 @@ class Transcriber:
                     vad_clip_timestamps,
                 )
         except TimeoutError as e:
-            raise TranscriptionError(
-                f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path}"
+            # Phase 1: 타임아웃은 NonRetryableError 로 변환 — 재시도가 MLX Metal
+            # 상태 오염된 채 모델을 재로드하여 SIGSEGV 크래시를 유발하기 때문.
+            from core.retry_policy import TranscriptionTimeoutError
+
+            logger.error(
+                f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path} — 재시도 금지"
+            )
+            raise TranscriptionTimeoutError(
+                f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path}. "
+                f"재시도 시 MLX Metal 크래시 위험으로 즉시 실패 처리."
             ) from e
         except ModelNotAvailableError:
             raise

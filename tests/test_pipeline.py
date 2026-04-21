@@ -3251,3 +3251,73 @@ class TestPipelineStateMultitrack:
         assert "wav_paths" in d
         assert "is_multitrack" in d
         assert d["is_multitrack"] is True
+
+
+# === Phase 1: 동적 타임아웃 및 재시도 정책 ===
+
+
+def test_compute_dynamic_timeout_짧은_파일은_최소값():
+    """짧은 오디오(60초 × 3 = 180s)는 하한(600s)으로 클램핑된다."""
+    from core.pipeline import compute_dynamic_timeout
+
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=60.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 600
+    )
+
+
+def test_compute_dynamic_timeout_중간_파일():
+    """중간 길이(900초 × 3 = 2700s)는 그대로 사용된다."""
+    from core.pipeline import compute_dynamic_timeout
+
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=900.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 2700
+    )
+
+
+def test_compute_dynamic_timeout_긴_파일은_상한():
+    """매우 긴 오디오(10시간 × 3 = 108000s)는 상한(10800s)으로 클램핑된다."""
+    from core.pipeline import compute_dynamic_timeout
+
+    assert (
+        compute_dynamic_timeout(
+            duration_seconds=36000.0,
+            multiplier=3.0,
+            min_seconds=600,
+            max_seconds=10800,
+        )
+        == 10800
+    )
+
+
+def test_compute_dynamic_timeout_타입은_int():
+    """float 입력에서도 반환 타입은 int이며, 절삭(truncation) 방식이다."""
+    from core.pipeline import compute_dynamic_timeout
+
+    result = compute_dynamic_timeout(
+        duration_seconds=900.5,  # float
+        multiplier=3.0,
+        min_seconds=600,
+        max_seconds=10800,
+    )
+    assert isinstance(result, int)
+    assert result == 2701  # int(900.5 * 3.0) = int(2701.5) = 2701
+
+
+def test_타임아웃_에러는_재시도_안함():
+    """NonRetryableError(TranscriptionTimeoutError) 감지 시 재시도 루프가 break 되어야 한다."""
+    from core.retry_policy import TranscriptionTimeoutError, should_retry
+
+    err = TranscriptionTimeoutError("1800초 초과")
+    assert should_retry(err, attempt=1, max_attempts=3) is False

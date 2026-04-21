@@ -33,6 +33,10 @@ class PathsConfig(BaseModel):
     pipeline_db: str = "pipeline.db"
     meetings_db: str = "meetings.db"
     recordings_temp_dir: str = "recordings_temp"
+    audio_quarantine_subdir: str = Field(
+        default="audio_quarantine",
+        description="거부/삭제된 오디오 파일 격리 서브디렉토리 (base_dir 하위)",
+    )
 
     def resolve_path(self, relative: str) -> Path:
         """base_dir 기준 상대 경로를 절대 경로로 변환한다.
@@ -84,6 +88,11 @@ class PathsConfig(BaseModel):
     def resolved_recordings_temp_dir(self) -> Path:
         """녹음 임시 폴더 절대 경로"""
         return self.resolve_path(self.recordings_temp_dir)
+
+    @property
+    def resolved_audio_quarantine_dir(self) -> Path:
+        """거부/삭제된 오디오 파일 격리 디렉토리 절대 경로"""
+        return self.resolve_path(self.audio_quarantine_subdir)
 
 
 class VADConfig(BaseModel):
@@ -140,6 +149,26 @@ class HallucinationFilterConfig(BaseModel):
         ge=2,
         le=10,
         description="반복 감지 임계값 (동일 패턴 N회 이상 반복 시 환각)",
+    )
+
+
+class AudioQualityConfig(BaseModel):
+    """오디오 품질 게이트 설정.
+
+    큐잉 시점에 저볼륨/극단적으로 짧은 파일을 차단하여
+    STT 디코더 루프와 MLX Metal 크래시를 예방한다.
+
+    근거: 2026-04-21 meeting_20260420_100536.wav (mean_volume=-48.6dB) 크래시.
+         실측 정상 113건 중 최저 -32.1dB 기준 8dB 마진으로 -40dB 임계값 설정.
+    """
+
+    enabled: bool = Field(default=True, description="품질 게이트 활성화")
+    min_mean_volume_db: float = Field(
+        default=-40.0,
+        description="허용 최소 mean_volume (dB)",
+    )
+    min_duration_seconds: float = Field(
+        default=5.0, ge=1.0, description="허용 최소 재생 시간 (초)"
     )
 
 
@@ -363,7 +392,31 @@ class PipelineConfig(BaseModel):
 
     peak_ram_limit_gb: float = Field(default=9.5, ge=1.0, le=16.0)
     checkpoint_enabled: bool = True
-    retry_max_count: int = Field(default=3, ge=0, le=10)
+    retry_max_count: int = Field(
+        default=1,  # Phase 1: 3 → 1 (타임아웃 재시도가 MLX Metal 크래시 유발)
+        ge=1,
+        le=5,
+        description="파이프라인 단계별 최대 재시도 횟수",
+    )
+    dynamic_timeout_enabled: bool = Field(
+        default=True,
+        description="오디오 길이에 비례한 동적 타임아웃 사용 여부",
+    )
+    dynamic_timeout_multiplier: float = Field(
+        default=3.0,
+        ge=1.0,
+        description="타임아웃 = max(min, duration × multiplier)",
+    )
+    dynamic_timeout_min_seconds: int = Field(
+        default=600,  # 10분 최소 (모델 로드 시간 포함)
+        ge=60,
+        description="동적 타임아웃 최소값 (초)",
+    )
+    dynamic_timeout_max_seconds: int = Field(
+        default=10800,  # 3시간 상한
+        ge=600,
+        description="동적 타임아웃 최대값 (초, 폭주 방지)",
+    )
     min_disk_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
     min_memory_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
     skip_llm_steps: bool = True  # 기본값: 전사만 진행, LLM 단계(correct, summarize) 스킵
@@ -413,6 +466,10 @@ class WatcherConfig(BaseModel):
 
     debounce_seconds: float = Field(default=2.0, ge=0.5, le=30.0)
     check_interval_seconds: float = Field(default=0.5, ge=0.1, le=5.0)
+    excluded_subdirs: list[str] = Field(
+        default_factory=lambda: ["audio_quarantine"],
+        description="watcher가 감시에서 제외할 서브디렉토리 이름 목록",
+    )
 
 
 class SecurityConfig(BaseModel):
@@ -498,6 +555,7 @@ class AppConfig(BaseModel):
     number_normalization: NumberNormalizationConfig = Field(
         default_factory=NumberNormalizationConfig
     )
+    audio_quality: AudioQualityConfig = Field(default_factory=AudioQualityConfig)
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:

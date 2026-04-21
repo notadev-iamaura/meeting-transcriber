@@ -1104,9 +1104,13 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
 
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
-    """회의를 삭제한다.
+    """회의를 삭제한다 (DB 레코드 + 오디오 파일 → quarantine).
 
-    meeting_id로 작업을 찾아 DB에서 삭제한다.
+    Phase 1-7: 오디오 파일이 watcher에 의해 재감지되는 문제를 차단하기 위해
+    DB 삭제와 함께 원본 오디오 파일을 quarantine 디렉토리로 이동한다.
+    파일 이동 실패는 best-effort(경고 로그만) 처리하여 DB 삭제 자체는
+    항상 성공시킨다. 파일이 이미 없는 경우(사용자가 직접 삭제했거나,
+    예전에 격리되었거나)도 마찬가지로 DB 삭제는 성공 처리한다.
 
     Args:
         request: FastAPI Request 객체
@@ -1116,15 +1120,17 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
         삭제 완료 메시지
 
     Raises:
-        HTTPException: 회의를 찾을 수 없을 때 (404)
+        HTTPException: 회의를 찾을 수 없을 때 (404) 또는 DB 삭제 실패 시 (500)
     """
+    import asyncio
+
     from core.job_queue import JobNotFoundError
+    from core.quarantine import QuarantineError, move_to_quarantine
 
     queue = _get_job_queue(request)
+    config = _get_config(request)
 
     try:
-        import asyncio
-
         # meeting_id로 작업 조회
         job = await asyncio.to_thread(
             queue.queue.get_job_by_meeting_id,
@@ -1136,10 +1142,38 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        # 삭제 실행 (job_id 기반)
-        await asyncio.to_thread(queue.queue.delete_job, job.id)
+        # 삭제 전 audio_path 확보 (DB 삭제 이후에도 파일을 찾을 수 있도록 먼저 스냅샷)
+        audio_path_str = getattr(job, "audio_path", None)
 
-        logger.info(f"회의 삭제: {meeting_id} (job_id={job.id})")
+        # DB 삭제 (반드시 먼저 — 파일 이동 실패해도 DB는 정리)
+        await asyncio.to_thread(queue.queue.delete_job, job.id)
+        logger.info(f"회의 DB 삭제: {meeting_id} (job_id={job.id})")
+
+        # 오디오 파일 quarantine 이동 (best-effort)
+        # watcher 재감지 루프를 끊기 위해 DB 삭제 직후에 수행한다.
+        if audio_path_str:
+            audio_path = Path(audio_path_str)
+            if audio_path.exists():
+                try:
+                    quarantine_dir = config.paths.resolved_audio_quarantine_dir
+                    new_path = await asyncio.to_thread(
+                        move_to_quarantine,
+                        audio_path,
+                        quarantine_dir,
+                        reason=f"사용자 삭제: meeting_id={meeting_id}",
+                    )
+                    logger.info(
+                        f"오디오 파일 격리 완료: {audio_path} → {new_path}"
+                    )
+                except QuarantineError as e:
+                    # 파일 이동 실패해도 DB 삭제는 이미 성공 — 경고만 남기고 진행
+                    logger.warning(
+                        f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}"
+                    )
+            else:
+                logger.debug(
+                    f"오디오 파일이 이미 존재하지 않음: {audio_path}"
+                )
 
         return {"message": f"회의가 삭제되었습니다: {meeting_id}"}
     except HTTPException:

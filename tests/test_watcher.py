@@ -687,3 +687,280 @@ class TestIntegration:
         assert len(all_jobs) == 3
 
         await watcher.stop()
+
+
+# === Phase 1 (품질 게이트 + 제외 경로) 테스트 ===
+
+
+def test_FolderWatcher가_config에서_excluded_subdirs_로드(monkeypatch, tmp_path):
+    """WatcherConfig.excluded_subdirs가 FolderWatcher에 반영된다."""
+    from config import AppConfig, PathsConfig, WatcherConfig
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        watcher=WatcherConfig(excluded_subdirs=["audio_quarantine", "trash"]),
+    )
+
+    # 더미 큐 (실제 사용 안 함, 초기화만 통과하면 됨)
+    queue_db = tmp_path / "pipeline.db"
+    sync_queue = JobQueue(db_path=queue_db)
+    async_queue = AsyncJobQueue(sync_queue)
+
+    watcher = FolderWatcher(async_queue, config=config)
+
+    assert "audio_quarantine" in watcher._excluded_subdirs
+    assert "trash" in watcher._excluded_subdirs
+
+
+def test_excluded_path_인지_판정(monkeypatch, tmp_path):
+    """_is_excluded가 excluded_subdirs에 속한 경로를 정확히 판정한다."""
+    from config import AppConfig, PathsConfig, WatcherConfig
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+    (tmp_path / "audio_quarantine").mkdir()
+
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        watcher=WatcherConfig(excluded_subdirs=["audio_quarantine"]),
+    )
+
+    queue_db = tmp_path / "pipeline.db"
+    async_queue = AsyncJobQueue(JobQueue(db_path=queue_db))
+    watcher = FolderWatcher(async_queue, config=config)
+
+    # base_dir/audio_quarantine/x.wav 는 excluded
+    assert watcher._is_excluded(tmp_path / "audio_quarantine" / "x.wav") is True
+    # base_dir/audio_input/x.wav 는 excluded 아님
+    assert watcher._is_excluded(watch_dir / "x.wav") is False
+
+
+@pytest.mark.asyncio
+async def test_품질_게이트_reject_시_quarantine_이동_후_큐등록_안함(monkeypatch, tmp_path):
+    """저볼륨 파일은 quarantine으로 이동되고 큐에 들어가지 않는다."""
+    from config import AppConfig, AudioQualityConfig, PathsConfig, WatcherConfig
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+
+    bad_file = watch_dir / "quiet.wav"
+    bad_file.write_bytes(b"x" * 100)  # 파일 안정화 통과용
+
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        audio_quality=AudioQualityConfig(enabled=True, min_mean_volume_db=-40.0),
+        watcher=WatcherConfig(),
+    )
+
+    queue_db = tmp_path / "pipeline.db"
+    async_queue = AsyncJobQueue(JobQueue(db_path=queue_db))
+    await async_queue.initialize()
+    watcher = FolderWatcher(async_queue, config=config)
+
+    # validator를 REJECT 반환하도록 monkeypatch
+    def fake_validator(path: Path) -> AudioQualityResult:
+        return AudioQualityResult(
+            status=AudioQualityStatus.REJECT,
+            mean_volume_db=-48.0,
+            duration_seconds=600.0,
+            reason="저볼륨 테스트",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+
+    # debounce 우회: 파일 안정화를 항상 True로
+    async def fake_stable(self, path):
+        return True
+
+    monkeypatch.setattr(FolderWatcher, "_wait_for_stable_size", fake_stable)
+
+    # 실행
+    await watcher._handle_new_file(bad_file)
+
+    # 검증: 큐에 작업 없음, 파일은 quarantine으로 이동
+    quarantine_dir = config.paths.resolved_audio_quarantine_dir
+    assert not bad_file.exists()
+    assert (quarantine_dir / "quiet.wav").exists()
+
+    # 큐에 작업이 없어야 함
+    import asyncio
+    job = await asyncio.to_thread(
+        async_queue.queue.get_job_by_meeting_id,
+        "quiet",
+    )
+    assert job is None
+
+
+@pytest.mark.asyncio
+async def test_품질_게이트_accept_시_정상_큐등록(monkeypatch, tmp_path):
+    """정상 파일은 큐에 등록된다."""
+    from config import AppConfig, AudioQualityConfig, PathsConfig, WatcherConfig
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+    good_file = watch_dir / "ok.wav"
+    good_file.write_bytes(b"x" * 100)
+
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        audio_quality=AudioQualityConfig(enabled=True),
+        watcher=WatcherConfig(),
+    )
+
+    queue_db = tmp_path / "pipeline.db"
+    async_queue = AsyncJobQueue(JobQueue(db_path=queue_db))
+    await async_queue.initialize()
+    watcher = FolderWatcher(async_queue, config=config)
+
+    def fake_validator(path: Path) -> AudioQualityResult:
+        return AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-25.0,
+            duration_seconds=900.0,
+            reason="",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+
+    async def fake_stable(self, path):
+        return True
+
+    monkeypatch.setattr(FolderWatcher, "_wait_for_stable_size", fake_stable)
+
+    await watcher._handle_new_file(good_file)
+
+    # 큐에 작업 존재해야 함
+    import asyncio
+    job = await asyncio.to_thread(
+        async_queue.queue.get_job_by_meeting_id,
+        "ok",
+    )
+    assert job is not None
+
+
+@pytest.mark.asyncio
+async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path):
+    """ffmpeg 측정 실패(ERROR)는 보수적으로 큐에 등록한다 (판단 보류)."""
+    from config import AppConfig, AudioQualityConfig, PathsConfig, WatcherConfig
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+    file = watch_dir / "unknown.wav"
+    file.write_bytes(b"x")
+
+    config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+
+    queue_db = tmp_path / "pipeline.db"
+    async_queue = AsyncJobQueue(JobQueue(db_path=queue_db))
+    await async_queue.initialize()
+    watcher = FolderWatcher(async_queue, config=config)
+
+    def fake_validator(path: Path) -> AudioQualityResult:
+        return AudioQualityResult(
+            status=AudioQualityStatus.ERROR,
+            mean_volume_db=None,
+            duration_seconds=None,
+            reason="측정 실패",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+
+    async def fake_stable(self, path):
+        return True
+
+    monkeypatch.setattr(FolderWatcher, "_wait_for_stable_size", fake_stable)
+
+    await watcher._handle_new_file(file)
+
+    # ERROR는 REJECT가 아니므로 큐에 등록되어야 함
+    import asyncio
+    job = await asyncio.to_thread(
+        async_queue.queue.get_job_by_meeting_id,
+        "unknown",
+    )
+    assert job is not None
+
+
+# === Cleanup 1 (2026-04-21): scan_existing() 품질 게이트 누수 방지 ===
+
+
+@pytest.mark.asyncio
+async def test_scan_existing이_저볼륨_파일을_quarantine으로_이동(
+    watcher: FolderWatcher, job_queue: AsyncJobQueue, tmp_path: Path, monkeypatch
+):
+    """앱 재기동 시 scan_existing이 저볼륨 파일을 큐에 올리지 않고 격리한다.
+
+    Phase 1 최종 리뷰 Important #1: scan_existing 이 _handle_new_file 의
+    품질 게이트를 우회하는 누수. 재기동 경로에서도 크래시 파일 재진입 차단.
+    """
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    bad_file = watch_dir / "bad_meeting.wav"
+    bad_file.write_bytes(b"x" * 100)
+
+    def fake_validator(path):
+        return AudioQualityResult(
+            status=AudioQualityStatus.REJECT,
+            mean_volume_db=-48.0,
+            duration_seconds=600.0,
+            reason="저볼륨: mean=-48.0dB < -40.0dB",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+    quarantine_dir = tmp_path / "audio_quarantine"
+    monkeypatch.setattr(watcher, "_quarantine_dir", quarantine_dir)
+
+    ids = await watcher.scan_existing()
+
+    # 저볼륨 파일은 큐에 등록되지 않고 격리됨
+    assert len(ids) == 0
+    assert not bad_file.exists()
+    moved = quarantine_dir / "bad_meeting.wav"
+    assert moved.exists()
+
+    # 큐 확인
+    job = await asyncio.to_thread(
+        job_queue.queue.get_job_by_meeting_id,
+        "bad_meeting",
+    )
+    assert job is None
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_accept_시_정상_등록(
+    watcher: FolderWatcher, tmp_path: Path, monkeypatch
+):
+    """scan_existing 의 validator 가 ACCEPT 반환 시 정상 큐 등록."""
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    good_file = watch_dir / "good.wav"
+    good_file.write_bytes(b"x")
+
+    def fake_accept(path):
+        return AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-25.0,
+            duration_seconds=600.0,
+            reason="",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_accept)
+
+    ids = await watcher.scan_existing()
+
+    assert len(ids) == 1

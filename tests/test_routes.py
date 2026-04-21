@@ -1373,6 +1373,103 @@ class TestDeleteMeetingEndpoint:
 
         assert response.status_code == 200
 
+    # === Phase 1-7: 오디오 파일 quarantine 이동 테스트 ===
+
+    def test_삭제시_오디오_파일도_quarantine으로_이동(self, tmp_path: Path) -> None:
+        """DELETE 엔드포인트가 DB 레코드 삭제 + 오디오 파일 quarantine 이동을 수행한다.
+
+        근거: watcher 재감지 루프 차단을 위해 파일도 격리되어야 한다.
+        """
+        # 1) 실제 오디오 파일 생성 (tmp_path/audio_input 아래)
+        audio_input = tmp_path / "audio_input"
+        audio_input.mkdir(parents=True, exist_ok=True)
+        audio_file = audio_input / "meeting_phase1.wav"
+        audio_file.write_bytes(b"fake audio data")
+
+        app = _make_test_app(tmp_path)
+
+        # Job 은 실제 audio_path 를 가리킨다
+        mock_job = MockJob(
+            id=1,
+            meeting_id="meeting_phase1",
+            audio_path=str(audio_file),
+            status="completed",
+        )
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_phase1")
+
+        # 2) DELETE 자체는 성공
+        assert response.status_code == 200
+        assert "삭제" in response.json()["message"]
+
+        # 3) DB 삭제 호출 확인
+        app.state.job_queue._queue.delete_job.assert_called_once_with(1)
+
+        # 4) 원본 파일 사라졌는지
+        assert not audio_file.exists(), "원본 오디오 파일이 quarantine으로 이동되었어야 한다"
+
+        # 5) quarantine 디렉토리에 이동되었는지
+        quarantine_dir = tmp_path / "audio_quarantine"
+        assert quarantine_dir.exists()
+        moved = quarantine_dir / "meeting_phase1.wav"
+        assert moved.exists(), f"{quarantine_dir} 아래에 meeting_phase1.wav 가 있어야 한다"
+        assert moved.read_bytes() == b"fake audio data"
+
+    def test_삭제시_오디오_파일_누락이어도_DB_삭제는_성공(self, tmp_path: Path) -> None:
+        """오디오 파일이 이미 없어도 DB 삭제는 성공 처리된다 (경고 로그만)."""
+        # 존재하지 않는 경로를 Job 에 등록
+        missing_audio = tmp_path / "audio_input" / "missing.wav"
+
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(
+            id=2,
+            meeting_id="meeting_missing",
+            audio_path=str(missing_audio),
+            status="completed",
+        )
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_missing")
+
+        # 파일 부재에도 DELETE 성공
+        assert response.status_code == 200
+        # DB 삭제는 여전히 호출
+        app.state.job_queue._queue.delete_job.assert_called_once_with(2)
+
+    def test_삭제시_audio_path_비어있어도_정상_처리(self, tmp_path: Path) -> None:
+        """Job 의 audio_path 가 비어 있어도 DB 삭제는 성공한다."""
+        app = _make_test_app(tmp_path)
+
+        mock_job = MockJob(
+            id=3,
+            meeting_id="meeting_noaudio",
+            audio_path="",  # 빈 문자열
+            status="failed",
+        )
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_noaudio")
+
+        assert response.status_code == 200
+        app.state.job_queue._queue.delete_job.assert_called_once_with(3)
+
 
 # === TestSystemResourcesEndpoint ===
 
