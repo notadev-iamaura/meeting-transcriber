@@ -892,3 +892,75 @@ async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path
         "unknown",
     )
     assert job is not None
+
+
+# === Cleanup 1 (2026-04-21): scan_existing() 품질 게이트 누수 방지 ===
+
+
+@pytest.mark.asyncio
+async def test_scan_existing이_저볼륨_파일을_quarantine으로_이동(
+    watcher: FolderWatcher, job_queue: AsyncJobQueue, tmp_path: Path, monkeypatch
+):
+    """앱 재기동 시 scan_existing이 저볼륨 파일을 큐에 올리지 않고 격리한다.
+
+    Phase 1 최종 리뷰 Important #1: scan_existing 이 _handle_new_file 의
+    품질 게이트를 우회하는 누수. 재기동 경로에서도 크래시 파일 재진입 차단.
+    """
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    bad_file = watch_dir / "bad_meeting.wav"
+    bad_file.write_bytes(b"x" * 100)
+
+    def fake_validator(path):
+        return AudioQualityResult(
+            status=AudioQualityStatus.REJECT,
+            mean_volume_db=-48.0,
+            duration_seconds=600.0,
+            reason="저볼륨: mean=-48.0dB < -40.0dB",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+    quarantine_dir = tmp_path / "audio_quarantine"
+    monkeypatch.setattr(watcher, "_quarantine_dir", quarantine_dir)
+
+    ids = await watcher.scan_existing()
+
+    # 저볼륨 파일은 큐에 등록되지 않고 격리됨
+    assert len(ids) == 0
+    assert not bad_file.exists()
+    moved = quarantine_dir / "bad_meeting.wav"
+    assert moved.exists()
+
+    # 큐 확인
+    job = await asyncio.to_thread(
+        job_queue.queue.get_job_by_meeting_id,
+        "bad_meeting",
+    )
+    assert job is None
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_accept_시_정상_등록(
+    watcher: FolderWatcher, tmp_path: Path, monkeypatch
+):
+    """scan_existing 의 validator 가 ACCEPT 반환 시 정상 큐 등록."""
+    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    good_file = watch_dir / "good.wav"
+    good_file.write_bytes(b"x")
+
+    def fake_accept(path):
+        return AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-25.0,
+            duration_seconds=600.0,
+            reason="",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_accept)
+
+    ids = await watcher.scan_existing()
+
+    assert len(ids) == 1

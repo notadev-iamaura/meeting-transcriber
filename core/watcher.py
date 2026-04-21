@@ -552,8 +552,12 @@ class FolderWatcher:
 
         감시 시작 전 폴더에 이미 있는 파일을 처리할 때 사용한다.
 
+        Phase 1 (2026-04-21): 앱 재기동 경로에서도 `_handle_new_file` 과 동일하게
+        품질 게이트와 제외 경로를 적용한다. 크래시 후 launchd 재기동 시 저볼륨
+        파일이 검증 없이 큐 재진입하여 동일 크래시를 유발하던 누수를 차단한다.
+
         Returns:
-            등록된 작업 ID 리스트
+            등록된 작업 ID 리스트 (REJECT 파일은 격리되고 리스트에 포함되지 않음)
         """
         if not self._watch_dir.exists():
             logger.warning(f"감시 디렉토리가 존재하지 않습니다: {self._watch_dir}")
@@ -566,6 +570,13 @@ class FolderWatcher:
                 continue
 
             if file_path.suffix.lower() not in self._supported_extensions:
+                continue
+
+            resolved = file_path.resolve()
+
+            # Phase 1: 제외 경로 무시
+            if self._is_excluded(resolved):
+                logger.debug(f"기존 파일 스캔: 제외 경로 무시 — {resolved}")
                 continue
 
             meeting_id = self._generate_meeting_id(file_path)
@@ -587,12 +598,40 @@ class FolderWatcher:
             except OSError:
                 continue
 
+            # Phase 1: 오디오 품질 게이트 (재기동 경로 누수 차단)
+            if self._audio_validator is not None:
+                try:
+                    result = await asyncio.to_thread(self._audio_validator, resolved)
+                except Exception as e:  # noqa: BLE001 — 품질 측정 예외는 보수적 통과
+                    logger.warning(
+                        f"기존 파일 품질 측정 예외, 보수적 진행: {resolved} ({e})"
+                    )
+                    result = None
+
+                if result is not None and result.status.value == "reject":
+                    from core.quarantine import QuarantineError, move_to_quarantine
+
+                    try:
+                        new_path = await asyncio.to_thread(
+                            move_to_quarantine,
+                            resolved,
+                            self._quarantine_dir,
+                            reason=f"재기동 스캔 거부: {result.reason}",
+                        )
+                        logger.warning(
+                            f"기존 파일 품질 게이트 거부: {resolved.name} "
+                            f"({result.reason}) — quarantine 이동: {new_path}"
+                        )
+                    except QuarantineError as e:
+                        logger.error(f"기존 파일 Quarantine 이동 실패: {e}")
+                    continue
+
             try:
                 from core.job_queue import JobStatus
 
                 job_id = await self._job_queue.add_job(
                     meeting_id=meeting_id,
-                    audio_path=str(file_path.resolve()),
+                    audio_path=str(resolved),
                     initial_status=JobStatus.RECORDED.value,
                 )
                 registered_ids.append(job_id)
