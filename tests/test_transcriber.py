@@ -833,3 +833,45 @@ class TestErrorHierarchy:
 
         with pytest.raises(TranscriptionError):
             raise EmptyAudioError("테스트")
+
+
+# === Phase 1 Cleanup P2b: 예외 순서 회귀 방어 ===
+
+
+class TestExceptionOrderingRegression:
+    """transcribe() 예외 처리 순서가 바뀌지 않도록 고정하는 회귀 테스트.
+
+    예외 블록이 `TimeoutError → ModelNotAvailableError → Exception` 순서로
+    배치되어야 타임아웃이 TranscriptionTimeoutError 로 올바르게 승격된다.
+    (STAB: Phase 1 핵심 방어 — 순서가 역전되면 TimeoutError 가 TranscriptionError
+    로 잡혀 NonRetryableError 분류가 깨지고 MLX Metal 크래시가 재발 가능.)
+    """
+
+    def test_transcribe_의_예외_블록_순서_고정(self) -> None:
+        """transcribe() 의 try/except 순서가 기대대로 유지되는지 소스에서 직접 검증."""
+        import inspect
+
+        import steps.transcriber as transcriber_module
+
+        source = inspect.getsource(transcriber_module.Transcriber.transcribe)
+
+        # 주요 3개 except 의 위치를 찾는다
+        timeout_pos = source.find("except TimeoutError")
+        model_pos = source.find("except ModelNotAvailableError")
+        general_pos = source.find("except Exception as e")
+
+        assert timeout_pos > 0, "TimeoutError 블록이 존재해야 한다"
+        assert model_pos > 0, "ModelNotAvailableError 블록이 존재해야 한다"
+        assert general_pos > 0, "Exception 블록이 존재해야 한다"
+
+        # 순서 고정: TimeoutError → ModelNotAvailableError → Exception
+        assert timeout_pos < model_pos < general_pos, (
+            "예외 블록 순서가 바뀌었다. TimeoutError 가 Exception 보다 나중에 오면 "
+            "TranscriptionError 로 잡혀 NonRetryableError 분류가 깨진다."
+        )
+
+    def test_TranscriptionTimeoutError_는_NonRetryableError_하위(self) -> None:
+        """Phase 1 재시도 정책 전제: TranscriptionTimeoutError ⊂ NonRetryableError."""
+        from core.retry_policy import NonRetryableError, TranscriptionTimeoutError
+
+        assert issubclass(TranscriptionTimeoutError, NonRetryableError)

@@ -309,7 +309,15 @@ class FolderWatcher:
             제외 대상이면 True, 아니면 False (base_dir 바깥 경로도 False)
         """
         try:
-            rel = path.resolve().relative_to(self._config.paths.resolved_base_dir)
+            resolved = path.resolve(strict=False)
+        except OSError as e:
+            # Phase 1 Cleanup P3: 깨진 심볼릭 링크 등 resolve 실패 시
+            # 관찰성을 위해 debug 로그로 남기고 False 반환 (제외 대상 아님).
+            logger.debug(f"_is_excluded: resolve 실패 ({path}): {e}")
+            return False
+
+        try:
+            rel = resolved.relative_to(self._config.paths.resolved_base_dir)
         except ValueError:
             # base_dir 바깥 경로는 제외 대상 아님
             return False
