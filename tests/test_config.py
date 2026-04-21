@@ -628,3 +628,69 @@ class TestSTTInitialPrompt:
         """정상 initial_prompt 값 유지."""
         config = STTConfig(initial_prompt="분기 매출 KPI")
         assert config.initial_prompt == "분기 매출 KPI"
+
+
+# === Phase 1 (크래시 방지) 설정 테스트 ===
+
+
+def test_AudioQualityConfig_기본값():
+    """오디오 품질 게이트 기본값 확인."""
+    from config import AudioQualityConfig
+
+    c = AudioQualityConfig()
+    assert c.enabled is True
+    assert c.min_mean_volume_db == -40.0
+    assert c.min_duration_seconds == 5.0
+
+
+def test_PathsConfig에_audio_quarantine_subdir_포함():
+    """PathsConfig 에 audio_quarantine 서브디렉토리 필드 존재."""
+    from config import PathsConfig
+
+    c = PathsConfig()
+    assert c.audio_quarantine_subdir == "audio_quarantine"
+
+
+def test_PathsConfig_resolved_audio_quarantine_dir_경로():
+    """resolved_audio_quarantine_dir 이 base_dir 하위 경로를 반환."""
+    from config import PathsConfig
+
+    c = PathsConfig()
+    resolved = c.resolved_audio_quarantine_dir
+    assert resolved.name == "audio_quarantine"
+    assert resolved.parent == c.resolved_base_dir
+
+
+def test_WatcherConfig에_excluded_subdirs_포함():
+    """WatcherConfig 에 감시 제외 서브디렉토리 목록 존재."""
+    from config import WatcherConfig
+
+    c = WatcherConfig()
+    assert "audio_quarantine" in c.excluded_subdirs
+
+
+def test_PipelineConfig에_dynamic_timeout_설정():
+    """PipelineConfig 에 동적 타임아웃 4개 필드 존재 및 기본값 검증."""
+    from config import PipelineConfig
+
+    c = PipelineConfig()
+    assert c.dynamic_timeout_enabled is True
+    assert c.dynamic_timeout_multiplier == 3.0
+    assert c.dynamic_timeout_min_seconds == 600
+    assert c.dynamic_timeout_max_seconds == 10800  # 3시간
+
+
+def test_PipelineConfig에_retry_max가_1로_변경():
+    """Phase 1: 재시도 1회로 축소 (기존 3 → 1). 타임아웃 재시도가 크래시 유발."""
+    from config import PipelineConfig
+
+    c = PipelineConfig()
+    assert c.retry_max_count == 1
+
+
+def test_AppConfig에_audio_quality_필드_포함():
+    """AppConfig 에 AudioQualityConfig 서브 설정이 등록되어 있음."""
+    from config import AppConfig
+
+    c = AppConfig()
+    assert c.audio_quality.enabled is True
