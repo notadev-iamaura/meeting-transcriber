@@ -110,6 +110,8 @@ def _make_embedder(config: AppConfig | None = None) -> Embedder:
     embedder._model_name = cfg.embedding.model_name
     embedder._dimension = cfg.embedding.dimension
     embedder._device = cfg.embedding.device
+    # 2-B: 청크 수 기반 적응 디바이스 (기본은 config 값과 동일)
+    embedder._effective_device = cfg.embedding.device
     embedder._passage_prefix = cfg.embedding.passage_prefix
     embedder._batch_size = cfg.embedding.batch_size
     embedder._chroma_dir = cfg.paths.resolved_chroma_db_dir
