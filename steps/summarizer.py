@@ -152,7 +152,7 @@ class SummaryResult:
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(self.to_dict(), f, ensure_ascii=False)
         logger.info(f"요약 체크포인트 저장: {output_path}")
 
     def save_markdown(self, output_path: Path) -> None:
