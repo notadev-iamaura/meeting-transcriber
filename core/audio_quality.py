@@ -15,8 +15,16 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 
 logger = logging.getLogger(__name__)
+
+
+# Phase 1 Cleanup P2: 상태별 검증 횟수 카운터 (관찰성).
+# ffmpeg 부재, 손상 파일 등으로 ERROR 가 빈발하면 외부 모니터가 감지할 수 있도록
+# 단순 카운터를 노출한다. `get_validation_stats()` 로 조회, `reset_validation_stats()` 로 리셋.
+_STATS_LOCK = Lock()
+_STATS: dict[str, int] = {"accept": 0, "reject": 0, "error": 0}
 
 
 class AudioQualityStatus(str, Enum):
@@ -65,6 +73,7 @@ def validate_audio_quality(
         # Phase 1 Cleanup (I2): except 범위를 AudioMeasurementError 만으로 좁혀
         # 예상치 못한 RuntimeError/버그가 ERROR 상태로 은폐되지 않도록 fail-fast.
         logger.warning(f"오디오 품질 측정 실패: {audio_path} ({e})")
+        _increment_stats("error")
         return AudioQualityResult(
             status=AudioQualityStatus.ERROR,
             mean_volume_db=None,
@@ -73,6 +82,7 @@ def validate_audio_quality(
         )
 
     if duration_s < min_duration_s:
+        _increment_stats("reject")
         return AudioQualityResult(
             status=AudioQualityStatus.REJECT,
             mean_volume_db=mean_db,
@@ -81,6 +91,7 @@ def validate_audio_quality(
         )
 
     if mean_db < min_mean_db:
+        _increment_stats("reject")
         return AudioQualityResult(
             status=AudioQualityStatus.REJECT,
             mean_volume_db=mean_db,
@@ -88,11 +99,38 @@ def validate_audio_quality(
             reason=f"저볼륨: mean={mean_db:.1f}dB < {min_mean_db:.1f}dB",
         )
 
+    _increment_stats("accept")
     return AudioQualityResult(
         status=AudioQualityStatus.ACCEPT,
         mean_volume_db=mean_db,
         duration_seconds=duration_s,
     )
+
+
+def _increment_stats(status_key: str) -> None:
+    """스레드 안전하게 상태별 카운터를 증가시킨다."""
+    with _STATS_LOCK:
+        _STATS[status_key] = _STATS.get(status_key, 0) + 1
+
+
+def get_validation_stats() -> dict[str, int]:
+    """현재까지의 검증 결과 카운터 스냅샷을 반환한다.
+
+    Phase 1 Cleanup P2: 외부 관찰(API 엔드포인트, 주기적 로깅 등)에서
+    ffmpeg 부재/오디오 파이프라인 이상을 조기 감지하기 위한 관찰성 헬퍼.
+
+    Returns:
+        {"accept": int, "reject": int, "error": int} 형태의 복사본
+    """
+    with _STATS_LOCK:
+        return dict(_STATS)
+
+
+def reset_validation_stats() -> None:
+    """카운터를 0 으로 초기화한다 (주로 테스트 용)."""
+    with _STATS_LOCK:
+        for k in _STATS:
+            _STATS[k] = 0
 
 
 def measure_audio_duration(audio_path: Path) -> float:

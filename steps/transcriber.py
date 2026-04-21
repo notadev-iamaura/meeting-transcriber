@@ -25,6 +25,7 @@ from typing import Any
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.preflight import run_preflight
+from core.retry_policy import TranscriptionTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -444,8 +445,6 @@ class Transcriber:
         except TimeoutError as e:
             # Phase 1: 타임아웃은 NonRetryableError 로 변환 — 재시도가 MLX Metal
             # 상태 오염된 채 모델을 재로드하여 SIGSEGV 크래시를 유발하기 때문.
-            from core.retry_policy import TranscriptionTimeoutError
-
             logger.error(
                 f"전사 타임아웃 ({transcribe_timeout}초 초과): {audio_path} — 재시도 금지"
             )

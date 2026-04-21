@@ -30,7 +30,9 @@ from typing import Any
 import psutil
 
 from config import AppConfig, get_config
+from core.audio_quality import AudioMeasurementError, measure_audio_duration
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.retry_policy import should_retry
 
 logger = logging.getLogger(__name__)
 
@@ -724,11 +726,6 @@ class PipelineManager:
         timeout_override: int | None = None
         if self._config.pipeline.dynamic_timeout_enabled:
             try:
-                from core.audio_quality import (
-                    AudioMeasurementError,
-                    measure_audio_duration,
-                )
-
                 duration = measure_audio_duration(wav_path)
                 timeout_override = compute_dynamic_timeout(
                     duration_seconds=duration,
@@ -1187,8 +1184,6 @@ class PipelineManager:
                     break  # 성공 시 재시도 루프 탈출
 
                 except Exception as e:  # noqa: BLE001 — 재시도 루프 catch-all
-                    from core.retry_policy import should_retry
-
                     last_error = e
                     logger.warning(
                         f"단계 {step.value} 실패 (시도 {attempt}/{self._retry_max}): {e}"

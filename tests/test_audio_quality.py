@@ -153,3 +153,75 @@ def test_ffmpeg_returncode_nonzero와_파싱_실패_구분():
         pytest.raises(AudioMeasurementError, match=r"returncode=1"),
     ):
         _measure_mean_volume_db(Path("/tmp/missing.wav"))
+
+
+# === Phase 1 Cleanup P2a: 관찰성 카운터 ===
+
+
+def test_카운터_초기값은_0():
+    from core.audio_quality import get_validation_stats, reset_validation_stats
+
+    reset_validation_stats()
+    stats = get_validation_stats()
+    assert stats == {"accept": 0, "reject": 0, "error": 0}
+
+
+def test_ACCEPT_REJECT_ERROR_각각_카운터_증가():
+    from core.audio_quality import (
+        AudioMeasurementError,
+        get_validation_stats,
+        reset_validation_stats,
+    )
+
+    reset_validation_stats()
+    fake_path = Path("/tmp/x.wav")
+
+    # ACCEPT 2회
+    with (
+        patch("core.audio_quality._measure_mean_volume_db", return_value=-25.0),
+        patch("core.audio_quality._measure_duration_seconds", return_value=900.0),
+    ):
+        validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+        validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+
+    # REJECT 1회 (저볼륨)
+    with (
+        patch("core.audio_quality._measure_mean_volume_db", return_value=-50.0),
+        patch("core.audio_quality._measure_duration_seconds", return_value=900.0),
+    ):
+        validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+
+    # ERROR 1회
+    with patch(
+        "core.audio_quality._measure_mean_volume_db",
+        side_effect=AudioMeasurementError("no ffmpeg"),
+    ):
+        validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+
+    stats = get_validation_stats()
+    assert stats == {"accept": 2, "reject": 1, "error": 1}
+
+
+def test_get_validation_stats_는_복사본_반환():
+    """반환된 dict 를 변경해도 내부 카운터에 영향 없어야 한다."""
+    from core.audio_quality import get_validation_stats, reset_validation_stats
+
+    reset_validation_stats()
+    snapshot = get_validation_stats()
+    snapshot["accept"] = 9999
+    assert get_validation_stats()["accept"] == 0
+
+
+def test_reset_validation_stats_는_모든_키_초기화():
+    from core.audio_quality import (
+        get_validation_stats,
+        reset_validation_stats,
+        _increment_stats,
+    )
+
+    _increment_stats("accept")
+    _increment_stats("reject")
+    _increment_stats("error")
+    reset_validation_stats()
+
+    assert get_validation_stats() == {"accept": 0, "reject": 0, "error": 0}
