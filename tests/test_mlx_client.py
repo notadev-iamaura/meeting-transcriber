@@ -141,6 +141,11 @@ class TestMLXBackendChat:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        # Prompt cache 필드 (신규) — None 으로 시작해 chat() 내부에서 lazy 초기화
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
         backend._tokenizer.apply_chat_template = MagicMock(return_value="formatted prompt")
         return backend
 
@@ -207,6 +212,10 @@ class TestMLXBackendChatStream:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
         backend._tokenizer.apply_chat_template = MagicMock(return_value="formatted prompt")
         return backend
 
@@ -240,12 +249,19 @@ class TestMLXBackendCleanup:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
 
         with patch.dict("sys.modules", {"mlx": None, "mlx.core": None}):
             backend.cleanup()
 
         assert backend._model is None
         assert backend._tokenizer is None
+        assert backend._vlm_prompt_cache_state is None
+        assert backend._lm_prompt_cache is None
+        assert backend._last_system_prompt_hash is None
 
     def test_cleanup_metal_캐시_정리(self) -> None:
         """cleanup 시 Metal GPU 캐시 정리를 시도한다."""
@@ -256,6 +272,10 @@ class TestMLXBackendCleanup:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
 
         mock_mx = MagicMock()
         mock_mx.metal.clear_cache = MagicMock()
@@ -276,6 +296,10 @@ class TestMLXBackendCleanup:
         backend._use_vlm = False
         backend._processor = None
         backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
 
         # ImportError가 발생해도 정상 종료
         with patch(
@@ -286,6 +310,81 @@ class TestMLXBackendCleanup:
 
         assert backend._model is None
         assert backend._tokenizer is None
+
+
+# === Prompt cache 테스트 (PERF: KV cache 재사용) ===
+
+
+class TestMLXBackendPromptCache:
+    """MLXBackend 의 시스템 프롬프트 기반 자동 prompt cache 관리."""
+
+    def _create_backend(self) -> MLXBackend:
+        backend = MLXBackend.__new__(MLXBackend)
+        backend._model = MagicMock()
+        backend._tokenizer = MagicMock()
+        backend._temperature = 0.0
+        backend._max_tokens = 1000
+        backend._model_name = "test-model"
+        backend._use_vlm = False
+        backend._processor = None
+        backend._vlm_generate = None
+        backend._vlm_stream_generate = None
+        backend._vlm_prompt_cache_state = None
+        backend._lm_prompt_cache = None
+        backend._last_system_prompt_hash = None
+        backend._tokenizer.apply_chat_template = MagicMock(return_value="prompt")
+        return backend
+
+    def test_동일_system_prompt_두_번째_호출은_cache_재사용(self) -> None:
+        """같은 시스템 프롬프트로 두 번 호출하면 _last_system_prompt_hash 가 유지된다."""
+        backend = self._create_backend()
+        msgs = [
+            {"role": "system", "content": "당신은 회의 교정 전문가입니다."},
+            {"role": "user", "content": "안녕"},
+        ]
+        # 내부 동작만 확인 — chat() 전체는 mlx_lm 모킹 필요하므로 _maybe_reset 직접 호출
+        backend._maybe_reset_prompt_cache(msgs)
+        first_hash = backend._last_system_prompt_hash
+        assert first_hash is not None
+
+        # 가짜 cache 를 주입해 재사용 여부 확인용
+        sentinel = object()
+        backend._lm_prompt_cache = sentinel
+
+        # 같은 messages 로 다시 호출 — hash 동일이면 cache 유지되어야 함
+        backend._maybe_reset_prompt_cache(msgs)
+        assert backend._last_system_prompt_hash == first_hash
+        assert backend._lm_prompt_cache is sentinel  # 리셋되지 않음
+
+    def test_system_prompt_변경시_cache_자동_리셋(self) -> None:
+        """시스템 프롬프트가 달라지면 cache 가 자동 리셋된다."""
+        backend = self._create_backend()
+        backend._maybe_reset_prompt_cache([{"role": "system", "content": "프롬프트 A"}])
+        # cache 채운 척
+        backend._lm_prompt_cache = object()
+        backend._vlm_prompt_cache_state = object()
+
+        backend._maybe_reset_prompt_cache([{"role": "system", "content": "프롬프트 B"}])
+        assert backend._lm_prompt_cache is None
+        assert backend._vlm_prompt_cache_state is None
+
+    def test_reset_prompt_cache_수동_호출(self) -> None:
+        """reset_prompt_cache 로 cache 와 hash 가 초기화된다."""
+        backend = self._create_backend()
+        backend._lm_prompt_cache = object()
+        backend._vlm_prompt_cache_state = object()
+        backend._last_system_prompt_hash = "deadbeef"
+
+        backend.reset_prompt_cache()
+        assert backend._lm_prompt_cache is None
+        assert backend._vlm_prompt_cache_state is None
+        assert backend._last_system_prompt_hash is None
+
+    def test_system_없는_messages_는_해시_None(self) -> None:
+        """user/assistant 만 있는 messages 는 hash=None 으로 처리한다."""
+        backend = self._create_backend()
+        backend._maybe_reset_prompt_cache([{"role": "user", "content": "질문"}])
+        assert backend._last_system_prompt_hash is None
 
 
 # === _apply_chat_template 테스트 ===
