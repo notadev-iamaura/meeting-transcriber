@@ -56,9 +56,14 @@ def test_너무_짧은_오디오는_reject_반환():
 
 
 def test_ffmpeg_실행_실패시_error_반환():
-    """ffmpeg 호출이 실패하면 ERROR 상태 반환 (REJECT 아님, 판단 보류)."""
+    """AudioMeasurementError 발생 시 ERROR 상태 반환 (REJECT 아님, 판단 보류)."""
+    from core.audio_quality import AudioMeasurementError
+
     fake_path = Path("/tmp/corrupt.wav")
-    with patch("core.audio_quality._measure_mean_volume_db", side_effect=RuntimeError("ffmpeg failed")):
+    with patch(
+        "core.audio_quality._measure_mean_volume_db",
+        side_effect=AudioMeasurementError("ffmpeg failed"),
+    ):
         result = validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
 
     assert result.status == AudioQualityStatus.ERROR
@@ -75,3 +80,76 @@ def test_경계값_정확히_mean_db와_같으면_accept():
         result = validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
 
     assert result.status == AudioQualityStatus.ACCEPT
+
+
+# === Phase 1 Cleanup (2026-04-21): 견고성 개선 테스트 ===
+
+
+def test_예상치_못한_RuntimeError는_전파됨():
+    """Phase 1 Cleanup (I2): AudioMeasurementError 외 예외는 fail-fast 전파.
+
+    의도적으로 좁힌 except 로 인해 내부 버그가 ERROR 상태로 은폐되지 않는다.
+    """
+    fake_path = Path("/tmp/bug.wav")
+    with patch(
+        "core.audio_quality._measure_mean_volume_db",
+        side_effect=RuntimeError("unexpected bug"),
+    ):
+        with pytest.raises(RuntimeError, match="unexpected bug"):
+            validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+
+
+def test_완전_무음_파일은_reject_반환():
+    """Phase 1 Cleanup (M2): ffmpeg의 `mean_volume: -inf dB` 출력을 REJECT로 처리.
+
+    _measure_mean_volume_db 가 float('-inf') 반환 시, -inf < -40.0 비교가 True이므로
+    자연스럽게 REJECT 경로를 타야 한다.
+    """
+    fake_path = Path("/tmp/silent.wav")
+    with (
+        patch("core.audio_quality._measure_mean_volume_db", return_value=float("-inf")),
+        patch("core.audio_quality._measure_duration_seconds", return_value=600.0),
+    ):
+        result = validate_audio_quality(fake_path, min_mean_db=-40.0, min_duration_s=5.0)
+
+    assert result.status == AudioQualityStatus.REJECT
+    assert result.mean_volume_db == float("-inf")
+
+
+def test_mean_volume_정규식이_inf_값을_파싱():
+    """Phase 1 Cleanup (M2): 정규식이 `-inf dB` 토큰을 매치하고 float('-inf') 반환."""
+    from core.audio_quality import _measure_mean_volume_db
+
+    fake_stderr = """
+    [Parsed_volumedetect_0 @ 0x7f] n_samples: 1
+    [Parsed_volumedetect_0 @ 0x7f] mean_volume: -inf dB
+    [Parsed_volumedetect_0 @ 0x7f] max_volume: -inf dB
+    """
+
+    class FakeResult:
+        stderr = fake_stderr
+        returncode = 0
+
+    with (
+        patch("core.audio_quality.shutil.which", return_value="/opt/homebrew/bin/ffmpeg"),
+        patch("core.audio_quality.subprocess.run", return_value=FakeResult()),
+    ):
+        assert _measure_mean_volume_db(Path("/tmp/x.wav")) == float("-inf")
+
+
+def test_ffmpeg_returncode_nonzero와_파싱_실패_구분():
+    """Phase 1 Cleanup (I4): returncode != 0 인 경우 더 명확한 에러 메시지."""
+    from core.audio_quality import AudioMeasurementError, _measure_mean_volume_db
+
+    fake_stderr = "File not found: /tmp/missing.wav"  # 파싱 실패 + 실패 종료
+
+    class FakeResult:
+        stderr = fake_stderr
+        returncode = 1
+
+    with (
+        patch("core.audio_quality.shutil.which", return_value="/opt/homebrew/bin/ffmpeg"),
+        patch("core.audio_quality.subprocess.run", return_value=FakeResult()),
+        pytest.raises(AudioMeasurementError, match=r"returncode=1"),
+    ):
+        _measure_mean_volume_db(Path("/tmp/missing.wav"))

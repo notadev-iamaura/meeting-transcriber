@@ -61,7 +61,9 @@ def validate_audio_quality(
     try:
         mean_db = _measure_mean_volume_db(audio_path)
         duration_s = _measure_duration_seconds(audio_path)
-    except (AudioMeasurementError, RuntimeError, FileNotFoundError) as e:
+    except AudioMeasurementError as e:
+        # Phase 1 Cleanup (I2): except 범위를 AudioMeasurementError 만으로 좁혀
+        # 예상치 못한 RuntimeError/버그가 ERROR 상태로 은폐되지 않도록 fail-fast.
         logger.warning(f"오디오 품질 측정 실패: {audio_path} ({e})")
         return AudioQualityResult(
             status=AudioQualityStatus.ERROR,
@@ -144,10 +146,28 @@ def _measure_mean_volume_db(audio_path: Path) -> float:
         raise AudioMeasurementError(f"ffmpeg 타임아웃: {audio_path}") from e
 
     output = result.stderr  # volumedetect는 stderr에 출력
-    match = re.search(r"mean_volume:\s*(-?\d+\.?\d*)\s*dB", output)
+
+    # Phase 1 Cleanup (M2): 완전 무음 파일의 "-inf dB" 매칭 추가.
+    # ffmpeg 는 무음일 때 `mean_volume: -inf dB` 를 출력하는데 기존 정규식은
+    # 숫자만 허용해 파싱 실패 → ERROR 로 흘러갔다. -inf 를 명시적으로 인식하여
+    # REJECT 경로(Python 의 -inf < threshold 비교)로 자연스럽게 보낸다.
+    match = re.search(r"mean_volume:\s*(-?\d+\.?\d*|-inf)\s*dB", output)
     if match is None:
-        raise AudioMeasurementError(f"mean_volume 파싱 실패: {output[:200]}")
-    return float(match.group(1))
+        # Phase 1 Cleanup (I3): output 앞 200자가 아니라 끝 500자로 변경.
+        # volumedetect 결과는 stderr 끝쪽에 출력되므로 끝부분이 진단에 유용.
+        # Phase 1 Cleanup (I4): returncode != 0 인 경우 진짜 ffmpeg 에러와
+        # 단순 파싱 실패를 구분.
+        if result.returncode != 0:
+            raise AudioMeasurementError(
+                f"ffmpeg 실패 (returncode={result.returncode}): {output[-500:]}"
+            )
+        raise AudioMeasurementError(f"mean_volume 파싱 실패: {output[-500:]}")
+
+    # -inf 문자열을 float('-inf') 로 변환 (Python 의 비교 연산과 호환)
+    raw_value = match.group(1)
+    if raw_value == "-inf":
+        return float("-inf")
+    return float(raw_value)
 
 
 def _measure_duration_seconds(audio_path: Path) -> float:
