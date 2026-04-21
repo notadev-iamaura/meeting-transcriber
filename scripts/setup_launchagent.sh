@@ -9,6 +9,18 @@
 #   bash scripts/setup_launchagent.sh --status  # LaunchAgent 상태 확인
 #
 # 관리자 권한 불필요 (~/Library/LaunchAgents/ 사용)
+#
+# Phase 1 (2026-04-21): KeepAlive 활성화로 크래시 시 자동 재기동.
+# 기존 설치된 에이전트가 있으면 다음으로 재적용:
+#   launchctl unload ~/Library/LaunchAgents/com.meeting-transcriber.plist
+#   bash scripts/setup_launchagent.sh
+#
+# Smoke test (KeepAlive 동작 확인):
+#   1) bash scripts/setup_launchagent.sh          # 등록
+#   2) APP_PID=$(pgrep -f "main.py")              # PID 확인
+#   3) kill -9 "$APP_PID"                          # 강제 크래시 유도
+#   4) sleep 35                                    # ThrottleInterval 30초 + 여유
+#   5) pgrep -f "main.py"                          # 새 PID 존재 확인
 # =================================================================
 set -euo pipefail
 
@@ -135,9 +147,21 @@ generate_plist() {
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 크래시 시 자동 재시작 비활성화 (안전) -->
+    <!-- Phase 1 (2026-04-21): 크래시 시에만 자동 재기동 -->
+    <!-- SuccessfulExit=false: 정상 종료 시 재기동 안 함 (사용자 수동 종료 존중) -->
+    <!-- Crashed=true: SIGSEGV/SIGKILL 등 비정상 종료 시 재기동 -->
+    <!-- orphan job 복구 로직(core/orchestrator.py)이 진행 중 작업을 queued로 되돌림 -->
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- 재기동 사이 최소 대기 (초) — 크래시 루프 방지 -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
 
     <!-- 백그라운드 프로세스 (리소스 우선순위 낮춤) -->
     <key>ProcessType</key>
