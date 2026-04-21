@@ -791,6 +791,7 @@ async def test_품질_게이트_reject_시_quarantine_이동_후_큐등록_안�
 
     # 큐에 작업이 없어야 함
     import asyncio
+
     job = await asyncio.to_thread(
         async_queue.queue.get_job_by_meeting_id,
         "quiet",
@@ -841,6 +842,7 @@ async def test_품질_게이트_accept_시_정상_큐등록(monkeypatch, tmp_pat
 
     # 큐에 작업 존재해야 함
     import asyncio
+
     job = await asyncio.to_thread(
         async_queue.queue.get_job_by_meeting_id,
         "ok",
@@ -851,7 +853,7 @@ async def test_품질_게이트_accept_시_정상_큐등록(monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path):
     """ffmpeg 측정 실패(ERROR)는 보수적으로 큐에 등록한다 (판단 보류)."""
-    from config import AppConfig, AudioQualityConfig, PathsConfig, WatcherConfig
+    from config import AppConfig, PathsConfig
     from core.audio_quality import AudioQualityResult, AudioQualityStatus
     from core.job_queue import AsyncJobQueue, JobQueue
     from core.watcher import FolderWatcher
@@ -887,6 +889,7 @@ async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path
 
     # ERROR는 REJECT가 아니므로 큐에 등록되어야 함
     import asyncio
+
     job = await asyncio.to_thread(
         async_queue.queue.get_job_by_meeting_id,
         "unknown",

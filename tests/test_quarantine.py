@@ -1,4 +1,5 @@
 """Quarantine 이동 헬퍼 테스트."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -63,6 +64,7 @@ def test_원본이_없으면_QuarantineError(tmp_path: Path):
 
 def test_이동_이력을_reason과_함께_로그(tmp_path: Path, caplog):
     import logging
+
     caplog.set_level(logging.INFO, logger="core.quarantine")
 
     src = tmp_path / "audio.wav"

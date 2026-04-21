@@ -6,6 +6,7 @@
 
 근거: docs/BENCHMARK.md, 실측 크래시 파일 mean_volume=-48.6dB (정상은 -20~-30dB).
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,7 +28,7 @@ _STATS_LOCK = Lock()
 _STATS: dict[str, int] = {"accept": 0, "reject": 0, "error": 0}
 
 
-class AudioQualityStatus(str, Enum):
+class AudioQualityStatus(str, Enum):  # noqa: UP042 — str 상속 유지 (기존 직렬화 호환)
     """오디오 품질 검증 결과 상태."""
 
     ACCEPT = "accept"

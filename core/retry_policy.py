@@ -8,6 +8,7 @@
 근거: 2026-04-21 meeting_20260420_100536.wav 크래시 분석 — 타임아웃 후
      재시도 과정에서 MLX Metal 상태가 오염된 채 모델 재로드되어 SIGSEGV 발생.
 """
+
 from __future__ import annotations
 
 import logging
@@ -48,10 +49,6 @@ def should_retry(
         재시도 가능 여부. NonRetryableError 계열은 항상 False.
     """
     if isinstance(error, NonRetryableError):
-        logger.info(
-            f"NonRetryableError 감지 — 재시도 중단: {type(error).__name__}: {error}"
-        )
+        logger.info(f"NonRetryableError 감지 — 재시도 중단: {type(error).__name__}: {error}")
         return False
-    if attempt >= max_attempts:
-        return False
-    return True
+    return not attempt >= max_attempts

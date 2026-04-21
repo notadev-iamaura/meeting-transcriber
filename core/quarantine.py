@@ -7,6 +7,7 @@ Quarantine 디렉토리 관리
 근거: 2026-04-21 DELETE /api/meetings/{id}가 DB만 삭제하여 오디오 파일이
      잔존 → watcher가 재등록 → 동일 크래시 반복. 이 헬퍼가 이동까지 담당.
 """
+
 from __future__ import annotations
 
 import logging
@@ -55,7 +56,5 @@ def move_to_quarantine(
     except OSError as e:
         raise QuarantineError(f"이동 실패: {src_path} → {dest}: {e}") from e
 
-    logger.info(
-        f"Quarantine 이동: {src_path.name} → {dest} (사유: {reason})"
-    )
+    logger.info(f"Quarantine 이동: {src_path.name} → {dest} (사유: {reason})")
     return dest

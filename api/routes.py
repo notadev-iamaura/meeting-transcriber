@@ -1162,18 +1162,12 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                         quarantine_dir,
                         reason=f"사용자 삭제: meeting_id={meeting_id}",
                     )
-                    logger.info(
-                        f"오디오 파일 격리 완료: {audio_path} → {new_path}"
-                    )
+                    logger.info(f"오디오 파일 격리 완료: {audio_path} → {new_path}")
                 except QuarantineError as e:
                     # 파일 이동 실패해도 DB 삭제는 이미 성공 — 경고만 남기고 진행
-                    logger.warning(
-                        f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}"
-                    )
+                    logger.warning(f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}")
             else:
-                logger.debug(
-                    f"오디오 파일이 이미 존재하지 않음: {audio_path}"
-                )
+                logger.debug(f"오디오 파일이 이미 존재하지 않음: {audio_path}")
 
         return {"message": f"회의가 삭제되었습니다: {meeting_id}"}
     except HTTPException:
