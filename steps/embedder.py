@@ -427,6 +427,10 @@ class Embedder:
         self._model_name = self._config.embedding.model_name
         self._dimension = self._config.embedding.dimension
         self._device = self._config.embedding.device
+        # 실제 모델 로드 시 사용될 디바이스 — 청크 수에 따라 embed() 에서 조정.
+        # 기본은 config.embedding.device. 짧은 회의(청크 < threshold) 에서는
+        # MPS 초기화 오버헤드가 실제 연산보다 커서 CPU 가 유리할 수 있다.
+        self._effective_device = self._device
         self._passage_prefix = self._config.embedding.passage_prefix
         self._batch_size = self._config.embedding.batch_size
 
@@ -456,12 +460,29 @@ class Embedder:
 
             model = SentenceTransformer(
                 self._model_name,
-                device=self._device,
+                device=self._effective_device,
             )
-            logger.info(f"임베딩 모델 로드 완료: {self._model_name} (device={self._device})")
+            logger.info(
+                f"임베딩 모델 로드 완료: {self._model_name} (device={self._effective_device})"
+            )
             return model
         except Exception as e:
             raise ModelLoadError(f"임베딩 모델 로드 실패: {self._model_name} - {e}") from e
+
+    # 청크 수가 이 값 미만이면 MPS 대신 CPU 로 전환.
+    # multilingual-e5-small 은 470MB 소형 모델이라 MPS 초기화 오버헤드
+    # (PyTorch → Metal 커널 컴파일 + 메모리 전송) 가 실제 연산보다 클 수 있다.
+    _MPS_MIN_CHUNKS = 50
+
+    def _resolve_device_for_chunks(self, total_chunks: int) -> str:
+        """청크 수에 따라 적합한 디바이스를 반환한다.
+
+        - config 가 "mps" 이고 청크가 임계값(_MPS_MIN_CHUNKS) 미만이면 "cpu"
+        - 그 외에는 config 값을 그대로 사용 ("cpu", "auto" 등 명시값 존중)
+        """
+        if self._device == "mps" and total_chunks < self._MPS_MIN_CHUNKS:
+            return "cpu"
+        return self._device
 
     def _generate_embeddings(
         self,
@@ -599,9 +620,16 @@ class Embedder:
             raise EmptyChunksError("임베딩할 청크가 비어있습니다.")
 
         meeting_id = chunked_result.meeting_id
-        logger.info(
-            f"임베딩 파이프라인 시작: meeting_id={meeting_id}, 청크 {len(chunked_result.chunks)}개"
-        )
+        total_chunks = len(chunked_result.chunks)
+        logger.info(f"임베딩 파이프라인 시작: meeting_id={meeting_id}, 청크 {total_chunks}개")
+
+        # 청크 수 기반 디바이스 자동 전환 (소량이면 MPS 오버헤드 회피)
+        self._effective_device = self._resolve_device_for_chunks(total_chunks)
+        if self._effective_device != self._device:
+            logger.info(
+                f"임베딩 디바이스 자동 전환: {self._device} → {self._effective_device} "
+                f"(청크 {total_chunks} < 임계값 {self._MPS_MIN_CHUNKS})"
+            )
 
         # 1. 모델 로드 및 임베딩 생성
         async with self._model_manager.acquire("e5", self._load_model) as model:
