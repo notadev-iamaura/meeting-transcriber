@@ -134,9 +134,7 @@ class TestAudioRecorderInit:
         """BlackHole 사용 중에는 is_system_audio=True."""
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
-        recorder._current_device = AudioDevice(
-            index=1, name="BlackHole 2ch", is_blackhole=True
-        )
+        recorder._current_device = AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True)
         assert recorder.get_status()["is_system_audio"] is True
 
     def test_get_status_is_system_audio_aggregate(self, tmp_path: Path) -> None:
@@ -816,9 +814,7 @@ class TestMultiTrackRecording:
         assert "system" not in selected
 
     @pytest.mark.asyncio
-    async def test_select_devices_멀티트랙에서_Aggregate_제외(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_select_devices_멀티트랙에서_Aggregate_제외(self, tmp_path: Path) -> None:
         """multi_track=True 경로에서 Aggregate 는 mic 후보에서 제외된다.
 
         Aggregate 는 본인 마이크 + BlackHole 합성 장치라 멀티트랙에 끌려가면
