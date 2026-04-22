@@ -130,6 +130,31 @@ class TestAudioRecorderInit:
         assert status["meeting_id"] is None
         assert status["device"] is None
 
+    def test_get_status_is_system_audio_blackhole(self, tmp_path: Path) -> None:
+        """BlackHole 사용 중에는 is_system_audio=True."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+        recorder._current_device = AudioDevice(
+            index=1, name="BlackHole 2ch", is_blackhole=True
+        )
+        assert recorder.get_status()["is_system_audio"] is True
+
+    def test_get_status_is_system_audio_aggregate(self, tmp_path: Path) -> None:
+        """Aggregate 사용 중에도 is_system_audio=True (BlackHole 경로 포함)."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+        recorder._current_device = AudioDevice(
+            index=2, name="Meeting Transcriber Aggregate", is_aggregate=True
+        )
+        assert recorder.get_status()["is_system_audio"] is True
+
+    def test_get_status_is_system_audio_mic_only(self, tmp_path: Path) -> None:
+        """물리 마이크만 사용 중에는 is_system_audio=False."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+        recorder._current_device = AudioDevice(index=0, name="MacBook Air Microphone")
+        assert recorder.get_status()["is_system_audio"] is False
+
 
 # === TestAudioDeviceDetection ===
 
@@ -344,6 +369,60 @@ class TestAudioDeviceDetection:
 
         # 미발견 → 자동 선택 경로 → prefer_system_audio=True 이므로 BlackHole
         assert selected.is_blackhole is True
+
+    @pytest.mark.asyncio
+    async def test_prefer_system_audio_false_aggregate_건너뜀(self, tmp_path: Path) -> None:
+        """prefer_system_audio=False 일 때 Aggregate 장치가 있어도 건너뛰고 실제 마이크를 선택한다.
+
+        이는 사용자가 시스템 오디오 캡처를 원하지 않을 때 Aggregate 장치가
+        자동 선택되지 않아야 함을 보장하는 회귀 방지 테스트이다.
+        """
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=False,  # 시스템 오디오 비선호
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone"),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        # prefer_system_audio=False → Aggregate·BlackHole 모두 3단계 real_devices 필터에서 제외
+        # → 마이크 키워드 "macbook" 에 매칭되는 MacBook Air Microphone 선택
+        assert selected.name == "MacBook Air Microphone"
+        assert selected.is_aggregate is False
+        assert selected.is_blackhole is False
+
+    @pytest.mark.asyncio
+    async def test_preferred_device_name_prefer_system_false_조합(self, tmp_path: Path) -> None:
+        """preferred_device_name 은 prefer_system_audio=False 여도 최우선 선택된다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=False,
+                preferred_device_name="Meeting Transcriber Aggregate",
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone"),
+            AudioDevice(index=1, name="Meeting Transcriber Aggregate", is_aggregate=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        # 0단계: preferred_device_name 정확 매칭 → prefer_system_audio 관계없이 선택
+        assert selected.name == "Meeting Transcriber Aggregate"
+        assert selected.is_aggregate is True
 
 
 # === TestStartRecording ===
@@ -735,6 +814,37 @@ class TestMultiTrackRecording:
 
         assert "mic" in selected
         assert "system" not in selected
+
+    @pytest.mark.asyncio
+    async def test_select_devices_멀티트랙에서_Aggregate_제외(
+        self, tmp_path: Path
+    ) -> None:
+        """multi_track=True 경로에서 Aggregate 는 mic 후보에서 제외된다.
+
+        Aggregate 는 본인 마이크 + BlackHole 합성 장치라 멀티트랙에 끌려가면
+        system 채널과 중복 녹음이 된다. 물리 마이크가 별도로 있으면 그것을
+        mic 로 선택해야 한다.
+        """
+        config = _make_multitrack_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(
+                index=0,
+                name="Meeting Transcriber Aggregate",
+                is_aggregate=True,
+            ),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=2, name="MacBook Air Microphone"),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_devices_multitrack()
+
+        assert selected["system"].is_blackhole is True
+        assert selected["mic"].name == "MacBook Air Microphone"
+        # Aggregate 는 어느 쪽에도 들어가지 않아야 한다
+        assert not selected["mic"].is_aggregate
+        assert not selected["system"].is_aggregate
 
     @pytest.mark.asyncio
     async def test_start_recording_멀티트랙_두_프로세스(self, tmp_path: Path) -> None:

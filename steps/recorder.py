@@ -611,7 +611,13 @@ class AudioRecorder:
         blackhole = None
         mic = None
 
+        # multi_track 경로는 BlackHole 과 물리 마이크를 각각 따로 녹음한다.
+        # Aggregate Device 는 본인 마이크 + BlackHole 을 이미 합성한 장치이므로
+        # mic 후보에서 제외한다 — 그렇지 않으면 Aggregate 가 "mic" 로 잡히면서
+        # system 채널과 겹쳐 이중 녹음이 된다.
         for dev in devices:
+            if dev.is_aggregate or dev.is_virtual:
+                continue
             if dev.is_blackhole and blackhole is None:
                 blackhole = dev
             elif not dev.is_blackhole and mic is None:
@@ -1170,6 +1176,9 @@ class AudioRecorder:
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
             "is_system_audio": (
-                self._current_device.is_blackhole if self._current_device else False
+                # Aggregate 는 BlackHole 경로를 포함하므로 시스템 오디오 캡처에 해당한다
+                (self._current_device.is_blackhole or self._current_device.is_aggregate)
+                if self._current_device
+                else False
             ),
         }
