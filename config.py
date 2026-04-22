@@ -486,6 +486,9 @@ class RecordingConfig(BaseModel):
     enabled: bool = True
     auto_record_on_zoom: bool = True
     prefer_system_audio: bool = True  # BlackHole 설치 시 시스템 오디오 우선
+    # 명시적 장치명. 빈 문자열이면 자동 선택(Aggregate > BlackHole > 물리 마이크).
+    # 정확 매칭 우선, 없으면 부분 매칭. 예: "Meeting Transcriber Aggregate"
+    preferred_device_name: str = ""
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
     channels: int = Field(default=1, ge=1, le=2)
     max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간

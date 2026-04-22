@@ -100,12 +100,14 @@ class AudioDevice:
         name: 장치 이름
         is_blackhole: BlackHole 가상 장치 여부
         is_virtual: 가상 오디오 장치 여부 (ZoomAudioDevice, SoundFlower 등)
+        is_aggregate: macOS Aggregate Device 여부 (본인 마이크 + BlackHole 통합용)
     """
 
     index: int
     name: str
     is_blackhole: bool = False
     is_virtual: bool = False
+    is_aggregate: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다."""
@@ -114,6 +116,7 @@ class AudioDevice:
             "name": self.name,
             "is_blackhole": self.is_blackhole,
             "is_virtual": self.is_virtual,
+            "is_aggregate": self.is_aggregate,
         }
 
 
@@ -350,23 +353,29 @@ class AudioRecorder:
                         idx = int(idx_str.strip())
                         name = name.strip()
 
-                        is_blackhole = "blackhole" in name.lower()
-                        # 가상 장치 감지 (BlackHole은 별도 is_blackhole로 처리)
+                        name_lower = name.lower()
+                        is_blackhole = "blackhole" in name_lower
+                        # Aggregate Device: 본인 마이크 + BlackHole 합성 장치.
+                        # 본인 목소리 포함 녹음의 핵심 수단이므로 virtual 에서 제외하고
+                        # 별도 플래그로 분리한다.
+                        is_aggregate = "aggregate" in name_lower
+                        # 가상 장치 감지 (BlackHole·Aggregate 는 별도 플래그로 처리)
                         virtual_keywords = [
                             "zoom",
                             "virtual",
-                            "aggregate",
                             "soundflower",
                             "loopback",
                         ]
-                        name_lower = name.lower()
-                        is_virtual = any(kw in name_lower for kw in virtual_keywords)
+                        is_virtual = not is_aggregate and any(
+                            kw in name_lower for kw in virtual_keywords
+                        )
                         devices.append(
                             AudioDevice(
                                 index=idx,
                                 name=name,
                                 is_blackhole=is_blackhole,
                                 is_virtual=is_virtual,
+                                is_aggregate=is_aggregate,
                             )
                         )
                 except (ValueError, IndexError):
@@ -376,7 +385,9 @@ class AudioRecorder:
         for dev in devices:
             # 장치 타입 레이블 생성
             label = ""
-            if dev.is_blackhole:
+            if dev.is_aggregate:
+                label = " (Aggregate)"
+            elif dev.is_blackhole:
                 label = " (BlackHole)"
             elif dev.is_virtual:
                 label = " (가상 장치)"
@@ -388,11 +399,13 @@ class AudioRecorder:
         """녹음에 사용할 오디오 장치를 선택한다.
 
         선택 우선순위:
-            1단계: BlackHole 우선 (시스템 오디오 캡처, prefer_system_audio 설정 시)
-            2단계: 가상 장치를 제외한 실제 장치 목록 필터링
-            3단계: 마이크 키워드 매칭 (microphone, built-in 등)
-            4단계: 실제 장치 중 첫 번째 선택
-            5단계: 가상 장치만 있는 경우 경고 후 폴백
+            0단계: config.preferred_device_name 명시 지정 (정확 매칭 → 부분 매칭)
+            1단계: Aggregate Device (본인 마이크 + BlackHole 통합, prefer_system_audio 시)
+            2단계: BlackHole (Aggregate 없을 때, prefer_system_audio 시)
+            3단계: 가상·Aggregate·BlackHole 을 제외한 실제 장치 목록 필터링
+            4단계: 마이크 키워드 매칭 (microphone, built-in 등)
+            5단계: 실제 장치 중 첫 번째 선택
+            6단계: 가상 장치만 있는 경우 경고 후 폴백
 
         Returns:
             선택된 오디오 장치
@@ -405,30 +418,55 @@ class AudioRecorder:
         if not devices:
             raise AudioDeviceError("사용 가능한 오디오 입력 장치가 없습니다.")
 
-        # 1단계: BlackHole 우선 선택 (시스템 오디오 캡처)
+        # 0단계: 명시적 장치명 지정 — 정확 매칭 우선, 없으면 부분 매칭
+        preferred = getattr(self._recording_config, "preferred_device_name", "") or ""
+        if preferred:
+            pref_lower = preferred.lower()
+            for dev in devices:
+                if dev.name.lower() == pref_lower:
+                    logger.info(f"명시 지정 장치 선택 (정확): [{dev.index}] {dev.name}")
+                    return dev
+            for dev in devices:
+                if pref_lower in dev.name.lower():
+                    logger.info(f"명시 지정 장치 선택 (부분): [{dev.index}] {dev.name}")
+                    return dev
+            logger.warning(f"preferred_device_name='{preferred}' 장치 미발견 → 자동 선택으로 폴백")
+
         if self._recording_config.prefer_system_audio:
+            # 1단계: Aggregate Device 우선 — 본인 목소리 + 시스템 오디오 통합
+            for dev in devices:
+                if dev.is_aggregate:
+                    logger.info(
+                        f"Aggregate 장치 선택 (본인 + 시스템 오디오 통합): "
+                        f"[{dev.index}] {dev.name}"
+                    )
+                    return dev
+
+            # 2단계: BlackHole (Aggregate 없을 때 폴백)
             for dev in devices:
                 if dev.is_blackhole:
                     logger.info(f"시스템 오디오 장치 선택: [{dev.index}] {dev.name}")
                     return dev
 
-        # 2단계: 가상 장치 제외한 실제 장치 목록
-        real_devices = [d for d in devices if not d.is_virtual and not d.is_blackhole]
+        # 3단계: 가상·Aggregate·BlackHole 제외한 실제 장치 목록
+        real_devices = [
+            d for d in devices if not d.is_virtual and not d.is_blackhole and not d.is_aggregate
+        ]
 
-        # 3단계: 마이크 키워드 매칭
+        # 4단계: 마이크 키워드 매칭
         mic_keywords = ["microphone", "마이크", "built-in", "internal", "macbook"]
         for dev in real_devices:
             if any(kw in dev.name.lower() for kw in mic_keywords):
                 logger.info(f"마이크 장치 선택: [{dev.index}] {dev.name}")
                 return dev
 
-        # 4단계: 가상 장치 제외 후 첫 번째
+        # 5단계: 가상 장치 제외 후 첫 번째
         if real_devices:
             selected = real_devices[0]
             logger.info(f"기본 오디오 장치 선택: [{selected.index}] {selected.name}")
             return selected
 
-        # 5단계: 최후 폴백 (가상 장치만 있는 경우)
+        # 6단계: 최후 폴백 (가상 장치만 있는 경우)
         selected = devices[0]
         logger.warning(
             f"실제 마이크를 찾을 수 없어 가상 장치를 사용합니다: "

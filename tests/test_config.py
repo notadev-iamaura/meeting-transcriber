@@ -417,6 +417,7 @@ class TestRecordingConfig:
         assert rc.enabled is True
         assert rc.auto_record_on_zoom is True
         assert rc.prefer_system_audio is True
+        assert rc.preferred_device_name == ""
         assert rc.sample_rate == 16000
         assert rc.channels == 1
         assert rc.max_duration_seconds == 14400
@@ -452,6 +453,14 @@ class TestRecordingConfig:
 
         with pytest.raises(ValidationError):
             RecordingConfig(max_duration_seconds=30)
+
+    def test_preferred_device_name_오버라이드(self) -> None:
+        """preferred_device_name 을 명시 지정할 수 있고 기본값은 빈 문자열이다."""
+        rc_default = RecordingConfig()
+        assert rc_default.preferred_device_name == ""
+
+        rc_custom = RecordingConfig(preferred_device_name="Meeting Transcriber Aggregate")
+        assert rc_custom.preferred_device_name == "Meeting Transcriber Aggregate"
 
     def test_AppConfig에_recording_포함(self, tmp_path: Path) -> None:
         """AppConfig에 recording 필드가 존재하고 기본값이 적용되는지 확인한다."""

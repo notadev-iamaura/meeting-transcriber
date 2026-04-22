@@ -145,6 +145,9 @@ recording:
   enabled: true                                # 녹음 기능 활성화
   auto_record_on_zoom: true                    # Zoom 감지 시 자동 녹음
   prefer_system_audio: true                    # BlackHole 설치 시 시스템 오디오 우선
+  # (옵션) 녹음에 쓸 장치 이름. 비워두면 자동 선택: Aggregate > BlackHole > 물리 마이크.
+  # 정확 매칭 실패 시 부분 매칭. 예: "Meeting Transcriber Aggregate"
+  preferred_device_name: ""
   sample_rate: 16000                           # 녹음 샘플레이트 (Hz)
   channels: 1                                  # 모노
   max_duration_seconds: 14400                  # 최대 녹음 시간 (초, 4시간)
