@@ -462,6 +462,16 @@ class TestRecordingConfig:
         rc_custom = RecordingConfig(preferred_device_name="Meeting Transcriber Aggregate")
         assert rc_custom.preferred_device_name == "Meeting Transcriber Aggregate"
 
+    def test_aggregate_mic_boost_기본_활성(self) -> None:
+        """aggregate_mic_boost 기본값은 True — 본인 목소리 저하 방지."""
+        rc = RecordingConfig()
+        assert rc.aggregate_mic_boost is True
+
+    def test_aggregate_mic_boost_오버라이드(self) -> None:
+        """비정형 Aggregate 환경에서 False 로 비활성화 가능."""
+        rc = RecordingConfig(aggregate_mic_boost=False)
+        assert rc.aggregate_mic_boost is False
+
     def test_AppConfig에_recording_포함(self, tmp_path: Path) -> None:
         """AppConfig에 recording 필드가 존재하고 기본값이 적용되는지 확인한다."""
         config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))

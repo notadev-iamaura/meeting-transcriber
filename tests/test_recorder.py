@@ -483,6 +483,119 @@ class TestStartRecording:
             recorder._duration_broadcast_task.cancel()
 
     @pytest.mark.asyncio
+    async def test_aggregate_녹음_pan_필터_적용(self, tmp_path: Path) -> None:
+        """Aggregate + aggregate_mic_boost=True 이면 ffmpeg 명령에 pan 필터가 포함된다.
+
+        기본 -ac 1 평균 다운믹스 대신 pan=mono|c0=0.5*c0+0.25*c1+0.25*c2 로
+        마이크 채널(c0) 가중치를 상향하여 본인 목소리 저하(약 10dB) 를 방지한다.
+        """
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        agg_device = AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True)
+        mock_process = AsyncMock()
+        mock_process.pid = 1
+        mock_process.stdin = MagicMock()
+        mock_process.wait = AsyncMock()
+
+        captured_cmd: list[str] = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            return mock_process
+
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=agg_device),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            await recorder.start_recording(meeting_id="agg_test")
+
+        assert "-af" in captured_cmd
+        af_idx = captured_cmd.index("-af")
+        assert captured_cmd[af_idx + 1] == "pan=mono|c0=0.5*c0+0.25*c1+0.25*c2"
+        # pan 필터가 모노 출력을 만들므로 -ac 1 은 중복 없이 생략되어야 한다
+        assert "-ac" not in captured_cmd
+
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_aggregate_boost_false_이면_기본_ac1(self, tmp_path: Path) -> None:
+        """aggregate_mic_boost=False 이면 Aggregate 이어도 기본 -ac 1 경로."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=True,
+                aggregate_mic_boost=False,
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        agg_device = AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True)
+        mock_process = AsyncMock()
+        mock_process.pid = 1
+        mock_process.stdin = MagicMock()
+        mock_process.wait = AsyncMock()
+
+        captured_cmd: list[str] = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            return mock_process
+
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=agg_device),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            await recorder.start_recording(meeting_id="agg_noboost")
+
+        assert "-af" not in captured_cmd
+        assert "-ac" in captured_cmd
+        assert captured_cmd[captured_cmd.index("-ac") + 1] == "1"
+
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_비Aggregate_장치는_pan_필터_미적용(self, tmp_path: Path) -> None:
+        """물리 마이크나 BlackHole 단독 장치는 pan 필터가 적용되지 않는다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        mic_device = AudioDevice(index=0, name="MacBook Air Microphone")
+        mock_process = AsyncMock()
+        mock_process.pid = 1
+        mock_process.stdin = MagicMock()
+        mock_process.wait = AsyncMock()
+
+        captured_cmd: list[str] = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            return mock_process
+
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=mic_device),
+            patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+        ):
+            await recorder.start_recording(meeting_id="mic_only")
+
+        assert "-af" not in captured_cmd
+
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+
+    @pytest.mark.asyncio
     async def test_meeting_id_자동생성(self, tmp_path: Path) -> None:
         """meeting_id를 지정하지 않으면 타임스탬프로 자동 생성된다."""
         config = _make_test_config(tmp_path)

@@ -496,6 +496,12 @@ class RecordingConfig(BaseModel):
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
     silence_threshold_rms: float = Field(default=0.001, ge=0.0, le=1.0)  # 무음 판정 RMS 임계값
+    # Aggregate Device(3채널: 마이크 + BlackHole L/R) 를 모노로 다운믹스할 때
+    # 단순 평균(-ac 1) 을 쓰면 마이크 채널이 1/3 로 희석되어 본인 목소리가 약 10dB
+    # 저하된다. True 이면 ffmpeg pan 필터로 가중치 다운믹스(c0=0.5 + c1=0.25 + c2=0.25)
+    # 를 적용하여 마이크 채널을 보호한다.
+    # 2채널/4채널 비정형 Aggregate 환경에서 ffmpeg 에러가 나면 False 로 비활성화.
+    aggregate_mic_boost: bool = True
 
 
 class LifecycleConfig(BaseModel):

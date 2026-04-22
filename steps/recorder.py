@@ -565,12 +565,24 @@ class AudioRecorder:
             "avfoundation",
             "-i",
             f":{device.index}",
+        ]
+
+        # Aggregate Device 3채널 다운믹스 보정:
+        # 기본 -ac 1 평균화는 마이크(c0) 를 1/3 로 희석해 본인 목소리가 약 10dB 저하된다.
+        # aggregate_mic_boost=True 이면 pan 필터로 c0 비중을 2배 (0.5) 로 유지하고
+        # BlackHole 좌/우 (c1,c2) 를 각 0.25 로 낮춰 합계 1.0 로 클리핑을 피하면서
+        # 마이크 채널만 상대적으로 보호한다.
+        if device.is_aggregate and self._recording_config.aggregate_mic_boost:
+            cmd += ["-af", "pan=mono|c0=0.5*c0+0.25*c1+0.25*c2"]
+            logger.info("Aggregate 마이크 보정 필터 적용: pan=mono|c0=0.5*c0+0.25*c1+0.25*c2")
+        else:
+            cmd += ["-ac", str(self._channels)]
+
+        cmd += [
             "-acodec",
             "pcm_s16le",
             "-ar",
             str(self._sample_rate),
-            "-ac",
-            str(self._channels),
             str(output_file),
         ]
 
