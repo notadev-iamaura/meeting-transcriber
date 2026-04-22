@@ -478,8 +478,37 @@ run_install() {
     _step "8단계: 디렉토리 및 보안 설정"
     setup_directories
 
+    # 9. 오디오 환경 (선택)
+    _step "9단계: 오디오 녹음 환경 (선택 사항)"
+    setup_audio_environment
+
     # 완료 요약
     print_summary
+}
+
+# === 9단계: 오디오 환경 셋업 ===
+# BlackHole 2ch + Aggregate Device 를 자동 셋업하여 본인 마이크 + 시스템 오디오
+# 양방향 녹음이 가능하도록 한다. 실패해도 설치 전체가 중단되지는 않는다 (선택 사항).
+setup_audio_environment() {
+    if [[ "${SKIP_AUDIO_SETUP:-0}" == "1" ]]; then
+        _info "SKIP_AUDIO_SETUP=1 감지 — 오디오 환경 셋업 건너뜀"
+        return 0
+    fi
+
+    local audio_script="${SCRIPT_DIR}/setup_audio.sh"
+    if [[ ! -x "${audio_script}" ]]; then
+        _warn "오디오 셋업 스크립트 누락 또는 실행 불가: ${audio_script}"
+        _warn "수동 안내: docs/AGGREGATE_DEVICE_SETUP.md 참고"
+        return 0
+    fi
+
+    _info "오디오 환경 셋업 스크립트 실행..."
+    if bash "${audio_script}"; then
+        _success "오디오 환경 자동 구성 완료 (Aggregate Device 준비됨)"
+    else
+        _warn "오디오 환경 자동 구성 실패 — 수동 안내: docs/AGGREGATE_DEVICE_SETUP.md"
+        _warn "(전사 파이프라인 자체는 영향 없음. 녹음 품질만 영향)"
+    fi
 }
 
 # === 완료 요약 ===
