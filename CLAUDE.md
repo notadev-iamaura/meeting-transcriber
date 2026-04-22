@@ -99,6 +99,56 @@ chmod 700 ~/.meeting-transcriber
    - `export HUGGINGFACE_TOKEN=hf_xxxxx` 및 `export HF_TOKEN=hf_xxxxx` 설정
    - ⚠️ 토큰 없이 우회 금지 — 게이트 모델은 약관 동의가 필수이며 에이전트가
      대신 동의하거나 공개 미러를 찾아 사용하면 안 됩니다.
+3. **BlackHole 2ch 설치**: 시스템 오디오 루프백을 위한 가상 드라이버.
+   `brew install blackhole-2ch` 실행. 설치 후 macOS 가 장치를 인식하려면
+   로그아웃·재로그인 또는 재부팅이 필요할 수 있음. ⚠️ 에이전트가 자동 설치
+   시도 가능하나, 커널 드라이버 특성상 사용자 확인을 받는 것이 안전.
+
+### 오디오 녹음 환경 자동 셋업 (Aggregate Device)
+
+> 본인 마이크 + 시스템 오디오(상대방 목소리) 를 하나의 WAV 로 동시 녹음하려면
+> macOS **Aggregate Device** 가 필요하다. 이 절차는 `scripts/install.sh` 실행
+> 시 9단계에서 자동으로 수행되며, 별도 스크립트로도 실행 가능하다.
+
+#### AI 에이전트용 지침
+
+**사용자가 "오디오 녹음 셋업해줘" 또는 "Aggregate Device 만들어줘" 라고 할 때**,
+아래 절차를 순서대로 수행하세요:
+
+```bash
+# 1. 상태 점검 (BlackHole 존재 여부 + Aggregate 존재 여부 동시 확인)
+bash scripts/setup_audio.sh --check
+
+# 2. 모두 미구성이면 자동 셋업
+bash scripts/setup_audio.sh
+
+# 3. 실패 시 에러 메시지를 사용자에게 그대로 전달하고 docs/AGGREGATE_DEVICE_SETUP.md 안내
+```
+
+**스크립트 내부 동작**:
+1. BlackHole 2ch 설치 여부 ffmpeg 로 검사 → 없으면 `brew install blackhole-2ch` 안내 후 종료
+2. `Meeting Transcriber Aggregate` 장치 존재 여부 확인 → 있으면 skip
+3. `scripts/create_aggregate_device.swift` 를 `/tmp/` 에 컴파일 후 실행
+4. Swift 스크립트가 CoreAudio `AudioHardwareCreateAggregateDevice` API 로
+   `기본 입력 장치 + BlackHole 2ch` 를 묶은 Aggregate 를 프로그램 방식으로 생성
+5. `ffmpeg -list_devices` 로 최종 등록 재검증
+
+**에이전트가 하면 안 되는 것**:
+- ❌ 사용자 오디오 장치 설정을 임의로 변경 (Zoom 마이크/스피커 바꾸는 등)
+- ❌ Audio MIDI 설정의 기존 Aggregate/Multi-Output 삭제
+- ❌ `~/Library/Preferences/com.apple.audio.DeviceSettings.plist` 직접 편집
+- ❌ BlackHole kext/driver 를 재설치하거나 권한 우회
+
+**자동 셋업이 실패하는 대표 시나리오**:
+- `swiftc` 없음 → `xcode-select --install` 안내
+- BlackHole 미설치 → `brew install blackhole-2ch` 안내
+- 스크립트는 성공이나 ffmpeg 목록에 안 보임 → 로그아웃·재로그인 안내
+- 위 모두 실패 → `docs/AGGREGATE_DEVICE_SETUP.md` 의 GUI 수동 절차로 안내
+
+**Zoom 등 앱 설정은 자동화하지 않는다**:
+스피커를 `BlackHole 2ch` 로, 마이크를 원래 마이크로 유지하는 조합은 사용자가
+직접 설정하는 것이 안전. 에이전트는 `docs/AGGREGATE_DEVICE_SETUP.md` 의 "2. Zoom
+설정" 섹션을 그대로 인용하여 안내하세요.
 
 ### 셋업 검증
 
