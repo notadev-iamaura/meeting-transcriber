@@ -419,7 +419,7 @@ class PipelineConfig(BaseModel):
     )
     min_disk_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
     min_memory_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
-    skip_llm_steps: bool = True  # 기본값: 전사만 진행, LLM 단계(correct, summarize) 스킵
+    skip_llm_steps: bool = False  # 기본값: 6단계 모두 실행 (LLM 교정·요약 포함)
 
 
 class ThermalConfig(BaseModel):
