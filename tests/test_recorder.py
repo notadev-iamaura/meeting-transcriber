@@ -76,6 +76,16 @@ _FFMPEG_NO_BLACKHOLE_OUTPUT = """\
 [AVFoundation indev @ 0x7f8] [0] MacBook Air Microphone
 """
 
+# Aggregate Device 포함 출력 (본인 마이크 + BlackHole 통합 시나리오)
+_FFMPEG_AGGREGATE_OUTPUT = """\
+[AVFoundation indev @ 0x7f8] AVFoundation video devices:
+[AVFoundation indev @ 0x7f8] [0] FaceTime HD Camera
+[AVFoundation indev @ 0x7f8] AVFoundation audio devices:
+[AVFoundation indev @ 0x7f8] [0] MacBook Air Microphone
+[AVFoundation indev @ 0x7f8] [1] BlackHole 2ch
+[AVFoundation indev @ 0x7f8] [2] Meeting Transcriber Aggregate
+"""
+
 
 # === TestAudioRecorderInit ===
 
@@ -218,6 +228,122 @@ class TestAudioDeviceDetection:
             pytest.raises(AudioDeviceError, match="오디오 입력 장치"),
         ):
             await recorder._select_audio_device()
+
+    # === Aggregate Device 지원 테스트 ===
+
+    def test_aggregate_감지_파싱(self, tmp_path: Path) -> None:
+        """Aggregate 이름이 포함되면 is_aggregate=True, is_virtual=False 로 태깅된다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+        devices = recorder._parse_device_list(_FFMPEG_AGGREGATE_OUTPUT)
+
+        assert len(devices) == 3
+        agg = next(d for d in devices if d.is_aggregate)
+        assert agg.name == "Meeting Transcriber Aggregate"
+        assert agg.is_aggregate is True
+        # Aggregate 는 실제 마이크 입력을 포함하는 합성 장치이므로 virtual 이 아니다
+        assert agg.is_virtual is False
+        assert agg.is_blackhole is False
+
+    @pytest.mark.asyncio
+    async def test_aggregate_blackhole_보다_우선(self, tmp_path: Path) -> None:
+        """Aggregate 와 BlackHole 이 모두 있을 때 Aggregate 가 우선 선택된다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone"),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.is_aggregate is True
+        assert selected.name == "Meeting Transcriber Aggregate"
+
+    @pytest.mark.asyncio
+    async def test_aggregate_없으면_blackhole_폴백(self, tmp_path: Path) -> None:
+        """Aggregate 가 없으면 기존처럼 BlackHole 이 선택된다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone"),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.is_blackhole is True
+
+    @pytest.mark.asyncio
+    async def test_preferred_device_name_정확_매칭(self, tmp_path: Path) -> None:
+        """preferred_device_name 정확 매칭이 BlackHole/Aggregate 우선순위를 덮어쓴다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=True,
+                preferred_device_name="My Custom Device",
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=1, name="My Custom Device"),
+            AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.name == "My Custom Device"
+
+    @pytest.mark.asyncio
+    async def test_preferred_device_name_부분_매칭(self, tmp_path: Path) -> None:
+        """preferred_device_name 정확 매칭 실패 시 부분 매칭으로 선택한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=True,
+                preferred_device_name="Aggregate",
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="BlackHole 2ch", is_blackhole=True),
+            AudioDevice(index=1, name="Meeting Transcriber Aggregate", is_aggregate=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        assert selected.name == "Meeting Transcriber Aggregate"
+
+    @pytest.mark.asyncio
+    async def test_preferred_device_name_미발견_폴백(self, tmp_path: Path) -> None:
+        """preferred_device_name 장치 미발견 시 자동 선택(Aggregate>BlackHole) 으로 폴백한다."""
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(
+                enabled=True,
+                prefer_system_audio=True,
+                preferred_device_name="Does Not Exist",
+            ),
+        )
+        recorder = AudioRecorder(config=config)
+
+        devices = [
+            AudioDevice(index=0, name="MacBook Air Microphone"),
+            AudioDevice(index=1, name="BlackHole 2ch", is_blackhole=True),
+        ]
+        with patch.object(recorder, "detect_audio_devices", return_value=devices):
+            selected = await recorder._select_audio_device()
+
+        # 미발견 → 자동 선택 경로 → prefer_system_audio=True 이므로 BlackHole
+        assert selected.is_blackhole is True
 
 
 # === TestStartRecording ===
@@ -526,7 +652,13 @@ class TestAudioDevice:
         """딕셔너리 변환이 올바르다."""
         device = AudioDevice(index=0, name="Mic", is_blackhole=False)
         d = device.to_dict()
-        assert d == {"index": 0, "name": "Mic", "is_blackhole": False, "is_virtual": False}
+        assert d == {
+            "index": 0,
+            "name": "Mic",
+            "is_blackhole": False,
+            "is_virtual": False,
+            "is_aggregate": False,
+        }
 
 
 # === TestRecordingState ===
@@ -837,7 +969,11 @@ class TestVirtualDeviceFiltering:
         assert devices[0].is_virtual is False
 
     def test_parse_device_여러_가상장치_키워드(self, tmp_path: Path) -> None:
-        """다양한 가상 장치 키워드(virtual, soundflower, aggregate, loopback)가 감지된다."""
+        """가상 장치 키워드(virtual, soundflower, loopback)가 감지된다.
+
+        Aggregate Device 는 본인 마이크 + BlackHole 통합의 합성 장치로 녹음에
+        활용 가능하므로 is_aggregate=True 로 분리되어 virtual 에서 제외된다.
+        """
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
 
@@ -851,8 +987,18 @@ class TestVirtualDeviceFiltering:
         devices = recorder._parse_device_list(stderr_output)
 
         assert len(devices) == 4
-        for dev in devices:
-            assert dev.is_virtual is True, f"{dev.name}이 is_virtual=False로 감지됨"
+        by_name = {d.name: d for d in devices}
+
+        # virtual (사용 불가) — 3건
+        assert by_name["Virtual Audio Cable"].is_virtual is True
+        assert by_name["Soundflower (2ch)"].is_virtual is True
+        assert by_name["Loopback Audio"].is_virtual is True
+
+        # aggregate — virtual 에서 제외되고 is_aggregate=True 로 태깅
+        agg = by_name["Aggregate Device"]
+        assert agg.is_virtual is False
+        assert agg.is_aggregate is True
+        assert agg.is_blackhole is False
 
     @pytest.mark.asyncio
     async def test_select_device_가상장치_필터링(self, tmp_path: Path) -> None:
