@@ -2222,11 +2222,13 @@ class AudioDeviceItem(BaseModel):
         index: ffmpeg 장치 인덱스
         name: 장치 이름
         is_blackhole: BlackHole 가상 장치 여부
+        is_aggregate: macOS Aggregate Device 여부 (본인 마이크 + 시스템 오디오 통합)
     """
 
     index: int
     name: str
     is_blackhole: bool = False
+    is_aggregate: bool = False
 
 
 class RecordingStartRequest(BaseModel):
@@ -2361,6 +2363,7 @@ async def get_recording_devices(
                 index=dev.index,
                 name=dev.name,
                 is_blackhole=dev.is_blackhole,
+                is_aggregate=dev.is_aggregate,
             )
             for dev in devices
         ]
