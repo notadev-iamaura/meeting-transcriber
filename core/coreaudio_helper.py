@@ -84,8 +84,7 @@ def get_aggregate_device_names(
 
     if result.returncode != 0:
         logger.debug(
-            f"system_profiler 비정상 종료: returncode={result.returncode} — "
-            "키워드 매칭으로 폴백"
+            f"system_profiler 비정상 종료: returncode={result.returncode} — 키워드 매칭으로 폴백"
         )
         return set()
 
@@ -185,9 +184,6 @@ def _extract_aggregate_names(plist_data: list) -> set[str]:
                 # transport 값이 Aggregate 판정 집합에 속하면 이름 추가
                 if transport in _AGGREGATE_TRANSPORT_VALUES:
                     aggregate_names.add(str(device_name))
-                    logger.debug(
-                        f"Aggregate 장치 확인: '{device_name}' "
-                        f"(transport={transport})"
-                    )
+                    logger.debug(f"Aggregate 장치 확인: '{device_name}' (transport={transport})")
 
     return aggregate_names

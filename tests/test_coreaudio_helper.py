@@ -150,7 +150,10 @@ class TestGetAggregateDeviceNames:
 
     def test_timeout_빈_set_반환(self) -> None:
         """system_profiler 타임아웃 시 빈 set 반환."""
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="system_profiler", timeout=5)):
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="system_profiler", timeout=5),
+        ):
             names = get_aggregate_device_names()
 
         assert names == set()
