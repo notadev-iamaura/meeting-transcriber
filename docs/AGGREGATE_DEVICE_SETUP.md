@@ -129,9 +129,21 @@ ffmpeg -i "$LATEST" -filter_complex \
 
 | 항목 | 상태 | 해결 |
 |------|------|------|
-| 3채널 → 1채널 다운믹스 시 **본인 목소리 볼륨 약 10 dB 저하** | 추적 중 | 별도 이슈 (filter_complex 로 채널별 가중치 지정) |
-| Aggregate Device 자동 생성 스크립트 | 추적 중 | 별도 이슈 (Swift/pyobjc 헬퍼) |
-| 이름 키워드 대신 CoreAudio transportType 로 정확 판정 | 추적 중 | 별도 이슈 |
+| 3채널 → 1채널 다운믹스 시 본인 목소리 약 10 dB 저하 | ✅ 해결 | `recording.aggregate_mic_boost: true` (기본) 로 `pan=mono|c0=0.5*c0+0.25*c1+0.25*c2` 자동 적용 |
+| Aggregate Device 자동 생성 스크립트 | ✅ 해결 | `scripts/create_aggregate_device.swift` + `bash scripts/setup_audio.sh` |
+| 이름 키워드 대신 CoreAudio transportType 로 정확 판정 | 추적 중 | 별도 이슈 — 현재는 `preferred_device_name` 으로 명시 지정 권장 |
+
+### 5.1 aggregate_mic_boost 튜닝
+
+Aggregate 가 표준 3채널(내장 마이크 모노 + BlackHole 좌/우) 이 아닌 경우 `pan` 필터가 실패할 수 있다. 녹음 시작 실패 로그가 보이면:
+
+```yaml
+# config.yaml
+recording:
+  aggregate_mic_boost: false  # ← 기본 -ac 1 평균 다운믹스로 폴백
+```
+
+실측 후 가중치를 직접 튜닝하고 싶다면 `steps/recorder.py` 의 `pan=mono|c0=0.5*c0+0.25*c1+0.25*c2` 를 수정하면 된다. 합계 1.0 을 유지해야 클리핑이 발생하지 않는다.
 
 ---
 

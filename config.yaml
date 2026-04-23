@@ -155,6 +155,9 @@ recording:
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
   multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음
   silence_threshold_rms: 0.001                   # 무음 판정 RMS 임계값 (0.0~1.0)
+  # Aggregate Device(3ch) 다운믹스 시 마이크 채널(c0) 가중치를 0.5로 올려 본인 목소리 저하 방지.
+  # 비정형 채널 수(2/4ch) Aggregate 에서 ffmpeg 에러가 나면 false 로 비활성화.
+  aggregate_mic_boost: true
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:

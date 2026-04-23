@@ -61,3 +61,21 @@ jobs:
 
       - name: 단위 테스트 실행
         run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
+
+  swift-build:
+    name: Swift 컴파일 검증 (Aggregate Device)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: swiftc 버전
+        run: swift --version
+
+      - name: Aggregate Device 생성 스크립트 빌드
+        # 실제 실행은 하지 않는다 — CoreAudio 장치 생성은 GitHub runner 에
+        # BlackHole 이 없어 의미가 없으므로 컴파일 성공 여부만 검증.
+        # xcode-select 경로는 runner 기본값(/Applications/Xcode.app) 사용.
+        run: |
+          swiftc scripts/create_aggregate_device.swift -o /tmp/create_aggregate
+          file /tmp/create_aggregate
+          /tmp/create_aggregate || echo "실행은 건너뜀 (BlackHole 없음 정상)"
