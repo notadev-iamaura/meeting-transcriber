@@ -21,14 +21,11 @@ import plistlib
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from core.coreaudio_helper import (
     _AGGREGATE_TRANSPORT_VALUES,
     _extract_aggregate_names,
     get_aggregate_device_names,
 )
-
 
 # === plist 샘플 헬퍼 ===
 
