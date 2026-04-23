@@ -1204,6 +1204,58 @@ class TestRecordingEndpoints:
         assert data[1]["name"] == "BlackHole 2ch"
         assert data[1]["is_blackhole"] is True
 
+    def test_recording_devices_응답에_is_aggregate_기본값_포함(self, tmp_path: Path) -> None:
+        """GET /api/recording/devices 응답 스키마에 is_aggregate 필드가 기본값 False 로 포함되는지 확인한다."""
+        from steps.recorder import AudioDevice
+
+        app = _make_test_app(tmp_path)
+
+        mock_devices = [
+            AudioDevice(index=0, name="MacBook Air 마이크"),
+        ]
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app)
+            mock_recorder.detect_audio_devices = AsyncMock(return_value=mock_devices)
+            response = client.get("/api/recording/devices")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        # is_aggregate 필드가 응답에 포함되고 기본값이 False 여야 한다
+        assert "is_aggregate" in data[0]
+        assert data[0]["is_aggregate"] is False
+
+    def test_recording_devices_aggregate_장치_노출(self, tmp_path: Path) -> None:
+        """Aggregate Device 를 반환하면 API 응답에서 is_aggregate: true 로 노출되는지 확인한다."""
+        from steps.recorder import AudioDevice
+
+        app = _make_test_app(tmp_path)
+
+        mock_devices = [
+            AudioDevice(index=0, name="MacBook Air 마이크", is_aggregate=False),
+            AudioDevice(
+                index=1,
+                name="Meeting Transcriber Aggregate",
+                is_aggregate=True,
+                is_blackhole=False,
+            ),
+        ]
+
+        with TestClient(app) as client:
+            mock_recorder = self._setup_recorder(app)
+            mock_recorder.detect_audio_devices = AsyncMock(return_value=mock_devices)
+            response = client.get("/api/recording/devices")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 2
+        # 일반 마이크는 is_aggregate: false
+        assert data[0]["is_aggregate"] is False
+        # Aggregate 장치는 is_aggregate: true 로 노출되어야 한다
+        assert data[1]["name"] == "Meeting Transcriber Aggregate"
+        assert data[1]["is_aggregate"] is True
+
     def test_recording_미초기화_503(self, tmp_path: Path) -> None:
         """recorder가 None일 때 503을 반환하는지 확인한다."""
         app = _make_test_app(tmp_path)
