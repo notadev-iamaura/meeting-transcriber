@@ -104,7 +104,7 @@ pipeline:
   dynamic_timeout_min_seconds: 600           # Phase 1: 최소 10분 (모델 로드 포함)
   dynamic_timeout_max_seconds: 10800         # Phase 1: 최대 3시간 (폭주 방지)
   min_disk_free_gb: 1.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
-  min_memory_free_gb: 2.0                    # Graceful Degradation: 메모리 최소 여유 (GB)
+  min_memory_free_gb: 1.5                    # Graceful Degradation: 메모리 최소 여유 (GB) — 실측 21건 최대 가용 1.9GB 기준으로 2.0에서 완화
   skip_llm_steps: false  # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
   diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)
   step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화

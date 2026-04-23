@@ -418,7 +418,9 @@ class PipelineConfig(BaseModel):
         description="동적 타임아웃 최대값 (초, 폭주 방지)",
     )
     min_disk_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
-    min_memory_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
+    # 실측 21건 중 최대 가용 메모리 1.9GB → 2.0GB 임계치 영구 미충족 문제 해결을 위해 1.5로 완화
+    # 엣지 케이스(1.5GB 이하)는 각 단계 직전 실시간 check_memory()로 추가 보호
+    min_memory_free_gb: float = Field(default=1.5, ge=0.5, le=16.0)
     skip_llm_steps: bool = False  # 기본값: 6단계 모두 실행 (LLM 교정·요약 포함)
 
 
