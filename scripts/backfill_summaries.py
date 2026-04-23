@@ -27,17 +27,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sqlite3
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 # ─────────────────────────────────────────────
 # 경로 헬퍼
 # ─────────────────────────────────────────────
+
 
 def _resolve_base_dir() -> Path:
     """MT_BASE_DIR 환경변수를 존중하며 기본 데이터 디렉토리를 반환한다."""
@@ -118,6 +117,7 @@ def _call_summarize(host: str, meeting_id: str, timeout: int = 300) -> tuple[boo
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
+
 
 def main() -> None:
     """누락 요약 백필 실행 진입점."""
