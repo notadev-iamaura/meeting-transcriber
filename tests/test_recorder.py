@@ -1405,3 +1405,85 @@ class TestSilenceDetection:
         self._make_wav(wav_path, [])
 
         assert recorder._check_audio_energy(wav_path) is False
+
+
+# === TestCoreAudioAggregateDetection (A-3 이슈) ===
+
+
+class TestCoreAudioAggregateDetection:
+    """CoreAudio 기반 Aggregate Device 정식 판정 테스트 (A-3 이슈).
+
+    이름에 "aggregate" 가 없어도 CoreAudio 가 Aggregate 로 보고하는 장치를
+    is_aggregate=True 로 태깅하는 것을 검증한다.
+    """
+
+    def test_임의_이름_Aggregate_CoreAudio_정식_감지(self, tmp_path: Path) -> None:
+        """ffmpeg 이름에 'aggregate' 없어도 CoreAudio 가 Aggregate 로 보고하면 is_aggregate=True.
+
+        사용자가 Aggregate Device 를 "통합 오디오", "My Combined Audio" 등
+        임의 이름으로 생성해도 CoreAudio transport 값 기반으로 정식 감지된다.
+        키워드 매칭 의존 없이 CoreAudio 결과가 우선 적용되는 것을 확인한다.
+        """
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        # CoreAudio 가 "통합 오디오" 를 Aggregate 로 보고
+        coreaudio_aggregate_set = {"통합 오디오"}
+
+        ffmpeg_output = (
+            "[AVFoundation indev @ 0x7f8] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x7f8] [0] MacBook Air 마이크\n"
+            "[AVFoundation indev @ 0x7f8] [1] BlackHole 2ch\n"
+            "[AVFoundation indev @ 0x7f8] [2] 통합 오디오\n"  # 임의 이름 Aggregate
+        )
+
+        # _aggregate_name_fetcher 주입으로 실제 system_profiler 호출 없이 테스트
+        devices = recorder._parse_device_list(
+            ffmpeg_output,
+            _aggregate_name_fetcher=lambda: coreaudio_aggregate_set,
+        )
+
+        by_name = {d.name: d for d in devices}
+
+        # "통합 오디오" 는 CoreAudio 판정 → is_aggregate=True
+        agg = by_name["통합 오디오"]
+        assert agg.is_aggregate is True
+        assert agg.is_virtual is False
+        assert agg.is_blackhole is False
+
+        # 나머지 장치는 영향 없음
+        assert by_name["MacBook Air 마이크"].is_aggregate is False
+        assert by_name["BlackHole 2ch"].is_blackhole is True
+        assert by_name["BlackHole 2ch"].is_aggregate is False
+
+    def test_CoreAudio_실패시_키워드_폴백_동작(self, tmp_path: Path) -> None:
+        """CoreAudio 조회 실패(빈 set) 시 이름 키워드 'aggregate' 매칭으로 폴백한다.
+
+        get_aggregate_device_names() 가 빈 set 을 반환하는 상황
+        (system_profiler 타임아웃, 비 macOS 환경 등)에서도
+        기존 키워드 매칭이 작동하여 이름에 'aggregate' 가 있으면 is_aggregate=True 가 된다.
+        """
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        # CoreAudio 조회 실패 — 빈 set 반환
+        coreaudio_aggregate_set: set[str] = set()
+
+        ffmpeg_output = (
+            "[AVFoundation indev @ 0x7f8] AVFoundation audio devices:\n"
+            "[AVFoundation indev @ 0x7f8] [0] MacBook Air Microphone\n"
+            "[AVFoundation indev @ 0x7f8] [1] Meeting Transcriber Aggregate\n"
+        )
+
+        devices = recorder._parse_device_list(
+            ffmpeg_output,
+            _aggregate_name_fetcher=lambda: coreaudio_aggregate_set,
+        )
+
+        by_name = {d.name: d for d in devices}
+
+        # CoreAudio 조회 실패 → 키워드 폴백 → "Aggregate" 단어 포함이므로 True
+        assert by_name["Meeting Transcriber Aggregate"].is_aggregate is True
+
+        # 일반 마이크는 변경 없음
+        assert by_name["MacBook Air Microphone"].is_aggregate is False
