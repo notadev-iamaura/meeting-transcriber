@@ -95,7 +95,7 @@ def get_aggregate_device_names(
 
     try:
         plist_data = plistlib.loads(result.stdout)
-    except (plistlib.InvalidFileException, Exception) as e:
+    except (plistlib.InvalidFileException, ValueError, TypeError) as e:
         logger.debug(f"plist 파싱 실패: {e} — 키워드 매칭으로 폴백")
         return set()
 
