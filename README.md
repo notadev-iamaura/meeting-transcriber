@@ -401,7 +401,7 @@ bash scripts/setup_launchagent.sh
 | `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
 | `llm.mlx_model_name` | MLX 모델명 | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
-| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `true` (최초 셋업 시), 설정에서 변경 가능 |
+| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `false` (기본: 전체 6단계 실행) |
 | `server.port` | 웹 서버 포트 | `8765` |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |

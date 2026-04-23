@@ -405,13 +405,15 @@ class JobProcessor:
                 logger.debug(f"step_progress 처리 실패 (무시): {e}")
 
         try:
-            # 파이프라인 실행 (LLM 단계는 온디맨드로 실행하므로 스킵)
+            # 파이프라인 실행: skip_llm_steps=None 으로 전달하면
+            # pipeline.run 내부에서 config.pipeline.skip_llm_steps 값을 사용한다.
+            # (orchestrator 가 강제 오버라이드하지 않고 사용자 설정을 존중)
             await self._pipeline.run(
                 Path(audio_path),
                 meeting_id=meeting_id,
                 on_step_start=on_step_start,
                 on_step_progress=on_step_progress,
-                skip_llm_steps=True,
+                skip_llm_steps=None,
             )
 
             # 완료 상태 업데이트

@@ -2763,11 +2763,16 @@ class TestSkipLlmSteps:
     """LLM 단계 스킵 테스트."""
 
     def test_skip_llm_steps_config_기본값(self) -> None:
-        """PipelineConfig의 skip_llm_steps 기본값이 True인지 확인한다."""
+        """PipelineConfig의 skip_llm_steps 기본값이 False인지 확인한다.
+
+        이슈 C 수정: config.yaml 의 'false' 설정과 정합성을 맞추기 위해
+        Pydantic 기본값을 True → False 로 변경함.
+        기본 동작은 6단계 모두 실행 (LLM 교정·요약 포함).
+        """
         from config import PipelineConfig
 
         cfg = PipelineConfig()
-        assert cfg.skip_llm_steps is True
+        assert cfg.skip_llm_steps is False
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_correct_summarize_스킵(

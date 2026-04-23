@@ -669,42 +669,52 @@ class TestStepToStatus:
         assert "pipeline_status" in event_types
 
 
-# === Cycle 10: skip_llm_steps 전달 ===
+# === Cycle 10: skip_llm_steps 전달 (config 존중 동작 검증) ===
 
 
 class TestProcessJobSkipLlm:
-    """_process_job에서 skip_llm_steps=True 전달 테스트."""
+    """_process_job에서 skip_llm_steps=None 전달로 config 설정을 존중하는지 테스트.
 
-    async def test_process_job_skip_llm_steps_전달(
+    이슈 C 회귀 방지:
+    - orchestrator 가 하드코딩 True 를 넘기면 config.yaml 의 false 가 무시된다.
+    - 수정 후: orchestrator 는 None 을 전달, pipeline.run 내부에서 config 값을 사용.
+    """
+
+    async def test_process_job이_pipeline_run에_skip_llm_none_전달(
         self,
         processor: JobProcessor,
         mock_pipeline: AsyncMock,
         mock_thermal: AsyncMock,
     ) -> None:
-        """_process_job이 pipeline.run()에 skip_llm_steps=True를 전달하는지 확인한다."""
+        """_process_job은 pipeline.run()에 skip_llm_steps=None을 전달해야 한다.
+
+        orchestrator 가 하드코딩 True 를 주입하지 않고,
+        pipeline.run 의 config 폴백 경로를 타도록 None 을 전달해야 한다.
+        """
         job = _make_job(job_id=1, meeting_id="skip_test")
         mock_pipeline.run.return_value = MagicMock(status="completed")
 
         await processor._process_job(job)
 
-        # pipeline.run 호출 인자 확인
+        # pipeline.run 호출 확인
         mock_pipeline.run.assert_called_once()
         call_kwargs = mock_pipeline.run.call_args
-        assert call_kwargs.kwargs.get("skip_llm_steps") is True
+        # None 을 전달해야 함 — True 를 넘기면 config.yaml 이 무시된다
+        assert call_kwargs.kwargs.get("skip_llm_steps") is None, (
+            "orchestrator 가 skip_llm_steps=True 를 하드코딩하면 안 됨; "
+            "config.pipeline.skip_llm_steps 를 존중하려면 None 을 전달해야 한다."
+        )
 
-    async def test_process_job_skip_llm_정상_완료(
+    async def test_process_job_None_전달_후_정상_완료(
         self,
         processor: JobProcessor,
         mock_pipeline: AsyncMock,
         mock_thermal: AsyncMock,
         mock_job_queue: AsyncMock,
     ) -> None:
-        """skip_llm_steps=True 전달 후에도 작업이 정상 완료되는지 확인한다."""
+        """skip_llm_steps=None 전달 후에도 작업이 정상 완료되어야 한다."""
         job = _make_job(job_id=2, meeting_id="skip_complete")
-        mock_pipeline.run.return_value = MagicMock(
-            status="completed",
-            skipped_steps=["correct", "summarize"],
-        )
+        mock_pipeline.run.return_value = MagicMock(status="completed")
 
         await processor._process_job(job)
 
@@ -715,3 +725,69 @@ class TestProcessJobSkipLlm:
 
         # 서멀 매니저 정상 호출 확인
         mock_thermal.notify_job_completed.assert_called_once()
+
+
+# === Cycle 11: Pydantic 기본값 및 config 통합 ===
+
+
+class TestSkipLlmStepsConfig:
+    """PipelineConfig.skip_llm_steps 기본값 및 config.yaml 정합성 테스트.
+
+    이슈 C 회귀 방지:
+    - config.py 기본값이 True 이면 config.yaml 의 false 와 모순된다.
+    - 수정 후: 기본값은 False (6단계 모두 실행).
+    """
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
+    def test_pipeline_config_기본값은_False(self) -> None:
+        """PipelineConfig 의 skip_llm_steps 기본값이 False 여야 한다.
+
+        config.yaml 의 'false' 주석과 일치해야 하며,
+        True 이면 사용자가 config.yaml 에서 명시적으로 설정해도
+        Pydantic 기본값과 모순이 생긴다.
+        await 가 없으므로 동기 함수이며, 모듈 레벨 pytestmark 의 asyncio 마크는
+        filterwarnings 로 억제한다.
+        """
+        from config import PipelineConfig
+
+        default_cfg = PipelineConfig()
+        assert default_cfg.skip_llm_steps is False, (
+            "PipelineConfig 기본값이 True 이면 config.yaml 의 false 설정이 무시될 수 있다. "
+            "이슈 C 참고."
+        )
+
+    @pytest.mark.parametrize("config_skip", [False, True])
+    async def test_orchestrator는_config_값과_무관하게_항상_None_전달(
+        self,
+        config_skip: bool,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        mock_thermal: AsyncMock,
+        mock_ws_manager: AsyncMock,
+    ) -> None:
+        """config.pipeline.skip_llm_steps 값과 무관하게 pipeline.run 에 None 이 전달된다.
+
+        orchestrator 는 skip_llm_steps 를 hardcode 하지 않고 항상 None 을 전달한다.
+        True/False 결정은 pipeline.run 내부의 config 폴백 로직이 담당하므로,
+        config 값을 어떻게 설정해도 orchestrator 에서 None 이 와야 한다는 불변식을 검증한다.
+        """
+        from config import get_config
+
+        # config.pipeline.skip_llm_steps 를 실제로 설정해 불변식을 진짜로 검증
+        get_config().pipeline.skip_llm_steps = config_skip
+
+        proc = JobProcessor(
+            job_queue=mock_job_queue,
+            pipeline=mock_pipeline,
+            thermal_manager=mock_thermal,
+            ws_manager=mock_ws_manager,
+            poll_interval=0.1,
+        )
+        job = _make_job(job_id=10, meeting_id=f"cfg_{config_skip}_test")
+        mock_pipeline.run.return_value = MagicMock(status="completed")
+
+        await proc._process_job(job)
+
+        call_kwargs = mock_pipeline.run.call_args
+        # config 값이 False 든 True 든 orchestrator 는 None 을 전달해야 한다
+        assert call_kwargs.kwargs.get("skip_llm_steps") is None
