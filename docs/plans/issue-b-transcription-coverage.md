@@ -180,13 +180,26 @@ if segs:
 ```bash
 # case 별 실험 반복 (case 0~5)
 # 1. config.yaml 편집 (no_speech_threshold, condition_on_previous_text)
-# 2. 앱 재시작 (config reload)
+# 2. 앱 재시작 — config hot-reload 미지원, 프로세스 재기동 필수
 # 3. 동일 녹음 파일로 파이프라인 재실행 (체크포인트 리셋 후)
 # 4. 누락률 + 환각률 기록
 # 5. benchmark_stt.py로 CER/WER 측정
 
-# 체크포인트 초기화 (동일 회의 재처리 시)
+# ── config.yaml 편집 후 앱 재시작 ─────────────────────────────────────────
+# config hot-reload 미지원 — 프로세스 재기동으로만 반영됨
+pkill -f "python main.py" 2>/dev/null || true
+sleep 2
+source .venv/bin/activate
+nohup python main.py --no-menubar > /tmp/mt-bench.log 2>&1 &
+disown
+sleep 5  # 서버 기동 대기
+curl -sS http://127.0.0.1:8765/api/health | grep -q "ok" && echo "앱 기동 완료"
+# ──────────────────────────────────────────────────────────────────────────
+
+# 체크포인트 초기화 (파이프라인이 transcript/diarization 을 재생성하도록)
 rm -rf "$HOME/.meeting-transcriber/checkpoints/$MEETING_ID"
+# outputs 폴더는 유지 — transcript_merged.json 등을 §3-2 분석에 재사용
+# 단, 완전 재처리를 원하면: rm -rf "$HOME/.meeting-transcriber/outputs/$MEETING_ID"
 ```
 
 ---
