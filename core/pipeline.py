@@ -981,13 +981,15 @@ class PipelineManager:
             skip_llm_steps if skip_llm_steps is not None else self._config.pipeline.skip_llm_steps
         )
 
-        # 메모리 부족 시 degraded 모드 설정
-        degraded = not resource_status.memory_ok
-        if degraded:
+        # degraded 플래그: 파이프라인 시작 시점 메모리 진단 결과를 기록.
+        # 목적: UI/API 보고용 + 경고 로그. LLM 단계 스킵 결정에는 사용하지 않는다.
+        # 실제 LLM 스킵 여부는 각 단계 직전 실시간 check_memory() 결과(mem_ok)로만 결정.
+        # 이유: 시작 시 메모리 부족이었다가 중반에 회복되면 LLM 단계를 정상 실행해야 함.
+        if not resource_status.memory_ok:
             state.degraded = True
             warn_msg = (
                 f"가용 메모리 부족({resource_status.memory_free_gb:.1f}GB): "
-                f"LLM 단계(correct, summarize)를 건너뜁니다"
+                f"파이프라인 시작 시점 리소스 압박 감지 (degraded=True 표시, LLM 단계는 실시간 재확인 후 결정)"
             )
             state.warnings.append(warn_msg)
             logger.warning(warn_msg)
@@ -1011,7 +1013,7 @@ class PipelineManager:
         logger.info(
             f"파이프라인 시작: meeting_id={meeting_id}, "
             f"audio={audio_path.name}"
-            f"{', degraded=True' if degraded else ''}"
+            f"{', degraded=True' if state.degraded else ''}"
         )
 
         # 재개 시작 단계 결정
@@ -1061,18 +1063,18 @@ class PipelineManager:
 
             # === Graceful Degradation / LLM 스킵: 단계별 리소스 재점검 ===
             if self._resource_guard.is_llm_step(step.value):
-                # 단계 직전에 메모리 재확인
+                # 단계 직전 실시간 메모리 재확인 — state.degraded(초기 진단값)와 무관하게 독립 판단.
+                # state.degraded=True 이더라도 실시간으로 메모리가 회복되었으면 LLM 단계를 실행한다.
+                # 반대로 초기에 OK였어도 실시간 mem_ok=False면 스킵한다.
                 mem_ok, mem_free = self._resource_guard.check_memory()
-                if _skip_llm or degraded or not mem_ok:
+                if _skip_llm or not mem_ok:
                     # 스킵 사유에 따른 메시지 구분
                     if _skip_llm:
                         skip_msg = f"설정에 의해 {step.value} 단계 건너뜀 (skip_llm_steps=True)"
-                    elif not mem_ok:
+                    else:
                         skip_msg = (
                             f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
                         )
-                    else:
-                        skip_msg = f"degraded 모드로 {step.value} 단계 건너뜀"
                     logger.warning(skip_msg)
                     state.skipped_steps.append(step.value)
                     state.degraded = True

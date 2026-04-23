@@ -3326,3 +3326,275 @@ def test_타임아웃_에러는_재시도_안함():
 
     err = TranscriptionTimeoutError("1800초 초과")
     assert should_retry(err, attempt=1, max_attempts=3) is False
+
+
+# === DEV_REQUEST_2026-04-23 이슈 G 회귀 테스트 ===
+# degraded 플래그 로직 분리 + 메모리 임계치 기본값 정합 검증
+
+
+class TestDegradedFlagLogicSeparation:
+    """degraded 플래그가 LLM 단계 스킵 결정과 분리되는지 검증하는 테스트 클래스.
+
+    핵심 변경 내용:
+        - state.degraded: 파이프라인 시작 시점 진단 결과 저장용 (UI/API 보고 목적)
+        - LLM 단계 스킵 결정: 각 단계 직전 실시간 check_memory() 반환값(mem_ok)만 사용
+        - 이전 동작: 초기 degraded=True면 중반 메모리 회복 후에도 LLM 영구 스킵
+        - 수정 동작: 실시간 mem_ok=True면 degraded 값과 관계없이 LLM 실행
+    """
+
+    def test_케이스D_config_min_memory_free_gb_기본값(self) -> None:
+        """케이스 D: PipelineConfig 기본값이 2.0에서 1.5로 완화되었는지 확인한다.
+
+        이슈 G 변경 1: 실측 21건 중 가용 메모리 최대값 1.9GB 기준으로
+        min_memory_free_gb를 2.0 → 1.5로 완화.
+        """
+        from config import PipelineConfig
+
+        cfg = PipelineConfig()
+        assert cfg.min_memory_free_gb == 1.5
+
+    @pytest.mark.asyncio
+    async def test_케이스A_초기메모리부족_중반회복시_llm_실행(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """케이스 A: 파이프라인 시작 시 메모리 부족(check_all=False)이었다가
+        중반에 회복(check_memory=True)되면 LLM 단계가 실행되어야 한다.
+
+        이전 동작(버그): degraded=True → LLM 영구 스킵.
+        수정 동작: 실시간 mem_ok=True → LLM 실행, state.degraded=True 는 유지.
+        """
+        mock_config.pipeline.skip_llm_steps = False
+
+        from core.pipeline import ResourceGuard, ResourceStatus
+
+        # 초기 check_all: memory_ok=False (degraded 발생)
+        initial_status = ResourceStatus(
+            disk_ok=True,
+            disk_free_gb=10.0,
+            memory_ok=False,
+            memory_free_gb=1.2,
+        )
+        # 각 단계 직전 check_memory: 회복됨 (True, 2.5GB)
+        recovered_memory = (True, 2.5)
+
+        with (
+            patch.object(
+                ResourceGuard,
+                "check_all",
+                return_value=initial_status,
+            ),
+            patch.object(
+                ResourceGuard,
+                "check_memory",
+                return_value=recovered_memory,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="degraded_recovery_test")
+
+        # LLM 단계가 스킵되지 않고 실행되어야 한다
+        mock_correct.assert_called_once()
+        mock_summarize.assert_called_once()
+        # correct, summarize 가 skipped_steps 에 없어야 한다
+        assert "correct" not in state.skipped_steps
+        assert "summarize" not in state.skipped_steps
+        # state.degraded 는 초기 진단 결과(True)를 유지한다 (UI 보고용)
+        assert state.degraded is True
+
+    @pytest.mark.asyncio
+    async def test_케이스B_실시간메모리부족시_llm_스킵(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """케이스 B: 초기 check_all은 OK이지만 단계 직전 check_memory가
+        False를 반환하면 LLM 단계가 스킵되어야 한다.
+        """
+        mock_config.pipeline.skip_llm_steps = False
+
+        from core.pipeline import ResourceGuard, ResourceStatus
+
+        # 초기 check_all: memory_ok=True (degraded 없음)
+        initial_status = ResourceStatus(
+            disk_ok=True,
+            disk_free_gb=10.0,
+            memory_ok=True,
+            memory_free_gb=2.5,
+        )
+        # 단계 직전 실시간 메모리: 부족 (False, 0.5GB)
+        low_memory = (False, 0.5)
+
+        with (
+            patch.object(
+                ResourceGuard,
+                "check_all",
+                return_value=initial_status,
+            ),
+            patch.object(
+                ResourceGuard,
+                "check_memory",
+                return_value=low_memory,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="realtime_low_mem_test")
+
+        # 실시간 메모리 부족 → LLM 단계 스킵
+        mock_correct.assert_not_called()
+        mock_summarize.assert_not_called()
+        assert "correct" in state.skipped_steps
+        assert "summarize" in state.skipped_steps
+        # state.degraded 도 True 로 설정된다 (스킵 시 설정)
+        assert state.degraded is True
+
+    @pytest.mark.asyncio
+    async def test_케이스C_skip_llm_steps_true_우선순위(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """케이스 C: skip_llm_steps=True 설정 시 메모리 상태에 관계없이 LLM 스킵.
+
+        기존 동작(회귀 없음): skip_llm_steps=True 는 mem_ok 보다 우선한다.
+        """
+        mock_config.pipeline.skip_llm_steps = True
+
+        from core.pipeline import ResourceGuard, ResourceStatus
+
+        # 메모리 충분한 상태여도 skip_llm_steps 우선
+        good_status = ResourceStatus(
+            disk_ok=True,
+            disk_free_gb=10.0,
+            memory_ok=True,
+            memory_free_gb=4.0,
+        )
+
+        with (
+            patch.object(
+                ResourceGuard,
+                "check_all",
+                return_value=good_status,
+            ),
+            patch.object(
+                ResourceGuard,
+                "check_memory",
+                return_value=(True, 4.0),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=audio_file,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as mock_correct,
+            patch.object(
+                PipelineManager,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as mock_summarize,
+        ):
+            pipeline = PipelineManager(mock_config, mock_model_manager)
+            state = await pipeline.run(audio_file, meeting_id="skip_llm_priority_test")
+
+        # skip_llm_steps=True 가 우선 → LLM 스킵
+        mock_correct.assert_not_called()
+        mock_summarize.assert_not_called()
+        assert "correct" in state.skipped_steps
+        assert "summarize" in state.skipped_steps
