@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Union
 
 from config import AppConfig, get_config
+from core.coreaudio_helper import get_aggregate_device_names
 
 logger = logging.getLogger(__name__)
 
@@ -315,15 +316,43 @@ class AudioRecorder:
 
         return True
 
-    def _parse_device_list(self, stderr_output: str) -> list[AudioDevice]:
+    def _parse_device_list(
+        self,
+        stderr_output: str,
+        _aggregate_name_fetcher: None | object = None,
+    ) -> list[AudioDevice]:
         """ffmpeg stderr 출력에서 오디오 장치 목록을 파싱한다.
 
+        Aggregate Device 판정에는 두 가지 방법을 OR 결합하여 사용한다:
+          1. CoreAudio 정식 판정: system_profiler 로 coreaudio_device_transport 조회
+             → 사용자가 임의 이름을 지정한 Aggregate Device 도 감지 가능
+          2. 이름 키워드 매칭: "aggregate" 포함 여부 (폴백)
+             → CoreAudio 조회 실패 시에도 기존 동작 유지
+
+        두 방법의 OR 결합이므로 기존 키워드 매칭 기반 테스트는 모두 호환된다.
+
         Args:
-            stderr_output: ffmpeg의 stderr 출력 문자열
+            stderr_output: ffmpeg 의 stderr 출력 문자열
+            _aggregate_name_fetcher: 테스트용 의존성 주입 인자.
+                None 이면 get_aggregate_device_names() 를 사용한다.
+                callable 을 전달하면 해당 callable() 의 반환값(set[str])을
+                CoreAudio 조회 결과로 사용한다.
 
         Returns:
             파싱된 오디오 장치 목록
         """
+        # CoreAudio 정식 Aggregate 이름 집합 조회 (루프 밖에서 한 번만 호출)
+        # system_profiler 는 subprocess 호출이므로 루프 안에서 반복 호출하면 성능 낭비.
+        if _aggregate_name_fetcher is None:
+            # 기본 경로: 실제 system_profiler 호출
+            coreaudio_aggregate_names: set[str] = get_aggregate_device_names()
+        else:
+            # 테스트 주입 경로: callable 이면 호출, set 이면 그대로 사용
+            if callable(_aggregate_name_fetcher):
+                coreaudio_aggregate_names = _aggregate_name_fetcher()
+            else:
+                coreaudio_aggregate_names = set(_aggregate_name_fetcher)
+
         devices: list[AudioDevice] = []
         in_audio_section = False
 
@@ -355,10 +384,17 @@ class AudioRecorder:
 
                         name_lower = name.lower()
                         is_blackhole = "blackhole" in name_lower
-                        # Aggregate Device: 본인 마이크 + BlackHole 합성 장치.
+
+                        # Aggregate Device 판정: CoreAudio 정식 조회 OR 이름 키워드 매칭.
+                        # - CoreAudio 조회: coreaudio_device_transport="coreaudio_device_type_aggregate"
+                        #   인 장치 → 임의 이름("통합 마이크", "My Combined Audio")도 감지
+                        # - 키워드 매칭: "aggregate" 포함 → CoreAudio 조회 실패 시 폴백
                         # 본인 목소리 포함 녹음의 핵심 수단이므로 virtual 에서 제외하고
                         # 별도 플래그로 분리한다.
-                        is_aggregate = "aggregate" in name_lower
+                        is_aggregate = (name in coreaudio_aggregate_names) or (
+                            "aggregate" in name_lower
+                        )
+
                         # 가상 장치 감지 (BlackHole·Aggregate 는 별도 플래그로 처리)
                         virtual_keywords = [
                             "zoom",
