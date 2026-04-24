@@ -43,6 +43,10 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.min_disk_free_gb = 2.0
     config.pipeline.min_memory_free_gb = 2.0
     config.pipeline.skip_llm_steps = False
+    # LLM 단계 하드 타임아웃 / 락 획득 타임아웃 (신규) — MagicMock 기본값 덮어쓰기
+    config.pipeline.correct_timeout_seconds = 1800
+    config.pipeline.summarize_timeout_seconds = 600
+    config.pipeline.llm_lock_acquire_timeout_seconds = 3600
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
     config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
     config.paths.resolved_base_dir = tmp_path
