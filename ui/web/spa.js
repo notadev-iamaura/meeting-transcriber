@@ -1685,6 +1685,8 @@
         // Density 토글 — localStorage 에 'viewer-density' 키로 저장, 기본은 Comfortable.
         // 저장값이 'compact' 면 .timeline 에 .density-compact 클래스를 붙여 레퍼런스
         // Viewer.jsx 수치(26px 배지 / 13px 본문 / lh 1.6) 를 적용한다.
+        // IIFE 는 자기 함수 스코프라 외부 this 접근 불가 → 로컬 변수로 캡처.
+        var els = this._els;
         (function initDensityToggle() {
             var btn = els.densityToggle;
             var tl = els.timeline;
