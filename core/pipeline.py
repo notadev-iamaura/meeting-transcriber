@@ -552,9 +552,7 @@ class PipelineManager:
         state_path = self._get_state_path(meeting_id)
         checkpoint_dir = self._checkpoints_dir / meeting_id
         if not checkpoint_dir.exists():
-            raise PipelineError(
-                f"체크포인트 디렉토리가 없어 상태 재구성 불가: {checkpoint_dir}"
-            )
+            raise PipelineError(f"체크포인트 디렉토리가 없어 상태 재구성 불가: {checkpoint_dir}")
 
         # 기본값: audio_path 는 알 수 없으므로 빈 문자열
         state = PipelineState(
@@ -573,8 +571,7 @@ class PipelineManager:
         # merge 체크포인트가 있으면 최소한 전사까지는 완료된 것으로 간주
         state.save(state_path)
         logger.info(
-            f"상태 파일 재구성 완료: meeting_id={meeting_id}, "
-            f"완료 단계={state.completed_steps}"
+            f"상태 파일 재구성 완료: meeting_id={meeting_id}, 완료 단계={state.completed_steps}"
         )
         return state
 
@@ -1506,9 +1503,7 @@ class PipelineManager:
         # 기존 체크포인트 조합으로 state 를 재구성하여 요약을 계속 진행한다.
         state_path = self._get_state_path(meeting_id)
         if not state_path.exists():
-            logger.warning(
-                f"상태 파일 유실 — 체크포인트에서 재구성: meeting_id={meeting_id}"
-            )
+            logger.warning(f"상태 파일 유실 — 체크포인트에서 재구성: meeting_id={meeting_id}")
             self._rebuild_state_from_checkpoints(meeting_id)
 
         state = PipelineState.from_file(state_path)

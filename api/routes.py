@@ -848,9 +848,7 @@ async def transcribe_meeting(
             )
 
         if job.status != JobStatus.RECORDED.value:
-            detail = (
-                f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)"
-            )
+            detail = f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)"
             if job.status == JobStatus.FAILED.value:
                 # 힌트: force=true 로 재시도 가능
                 detail += ". 실패한 회의를 재시도하려면 ?force=true 를 붙여 요청하세요."
@@ -2042,9 +2040,7 @@ async def summarize_meeting(
         # 404 로 차단하지 않고 체크포인트 기반으로 state 를 복원하여 summarize 진행.
         state_path = pipeline._get_state_path(meeting_id)
         if not state_path.exists():
-            logger.warning(
-                f"state 파일 유실, merge 체크포인트 기반 재구성: {meeting_id}"
-            )
+            logger.warning(f"state 파일 유실, merge 체크포인트 기반 재구성: {meeting_id}")
             pipeline._rebuild_state_from_checkpoints(meeting_id)
 
         # force=True: 기존 요약 체크포인트/출력 삭제 (재생성)

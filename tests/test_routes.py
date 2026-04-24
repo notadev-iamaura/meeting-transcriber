@@ -1713,9 +1713,7 @@ class TestSummarizeMeetingEndpoint:
 
         # 404 가 아닌 200 을 받아야 한다 — state 재구성 경로
         assert response.status_code == 200
-        mock_pipeline._rebuild_state_from_checkpoints.assert_called_once_with(
-            "meeting_legacy"
-        )
+        mock_pipeline._rebuild_state_from_checkpoints.assert_called_once_with("meeting_legacy")
         mock_pipeline.run_llm_steps.assert_called_once_with("meeting_legacy")
 
     def test_summarize_meeting_state_merge_모두_없음_404(self, tmp_path: Path) -> None:
@@ -1774,9 +1772,7 @@ class TestTranscribeMeetingEndpoint:
             queue.force_set_status = MagicMock(return_value=recorded_job)
             queue.update_status = MagicMock(return_value=queued_job)
 
-            response = client.post(
-                "/api/meetings/meeting_retry/transcribe?force=true"
-            )
+            response = client.post("/api/meetings/meeting_retry/transcribe?force=true")
 
         assert response.status_code == 200
         data = response.json()
@@ -1804,9 +1800,7 @@ class TestTranscribeMeetingEndpoint:
         # recorded 상태에서는 force_set_status 를 호출하지 않아야 한다
         queue.force_set_status.assert_not_called()
 
-    def test_transcribe_completed_상태_force_true_여도_409(
-        self, tmp_path: Path
-    ) -> None:
+    def test_transcribe_completed_상태_force_true_여도_409(self, tmp_path: Path) -> None:
         """completed 등 다른 상태에서는 force=true 여도 force_set_status 를 타지 않아 409."""
         app = _make_test_app(tmp_path)
         mock_job = MockJob(1, "meeting_done", "/audio/done.m4a", "completed")
@@ -1816,9 +1810,7 @@ class TestTranscribeMeetingEndpoint:
             queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
             queue.force_set_status = MagicMock()
 
-            response = client.post(
-                "/api/meetings/meeting_done/transcribe?force=true"
-            )
+            response = client.post("/api/meetings/meeting_done/transcribe?force=true")
 
         assert response.status_code == 409
         # force=true 라도 failed 가 아니므로 force_set_status 는 호출되지 않음
