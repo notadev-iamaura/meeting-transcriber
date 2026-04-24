@@ -474,6 +474,12 @@ class PipelineManager:
         )
         self._on_resource_warning = on_resource_warning
 
+        # 이슈 H: LLM 단계(correct+summarize)를 프로세스 전역으로 직렬화하는 락.
+        # MLX는 같은 모델 인스턴스에 대해 복수 태스크가 동시에 generate() 호출 시
+        # Metal 커맨드 버퍼가 꼬여 SIGABRT 로 죽는다. 배치 백필·UI 연타 어느 경로든
+        # run_llm_steps() 로 들어오면 한 번에 하나만 실행되도록 이 락으로 보호한다.
+        self._llm_lock = asyncio.Lock()
+
         logger.info(
             f"PipelineManager 초기화: "
             f"checkpoint={self._checkpoint_enabled}, "
@@ -521,6 +527,51 @@ class PipelineManager:
             상태 JSON 파일 경로
         """
         return self._checkpoints_dir / meeting_id / "pipeline_state.json"
+
+    def _rebuild_state_from_checkpoints(self, meeting_id: str) -> PipelineState:
+        """pipeline_state.json 이 유실되었을 때 기존 체크포인트로 상태를 재구성한다.
+
+        이슈 I 대응: 과거 파이프라인 초기 버전에서 생성된 회의 등은 merge 체크포인트는
+        있지만 state 파일이 없을 수 있다. 이 경우 summarize 요청이 404 로 차단되던
+        문제를 해결하기 위해, 존재하는 체크포인트를 스캔하여 completed_steps 를 복원한다.
+
+        Args:
+            meeting_id: 회의 ID
+
+        Returns:
+            재구성된 PipelineState (파일에도 저장됨)
+
+        Raises:
+            PipelineError: 회의 디렉토리조차 없어 재구성이 불가능할 때
+        """
+        state_path = self._get_state_path(meeting_id)
+        checkpoint_dir = self._checkpoints_dir / meeting_id
+        if not checkpoint_dir.exists():
+            raise PipelineError(
+                f"체크포인트 디렉토리가 없어 상태 재구성 불가: {checkpoint_dir}"
+            )
+
+        # 기본값: audio_path 는 알 수 없으므로 빈 문자열
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path="",
+            output_dir=str(self._get_output_dir(meeting_id)),
+            status="pending",
+        )
+
+        # 존재하는 체크포인트를 순회하며 completed_steps 복원
+        for step in PipelineStep:
+            cp = self._get_checkpoint_path(meeting_id, step)
+            if cp.exists() and step.value not in state.completed_steps:
+                state.completed_steps.append(step.value)
+
+        # merge 체크포인트가 있으면 최소한 전사까지는 완료된 것으로 간주
+        state.save(state_path)
+        logger.info(
+            f"상태 파일 재구성 완료: meeting_id={meeting_id}, "
+            f"완료 단계={state.completed_steps}"
+        )
+        return state
 
     def _get_output_dir(self, meeting_id: str) -> Path:
         """회의별 출력 디렉토리 경로를 반환한다.
@@ -1410,6 +1461,10 @@ class PipelineManager:
         skip_llm_steps=True로 파이프라인을 실행한 뒤,
         나중에 LLM 단계만 별도로 실행하고 싶을 때 사용한다.
 
+        이슈 H 대응: MLX Metal 커맨드 버퍼 충돌을 방지하기 위해 프로세스 전역
+        _llm_lock 으로 동시 실행을 직렬화한다. 다수 요청이 동시에 도달해도
+        내부에서 하나씩 순차 처리되며, 대기 중인 요청은 락을 기다린다.
+
         Args:
             meeting_id: 회의 ID
             on_step_start: 단계 시작 콜백
@@ -1420,19 +1475,33 @@ class PipelineManager:
         Raises:
             PipelineError: 상태 파일 또는 merge 체크포인트 미존재 시
         """
-        # 1. 상태 파일 확인 및 로드
-        state_path = self._get_state_path(meeting_id)
-        if not state_path.exists():
-            raise PipelineError(f"파이프라인 상태 파일을 찾을 수 없습니다: {meeting_id}")
+        async with self._llm_lock:
+            return await self._run_llm_steps_inner(meeting_id, on_step_start)
 
-        state = PipelineState.from_file(state_path)
-
-        # 2. merge 체크포인트 확인 및 로드
+    async def _run_llm_steps_inner(
+        self,
+        meeting_id: str,
+        on_step_start: Callable[[str], Awaitable[None]] | None = None,
+    ) -> PipelineState:
+        """run_llm_steps 의 실제 본문. 호출자가 _llm_lock 을 이미 획득한 상태여야 한다."""
+        # 2. merge 체크포인트 확인 및 로드 (이슈 I: state 파일보다 먼저 검사)
         merge_cp = self._get_checkpoint_path(meeting_id, PipelineStep.MERGE)
         if not merge_cp.exists():
             raise PipelineError(
                 f"merge 체크포인트를 찾을 수 없습니다: {merge_cp}. 파이프라인을 먼저 실행하세요."
             )
+
+        # 1. 상태 파일 확인 및 로드
+        # 이슈 I: pipeline_state.json 이 유실되었어도 merge 체크포인트가 있으면
+        # 기존 체크포인트 조합으로 state 를 재구성하여 요약을 계속 진행한다.
+        state_path = self._get_state_path(meeting_id)
+        if not state_path.exists():
+            logger.warning(
+                f"상태 파일 유실 — 체크포인트에서 재구성: meeting_id={meeting_id}"
+            )
+            self._rebuild_state_from_checkpoints(meeting_id)
+
+        state = PipelineState.from_file(state_path)
 
         from steps.merger import MergedResult
 

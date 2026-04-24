@@ -794,14 +794,21 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
 
 
 @router.post("/meetings/{meeting_id}/transcribe")
-async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
+async def transcribe_meeting(
+    request: Request,
+    meeting_id: str,
+    force: bool = False,
+) -> MeetingItem:
     """녹음 완료된 회의의 전사를 시작한다.
 
     recorded 상태의 작업을 queued로 전환하여 전사 파이프라인을 트리거한다.
+    이슈 J 대응: ``force=true`` 를 전달하면 ``failed`` 상태에서도 재시도를 시작한다.
+    이때 기존 에러 메시지는 지우고 retry_count 는 그대로 유지한다.
 
     Args:
         request: FastAPI Request 객체
         meeting_id: 전사할 회의 고유 식별자
+        force: True이면 failed 상태도 강제로 재시도한다 (쿼리파라미터)
 
     Returns:
         MeetingItem: 업데이트된 회의 정보
@@ -826,11 +833,28 @@ async def transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        if job.status != JobStatus.RECORDED.value:
-            raise HTTPException(
-                status_code=409,
-                detail=f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)",
+        # 이슈 J: failed 상태에서도 force=true 이면 재시도 허용
+        if job.status == JobStatus.FAILED.value and force:
+            logger.info(
+                f"failed 상태 강제 재시도: {meeting_id} (job_id={job.id}, "
+                f"retry_count={job.retry_count})"
             )
+            # failed → recorded 로 되돌린 뒤 아래 공통 경로에서 queued 로 전이
+            job = await asyncio.to_thread(
+                queue.queue.force_set_status,
+                job.id,
+                JobStatus.RECORDED,
+                "",
+            )
+
+        if job.status != JobStatus.RECORDED.value:
+            detail = (
+                f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)"
+            )
+            if job.status == JobStatus.FAILED.value:
+                # 힌트: force=true 로 재시도 가능
+                detail += ". 실패한 회의를 재시도하려면 ?force=true 를 붙여 요청하세요."
+            raise HTTPException(status_code=409, detail=detail)
 
         updated_job = await asyncio.to_thread(
             queue.queue.update_status,
@@ -2000,19 +2024,28 @@ async def summarize_meeting(
 
     # 상태 파일 / 체크포인트 존재 여부를 사전 검증
     try:
-        state_path = pipeline._get_state_path(meeting_id)
-        if not state_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"회의를 찾을 수 없습니다: {meeting_id}",
-            )
-
         merge_cp = pipeline._get_checkpoint_path(meeting_id, PipelineStep.MERGE)
         if not merge_cp.exists():
+            # 이슈 I: merge 체크포인트가 없다면 state 파일 유무와 상관없이 404
+            state_path = pipeline._get_state_path(meeting_id)
+            if not state_path.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+                )
             raise HTTPException(
                 status_code=400,
                 detail=f"merge 체크포인트가 없습니다. 파이프라인을 먼저 실행하세요: {meeting_id}",
             )
+
+        # 이슈 I: merge 체크포인트는 있는데 state 파일만 유실된 경우 자동 재구성.
+        # 404 로 차단하지 않고 체크포인트 기반으로 state 를 복원하여 summarize 진행.
+        state_path = pipeline._get_state_path(meeting_id)
+        if not state_path.exists():
+            logger.warning(
+                f"state 파일 유실, merge 체크포인트 기반 재구성: {meeting_id}"
+            )
+            pipeline._rebuild_state_from_checkpoints(meeting_id)
 
         # force=True: 기존 요약 체크포인트/출력 삭제 (재생성)
         if force:
