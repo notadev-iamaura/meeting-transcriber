@@ -423,6 +423,27 @@ class PipelineConfig(BaseModel):
     min_memory_free_gb: float = Field(default=1.5, ge=0.5, le=16.0)
     skip_llm_steps: bool = False  # 기본값: 6단계 모두 실행 (LLM 교정·요약 포함)
 
+    # LLM 단계 하드 타임아웃 — 모델 무한 루프/환각 폭주 대응
+    # 값은 해당 단계 전체 실행 (모델 로드 + 모든 배치 + I/O 포함) 기준.
+    # 일반 1시간 회의 기준 실측: correct ~180s, summarize ~60s. 여유 포함 약 4배.
+    correct_timeout_seconds: int = Field(
+        default=1800,  # 30분
+        ge=60,
+        description="correct 단계(LLM 보정) 전체 하드 타임아웃 (초)",
+    )
+    summarize_timeout_seconds: int = Field(
+        default=600,  # 10분
+        ge=60,
+        description="summarize 단계(LLM 요약) 전체 하드 타임아웃 (초)",
+    )
+    # _llm_lock 획득 타임아웃 — 선행 작업이 비정상 장기화 시 무한 대기 방지.
+    # 실용상 단일 LLM 단계 타임아웃 + 약간의 여유 이상이면 충분.
+    llm_lock_acquire_timeout_seconds: int = Field(
+        default=3600,  # 1시간
+        ge=60,
+        description="LLM 락 획득 대기 하드 타임아웃 (초). 초과 시 PipelineError.",
+    )
+
 
 class ThermalConfig(BaseModel):
     """서멀 관리 설정 (팬리스 MacBook Air 대응)"""

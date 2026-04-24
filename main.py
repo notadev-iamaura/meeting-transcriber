@@ -369,6 +369,25 @@ def main(argv: list[str] | None = None) -> None:
     # 4. 데이터 디렉토리 초기화
     ensure_data_directories(config)
 
+    # 4-0. 단일 인스턴스 락 — 다중 프로세스 실행 시 MLX Metal 충돌 방지.
+    # asyncio.Lock 은 프로세스 간 공유 불가하므로, 파일 기반 fcntl advisory
+    # lock 으로 앱 레벨에서 중복 실행을 차단한다. 부팅 초기에 체크해야
+    # FastAPI 포트 충돌 에러보다 명확한 메시지를 사용자에게 줄 수 있다.
+    from core.single_instance import AlreadyRunningError, SingleInstanceLock
+
+    _instance_lock = SingleInstanceLock(config.paths.resolved_base_dir)
+    try:
+        _instance_lock.acquire()
+    except AlreadyRunningError as e:
+        logger.critical(str(e))
+        print(f"\n❗ {e}\n", file=sys.stderr)
+        sys.exit(2)
+
+    # 프로세스 종료 시 자동 해제 (atexit 으로 시그널 경로도 커버)
+    import atexit
+
+    atexit.register(_instance_lock.release)
+
     # 4-1. 사용자 설정 초기화 (프롬프트/용어집 JSON 파일 생성)
     try:
         from core.user_settings import init_user_settings

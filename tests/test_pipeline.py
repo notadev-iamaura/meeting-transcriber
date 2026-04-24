@@ -49,6 +49,10 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.min_disk_free_gb = 1.0
     config.pipeline.min_memory_free_gb = 2.0
     config.pipeline.skip_llm_steps = False
+    # 안정성 개선 기본값: 테스트는 충분히 여유를 둠
+    config.pipeline.correct_timeout_seconds = 1800
+    config.pipeline.summarize_timeout_seconds = 600
+    config.pipeline.llm_lock_acquire_timeout_seconds = 3600
 
     # paths 설정
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
@@ -3839,3 +3843,134 @@ class TestRebuildStateFromCheckpoints:
 
         assert state.status == "completed"
         assert (state_dir / "pipeline_state.json").exists()
+
+
+# === 안정성 개선: 타임아웃 회귀 테스트 ===
+
+
+class TestLlmTimeouts:
+    """correct/summarize 단계 하드 타임아웃 + 락 획득 타임아웃 검증."""
+
+    @pytest.mark.asyncio
+    async def test_correct_단계_타임아웃_시_PipelineError(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """correct 단계가 타임아웃 임계 이상 걸리면 PipelineError(타임아웃 메시지)."""
+        import asyncio
+
+        mock_config.pipeline.correct_timeout_seconds = 1
+        mock_config.pipeline.summarize_timeout_seconds = 60
+        mock_config.pipeline.llm_lock_acquire_timeout_seconds = 60
+
+        meeting_id = "timeout_correct"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/t.m4a",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        async def _slow_correct(*_a: object, **_kw: object) -> None:
+            await asyncio.sleep(5)  # 타임아웃 5배 이상
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(pipeline, "_run_step_correct", new=_slow_correct),
+        ):
+            with pytest.raises(PipelineError, match="correct 단계 타임아웃"):
+                await pipeline.run_llm_steps(meeting_id)
+
+    @pytest.mark.asyncio
+    async def test_summarize_단계_타임아웃_시_PipelineError(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """summarize 단계가 타임아웃 임계 이상 걸리면 PipelineError."""
+        import asyncio
+
+        mock_config.pipeline.correct_timeout_seconds = 60
+        mock_config.pipeline.summarize_timeout_seconds = 1
+        mock_config.pipeline.llm_lock_acquire_timeout_seconds = 60
+
+        meeting_id = "timeout_summarize"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/t.m4a",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        async def _slow_summarize(*_a: object, **_kw: object) -> None:
+            await asyncio.sleep(5)
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(pipeline, "_run_step_summarize", new=_slow_summarize),
+        ):
+            with pytest.raises(PipelineError, match="summarize 단계 타임아웃"):
+                await pipeline.run_llm_steps(meeting_id)
+
+    @pytest.mark.asyncio
+    async def test_llm_락_획득_타임아웃_시_PipelineError(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """선행 작업이 락을 쥐고 놓지 않을 때 후속 호출은 타임아웃 후 PipelineError."""
+
+        mock_config.pipeline.correct_timeout_seconds = 60
+        mock_config.pipeline.summarize_timeout_seconds = 60
+        mock_config.pipeline.llm_lock_acquire_timeout_seconds = 1  # 1초 내 획득 실패
+
+        meeting_id = "lock_timeout"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/t.m4a",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        # 사전에 락을 강제 획득하여 타임아웃 유발
+        await pipeline._llm_lock.acquire()
+        try:
+            with pytest.raises(PipelineError, match="LLM 락 획득 타임아웃"):
+                await pipeline.run_llm_steps(meeting_id)
+        finally:
+            pipeline._llm_lock.release()
