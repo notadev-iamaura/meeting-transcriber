@@ -476,8 +476,13 @@ class PipelineManager:
 
         # 이슈 H: LLM 단계(correct+summarize)를 프로세스 전역으로 직렬화하는 락.
         # MLX는 같은 모델 인스턴스에 대해 복수 태스크가 동시에 generate() 호출 시
-        # Metal 커맨드 버퍼가 꼬여 SIGABRT 로 죽는다. 배치 백필·UI 연타 어느 경로든
-        # run_llm_steps() 로 들어오면 한 번에 하나만 실행되도록 이 락으로 보호한다.
+        # Metal 커맨드 버퍼가 꼬여 SIGABRT 로 죽는다. 아래 모든 경로가 이 락을 공유해
+        # MLX 호출이 항상 한 번에 하나만 실행되도록 보장한다:
+        #   - run_llm_steps(): 온디맨드 /summarize, /summarize-batch, 배치 백필 스크립트
+        #   - run() 내부의 CORRECT/SUMMARIZE 단계: 자동 파이프라인(JobProcessor)
+        # JobProcessor._run_loop 자체가 순차(single consumer)라 같은 프로세서가
+        # 자기 자신과 경쟁할 일은 없지만, 자동 파이프라인 진행 중에 사용자가
+        # 다른 회의 /summarize 를 호출하는 혼합 시나리오에서 락이 결정적이다.
         self._llm_lock = asyncio.Lock()
 
         logger.info(
@@ -1217,18 +1222,23 @@ class PipelineManager:
 
                     elif step == PipelineStep.CORRECT:
                         assert merged_result is not None
-                        corrected_result = await self._run_step_correct(
-                            merged_result,
-                            checkpoint_path,
-                        )
+                        # 이슈 H: pipeline.run() 내 LLM 단계도 run_llm_steps() 와
+                        # 동일 락으로 보호해야 외부 /summarize 요청과 동시 실행 시
+                        # MLX Metal 커맨드 버퍼 충돌을 막을 수 있다.
+                        async with self._llm_lock:
+                            corrected_result = await self._run_step_correct(
+                                merged_result,
+                                checkpoint_path,
+                            )
 
                     elif step == PipelineStep.SUMMARIZE:
                         assert corrected_result is not None
-                        _summary_result = await self._run_step_summarize(
-                            corrected_result,
-                            checkpoint_path,
-                            output_dir,
-                        )
+                        async with self._llm_lock:
+                            _summary_result = await self._run_step_summarize(
+                                corrected_result,
+                                checkpoint_path,
+                                output_dir,
+                            )
 
                     success = True
                     last_error = None

@@ -3684,6 +3684,81 @@ class TestLlmLockSerialization:
         )
         assert all(r.status == "completed" for r in results)
 
+    @pytest.mark.asyncio
+    async def test_run_내_LLM_단계와_run_llm_steps_동시_호출_직렬화(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """자동 파이프라인(run) 의 CORRECT 단계와 수동 run_llm_steps 가 겹쳐도 MLX 호출이 직렬화되어야 한다.
+
+        가장 현실적 시나리오: JobProcessor 가 자동 파이프라인을 돌리는 중에
+        사용자가 다른 회의의 /summarize 를 눌러 run_llm_steps 를 트리거하면
+        두 경로가 모두 _run_step_correct / _run_step_summarize 를 호출한다.
+        _llm_lock 이 양쪽 경로에 적용되어야 MLX Metal 크래시가 차단된다.
+        """
+        import asyncio
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        # 카운터로 동시 실행 감지
+        mlx_active = {"value": 0, "peak": 0}
+
+        async def _fake_correct(*_args: object, **_kwargs: object) -> MagicMock:
+            mlx_active["value"] += 1
+            mlx_active["peak"] = max(mlx_active["peak"], mlx_active["value"])
+            try:
+                await asyncio.sleep(0.05)
+                return _make_mock_corrected()
+            finally:
+                mlx_active["value"] -= 1
+
+        # 수동 run_llm_steps 경로용 체크포인트 준비
+        manual_mid = "manual_summary"
+        manual_dir = tmp_path / "checkpoints" / manual_mid
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        PipelineState(
+            meeting_id=manual_mid,
+            audio_path="/tmp/m.m4a",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+            output_dir=str(tmp_path / "outputs" / manual_mid),
+        ).save(manual_dir / "pipeline_state.json")
+        (manual_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        # 자동 파이프라인의 CORRECT 단계 내부 호출 흉내 (경로 A)
+        async def _auto_pipeline_llm_call() -> None:
+            async with pipeline._llm_lock:
+                await _fake_correct()
+
+        # 수동 run_llm_steps 경로 (경로 B)
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(pipeline, "_run_step_correct", new=_fake_correct),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            results = await asyncio.gather(
+                _auto_pipeline_llm_call(),
+                pipeline.run_llm_steps(manual_mid),
+            )
+
+        # 두 경로가 같은 락을 공유하므로 peak=1 이어야 한다
+        assert mlx_active["peak"] == 1, (
+            f"혼합 경로 동시 호출 시 MLX 직렬화 실패 (peak={mlx_active['peak']}). "
+            "run() 내부 LLM 단계에도 _llm_lock 을 적용해야 한다."
+        )
+        assert results[1].status == "completed"
+
 
 class TestRebuildStateFromCheckpoints:
     """이슈 I: pipeline_state.json 유실 시 재구성 로직."""
