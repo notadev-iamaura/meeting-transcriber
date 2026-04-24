@@ -3207,15 +3207,19 @@ class TestRunLlmSteps:
             await pipeline.run_llm_steps(meeting_id)
 
     @pytest.mark.asyncio
-    async def test_run_llm_steps_상태파일_없으면_에러(
+    async def test_run_llm_steps_아무것도_없으면_에러(
         self,
         mock_config: MagicMock,
         mock_model_manager: MagicMock,
     ) -> None:
-        """상태 파일이 없으면 PipelineError가 발생하는지 확인한다."""
+        """state 파일과 merge 체크포인트 모두 없으면 PipelineError 가 발생한다.
+
+        (이슈 I 이후: merge 체크포인트가 있으면 state 를 자동 재구성하므로,
+         merge 까지 없어야 진짜 에러. 메시지는 merge 체크포인트 부재를 안내한다.)
+        """
         pipeline = PipelineManager(mock_config, mock_model_manager)
 
-        with pytest.raises(PipelineError, match="상태 파일"):
+        with pytest.raises(PipelineError, match="merge 체크포인트"):
             await pipeline.run_llm_steps("nonexistent_meeting")
 
 
@@ -3598,3 +3602,240 @@ class TestDegradedFlagLogicSeparation:
         mock_summarize.assert_not_called()
         assert "correct" in state.skipped_steps
         assert "summarize" in state.skipped_steps
+
+
+# === 이슈 H / I 회귀 테스트 ===
+
+
+class TestLlmLockSerialization:
+    """이슈 H: run_llm_steps 가 _llm_lock 으로 직렬화되는지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_동시_호출_순차_실행(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """두 회의에 대해 동시에 run_llm_steps 를 호출해도 내부에서 직렬화되어야 한다.
+
+        MLX Metal 커맨드 버퍼 충돌 방지를 위한 프로세스 전역 락이 동작하는지
+        검증한다. 두 번째 호출은 첫 번째가 완료될 때까지 대기해야 한다.
+        """
+        import asyncio
+
+        checkpoints_dir = tmp_path / "checkpoints"
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        # 두 회의 상태/체크포인트 파일 준비
+        for mid in ("llm_lock_A", "llm_lock_B"):
+            state_dir = checkpoints_dir / mid
+            state_dir.mkdir(parents=True, exist_ok=True)
+            PipelineState(
+                meeting_id=mid,
+                audio_path="/tmp/t.m4a",
+                status="completed",
+                completed_steps=["convert", "transcribe", "diarize", "merge"],
+                output_dir=str(tmp_path / "outputs" / mid),
+            ).save(state_dir / "pipeline_state.json")
+            (state_dir / "merge.json").write_text(
+                '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+            )
+
+        # 동시 실행 순서 추적용
+        active_count = {"value": 0, "peak": 0}
+
+        async def _slow_correct(*_args: object, **_kwargs: object) -> MagicMock:
+            active_count["value"] += 1
+            active_count["peak"] = max(active_count["peak"], active_count["value"])
+            try:
+                await asyncio.sleep(0.05)
+                return _make_mock_corrected()
+            finally:
+                active_count["value"] -= 1
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new=_slow_correct,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            # 두 건을 동시에 실행
+            results = await asyncio.gather(
+                pipeline.run_llm_steps("llm_lock_A"),
+                pipeline.run_llm_steps("llm_lock_B"),
+            )
+
+        # 핵심 검증: 동시에 2개가 실행되면 peak 가 2가 되지만, 락이 있으면 1 이어야 한다.
+        assert active_count["peak"] == 1, (
+            f"LLM 단계가 동시에 실행되었다 (peak={active_count['peak']}) — "
+            "_llm_lock 이 동작하지 않음"
+        )
+        assert all(r.status == "completed" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_run_내_LLM_단계와_run_llm_steps_동시_호출_직렬화(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """자동 파이프라인(run) 의 CORRECT 단계와 수동 run_llm_steps 가 겹쳐도 MLX 호출이 직렬화되어야 한다.
+
+        가장 현실적 시나리오: JobProcessor 가 자동 파이프라인을 돌리는 중에
+        사용자가 다른 회의의 /summarize 를 눌러 run_llm_steps 를 트리거하면
+        두 경로가 모두 _run_step_correct / _run_step_summarize 를 호출한다.
+        _llm_lock 이 양쪽 경로에 적용되어야 MLX Metal 크래시가 차단된다.
+        """
+        import asyncio
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        # 카운터로 동시 실행 감지
+        mlx_active = {"value": 0, "peak": 0}
+
+        async def _fake_correct(*_args: object, **_kwargs: object) -> MagicMock:
+            mlx_active["value"] += 1
+            mlx_active["peak"] = max(mlx_active["peak"], mlx_active["value"])
+            try:
+                await asyncio.sleep(0.05)
+                return _make_mock_corrected()
+            finally:
+                mlx_active["value"] -= 1
+
+        # 수동 run_llm_steps 경로용 체크포인트 준비
+        manual_mid = "manual_summary"
+        manual_dir = tmp_path / "checkpoints" / manual_mid
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        PipelineState(
+            meeting_id=manual_mid,
+            audio_path="/tmp/m.m4a",
+            completed_steps=["convert", "transcribe", "diarize", "merge"],
+            output_dir=str(tmp_path / "outputs" / manual_mid),
+        ).save(manual_dir / "pipeline_state.json")
+        (manual_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        # 자동 파이프라인의 CORRECT 단계 내부 호출 흉내 (경로 A)
+        async def _auto_pipeline_llm_call() -> None:
+            async with pipeline._llm_lock:
+                await _fake_correct()
+
+        # 수동 run_llm_steps 경로 (경로 B)
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(pipeline, "_run_step_correct", new=_fake_correct),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            results = await asyncio.gather(
+                _auto_pipeline_llm_call(),
+                pipeline.run_llm_steps(manual_mid),
+            )
+
+        # 두 경로가 같은 락을 공유하므로 peak=1 이어야 한다
+        assert mlx_active["peak"] == 1, (
+            f"혼합 경로 동시 호출 시 MLX 직렬화 실패 (peak={mlx_active['peak']}). "
+            "run() 내부 LLM 단계에도 _llm_lock 을 적용해야 한다."
+        )
+        assert results[1].status == "completed"
+
+
+class TestRebuildStateFromCheckpoints:
+    """이슈 I: pipeline_state.json 유실 시 재구성 로직."""
+
+    def test_merge_체크포인트만_있을_때_재구성(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """merge 체크포인트가 있으면 state 를 재구성하고 completed_steps 에 merge 가 포함된다."""
+        meeting_id = "legacy_001"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        # merge 체크포인트만 존재, state 파일은 없음
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+        (state_dir / "transcribe.json").write_text("{}", encoding="utf-8")
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        state = pipeline._rebuild_state_from_checkpoints(meeting_id)
+
+        # state 파일이 생성되었고, merge/transcribe 가 completed_steps 에 포함
+        assert (state_dir / "pipeline_state.json").exists()
+        assert "merge" in state.completed_steps
+        assert "transcribe" in state.completed_steps
+        assert state.meeting_id == meeting_id
+
+    def test_체크포인트_디렉토리_부재_시_예외(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """체크포인트 디렉토리조차 없으면 PipelineError 를 발생시킨다."""
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        with pytest.raises(PipelineError, match="체크포인트 디렉토리"):
+            pipeline._rebuild_state_from_checkpoints("never_existed")
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_state_유실_자동_복구(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """run_llm_steps 가 state 파일 유실에도 merge 체크포인트로 자동 복구 후 실행된다."""
+        meeting_id = "legacy_002"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
+        )
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+        ):
+            state = await pipeline.run_llm_steps(meeting_id)
+
+        assert state.status == "completed"
+        assert (state_dir / "pipeline_state.json").exists()

@@ -1637,7 +1637,11 @@ class TestSummarizeMeetingEndpoint:
         assert "요약" in data["message"]
 
     def test_summarize_meeting_존재하지_않는_회의_404(self, tmp_path: Path) -> None:
-        """상태 파일이 없는 meeting_id로 요약 요청 시 404를 반환한다."""
+        """상태 파일과 merge 체크포인트가 모두 없는 meeting_id 는 404 를 반환한다.
+
+        (이슈 I 이후: merge 체크포인트가 있으면 state 자동 재구성하므로,
+         404 를 받으려면 merge 도 없어야 한다.)
+        """
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
@@ -1646,6 +1650,7 @@ class TestSummarizeMeetingEndpoint:
                 tmp_path,
                 "nonexistent",
                 create_state=False,
+                create_merge_cp=False,
             )
             response = client.post("/api/meetings/nonexistent/summarize")
 
@@ -1690,3 +1695,123 @@ class TestSummarizeMeetingEndpoint:
         assert response.status_code == 200
         # run_llm_steps가 호출되었는지 확인
         mock_pipeline.run_llm_steps.assert_called_once_with("meeting_003")
+
+    def test_summarize_meeting_state_유실_자동_재구성(self, tmp_path: Path) -> None:
+        """이슈 I: state 파일이 없고 merge 체크포인트만 있을 때 자동 재구성 후 요약 시작."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(
+                app,
+                tmp_path,
+                "meeting_legacy",
+                create_state=False,
+                create_merge_cp=True,
+            )
+            mock_pipeline._rebuild_state_from_checkpoints = MagicMock()
+            response = client.post("/api/meetings/meeting_legacy/summarize")
+
+        # 404 가 아닌 200 을 받아야 한다 — state 재구성 경로
+        assert response.status_code == 200
+        mock_pipeline._rebuild_state_from_checkpoints.assert_called_once_with("meeting_legacy")
+        mock_pipeline.run_llm_steps.assert_called_once_with("meeting_legacy")
+
+    def test_summarize_meeting_state_merge_모두_없음_404(self, tmp_path: Path) -> None:
+        """이슈 I: state와 merge가 모두 없으면 여전히 404."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(
+                app,
+                tmp_path,
+                "meeting_ghost",
+                create_state=False,
+                create_merge_cp=False,
+            )
+            mock_pipeline._rebuild_state_from_checkpoints = MagicMock()
+            response = client.post("/api/meetings/meeting_ghost/summarize")
+
+        assert response.status_code == 404
+        # 재구성은 호출되지 않아야 한다
+        mock_pipeline._rebuild_state_from_checkpoints.assert_not_called()
+
+
+# === TestTranscribeMeetingEndpoint (이슈 J) ===
+
+
+class TestTranscribeMeetingEndpoint:
+    """POST /api/meetings/{meeting_id}/transcribe 엔드포인트 테스트 (이슈 J)."""
+
+    def test_transcribe_failed_상태_force_false_409(self, tmp_path: Path) -> None:
+        """failed 상태에서 force=false 면 409 + 힌트 메시지를 반환한다."""
+        app = _make_test_app(tmp_path)
+        mock_job = MockJob(1, "meeting_fail", "/audio/fail.m4a", "failed")
+
+        with TestClient(app) as client:
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            response = client.post("/api/meetings/meeting_fail/transcribe")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "failed" in detail
+        assert "force=true" in detail  # 힌트 포함
+
+    def test_transcribe_failed_상태_force_true_재시도(self, tmp_path: Path) -> None:
+        """failed 상태에서 force=true 이면 recorded 로 되돌린 뒤 queued 로 전이한다."""
+        app = _make_test_app(tmp_path)
+
+        failed_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "failed")
+        recorded_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "recorded")
+        queued_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "queued")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock(return_value=recorded_job)
+            queue.update_status = MagicMock(return_value=queued_job)
+
+            response = client.post("/api/meetings/meeting_retry/transcribe?force=true")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "queued"
+        # force_set_status 가 failed → recorded 로 호출되었는지 확인
+        queue.force_set_status.assert_called_once()
+        queue.update_status.assert_called_once()
+
+    def test_transcribe_recorded_상태_정상(self, tmp_path: Path) -> None:
+        """recorded 상태에서는 force 여부와 무관하게 정상 전이한다."""
+        app = _make_test_app(tmp_path)
+
+        recorded_job = MockJob(1, "meeting_ok", "/audio/ok.m4a", "recorded")
+        queued_job = MockJob(1, "meeting_ok", "/audio/ok.m4a", "queued")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.force_set_status = MagicMock()
+            queue.update_status = MagicMock(return_value=queued_job)
+
+            response = client.post("/api/meetings/meeting_ok/transcribe")
+
+        assert response.status_code == 200
+        # recorded 상태에서는 force_set_status 를 호출하지 않아야 한다
+        queue.force_set_status.assert_not_called()
+
+    def test_transcribe_completed_상태_force_true_여도_409(self, tmp_path: Path) -> None:
+        """completed 등 다른 상태에서는 force=true 여도 force_set_status 를 타지 않아 409."""
+        app = _make_test_app(tmp_path)
+        mock_job = MockJob(1, "meeting_done", "/audio/done.m4a", "completed")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            queue.force_set_status = MagicMock()
+
+            response = client.post("/api/meetings/meeting_done/transcribe?force=true")
+
+        assert response.status_code == 409
+        # force=true 라도 failed 가 아니므로 force_set_status 는 호출되지 않음
+        queue.force_set_status.assert_not_called()
