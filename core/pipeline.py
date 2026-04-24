@@ -533,6 +533,61 @@ class PipelineManager:
         """
         return self._checkpoints_dir / meeting_id / "pipeline_state.json"
 
+    async def _acquire_llm_lock_with_timeout(self) -> None:
+        """_llm_lock 을 타임아웃과 함께 획득한다.
+
+        선행 LLM 작업이 비정상적으로 장기화되거나 데드락이 발생해도
+        무한 대기하지 않도록 config.pipeline.llm_lock_acquire_timeout_seconds
+        내에서 획득을 시도한다. 실패 시 PipelineError.
+
+        Raises:
+            PipelineError: 타임아웃 내 획득 실패 시
+        """
+        timeout = self._config.pipeline.llm_lock_acquire_timeout_seconds
+        try:
+            await asyncio.wait_for(self._llm_lock.acquire(), timeout=timeout)
+        except TimeoutError as e:
+            raise PipelineError(
+                f"LLM 락 획득 타임아웃 ({timeout}s). "
+                "선행 LLM 작업이 비정상 장기화되었을 수 있습니다."
+            ) from e
+
+    async def _run_llm_step_with_timeout(
+        self,
+        step_name: str,
+        coro_factory: Callable[[], Awaitable[Any]],
+        timeout_seconds: int,
+    ) -> Any:
+        """LLM 단계를 _llm_lock + 타임아웃 조합으로 실행한다.
+
+        1. _acquire_llm_lock_with_timeout() 로 락 획득 (하드 타임아웃)
+        2. 락 보유 상태에서 coro_factory() 호출 → asyncio.wait_for 로 감싸
+           단계 자체의 무한 대기(모델 환각 폭주·MLX hang)도 차단
+        3. 타임아웃 시 PipelineError 발생, finally 블록에서 락 해제
+
+        Args:
+            step_name: 로깅용 단계명 (correct/summarize)
+            coro_factory: 실제 LLM 작업을 만드는 함수 (인자 없음)
+            timeout_seconds: 단계 실행 하드 타임아웃
+
+        Returns:
+            coro_factory() 의 결과
+
+        Raises:
+            PipelineError: 락 획득 실패 또는 단계 타임아웃 시
+        """
+        await self._acquire_llm_lock_with_timeout()
+        try:
+            try:
+                return await asyncio.wait_for(coro_factory(), timeout=timeout_seconds)
+            except TimeoutError as e:
+                raise PipelineError(
+                    f"{step_name} 단계 타임아웃 ({timeout_seconds}s). "
+                    "LLM 모델이 비정상적으로 오래 실행되었습니다."
+                ) from e
+        finally:
+            self._llm_lock.release()
+
     def _rebuild_state_from_checkpoints(self, meeting_id: str) -> PipelineState:
         """pipeline_state.json 이 유실되었을 때 기존 체크포인트로 상태를 재구성한다.
 
@@ -1219,23 +1274,26 @@ class PipelineManager:
 
                     elif step == PipelineStep.CORRECT:
                         assert merged_result is not None
-                        # 이슈 H: pipeline.run() 내 LLM 단계도 run_llm_steps() 와
-                        # 동일 락으로 보호해야 외부 /summarize 요청과 동시 실행 시
-                        # MLX Metal 커맨드 버퍼 충돌을 막을 수 있다.
-                        async with self._llm_lock:
-                            corrected_result = await self._run_step_correct(
-                                merged_result,
-                                checkpoint_path,
-                            )
+                        # 이슈 H + 안정성: _llm_lock (동시 MLX 차단) + 하드 타임아웃
+                        # (모델 환각 폭주/hang 차단) 을 헬퍼에서 한꺼번에 적용한다.
+                        # lambda 는 기본 인자로 루프 변수를 즉시 바인딩한다 (B023 회피).
+                        corrected_result = await self._run_llm_step_with_timeout(
+                            "correct",
+                            lambda m=merged_result, cp=checkpoint_path: self._run_step_correct(
+                                m, cp
+                            ),
+                            self._config.pipeline.correct_timeout_seconds,
+                        )
 
                     elif step == PipelineStep.SUMMARIZE:
                         assert corrected_result is not None
-                        async with self._llm_lock:
-                            _summary_result = await self._run_step_summarize(
-                                corrected_result,
-                                checkpoint_path,
-                                output_dir,
-                            )
+                        _summary_result = await self._run_llm_step_with_timeout(
+                            "summarize",
+                            lambda c=corrected_result, cp=checkpoint_path, od=output_dir: (
+                                self._run_step_summarize(c, cp, od)
+                            ),
+                            self._config.pipeline.summarize_timeout_seconds,
+                        )
 
                     success = True
                     last_error = None
@@ -1471,6 +1529,8 @@ class PipelineManager:
         이슈 H 대응: MLX Metal 커맨드 버퍼 충돌을 방지하기 위해 프로세스 전역
         _llm_lock 으로 동시 실행을 직렬화한다. 다수 요청이 동시에 도달해도
         내부에서 하나씩 순차 처리되며, 대기 중인 요청은 락을 기다린다.
+        락 획득 자체에도 하드 타임아웃이 걸려 선행 작업이 비정상 장기화될 때
+        무한 대기 대신 PipelineError 로 종료된다.
 
         Args:
             meeting_id: 회의 ID
@@ -1480,10 +1540,14 @@ class PipelineManager:
             업데이트된 PipelineState
 
         Raises:
-            PipelineError: 상태 파일 또는 merge 체크포인트 미존재 시
+            PipelineError: 상태 파일/merge 체크포인트 미존재, 락 획득 타임아웃,
+                          단계 실행 타임아웃 시
         """
-        async with self._llm_lock:
+        await self._acquire_llm_lock_with_timeout()
+        try:
             return await self._run_llm_steps_inner(meeting_id, on_step_start)
+        finally:
+            self._llm_lock.release()
 
     async def _run_llm_steps_inner(
         self,
@@ -1541,10 +1605,17 @@ class PipelineManager:
             state.current_step = PipelineStep.CORRECT.value
             state.save(state_path)
 
-            corrected_result = await self._run_step_correct(
-                merged_result,
-                correct_cp,
-            )
+            # 안정성: 단계 자체에도 하드 타임아웃 (모델 환각 폭주/hang 차단).
+            # 락은 상위에서 이미 보유 중이므로 재획득하지 않는다.
+            try:
+                corrected_result = await asyncio.wait_for(
+                    self._run_step_correct(merged_result, correct_cp),
+                    timeout=self._config.pipeline.correct_timeout_seconds,
+                )
+            except TimeoutError as e:
+                raise PipelineError(
+                    f"correct 단계 타임아웃 ({self._config.pipeline.correct_timeout_seconds}s)"
+                ) from e
 
         # 5. summarize 단계 실행
         summarize_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
@@ -1558,11 +1629,19 @@ class PipelineManager:
             state.current_step = PipelineStep.SUMMARIZE.value
             state.save(state_path)
 
-            await self._run_step_summarize(
-                corrected_result,
-                summarize_cp,
-                output_dir,
-            )
+            try:
+                await asyncio.wait_for(
+                    self._run_step_summarize(
+                        corrected_result,
+                        summarize_cp,
+                        output_dir,
+                    ),
+                    timeout=self._config.pipeline.summarize_timeout_seconds,
+                )
+            except TimeoutError as e:
+                raise PipelineError(
+                    f"summarize 단계 타임아웃 ({self._config.pipeline.summarize_timeout_seconds}s)"
+                ) from e
         else:
             logger.info(f"summarize 체크포인트 복원: {summarize_cp}")
 
