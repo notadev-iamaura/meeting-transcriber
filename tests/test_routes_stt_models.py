@@ -98,8 +98,10 @@ def _make_download_job(
 class TestGetSTTModels:
     """GET /api/stt-models 엔드포인트 테스트."""
 
-    def test_GET_stt_models_3개_반환(self, tmp_path: Path) -> None:
-        """3개 모델 스펙과 active_model_id 필드가 반환되는지 확인한다."""
+    def test_GET_stt_models_등록된_수만큼_반환(self, tmp_path: Path) -> None:
+        """등록된 모델 수만큼 반환하고 active_model_id 필드가 있는지 확인한다."""
+        from core.stt_model_registry import STT_MODELS
+
         app = _make_test_app(tmp_path)
         with TestClient(app) as client:
             _install_fake_downloader(app)
@@ -107,7 +109,7 @@ class TestGetSTTModels:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["models"]) == 3
+        assert len(data["models"]) == len(STT_MODELS)
         assert "active_model_id" in data
         assert "active_model_path" in data
 

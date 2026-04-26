@@ -138,6 +138,8 @@ class ResourceGuard:
     ) -> None:
         self._min_disk_gb = config.pipeline.min_disk_free_gb
         self._min_memory_gb = config.pipeline.min_memory_free_gb
+        # LLM 단계 사전 경고용 권장 메모리 (skip 임계치보다 큰 값)
+        self._llm_recommended_gb = getattr(config.pipeline, "llm_recommended_memory_gb", 6.5)
         self._base_dir = config.paths.resolved_base_dir
         self._on_warning = on_warning
 
@@ -234,6 +236,42 @@ class ResourceGuard:
             LLM 사용 단계이면 True
         """
         return step_name in _LLM_STEPS
+
+    def check_llm_capacity(self) -> tuple[bool, float, str | None]:
+        """LLM 단계 진입 전 가용 메모리를 점검하고 사전 경고를 결정한다.
+
+        세 가지 결과:
+            - 충분: 가용 ≥ llm_recommended_memory_gb → (True, free_gb, None)
+            - 빠듯: min_memory < 가용 < llm_recommended → (True, free_gb, 경고메시지)
+              (실행은 진행, 사용자에게 알림만)
+            - 부족: 가용 ≤ min_memory_free_gb → (False, free_gb, 차단메시지)
+              (다음 단계의 mem_ok 체크가 실제 skip 결정을 내림)
+
+        Returns:
+            (실행 가능 여부, 가용 메모리 GB, 경고 메시지) 튜플.
+            메시지는 None 이면 경고 없음.
+        """
+        ok, free_gb = self.check_memory()
+        if not ok:
+            # 하드 차단은 기존 check_memory 가 처리 — 여기는 보고만
+            msg = f"LLM 단계 메모리 부족: 가용 {free_gb:.1f}GB < 필수 {self._min_memory_gb:.1f}GB"
+            if self._on_warning:
+                self._on_warning(msg, "llm_memory_blocked")
+            return (False, free_gb, msg)
+
+        if free_gb < self._llm_recommended_gb:
+            # 빠듯: 진행은 하되 사용자에게 사전 알림
+            msg = (
+                f"LLM 단계 가용 메모리 부족 위험: 가용 {free_gb:.1f}GB < "
+                f"권장 {self._llm_recommended_gb:.1f}GB. "
+                "다른 무거운 앱(브라우저·IDE 등)을 종료하면 안정성이 향상됩니다."
+            )
+            logger.warning(msg)
+            if self._on_warning:
+                self._on_warning(msg, "llm_memory_low_warning")
+            return (True, free_gb, msg)
+
+        return (True, free_gb, None)
 
 
 # === 파이프라인 단계 정의 ===
@@ -1174,6 +1212,10 @@ class PipelineManager:
                 # 단계 직전 실시간 메모리 재확인 — state.degraded(초기 진단값)와 무관하게 독립 판단.
                 # state.degraded=True 이더라도 실시간으로 메모리가 회복되었으면 LLM 단계를 실행한다.
                 # 반대로 초기에 OK였어도 실시간 mem_ok=False면 스킵한다.
+                # check_llm_capacity 가 사전 경고(빠듯) + 차단(부족) 둘 다 처리.
+                _, _, warn_msg = self._resource_guard.check_llm_capacity()
+                if warn_msg and warn_msg not in state.warnings:
+                    state.warnings.append(warn_msg)
                 mem_ok, mem_free = self._resource_guard.check_memory()
                 if _skip_llm or not mem_ok:
                     # 스킵 사유에 따른 메시지 구분

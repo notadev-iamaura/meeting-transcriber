@@ -47,6 +47,8 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.correct_timeout_seconds = 1800
     config.pipeline.summarize_timeout_seconds = 600
     config.pipeline.llm_lock_acquire_timeout_seconds = 3600
+    # LLM 사전 경고 임계치 (Phase 4)
+    config.pipeline.llm_recommended_memory_gb = 6.5
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
     config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
     config.paths.resolved_base_dir = tmp_path
@@ -224,6 +226,64 @@ class TestResourceGuardMemory:
         ok, available = guard.check_memory()
         assert ok is True
         assert available == 0.0
+
+
+class TestLlmCapacityWarning:
+    """check_llm_capacity() — LLM 단계 사전 메모리 경고 테스트."""
+
+    @patch("core.pipeline.psutil.virtual_memory")
+    def test_llm_capacity_충분(
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+    ) -> None:
+        """가용 메모리가 권장치 이상이면 경고 없음."""
+        mock_config.pipeline.llm_recommended_memory_gb = 6.5
+        mock_mem.return_value = MagicMock(available=10 * 1024**3)
+        guard = ResourceGuard(mock_config)
+        ok, free, msg = guard.check_llm_capacity()
+        assert ok is True
+        assert free == 10.0
+        assert msg is None
+
+    @patch("core.pipeline.psutil.virtual_memory")
+    def test_llm_capacity_빠듯_경고(
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+    ) -> None:
+        """가용이 권장치 미만, 필수치 이상이면 진행 + 경고."""
+        mock_config.pipeline.llm_recommended_memory_gb = 6.5
+        mock_config.pipeline.min_memory_free_gb = 1.5
+        mock_mem.return_value = MagicMock(available=4 * 1024**3)
+        warnings: list[tuple[str, str]] = []
+        guard = ResourceGuard(mock_config, on_warning=lambda m, k: warnings.append((m, k)))
+        ok, free, msg = guard.check_llm_capacity()
+        assert ok is True
+        assert free == 4.0
+        assert msg is not None
+        assert "권장" in msg
+        # 경고 콜백도 호출됨
+        assert any(k == "llm_memory_low_warning" for _, k in warnings)
+
+    @patch("core.pipeline.psutil.virtual_memory")
+    def test_llm_capacity_부족_차단(
+        self,
+        mock_mem: MagicMock,
+        mock_config: MagicMock,
+    ) -> None:
+        """가용이 필수치 미만이면 차단 메시지 반환."""
+        mock_config.pipeline.llm_recommended_memory_gb = 6.5
+        mock_config.pipeline.min_memory_free_gb = 1.5
+        mock_mem.return_value = MagicMock(available=1 * 1024**3)
+        warnings: list[tuple[str, str]] = []
+        guard = ResourceGuard(mock_config, on_warning=lambda m, k: warnings.append((m, k)))
+        ok, free, msg = guard.check_llm_capacity()
+        assert ok is False
+        assert free == 1.0
+        assert msg is not None
+        assert "부족" in msg
+        assert any(k == "llm_memory_blocked" for _, k in warnings)
 
 
 class TestResourceGuardCheckAll:

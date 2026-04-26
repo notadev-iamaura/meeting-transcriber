@@ -53,6 +53,7 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.pipeline.correct_timeout_seconds = 1800
     config.pipeline.summarize_timeout_seconds = 600
     config.pipeline.llm_lock_acquire_timeout_seconds = 3600
+    config.pipeline.llm_recommended_memory_gb = 6.5
 
     # paths 설정
     config.paths.resolved_outputs_dir = tmp_path / "outputs"

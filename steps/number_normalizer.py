@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # 한글 숫자 매핑 테이블
 # ============================================================
 
-# 기본 숫자 (일~구)
+# 기본 숫자 (일~구) — 한자식
 _DIGITS: dict[str, int] = {
     "일": 1,
     "이": 2,
@@ -36,6 +36,37 @@ _DIGITS: dict[str, int] = {
     "칠": 7,
     "팔": 8,
     "구": 9,
+}
+
+# 고유어(순한국어) 숫자. STT 출력 빈도 높음.
+# 한정사 형태("한 명", "두 개", "세 시간", "네 분")는 동음이의 위험이 있으므로
+# 반드시 단위어가 동반될 때만 변환되도록 _UNIT_PATTERN 에 결합한다.
+_NATIVE_DIGITS: dict[str, int] = {
+    # 1~10
+    "하나": 1,
+    "한": 1,  # 한정사: 한 명, 한 개
+    "둘": 2,
+    "두": 2,  # 한정사: 두 개, 두 명
+    "셋": 3,
+    "세": 3,  # 한정사: 세 개
+    "넷": 4,
+    "네": 4,  # 한정사: 네 시간 — 단, "네"는 응답 부사("네")와 충돌 가능 → 단위어 동반 필수
+    "다섯": 5,
+    "여섯": 6,
+    "일곱": 7,
+    "여덟": 8,
+    "아홉": 9,
+    "열": 10,
+    # 10의 자리 (스물~아흔)
+    "스물": 20,
+    "스무": 20,  # 한정사: 스무 명
+    "서른": 30,
+    "마흔": 40,
+    "쉰": 50,
+    "예순": 60,
+    "일흔": 70,
+    "여든": 80,
+    "아흔": 90,
 }
 
 # 자리수 단위 (십, 백, 천)
@@ -508,8 +539,8 @@ def _build_unit_pattern(units: set[str]) -> re.Pattern:
 
     # 단위어 뒤에 올 수 있는 허용 조사/어미 패턴
     # 이 패턴이 매칭되면 단위어 뒤에 한글이 와도 허용한다
-    # 예: "일까지", "명이", "원을", "퍼센트도"
-    allowed_suffix = r"(?:까지|에서|에|도|이|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
+    # 예: "일까지", "명이", "원을", "퍼센트도", "개가"
+    allowed_suffix = r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
 
     # 단위어 뒤 경계 조건:
     # - 문자열 끝 or 공백 or 숫자 or 구두점: 무조건 허용
@@ -531,6 +562,53 @@ def _build_unit_pattern(units: set[str]) -> re.Pattern:
 # 레벨별 패턴 사전 컴파일
 _UNIT_PATTERN_L1 = _build_unit_pattern(_SAFE_UNITS_L1)
 _UNIT_PATTERN_L2 = _build_unit_pattern(_SAFE_UNITS_L2)
+
+
+def _build_native_pattern(units: set[str]) -> re.Pattern:
+    """고유어 숫자 + 단위어 패턴을 생성한다.
+
+    한자식 숫자(_DIGITS)와 별도로 처리한다. 길이 내림차순 매칭으로
+    "스물" 이 "스" 보다 먼저 잡히게 한다.
+
+    Args:
+        units: 허용 단위어 집합
+
+    Returns:
+        컴파일된 정규식 패턴. 그룹(1)=고유어, 그룹(2)=단위어.
+    """
+    sorted_natives = sorted(_NATIVE_DIGITS.keys(), key=len, reverse=True)
+    natives_pattern = "|".join(re.escape(n) for n in sorted_natives)
+
+    sorted_units = sorted(units, key=len, reverse=True)
+    units_pattern = "|".join(re.escape(u) for u in sorted_units)
+
+    allowed_suffix = r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
+    unit_boundary = rf"(?={allowed_suffix}|[^가-힣]|\s|$)"
+
+    # 고유어 앞에는 한글이 없어야 함 (예: "친한 명" 의 "한" 은 변환 안 됨)
+    pattern = rf"(?<![가-힣])({natives_pattern})\s*({units_pattern}){unit_boundary}"
+    return re.compile(pattern)
+
+
+_NATIVE_PATTERN_L1 = _build_native_pattern(_SAFE_UNITS_L1)
+_NATIVE_PATTERN_L2 = _build_native_pattern(_SAFE_UNITS_L2)
+
+
+def _replace_native_numbers(text: str, pattern: re.Pattern) -> str:
+    """고유어 숫자 + 단위어를 아라비아 숫자로 변환.
+
+    예: "여덟 개" → "8 개", "두 명" → "2 명", "스무 살" → "20 살"
+    """
+
+    def _sub(m: re.Match) -> str:
+        native = m.group(1)
+        unit = m.group(2)
+        value = _NATIVE_DIGITS.get(native)
+        if value is None:
+            return m.group(0)
+        return f"{value} {unit}"
+
+    return pattern.sub(_sub, text)
 
 
 def normalize_numbers(text: str, level: int = 1) -> str:
@@ -570,9 +648,15 @@ def normalize_numbers(text: str, level: int = 1) -> str:
         # 이유: "3십"이 한글 패턴에 의해 "십"만 변환되면 "310"이 됨
         protected = _normalize_mixed(protected)
 
-        # 3단계: 한글숫자 + 단위어 패턴 변환
+        # 3단계: 한자식 한글숫자 + 단위어 패턴 변환 (예: "삼십 퍼센트" → "30 퍼센트")
         unit_pattern = _UNIT_PATTERN_L2 if level >= 2 else _UNIT_PATTERN_L1
         protected = _replace_korean_numbers(protected, unit_pattern)
+
+        # 3.5단계: 고유어 숫자 + 단위어 변환 (예: "여덟 개" → "8 개", "두 명" → "2 명")
+        # 한자식 변환 후에 적용: "삼십" 같은 단어가 먼저 변환된 뒤에 "여덟" 등을 처리해
+        # 충돌을 방지한다.
+        native_pattern = _NATIVE_PATTERN_L2 if level >= 2 else _NATIVE_PATTERN_L1
+        protected = _replace_native_numbers(protected, native_pattern)
 
         # 4단계: 고유명사 복원
         result = _restore_brands(protected, brands)

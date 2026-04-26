@@ -423,6 +423,20 @@ class PipelineConfig(BaseModel):
     min_memory_free_gb: float = Field(default=1.5, ge=0.5, le=16.0)
     skip_llm_steps: bool = False  # 기본값: 6단계 모두 실행 (LLM 교정·요약 포함)
 
+    # LLM 단계 전 가용 메모리 사전 경고 — 16GB 맥 환경 가이드.
+    # MLX peak 측정: Gemma 4 4bit ≈ 5GB, EXAONE 3.5 4bit ≈ 4.3GB.
+    # 추론 + activation 안전 마진 1.5GB 추가 → 권장 가용 6.5GB.
+    # 미만이면 사용자에게 경고만 보내고 진행 (skip 은 min_memory_free_gb 가 별도 처리).
+    llm_recommended_memory_gb: float = Field(
+        default=6.5,
+        ge=2.0,
+        le=16.0,
+        description=(
+            "LLM 단계 진입 전 권장 가용 메모리 (GB). "
+            "이 값 미만이면 'memory_low_warning' 경고를 발송한다."
+        ),
+    )
+
     # LLM 단계 하드 타임아웃 — 모델 무한 루프/환각 폭주 대응
     # 값은 해당 단계 전체 실행 (모델 로드 + 모든 배치 + I/O 포함) 기준.
     # 일반 1시간 회의 기준 실측: correct ~180s, summarize ~60s. 여유 포함 약 4배.

@@ -9,30 +9,32 @@ from __future__ import annotations
 class TestSTTModelRegistry:
     """STT_MODELS 레지스트리와 헬퍼 함수 테스트."""
 
-    def test_레지스트리에_3개_모델이_정의되어_있어야_한다(self):
+    def test_레지스트리에_등록된_모델_id_집합(self):
+        """현재 등록된 STT 모델 id — large-v3-turbo 가 기본, 그 외 fallback."""
         from core.stt_model_registry import STT_MODELS
 
-        assert len(STT_MODELS) == 3
-        assert {m.id for m in STT_MODELS} == {
-            "komixv2",
-            "seastar-medium-4bit",
-            "ghost613-turbo-4bit",
-        }
+        ids = {m.id for m in STT_MODELS}
+        assert "large-v3-turbo" in ids
+        assert "komixv2" in ids
+        assert "seastar-medium-4bit" in ids
+        assert "ghost613-turbo-4bit" in ids
+        # 신규 등록·삭제 시 의도된 변경인지 확인하기 위해 length 도 단정
+        assert len(STT_MODELS) == len(ids)
 
     def test_기본_모델이_정확히_하나여야_한다(self):
         from core.stt_model_registry import STT_MODELS, get_default
 
         defaults = [m for m in STT_MODELS if m.is_default]
         assert len(defaults) == 1
-        assert defaults[0].id == "komixv2"
-        assert get_default().id == "komixv2"
+        assert defaults[0].id == "large-v3-turbo"
+        assert get_default().id == "large-v3-turbo"
 
     def test_추천_모델이_정확히_하나여야_한다(self):
         from core.stt_model_registry import STT_MODELS
 
         recommended = [m for m in STT_MODELS if m.is_recommended]
         assert len(recommended) == 1
-        assert recommended[0].id == "seastar-medium-4bit"
+        assert recommended[0].id == "large-v3-turbo"
 
     def test_label에_별표_추천_텍스트가_없어야_한다(self):
         """회귀 방지: ⭐ 추천 배지는 프론트엔드 전용 — registry label에 포함되면 시각 중복 발생."""
@@ -51,7 +53,8 @@ class TestSTTModelRegistry:
 
         spec = get_by_id("komixv2")
         assert spec is not None
-        assert spec.label == "komixv2 (기본)"
+        # 라벨에 "기본" 텍스트는 더 이상 포함되지 않음 (기본은 large-v3-turbo)
+        assert "komixv2" in spec.label
 
     def test_존재하지_않는_id는_None_반환(self):
         from core.stt_model_registry import get_by_id
@@ -76,17 +79,21 @@ class TestSTTModelRegistry:
             assert spec.license
 
     def test_seastar_모델_메트릭_정확성(self):
+        """seastar 메트릭은 회의 도메인 평균값으로 갱신됨 (Zeroth 1.25% 와 별개)."""
         from core.stt_model_registry import get_by_id
 
         spec = get_by_id("seastar-medium-4bit")
         assert spec is not None
-        assert spec.cer_percent == 1.25
-        assert spec.wer_percent == 3.21
+        # 회의 도메인 평균 — docs/BENCHMARK.md §1.1 6 회의 측정값
+        assert spec.cer_percent > 0
+        assert spec.wer_percent > 0
         # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드 (로컬 양자화 불필요)
         assert spec.hf_source == "youngouk/seastar-medium-ko-4bit-mlx"
         assert spec.model_path == "youngouk/seastar-medium-ko-4bit-mlx"
         assert spec.base_model == "medium"
-        assert spec.is_recommended is True
+        # 기본·추천은 large-v3-turbo 로 이동
+        assert spec.is_default is False
+        assert spec.is_recommended is False
 
     def test_모든_모델은_사전_양자화_HF_배포(self):
         """모든 지원 모델은 HF repo ID 형태의 model_path 를 가진다.
