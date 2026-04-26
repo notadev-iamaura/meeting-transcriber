@@ -540,9 +540,7 @@ def _build_unit_pattern(units: set[str]) -> re.Pattern:
     # 단위어 뒤에 올 수 있는 허용 조사/어미 패턴
     # 이 패턴이 매칭되면 단위어 뒤에 한글이 와도 허용한다
     # 예: "일까지", "명이", "원을", "퍼센트도", "개가"
-    allowed_suffix = (
-        r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
-    )
+    allowed_suffix = r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
 
     # 단위어 뒤 경계 조건:
     # - 문자열 끝 or 공백 or 숫자 or 구두점: 무조건 허용
@@ -584,9 +582,7 @@ def _build_native_pattern(units: set[str]) -> re.Pattern:
     sorted_units = sorted(units, key=len, reverse=True)
     units_pattern = "|".join(re.escape(u) for u in sorted_units)
 
-    allowed_suffix = (
-        r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
-    )
+    allowed_suffix = r"(?:까지|에서|에|도|이|가|은|는|을|를|의|과|와|로|부터|만|씩|이나|이면)"
     unit_boundary = rf"(?={allowed_suffix}|[^가-힣]|\s|$)"
 
     # 고유어 앞에는 한글이 없어야 함 (예: "친한 명" 의 "한" 은 변환 안 됨)
@@ -603,6 +599,7 @@ def _replace_native_numbers(text: str, pattern: re.Pattern) -> str:
 
     예: "여덟 개" → "8 개", "두 명" → "2 명", "스무 살" → "20 살"
     """
+
     def _sub(m: re.Match) -> str:
         native = m.group(1)
         unit = m.group(2)
