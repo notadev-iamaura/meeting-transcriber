@@ -50,41 +50,66 @@ class STTModelSpec:
 
 # 지원 STT 모델 레지스트리.
 # 계획서 docs/plans/2026-04-07-stt-model-selector-plan.md 섹션 2.6 기준.
+# 2026-04-26 갱신: 6 회의 다중 파일 벤치마크 결과 large-v3-turbo 가
+# komixv2/seastar 대비 CER 평균 12%p 우수 → 기본값 변경.
 STT_MODELS: list[STTModelSpec] = [
     STTModelSpec(
+        id="large-v3-turbo",
+        label="Whisper large-v3-turbo (기본·권장)",
+        description=(
+            "OpenAI large-v3-turbo MLX 변환, fp16. multilingual 학습량 최대. "
+            "실측 회의 평균 CER 49.8% (komixv2 대비 -16%p)."
+        ),
+        # mlx-community 가 MLX 호환 fp16 가중치로 변환한 공식 turbo 모델.
+        hf_source="mlx-community/whisper-large-v3-turbo",
+        model_path="mlx-community/whisper-large-v3-turbo",
+        base_model="large-v3-turbo",
+        expected_size_mb=1540,
+        cer_percent=49.80,  # 회의 도메인 평균 (Zeroth 기준 별도)
+        wer_percent=61.92,
+        memory_gb=2.24,  # MLX peak 측정값
+        rtf=0.087,  # 회의 평균
+        license="MIT (OpenAI)",
+        is_default=True,
+        is_recommended=True,
+    ),
+    STTModelSpec(
         id="komixv2",
-        label="komixv2 (기본)",
-        description="Whisper Medium 한국어 fine-tune, fp16 (변환 불필요)",
+        label="komixv2 (medium 한국어 fine-tune)",
+        description="Whisper Medium 한국어 fine-tune, fp16 (변환 불필요). 회의 환경 CER 약 66%.",
         hf_source="youngouk/whisper-medium-komixv2-mlx",
         # mlx-whisper 가 HF repo ID 를 직접 해석한다.
         model_path="youngouk/whisper-medium-komixv2-mlx",
         base_model="medium",
         expected_size_mb=1500,
-        cer_percent=11.88,
-        wer_percent=33.26,
-        memory_gb=1.88,
-        rtf=0.071,
+        cer_percent=66.17,  # 회의 도메인 평균
+        wer_percent=80.10,
+        memory_gb=2.27,
+        rtf=0.087,
         license="Apache-2.0",
-        is_default=True,
+        is_default=False,
         is_recommended=False,
     ),
     STTModelSpec(
         id="seastar-medium-4bit",
-        label="seastar medium-ko-zeroth (4bit)",
-        description="Whisper Medium + Zeroth Korean fine-tune, 4bit 양자화 — 최고 정확도",
+        label="seastar medium-ko-zeroth (4bit, 경량)",
+        description=(
+            "Whisper Medium + Zeroth Korean fine-tune, 4bit 양자화. "
+            "Zeroth(읽기 음성) CER 1.25% — 회의 환경에선 환각 누적으로 평균 62%."
+        ),
         # 사전 양자화된 4bit 모델을 HF에서 직접 다운로드.
         # 원본 seastar105/whisper-medium-ko-zeroth 를 mlx-examples convert.py 로 양자화 후 재배포.
         hf_source="youngouk/seastar-medium-ko-4bit-mlx",
         model_path="youngouk/seastar-medium-ko-4bit-mlx",
         base_model="medium",
         expected_size_mb=420,
-        cer_percent=1.25,
-        wer_percent=3.21,
-        memory_gb=1.26,
+        cer_percent=62.04,  # 회의 도메인 평균 (Zeroth 기준 1.25% 와 별개)
+        wer_percent=79.26,
+        memory_gb=1.23,  # MLX peak 측정값
         rtf=0.055,
         license="Apache-2.0",
         is_default=False,
-        is_recommended=True,
+        is_recommended=False,
     ),
     STTModelSpec(
         id="ghost613-turbo-4bit",

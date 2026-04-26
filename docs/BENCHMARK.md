@@ -49,12 +49,46 @@
 
 | 영역 | 기본값 | 근거 (요약) |
 |------|--------|-----------|
-| STT 모델 | `youngouk/whisper-medium-komixv2-mlx` (fp16) | 환각 필터 후 순도 100%, 커버리지 85.1% |
-| VAD | OFF | 이 환경에서 ON 시 추론 3.1배 증가, 커버리지 -13.2%p |
+| STT 모델 | **`mlx-community/whisper-large-v3-turbo`** (fp16) | **6 회의 다중 파일 평균 CER 49.8% — komixv2 대비 -16%p (§1.1)** |
+| VAD | ON (silero) | 환각 누적 차단, full pipeline 권장 |
 | LLM 모델 | `mlx-community/gemma-4-e4b-it-4bit` | 정답지 유사도 92.9% vs EXAONE 47.5% (44 발화 기준) |
 | LLM temperature | 0.0 | MLX 4bit 환경에서 0.0~0.5 결과 동일 관찰 |
 | 교정 batch_size | 5 | 파싱 100%, 원문 변형 최소 |
 | 용어집 | 67개 | 오인식 교정률 18% → 76~100% |
+| LLM 권장 가용 메모리 | 6.5GB | Gemma 4 4bit 피크 5GB + 안전 마진 1.5GB |
+
+---
+
+## 1.1 STT 4-Experiment Multi-File Benchmark (2026-04-26)
+
+### 실험 설계
+
+- 데이터: 6 실제 Zoom 회의 (`testCase/`), 총 108분
+- 정답지: OpenAI gpt-4o-transcribe (검증 도구로만 사용, 운영 외부 API 호출 없음)
+- 평가: CER, WER, 용어집 hit율 (47개 회의 핵심 용어)
+- Harness: `/tmp/transcribe_lab/` (재현 스크립트 동일 위치)
+
+### 결과 매트릭스
+
+| 실험 | STT 모델 | LLM 보정 | CER 평균 | 용어집 hit율 |
+|---|---|---|---|---|
+| E001 | seastar-medium-4bit | 기본 | 62.04% | 13.51% |
+| E001b | komixv2 fp16 (이전 기본) | 기본 | 66.17% | 13.06% |
+| **E002** | **large-v3-turbo (현 기본)** | 기본 | **49.80%** ⭐ | 19.82% |
+| E003 | seastar-medium-4bit | 용어집 강화 | 65.14% | 22.07% |
+| **E004** | **large-v3-turbo + 용어집** | 강화 | 55.94% | **24.78%** ⭐ |
+
+### 핵심 발견
+
+1. **모델 교체 효과 압도적**: `komixv2 → large-v3-turbo` 만으로 CER **-16%p**
+   - 모든 6 파일에서 일관된 개선 (우연 아닌 모델 자체 우수성)
+2. **용어집 hit율은 trade-off**: LLM 보정 강화 시 CER 미세 악화하지만 핵심 용어 정확도 +56% (체감 품질 직결)
+3. **메모리 영향 미미**: large-v3-turbo MLX peak 2,237 MB ≈ komixv2 2,269 MB (오히려 -32 MB)
+
+### 권장 운영 조합
+
+- **CER 최저 우선**: large-v3-turbo + 기본 LLM 보정 (E002)
+- **사용자 체감 품질 우선**: large-v3-turbo + 용어집 강화 LLM 보정 (E004)
 
 ---
 

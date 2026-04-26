@@ -14,7 +14,7 @@ paths:
 
 # === STT 모델 설정 ===
 stt:
-  model_name: "youngouk/whisper-medium-komixv2-mlx"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §1). 속도 우선이면 seastar/ghost613 4bit 선택 가능
+  model_name: "mlx-community/whisper-large-v3-turbo"  # 6 회의 벤치마크 기반 (docs/BENCHMARK.md §1). komixv2 대비 CER -16%p
   language: "ko"  # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)

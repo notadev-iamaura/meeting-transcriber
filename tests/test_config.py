@@ -48,7 +48,7 @@ class TestConfigYamlParsing:
         config_path = Path(__file__).parent.parent / "config.yaml"
         config = load_config(config_path)
 
-        assert config.stt.model_name == "youngouk/whisper-medium-komixv2-mlx"
+        assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
         assert config.stt.language == "ko"
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "auto"
