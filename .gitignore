@@ -46,6 +46,9 @@ short_clip_comparison.json
 test_short_clip_comparison.py
 benchmark_*_results.json
 validate_settings_results.json
+# 옛 일회성 STT 측정 산출물 (요약은 docs/BENCHMARK.md 에 기록)
+whisper_*_results.json
+scripts/whisper_*_results.json
 
 # 내부 연구 메모 / 개인 배치 스크립트 (공개본은 docs/BENCHMARK.md)
 research.md
@@ -59,3 +62,11 @@ design_handoff_recap_rebrand/
 # Ralph 루프 (개발용)
 .ralph-logs/
 progress.md
+
+# 환경변수·로컬 설정
+.env
+.env.local
+
+# Claude Code 로컬 상태 (스케줄/세션 lock)
+.claude/scheduled_tasks.lock
+.claude/sessions/

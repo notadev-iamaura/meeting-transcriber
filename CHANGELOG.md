@@ -9,6 +9,44 @@
 
 ## [미출시 (Unreleased)]
 
+### 변경됨
+- **STT 기본 모델 교체** (PR #18, 2026-04-26): `youngouk/whisper-medium-komixv2-mlx`
+  → `mlx-community/whisper-large-v3-turbo`. 6 회의 다중 파일 벤치마크 결과
+  CER 평균 -16%p (66.17% → 49.80%). MLX 메모리 피크 거의 동일 (-32 MB).
+- `core/stt_model_registry.py` 등록 모델 3종 → 4종 확장 (large-v3-turbo 추가).
+  CER/WER/메모리 메타값을 회의 도메인 평균으로 갱신.
+
+### 추가됨
+- **LLM 단계 사전 메모리 경고** (PR #18): `ResourceGuard.check_llm_capacity()`
+  신설. 가용 메모리 < `pipeline.llm_recommended_memory_gb` (기본 6.5GB) 일 때
+  `llm_memory_low_warning` 콜백을 발송한다. 기존 차단(<1.5GB) 은 유지.
+- **LLM 단계 하드 타임아웃** (PR #17): `correct_timeout_seconds`(1800s),
+  `summarize_timeout_seconds`(600s), `llm_lock_acquire_timeout_seconds`(3600s).
+  모델 환각 폭주·hang·데드락 시 PipelineError 로 승격.
+- **단일 프로세스 락** (PR #17): `core/single_instance.py`. fcntl advisory
+  lock 으로 다중 인스턴스 실행 시 부팅 차단 (asyncio.Lock 이 막지 못하는
+  프로세스 간 MLX 충돌 방어).
+- **이슈 H 동시 LLM Metal 크래시 차단** (PR #16): `PipelineManager._llm_lock`
+  으로 자동 파이프라인 + 수동 /summarize 모두 직렬화. 실측 8건 동시 호출에서
+  Metal `encodeSignalEvent` assertion 재현 + 락으로 차단 검증.
+- **state 유실 시 자동 재구성** (PR #16): `pipeline_state.json` 이 사라져도
+  `merge.json` 체크포인트가 있으면 자동 복원하여 /summarize 가 404 대신 정상
+  진행 (이슈 I).
+- **failed → recorded 강제 재시도** (PR #16): `POST /meetings/{id}/transcribe?force=true`
+  쿼리파라미터 추가 (이슈 J).
+- **숫자 정규화 고유어 매핑** (PR #18): `여덟/스무/마흔` 등 순한국어 숫자를
+  단위어 동반 시 아라비아 숫자로 변환. 정규식 `allowed_suffix` 의 주격 조사
+  `가` 누락 버그 동시 수정.
+- **CoreAudio 기반 Aggregate Device 정식 판정** (PR #14): `is_aggregate` 플래그
+  + 2채널 다운믹스 가중치 + Swift 기반 자동 생성 스크립트.
+
+### 수정됨
+- **메모리 임계치 완화** (PR #15): `min_memory_free_gb` 2.0 → 1.5 GB.
+  `degraded` 플래그를 disk 와 memory 로 분리. 누락된 요약 백필 스크립트 추가.
+- **ViewerView IIFE 스코프 누락** (PR #16): `ui/web/spa.js` 의
+  `initDensityToggle` 가 `this._els` 를 참조 못해 회의 상세 페이지 진입 시
+  `ReferenceError`. `var els = this._els;` 1줄로 해결.
+
 ---
 
 ## [0.1.0] — 2026-03-06

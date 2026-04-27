@@ -1,4 +1,10 @@
-# Whisper 한국어 모델 평가 및 MLX 변환 설계
+# ✅ RESOLVED — Whisper 한국어 모델 평가 및 MLX 변환 설계
+
+> **상태 (2026-04-26)**: 본 평가의 후속으로 6 회의 다중 파일 벤치마크가 수행되어
+> `mlx-community/whisper-large-v3-turbo` 가 기본 STT 모델로 채택됨 (PR #18).
+> 결과 매트릭스는 `docs/BENCHMARK.md §1.1` 참조.
+>
+> 본 문서는 의사결정 기록 보존 목적으로 유지.
 
 ## 배경
 
