@@ -842,14 +842,30 @@
 
         /**
          * 회의 목록을 API에서 가져와 렌더링한다.
+         *
+         * 초기 로딩 (목록이 비어있을 때) 만 스켈레톤 카드 4 개를 표시한다.
+         * 폴링 (이미 데이터가 렌더링된 상태) 에서는 깜빡임 방지를 위해
+         * 스켈레톤을 표시하지 않는다. mockup §3.3 표 (회의 목록 = 카드형 × 4).
+         * render() 진입 시 _listEl.innerHTML="" 으로 자동 cleanup.
          */
         async function loadMeetings() {
+            // 최초 로딩 시점 (목록 비어있고 _meetings 도 비어있음) 에만 스켈레톤 노출
+            if (_listEl && _meetings.length === 0 && _listEl.children.length === 0) {
+                _listEl.appendChild(App.createSkeletonCards(4));
+            }
             try {
                 var data = await App.apiRequest("/meetings");
                 _meetings = data.meetings || [];
                 _applyFilterAndSort();
             } catch (e) {
                 // 조용히 처리 (리스트 로드 실패는 치명적이지 않음)
+                // 실패 시 스켈레톤이 남아있을 수 있으므로 정리
+                if (_listEl) {
+                    var skeletons = _listEl.querySelectorAll(".skeleton-card");
+                    if (skeletons.length > 0) {
+                        _listEl.innerHTML = "";
+                    }
+                }
             }
         }
 
@@ -1275,9 +1291,25 @@
             '      </div>',
             '    </div>',
             '    <div id="searchResultsList"></div>',
-            '    <div class="loading-overlay" id="searchLoading" role="status" aria-live="polite">',
-            '      <span class="loading-spinner" aria-hidden="true"></span>',
-            '      <span>검색 중...</span>',
+            // 스켈레톤 로딩 (mockup §3.3 — 카드형 × 3, sr-only 텍스트 "검색 중…")
+            // 기존 id="searchLoading" 보존 → els.searchLoading.style.display 로직 유지.
+            '    <div class="skeleton-container" id="searchLoading" role="status" aria-live="polite" style="display:none;">',
+            '      <span class="sr-only">검색 중…</span>',
+            '      <div class="skeleton-card" aria-hidden="true">',
+            '        <div class="skeleton-line short"></div>',
+            '        <div class="skeleton-line medium"></div>',
+            '        <div class="skeleton-line"></div>',
+            '      </div>',
+            '      <div class="skeleton-card" aria-hidden="true">',
+            '        <div class="skeleton-line short"></div>',
+            '        <div class="skeleton-line medium"></div>',
+            '        <div class="skeleton-line"></div>',
+            '      </div>',
+            '      <div class="skeleton-card" aria-hidden="true">',
+            '        <div class="skeleton-line short"></div>',
+            '        <div class="skeleton-line medium"></div>',
+            '        <div class="skeleton-line"></div>',
+            '      </div>',
             '    </div>',
             // 검색 빈 상태 (mockup §5.2) — fixture 마크업 인터페이스와 일치
             '    <div class="empty-state-container" id="searchEmpty" data-empty="search" style="display:none;">',
@@ -1641,9 +1673,17 @@
 
             '  <div class="timeline" id="viewerTimeline"></div>',
 
-            '  <div class="loading-overlay" id="viewerTranscriptLoading" role="status" aria-live="polite">',
-            '    <span class="loading-spinner" aria-hidden="true"></span>',
-            '    <span>전사문 불러오는 중...</span>',
+            // 스켈레톤 로딩 (mockup §3.3 — 라인형 × 5, sr-only 텍스트 "전사 불러오는 중…")
+            // 기존 id="viewerTranscriptLoading" 보존 → 기존 show/hide 로직 유지.
+            '  <div class="skeleton-container" id="viewerTranscriptLoading" role="status" aria-live="polite" style="display:none;">',
+            '    <span class="sr-only">전사 불러오는 중…</span>',
+            '    <div data-skeleton="lines" aria-hidden="true">',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line medium"></div>',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line short"></div>',
+            '    </div>',
             '  </div>',
 
             '  <div class="empty-state" id="viewerTranscriptEmpty" style="display:none;">',
@@ -1665,9 +1705,17 @@
             '     role="tabpanel" aria-labelledby="viewerTabSummary">',
             '  <div class="summary-content" id="viewerSummaryContent"></div>',
 
-            '  <div class="loading-overlay" id="viewerSummaryLoading" role="status" aria-live="polite">',
-            '    <span class="loading-spinner" aria-hidden="true"></span>',
-            '    <span>회의록 불러오는 중...</span>',
+            // 스켈레톤 로딩 (mockup §3.3 — 라인형 × 5, sr-only 텍스트 "요약 불러오는 중…")
+            // 기존 id="viewerSummaryLoading" 보존 → 기존 show/hide 로직 유지.
+            '  <div class="skeleton-container" id="viewerSummaryLoading" role="status" aria-live="polite" style="display:none;">',
+            '    <span class="sr-only">요약 불러오는 중…</span>',
+            '    <div data-skeleton="lines" aria-hidden="true">',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line medium"></div>',
+            '      <div class="skeleton-line"></div>',
+            '      <div class="skeleton-line short"></div>',
+            '    </div>',
             '  </div>',
 
             '  <div class="empty-state" id="viewerSummaryEmpty" style="display:none;">',
