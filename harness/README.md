@@ -71,18 +71,6 @@ pytest -m ui -v
 
 ## 알려진 제약
 
-### 시각 회귀 비교 로직 미완성
-
-Plan 0 의 데모 (`tests/ui/visual/test_demo_swatch.py`) 는 베이스라인 PNG를
-저장만 하고 픽셀 diff 비교는 수행하지 않는다. Playwright Python sync API 에는
-`expect(page).to_have_screenshot()` 가 존재하지 않기 때문.
-
-**Wave 1 (Visual Polish) 시작 시 추가 작업**:
-- `Pillow` 또는 `pixelmatch-py` 의존성 추가 (테스트 전용)
-- `tests/ui/visual/conftest.py` 에 `assert_visual_match(page, baseline_path)`
-  헬퍼 작성 (현재 캡처 vs 베이스라인 픽셀 diff < 0.1%)
-- 본 README 의 "알려진 제약" 섹션 갱신
-
 ### 데모 잔존물
 
 `ui/web/_demo/swatch.html`, `tests/ui/*/test_demo_swatch.py`,

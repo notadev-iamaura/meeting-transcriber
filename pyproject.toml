@@ -81,6 +81,7 @@ dev = [
     "playwright>=1.58.0",
     "pytest-playwright>=0.7.2",
     "axe-playwright-python>=0.1.4",
+    "Pillow>=10.0",
 ]
 
 [project.urls]

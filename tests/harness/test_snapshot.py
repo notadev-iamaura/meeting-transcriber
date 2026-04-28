@@ -82,3 +82,102 @@ def test_register_baseline_invalid_variant_raises(
     png.write_bytes(b"x")
     with pytest.raises(ValueError, match="variant must be one of"):
         snapshot.register_baseline(db_conn, ticket_id=t.id, path=png, variant="huge")
+
+
+# === pixel_diff_ratio tests ===
+
+def test_pixel_diff_identical_images(tmp_path: Path) -> None:
+    """동일한 이미지는 diff 0.0."""
+    from PIL import Image
+
+    from harness import snapshot
+
+    img = Image.new("RGB", (10, 10), color=(255, 0, 0))
+    p1 = tmp_path / "a.png"
+    p2 = tmp_path / "b.png"
+    img.save(p1)
+    img.save(p2)
+    assert snapshot.pixel_diff_ratio(p1, p2) == 0.0
+
+
+def test_pixel_diff_completely_different_images(tmp_path: Path) -> None:
+    """완전히 다른 이미지는 diff 1.0 (모든 픽셀 차이)."""
+    from PIL import Image
+
+    from harness import snapshot
+
+    p1 = tmp_path / "red.png"
+    p2 = tmp_path / "blue.png"
+    Image.new("RGB", (10, 10), color=(255, 0, 0)).save(p1)
+    Image.new("RGB", (10, 10), color=(0, 0, 255)).save(p2)
+    assert snapshot.pixel_diff_ratio(p1, p2) == 1.0
+
+
+def test_pixel_diff_different_sizes(tmp_path: Path) -> None:
+    """크기가 다르면 1.0 (비교 불가, 100% 차이로 처리)."""
+    from PIL import Image
+
+    from harness import snapshot
+
+    p1 = tmp_path / "small.png"
+    p2 = tmp_path / "big.png"
+    Image.new("RGB", (10, 10), color=(0, 0, 0)).save(p1)
+    Image.new("RGB", (20, 20), color=(0, 0, 0)).save(p2)
+    assert snapshot.pixel_diff_ratio(p1, p2) == 1.0
+
+
+def test_pixel_diff_partial_difference(tmp_path: Path) -> None:
+    """절반만 다른 이미지는 diff 약 0.5."""
+    import numpy as np
+    from PIL import Image
+
+    from harness import snapshot
+
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = np.zeros((10, 10, 3), dtype=np.uint8)
+    b[:, :5] = [255, 0, 0]  # 왼쪽 절반만 빨강
+    p1 = tmp_path / "a.png"
+    p2 = tmp_path / "b.png"
+    Image.fromarray(a).save(p1)
+    Image.fromarray(b).save(p2)
+    ratio = snapshot.pixel_diff_ratio(p1, p2)
+    assert 0.49 <= ratio <= 0.51
+
+
+# === assert_visual_match tests (페이지 캡처 동작은 모킹) ===
+
+def test_assert_visual_match_creates_baseline_when_missing(tmp_path: Path) -> None:
+    """베이스라인 미존재 시 자동 생성하고 PASS."""
+    from PIL import Image
+
+    from harness import snapshot
+
+    baseline = tmp_path / "baselines" / "x-light.png"
+    assert not baseline.exists()
+
+    # 가짜 page.screenshot() 동작: 임시 PNG 파일을 직접 작성
+    fake_capture = tmp_path / "capture.png"
+    Image.new("RGB", (10, 10), color=(50, 50, 50)).save(fake_capture)
+
+    # 헬퍼 시그니처: assert_visual_match(actual_path, baseline_path, max_diff_pixel_ratio)
+    # 베이스라인 미존재 → fake_capture 를 baseline 으로 복사 + PASS (예외 없음)
+    snapshot.assert_visual_match(fake_capture, baseline, max_diff_pixel_ratio=0.001)
+    assert baseline.exists()
+
+
+def test_assert_visual_match_raises_on_diff(tmp_path: Path) -> None:
+    """베이스라인 존재 + 차이 > 임계 → AssertionError."""
+    import pytest as pt
+    from PIL import Image
+
+    from harness import snapshot
+
+    baseline = tmp_path / "baselines" / "x-light.png"
+    baseline.parent.mkdir(parents=True)
+    Image.new("RGB", (10, 10), color=(0, 0, 0)).save(baseline)
+
+    actual = tmp_path / "capture.png"
+    Image.new("RGB", (10, 10), color=(255, 255, 255)).save(actual)  # 100% 차이
+
+    with pt.raises(AssertionError, match="visual diff"):
+        snapshot.assert_visual_match(actual, baseline, max_diff_pixel_ratio=0.001)

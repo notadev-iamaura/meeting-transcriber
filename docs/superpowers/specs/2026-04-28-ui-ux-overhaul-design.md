@@ -18,7 +18,7 @@
 - 백엔드 API 변경 (예: 파일 업로드 엔드포인트 신설은 별도 작업)
 - 미구현 기능 추가 (Archive, 라이프사이클 자동화 등은 별도 작업)
 - 디자인 언어 자체의 전면 개편 (`docs/design.md` 의 토큰을 보강할 뿐 새 언어 도입 없음)
-- 신규 런타임 의존성 추가 — 추가 허용 항목은 `axe-playwright-python` (테스트 전용) 단 하나로 한정
+- 신규 런타임 의존성 추가 — 테스트 전용 허용 항목: `axe-playwright-python` 과 `Pillow` (Pillow 는 chromadb 등으로 이미 transitive 로 설치돼 있어 명시적 dev dep 추가만 필요)
 
 ---
 

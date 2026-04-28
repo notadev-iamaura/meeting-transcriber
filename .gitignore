@@ -80,3 +80,4 @@ state/harness.db-journal
 tests/ui/visual/diffs/
 tests/ui/__snapshots__/
 state/gate-logs/
+tests/ui/visual/_actual/
