@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # 스펙 §5.3 — 기본 룰셋.
 # wcag21aaa 는 너무 엄격하여 본 작업 범위 밖.
@@ -17,7 +17,7 @@ DEFAULT_RULESET: tuple[str, ...] = ("wcag2a", "wcag2aa", "wcag21aa")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def record_run(

@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class InvalidStatusTransition(Exception):
@@ -42,7 +42,7 @@ _VALID_STATUSES = {
 
 def _now() -> str:
     """ISO-8601 UTC 타임스탬프."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _next_ticket_id(conn: sqlite3.Connection, wave: int) -> str:

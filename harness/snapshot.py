@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # 지원 변종: 라이트 모드 / 다크 모드 / 모바일 (768px 이하).
@@ -45,7 +45,7 @@ def _sha256_of(path: Path) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def register_baseline(
