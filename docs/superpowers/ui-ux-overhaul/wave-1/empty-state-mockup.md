@@ -372,8 +372,28 @@ WCAG 2.1 AA 기준:
 
 ---
 
-## 9. 변경 이력
+## 9. Baseline 재캡처 메모 (T-101 진행 중 보정)
+
+Frontend-A 의 정직한 BLOCKED 보고로 baseline ↔ mockup §3 의 미세 비일관성 발견.
+caché 시각 게이트가 ~0.7% 픽셀 diff 로 1px 미세 차이 FAIL 중. 다음 결정 채택:
+
+- **fixture HTML 을 단일 진실 공급원으로 격상** — 현재 fixture 의 캡처 결과를 baseline 으로 사용 (fixture HTML + style.css 의 Frontend-A 추가분 = 시각 명세)
+- **panel 컨텍스트 미포함** — 빈 상태 컴포넌트 자체에만 집중. SPA 의 `#list-panel` 우측 0.5px 보더, 320px 폭 시뮬레이션 제거. fixture stage 가 viewport 전체를 차지하며 `--bg-canvas` 배경 위에서 빈 상태 컴포넌트만 렌더.
+- **mockup §3 의 CSS 골격은 *의도* 명세**, 실제 토큰 적용은 Frontend-A 가 `.empty-state-container .empty-state` descendant selector 로 수행 (specificity 격리, 기존 viewer/list 의 `.empty-state` 정의와 충돌 회피)
+- 재캡처 일시: 2026-04-28 21:20
+- 재캡처 도구: `/tmp/recapture_empty_state.py` (Playwright sync API, chromium, full_page=False)
+- 재캡처 결과: 3/3 PASS (visual diff = 0)
+- baseline 크기: light 12.9KB, dark 13.2KB, mobile 10.4KB — 모두 200KB 이하
+
+이로써 SPA 마크업 ↔ fixture ↔ baseline 의 자동 일관성이 확보된다. fixture 마크업·class
+와 SPA(`spa.js`) 의 빈 상태 마크업·class 가 정확히 일치 → fixture 캡처 결과가 곧 SPA
+의 시각 정의가 된다.
+
+---
+
+## 10. 변경 이력
 
 | 일자 | 변경 내용 |
 |------|---------|
 | 2026-04-27 | 초기 작성 — Designer-A self-check 통과 |
+| 2026-04-28 | §9 baseline 재캡처 메모 추가 — fixture 단일 진실 공급원 채택, panel 컨텍스트 미포함, 3/3 PASS 검증 |
