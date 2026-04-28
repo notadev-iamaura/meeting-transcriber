@@ -112,10 +112,11 @@ button {
 --bg-active: rgba(0, 122, 255, 0.12);
 
 --text-primary: #1D1D1F;
---text-secondary: #86868B;
---text-muted: #AEAEB2;
+--text-secondary: #6E6E73;
+--text-muted: #8E8E93;
 
 --accent: #007AFF;
+--accent-text: #0066CC;     /* 본문 텍스트용 (WCAG AA 5.57:1 on #FFFFFF) */
 --accent-hover: #0056CC;
 --success: #34C759;
 --warning: #FF9500;
@@ -138,9 +139,10 @@ button {
 
 --text-primary: #F5F5F7;
 --text-secondary: #98989D;
---text-muted: #636366;
+--text-muted: #8E8E93;
 
 --accent: #0A84FF;
+--accent-text: #4DA1FF;     /* 본문 텍스트용 (WCAG AA 6.37:1 on #1C1C1E) */
 --border: #38383A;
 ```
 
