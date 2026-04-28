@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<!--
+  skeleton-shimmer preview fixture (T-103) — 정식 위치
+
+  단일 진실 공급원 (Source of Truth):
+    본 fixture 는 Designer-A 의 임시 fixture (`/tmp/skeleton-preview.html`) 와
+    동일한 마크업·구조를 가지며, `ui/web/style.css` §11-10 의 .skeleton-card /
+    .skeleton-line 정의 + @keyframes shimmer 를 그대로 상속한다. 본 fixture 의
+    캡처 결과가 `tests/ui/visual/baselines/skeleton-shimmer-{light,dark,mobile}.png`
+    와 픽셀 일치해야 한다.
+
+  목적:
+    - 시각 회귀 (visual): 카드형 × 3 + 라인형 × 5 마크업이 light/dark/mobile
+      베이스라인과 픽셀 일치해야 한다.
+    - 행동 (behavior): 카드/라인 카운트 + width 변종 클래스 인터페이스가
+      mockup §3 명세대로 노출됨을 검증한다.
+    - 접근성 (a11y): 모든 .skeleton-card / lines 컨테이너에 aria-hidden="true"
+      적용 + axe wcag2a/2aa/21aa 위반 0.
+
+  shimmer 애니메이션 고정 (시각 회귀 재현성):
+    `@keyframes shimmer` 는 무한 반복이라 정적 PNG 캡처가 매 frame 마다 다른
+    background-position 을 갖는다. Designer-A 의 캡처 스크립트
+    (`/tmp/capture_skeleton.py::_pause_animation`) 는 add_style_tag 로
+    `animation-play-state: paused + animation-delay: 0s + background-position: 0% 0`
+    을 주입했다. 본 fixture 는 동일한 효과를 인라인 <style> 로 삽입하여
+    Playwright 캡처 시점부터 한 frame 에 고정된다 → baseline 캡처와 동일.
+
+  Frontend-A 마크업 인터페이스 명세 (mockup §3.1 / §3.2):
+    - 카드형: section[data-skeleton="card-list"] > .skeleton-card × N
+              각 카드는 .skeleton-line.short / .medium / (full) 3 개 라인 보유
+    - 라인형: section[data-skeleton="lines"] > .skeleton-line × M
+              width 변종(short/medium/full) 자유 조합 — 본 fixture 는
+              full × 3 + medium × 1 + short × 1 = 5 개로 회의록 단락 모방
+    - aria-hidden="true" — 카드 단위 또는 lines 컨테이너 단위로 적용
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skeleton Shimmer Preview (T-103)</title>
+<link rel="stylesheet" href="../../../ui/web/style.css">
+</head>
+<body>
+<main role="main" aria-label="스켈레톤 미리보기">
+  <!-- 카드형 (회의 목록 / 검색 결과) — 3 개 카드 × 3 라인 (short/medium/full) -->
+  <section data-skeleton="card-list">
+    <div class="skeleton-card" aria-hidden="true">
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-line medium"></div>
+      <div class="skeleton-line"></div>
+    </div>
+    <div class="skeleton-card" aria-hidden="true">
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-line medium"></div>
+      <div class="skeleton-line"></div>
+    </div>
+    <div class="skeleton-card" aria-hidden="true">
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-line medium"></div>
+      <div class="skeleton-line"></div>
+    </div>
+  </section>
+
+  <!-- 라인형 (뷰어 transcript / summary) — 5 라인 (full / full / medium / full / short) -->
+  <section data-skeleton="lines" aria-hidden="true">
+    <div class="skeleton-line"></div>
+    <div class="skeleton-line"></div>
+    <div class="skeleton-line medium"></div>
+    <div class="skeleton-line"></div>
+    <div class="skeleton-line short"></div>
+  </section>
+</main>
+<style>
+  /* fixture 전용 레이아웃 — Designer-A 임시 fixture 와 동일한 padding/gap.
+     .skeleton-card / .skeleton-line 정의 자체에는 손대지 않고, 외부 컨테이너의
+     배경·폰트·gap·max-width 만 정의한다. */
+  body {
+    padding: 24px;
+    background: var(--bg-canvas);
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+      "Helvetica Neue", Arial, sans-serif;
+  }
+  section { margin-bottom: 32px; max-width: 520px; }
+  section[data-skeleton="card-list"] { display: flex; flex-direction: column; gap: 12px; }
+  section[data-skeleton="lines"] { display: flex; flex-direction: column; gap: 8px; }
+
+  /* 시각 회귀 재현성: shimmer 애니메이션을 한 frame 에 고정.
+     Designer-A 의 baseline 캡처 스크립트(`/tmp/capture_skeleton.py`) 가
+     동일한 규칙을 add_style_tag 로 주입한 상태에서 PNG 를 저장했다.
+     본 fixture 는 인라인 <style> 로 같은 효과를 영구 적용하여 baseline 과
+     픽셀 일치한다. */
+  .skeleton-line {
+    animation-play-state: paused !important;
+    animation-delay: 0s !important;
+    background-position: 0% 0 !important;
+  }
+</style>
+</body>
+</html>
