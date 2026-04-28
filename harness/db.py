@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS tickets (
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_id       TEXT NOT NULL REFERENCES tickets(id),
     kind            TEXT NOT NULL CHECK (kind IN (
                         'mockup', 'visual_baseline', 'behavior_scenario',
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS gate_runs (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_id       TEXT NOT NULL REFERENCES tickets(id),
     phase           TEXT NOT NULL CHECK (phase IN ('red', 'green')),
     visual_pass     INTEGER NOT NULL CHECK (visual_pass IN (0, 1)),
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS gate_runs (
 );
 
 CREATE TABLE IF NOT EXISTS events (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_id       TEXT REFERENCES tickets(id),
     type            TEXT NOT NULL,
     payload         TEXT,

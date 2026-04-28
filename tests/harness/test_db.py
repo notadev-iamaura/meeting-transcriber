@@ -23,7 +23,9 @@ def test_connect_creates_db_file(tmp_path: Path) -> None:
 def test_init_schema_creates_four_tables(db_conn: sqlite3.Connection) -> None:
     """init_schema() 는 tickets / artifacts / gate_runs / events 4개 테이블을 만든다."""
     cursor = db_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+        "ORDER BY name"
     )
     tables = [row[0] for row in cursor.fetchall()]
     assert tables == ["artifacts", "events", "gate_runs", "tickets"]
