@@ -70,3 +70,6 @@ progress.md
 # Claude Code 로컬 상태 (스케줄/세션 lock)
 .claude/scheduled_tasks.lock
 .claude/sessions/
+
+# Superpowers 비주얼 컴패니언 세션 파일 (목업/이벤트)
+.superpowers/
