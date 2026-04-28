@@ -1554,6 +1554,13 @@
         self._totalMatches = 0;
         self._searchTimeout = null;
 
+        // 발화 음성 재생 상태 (lazy 초기화 — 첫 재생 시 audio element 생성)
+        self._audioElement = null;
+        self._currentPlayingIdx = -1;   // 재생 중 발화의 _allUtterances 인덱스
+        self._currentPlayingEnd = 0;    // 재생 정지 기준 시각 (초)
+        self._currentPlayingEl = null;  // .utterance DOM (.playing 토글 대상)
+        self._currentPlayingBtn = null; // ▶ 버튼 DOM
+
         // 실시간 처리 로그 상태 — 단계별 { elapsed, eta, status, anomaly, startedAt }
         // status: "pending" | "running" | "completed" | "failed" | "skipped"
         self._liveLog = {};
@@ -2060,6 +2067,8 @@
     ViewerView.prototype._renderTimeline = function (utterances, query) {
         var self = this;
         var els = self._els;
+        // 재렌더 직전 재생 상태를 정리 (이전 DOM 참조가 끊어지므로)
+        self._stopUtterancePlayback();
         els.timeline.innerHTML = "";
         var matchCount = 0;
 
@@ -2110,8 +2119,22 @@
             timeEl.className = "utterance-time";
             timeEl.textContent = App.formatTime(u.start);
 
+            // ▶ 발화 음성 재생 버튼 (이 발화 시간 구간만 재생)
+            var playBtn = document.createElement("button");
+            playBtn.type = "button";
+            playBtn.className = "utterance-play-btn";
+            playBtn.setAttribute("aria-label", "이 발화 음성 재생");
+            playBtn.title = "이 발화의 음성 재생 (다시 누르면 정지)";
+            // 재생 ▶ / 정지 ■ 둘 다 그려두고 CSS 로 .playing 시 표시 토글
+            playBtn.innerHTML =
+                '<svg class="play-icon" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">' +
+                '<path d="M3 1.5v9l7.5-4.5L3 1.5z" fill="currentColor"/></svg>' +
+                '<svg class="stop-icon" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">' +
+                '<rect x="2.5" y="2.5" width="7" height="7" rx="1" fill="currentColor"/></svg>';
+
             header.appendChild(speakerEl);
             header.appendChild(timeEl);
+            header.appendChild(playBtn);
 
             // 텍스트
             var textEl = document.createElement("div");
@@ -2136,6 +2159,14 @@
             textEl.addEventListener("dblclick", function () {
                 self._beginEditUtterance(utteranceIndex, textEl);
             });
+
+            // ▶ 버튼 → 해당 발화 구간만 재생 (toggle)
+            (function (idx, container, btn) {
+                btn.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    self._toggleUtterancePlayback(idx, container, btn);
+                });
+            })(utteranceIndex, el, playBtn);
 
             content.appendChild(header);
             content.appendChild(textEl);
@@ -2172,6 +2203,144 @@
             els.searchPrev.style.display = "none";
             els.searchNext.style.display = "none";
         }
+    };
+
+    /**
+     * 발화 음성 재생용 audio element 를 lazy 하게 만든다.
+     *
+     * 한 ViewerView 인스턴스에서 단일 audio 만 사용한다 (여러 발화가
+     * 같은 audio 를 공유하고 currentTime 만 옮긴다). 첫 ▶ 클릭에서만
+     * 메타데이터 로드가 일어나도록 preload="metadata".
+     *
+     * @returns {HTMLAudioElement}
+     */
+    ViewerView.prototype._ensureAudioPlayer = function () {
+        var self = this;
+        if (self._audioElement) return self._audioElement;
+
+        var audio = document.createElement("audio");
+        audio.preload = "metadata";
+        audio.src = "/api/meetings/" + encodeURIComponent(self._meetingId) + "/audio";
+        audio.style.display = "none";
+
+        // 발화 종료 시각에 도달하면 자동 정지 (구간 재생)
+        audio.addEventListener("timeupdate", function () {
+            if (self._currentPlayingIdx < 0) return;
+            if (audio.currentTime >= self._currentPlayingEnd) {
+                try { audio.pause(); } catch (e) { /* no-op */ }
+                self._stopUtterancePlayback();
+            }
+        });
+
+        // 파일 끝까지 재생된 경우
+        audio.addEventListener("ended", function () {
+            self._stopUtterancePlayback();
+        });
+
+        // 404·네트워크·코덱 오류 → 사용자 알림
+        audio.addEventListener("error", function () {
+            // 처음 한 번만 알리고 정지 (각 발화마다 알림 폭탄 방지)
+            if (self._currentPlayingIdx >= 0) {
+                errorBanner.show(
+                    "이 회의의 음성 파일을 재생할 수 없어요 " +
+                    "(보존 기간이 지났거나 파일이 손상되었을 수 있어요)."
+                );
+            }
+            self._stopUtterancePlayback();
+        });
+
+        document.body.appendChild(audio);
+        self._audioElement = audio;
+        return audio;
+    };
+
+    /**
+     * 특정 발화의 음성 구간을 재생/정지 토글한다 (▶ 버튼 핸들러).
+     *
+     * 같은 발화에서 다시 누르면 정지, 다른 발화를 누르면 그 발화로 점프.
+     * Whisper 시작 시각이 살짝 늦은 경우가 잦아 0.2초 백오프하여 seek 한다.
+     *
+     * @param {number} index - self._allUtterances 인덱스
+     * @param {HTMLElement} utteranceEl - .utterance 컨테이너 (.playing 클래스 토글용)
+     * @param {HTMLElement} btnEl - ▶ 버튼 (.playing 클래스 토글용)
+     */
+    ViewerView.prototype._toggleUtterancePlayback = function (index, utteranceEl, btnEl) {
+        var self = this;
+        if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
+        var u = self._allUtterances[index];
+        if (typeof u.start !== "number" || typeof u.end !== "number") return;
+
+        var audio = self._ensureAudioPlayer();
+
+        // 같은 발화 재생 중 → 정지 (토글)
+        if (self._currentPlayingIdx === index && !audio.paused) {
+            try { audio.pause(); } catch (e) { /* no-op */ }
+            self._stopUtterancePlayback();
+            return;
+        }
+
+        // 이전 발화 재생 중이면 정리 후 새 발화로 전환
+        self._stopUtterancePlayback();
+
+        self._currentPlayingIdx = index;
+        self._currentPlayingEnd = u.end;
+        self._currentPlayingEl = utteranceEl;
+        self._currentPlayingBtn = btnEl;
+
+        utteranceEl.classList.add("playing");
+        btnEl.classList.add("playing");
+        btnEl.setAttribute("aria-label", "재생 정지");
+
+        // Whisper 타임스탬프 보정 (시작 시각에서 0.2초 앞으로 백오프)
+        var seekTo = Math.max(0, (u.start || 0) - 0.2);
+
+        var startPlayback = function () {
+            try {
+                audio.currentTime = seekTo;
+                var playPromise = audio.play();
+                if (playPromise && typeof playPromise.catch === "function") {
+                    playPromise.catch(function (err) {
+                        self._stopUtterancePlayback();
+                        errorBanner.show(
+                            "음성 재생에 실패했어요: " + (err && err.message ? err.message : err)
+                        );
+                    });
+                }
+            } catch (err) {
+                self._stopUtterancePlayback();
+            }
+        };
+
+        // 메타데이터(duration) 로드 전이면 로드 완료 후 재생 시작
+        if (audio.readyState < 1) {
+            var onLoaded = function () {
+                audio.removeEventListener("loadedmetadata", onLoaded);
+                // 사이에 사용자가 다른 버튼을 누르거나 정지했는지 확인
+                if (self._currentPlayingIdx === index) startPlayback();
+            };
+            audio.addEventListener("loadedmetadata", onLoaded);
+        } else {
+            startPlayback();
+        }
+    };
+
+    /**
+     * 현재 발화 재생 상태를 모두 정리한다 (UI 클래스 + 내부 인덱스).
+     * audio 요소 자체는 유지 (다음 재생에 재사용).
+     */
+    ViewerView.prototype._stopUtterancePlayback = function () {
+        var self = this;
+        if (self._currentPlayingEl) {
+            self._currentPlayingEl.classList.remove("playing");
+        }
+        if (self._currentPlayingBtn) {
+            self._currentPlayingBtn.classList.remove("playing");
+            self._currentPlayingBtn.setAttribute("aria-label", "이 발화 음성 재생");
+        }
+        self._currentPlayingIdx = -1;
+        self._currentPlayingEnd = 0;
+        self._currentPlayingEl = null;
+        self._currentPlayingBtn = null;
     };
 
     /**
@@ -3667,6 +3836,19 @@
         clearTimeout(this._searchTimeout);
         this._timers.forEach(function (t) { clearInterval(t); clearTimeout(t); });
         this._timers = [];
+
+        // 발화 음성 재생용 audio element 정리 (다른 뷰로 이동 시 leak 방지)
+        if (this._audioElement) {
+            try { this._audioElement.pause(); } catch (e) { /* no-op */ }
+            this._audioElement.src = "";
+            if (this._audioElement.parentNode) {
+                this._audioElement.parentNode.removeChild(this._audioElement);
+            }
+            this._audioElement = null;
+        }
+        this._currentPlayingIdx = -1;
+        this._currentPlayingEl = null;
+        this._currentPlayingBtn = null;
 
         // 페이지 타이틀 복원
         document.title = "회의록 · Recap";

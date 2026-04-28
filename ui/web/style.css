@@ -2805,6 +2805,70 @@ button {
   flex-shrink: 0;
 }
 
+/* 발화 음성 재생 버튼
+ * - 평소: 0.4 (옅게 보여 — 터치/모바일·키보드 사용자도 발견 가능)
+ * - hover/focus/playing: 1.0 (선명)
+ * - :focus 와 :focus-visible 둘 다 포함 — JS focus() 호출에서도 가시성 보장 */
+.utterance-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity var(--duration-fast) var(--ease-macos),
+              background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+/* 발화 row hover, 버튼 자체 hover/focus, 재생 중일 때 완전 노출 */
+.utterance:hover .utterance-play-btn,
+.utterance-play-btn:hover,
+.utterance-play-btn:focus,
+.utterance-play-btn:focus-visible,
+.utterance-play-btn.playing {
+  opacity: 1;
+}
+
+/* hover-less 환경(터치 디바이스): 평상시에도 잘 보이게 한 단계 더 진하게 */
+@media (hover: none) {
+  .utterance-play-btn {
+    opacity: 0.7;
+  }
+}
+
+.utterance-play-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--accent);
+}
+
+.utterance-play-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 재생 중일 때는 accent 컬러로 채우고 정지(■) 아이콘만 보이게 */
+.utterance-play-btn.playing {
+  background: var(--accent);
+  color: #fff;
+}
+
+.utterance-play-btn .play-icon,
+.utterance-play-btn .stop-icon {
+  display: block;
+}
+
+.utterance-play-btn .stop-icon { display: none; }
+.utterance-play-btn.playing .play-icon { display: none; }
+.utterance-play-btn.playing .stop-icon { display: block; }
+
 /* 전사 내용: 가독성 강화 (Comfortable 기본 14/1.8, Compact 13/1.6) */
 .utterance-text {
   font-size: var(--utt-text-fs);
@@ -2818,6 +2882,18 @@ button {
 .utterance.highlighted {
   background: var(--highlight-bg);
   border-left: 3px solid var(--highlight-border);
+}
+
+/* 음성 재생 중인 발화 — 검색 하이라이트와 구분되도록 좌측 accent 라인 */
+.utterance.playing {
+  border-left: 3px solid var(--accent);
+  background: var(--bg-secondary);
+}
+
+/* 검색 매치 + 재생 동시: 검색 노란 배경(가독성 우선) 유지 + accent 좌측 라인 */
+.utterance.highlighted.playing {
+  background: var(--highlight-bg);
+  border-left: 3px solid var(--accent);
 }
 
 /* 화자 범례 배지 스타일 */

@@ -1124,6 +1124,206 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
     return data
 
 
+# === 회의 음성 재생 ===
+
+
+# 재생 가능한 오디오 확장자 (HTML <audio> 호환)
+_PLAYABLE_AUDIO_EXTS: tuple[str, ...] = (".wav", ".mp3", ".m4a", ".flac", ".ogg")
+
+# 확장자 → MIME 매핑 (표준 우선)
+_AUDIO_MIME_BY_EXT: dict[str, str] = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+}
+
+
+def _find_meeting_audio_path(config: Any, meeting_id: str) -> Path | None:
+    """회의의 재생 가능한 오디오 파일을 찾는다.
+
+    탐색 우선순위:
+        1. checkpoints/{id}/pipeline_state.json 의 ``wav_path`` (16kHz 변환본 — 회의록 화자분리·STT 의 정답 시간축과 동일)
+        2. checkpoints/{id}/pipeline_state.json 의 ``audio_path`` (원본)
+        3. outputs/{id}/ 디렉토리 내 ``*_16k.wav`` 또는 임의 ``*.wav`` (폴백)
+
+    Args:
+        config: AppConfig
+        meeting_id: 회의 고유 식별자 (이미 검증된 값)
+
+    Returns:
+        실제 존재하는 오디오 파일 Path, 못 찾으면 None.
+    """
+    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
+    if state_path.is_file():
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            data = {}
+
+        # wav_path 가 회의록 시간축과 일치하므로 우선 사용
+        for key in ("wav_path", "audio_path"):
+            value = data.get(key) if isinstance(data, dict) else None
+            if isinstance(value, str) and value:
+                candidate = Path(value)
+                if candidate.is_file() and candidate.suffix.lower() in _PLAYABLE_AUDIO_EXTS:
+                    return candidate
+
+    # 폴백: outputs/{id}/ 디렉토리 글롭
+    outputs_root = config.paths.resolved_outputs_dir / meeting_id
+    if outputs_root.is_dir():
+        # 16kHz 변환본을 우선, 없으면 임의 wav
+        for pattern in ("*_16k.wav", "*.wav"):
+            matches = sorted(outputs_root.glob(pattern))
+            if matches:
+                return matches[0]
+
+    return None
+
+
+def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """HTTP Range 헤더를 파싱한다 (단일 range 만 지원).
+
+    지원 형식:
+        - ``bytes=START-END`` — 명시적 범위
+        - ``bytes=START-`` — START 부터 끝까지
+        - ``bytes=-N`` — 마지막 N 바이트 (suffix range)
+
+    multipart range (``bytes=0-100,200-300``) 는 복잡도 대비 활용도가 낮아 미지원.
+
+    Args:
+        range_header: Range 헤더 원본 문자열
+        file_size: 대상 파일 크기 (바이트)
+
+    Returns:
+        (start, end) 튜플 — 둘 다 inclusive. 형식 불량·범위 초과 시 None.
+    """
+    if not range_header.lower().startswith("bytes="):
+        return None
+
+    spec = range_header[len("bytes=") :].strip()
+    if "," in spec:
+        # multipart range 미지원
+        return None
+
+    parts = spec.split("-", 1)
+    if len(parts) != 2:
+        return None
+
+    start_s, end_s = parts[0].strip(), parts[1].strip()
+    try:
+        if start_s == "":
+            # suffix range: 마지막 N 바이트
+            if end_s == "":
+                return None
+            n = int(end_s)
+            if n <= 0:
+                return None
+            start = max(0, file_size - n)
+            end = file_size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s != "" else file_size - 1
+    except ValueError:
+        return None
+
+    if start < 0 or start >= file_size or end < start:
+        return None
+
+    end = min(end, file_size - 1)
+    return (start, end)
+
+
+@router.get("/meetings/{meeting_id}/audio")
+async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
+    """회의의 원본 음성을 재생용으로 스트리밍한다 (HTTP Range 지원).
+
+    프론트엔드 ViewerView 에서 utterance 별 ▶ 버튼이 클릭되면
+    ``<audio>`` 요소가 ``currentTime = u.start`` 으로 seek 한 뒤 play 한다.
+    Range 헤더 (``Accept-Ranges: bytes``) 를 응답하므로 브라우저가 임의 시점으로
+    바로 점프할 수 있다.
+
+    Args:
+        request: FastAPI Request
+        meeting_id: 회의 고유 식별자
+
+    Returns:
+        FileResponse (전체 파일, 200) 또는 StreamingResponse (Range, 206)
+
+    Raises:
+        HTTPException: 잘못된 ID 형식 (400), 음성 파일 없음 (404), 설정 미초기화 (503)
+    """
+    from fastapi.responses import FileResponse, Response, StreamingResponse
+
+    _validate_meeting_id(meeting_id)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
+
+    audio_path = await asyncio.to_thread(_find_meeting_audio_path, config, meeting_id)
+    if audio_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"재생 가능한 음성 파일이 없습니다: {meeting_id} "
+            "(라이프사이클 정책에 따라 30~90일 후 삭제될 수 있습니다)",
+        )
+
+    file_size = audio_path.stat().st_size
+    media_type = _AUDIO_MIME_BY_EXT.get(audio_path.suffix.lower(), "application/octet-stream")
+
+    # Range 요청 처리
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    if range_header:
+        parsed = _parse_range_header(range_header, file_size)
+        if parsed is None:
+            # 416 Range Not Satisfiable — 클라이언트가 잘못된 범위를 요청
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+
+        start, end = parsed
+        length = end - start + 1
+
+        def _iter_range():
+            """파일을 64KB 청크로 부분 스트리밍한다."""
+            with open(audio_path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                chunk_size = 64 * 1024
+                while remaining > 0:
+                    chunk = f.read(min(chunk_size, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            _iter_range(),
+            status_code=206,
+            media_type=media_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(length),
+                # 같은 파일에 대한 반복 seek 시 브라우저 캐시 활용
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
+
+    # 전체 파일 응답 (Range 헤더 없는 첫 요청 또는 단순 다운로드)
+    return FileResponse(
+        path=audio_path,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     """회의를 삭제한다 (DB 레코드 + 오디오 파일 → quarantine).
