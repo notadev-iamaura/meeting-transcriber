@@ -119,7 +119,7 @@ markers = [
 [tool.ruff]
 target-version = "py311"
 line-length = 99
-src = [".", "core", "steps", "search", "api", "ui", "security"]
+src = [".", "core", "steps", "search", "api", "ui", "security", "harness"]
 
 [tool.ruff.lint]
 select = [
@@ -150,7 +150,7 @@ ignore = [
 "scripts/*" = ["E402"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["config", "core", "steps", "search", "api", "ui", "security"]
+known-first-party = ["config", "core", "steps", "search", "api", "ui", "security", "harness"]
 
 [tool.mypy]
 python_version = "3.11"
