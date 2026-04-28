@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ko">
+<!--
+  empty-state preview fixture (T-101)
+
+  목적:
+    - 시각 회귀 (visual): 회의 목록 사이드바 320×600 패널 시뮬레이션 캡처가
+      `tests/ui/visual/baselines/empty-state-{light,dark,mobile}.png` 와 일치해야 함.
+    - 행동 (behavior): 3 위치(meeting-list / search / chat) 모두 mockup 명세된
+      마크업으로 존재 — 검색/채팅 변종은 viewport 밖에 두어 시각 baseline 영향 없음.
+    - 접근성 (a11y): 모든 빈 상태가 role=status 보유, 장식용 SVG 는 aria-hidden.
+
+  중요: 본 fixture 는 inline 스타일을 두지 않고 `ui/web/style.css` 에 의존한다.
+  style.css 가 mockup 명세된 .empty-state* 클래스를 정의하지 않으면 캡처가
+  baseline 과 다르게 렌더되어 visual FAIL (Red 의도성). Frontend-A 가 style.css
+  를 보강하면 자동으로 일치 → Green.
+
+  Frontend-A 마크업 인터페이스 명세:
+    - .empty-state, .empty-state-icon, .empty-state-title,
+      .empty-state-description, .empty-state-cta
+    - data-empty="meeting-list" | "search" | "chat"
+    - role="status" (전역) + aria-live="polite" (목록·검색만)
+    - SVG 는 aria-hidden="true" + width/height="48"
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Empty State Preview (T-101)</title>
+<link rel="stylesheet" href="../../../ui/web/style.css">
+<style>
+  /* fixture 전용 레이아웃 — baseline 의 사이드바 패널 320×600 시뮬레이션. */
+  /* 본 스타일은 .empty-state* 클래스 자체에는 손대지 않고, 회의 목록 패널 */
+  /* 컨테이너의 위치·크기만 정의. .empty-state* 토큰·타이포그래피는 style.css 의 */
+  /* Frontend-A 추가분에서 상속받는다. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-canvas);
+    /* SPA 의 폰트 토큰 상속. style.css 가 system-font 를 :root 또는 body 에 */
+    /* 정의하지 않더라도 -apple-system 폴백으로 동일 결과. */
+  }
+  body {
+    min-height: 768px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+      "Helvetica Neue", Arial, sans-serif;
+  }
+  /* baseline 좌측 사이드바 패널 — 320×600, --bg-sidebar */
+  .fixture-list-panel {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 320px;
+    height: 600px;
+    background: var(--bg-sidebar);
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  /* 검색/채팅 변종 — viewport(1024×768) 밖에 배치하여 visual baseline 에 */
+  /* 영향을 주지 않으면서 행동·a11y 시나리오에서는 locator 로 접근 가능. */
+  .fixture-offscreen {
+    position: absolute;
+    top: 2000px;
+    left: 0;
+    width: 600px;
+    padding: 32px;
+    box-sizing: border-box;
+  }
+  /* 모바일 변종(375×667) — 사이드바가 viewport 전체를 차지. */
+  /* @media 로 분기하여 라이트/다크 모드와 독립적으로 동작. */
+  @media (max-width: 480px) {
+    .fixture-list-panel {
+      width: 100%;
+      height: 100vh;
+      background: var(--bg-canvas);
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- 회의 목록 빈 상태 — 사이드바 패널 안. baseline 픽셀의 source. -->
+<div class="fixture-list-panel">
+  <section data-empty="meeting-list" class="empty-state-container">
+    <div class="empty-state" role="status" aria-live="polite">
+      <svg class="empty-state-icon"
+           width="48" height="48"
+           viewBox="0 0 48 48"
+           fill="none"
+           stroke="currentColor"
+           stroke-width="2"
+           stroke-linecap="round"
+           stroke-linejoin="round"
+           aria-hidden="true">
+        <!-- waveform.circle 변형 (mockup §5.1) -->
+        <circle cx="24" cy="24" r="20"/>
+        <line x1="14" y1="20" x2="14" y2="28"/>
+        <line x1="19" y1="16" x2="19" y2="32"/>
+        <line x1="24" y1="14" x2="24" y2="34"/>
+        <line x1="29" y1="16" x2="29" y2="32"/>
+        <line x1="34" y1="20" x2="34" y2="28"/>
+      </svg>
+      <h2 class="empty-state-title">아직 회의가 없어요</h2>
+      <p class="empty-state-description">첫 회의를 녹음하면 자동으로 전사·요약돼요.</p>
+      <button type="button" class="empty-state-cta">녹음 시작</button>
+    </div>
+  </section>
+</div>
+
+<!-- 검색 결과 0개 — viewport 밖. -->
+<div class="fixture-offscreen">
+  <section data-empty="search" class="empty-state-container">
+    <div class="empty-state" role="status" aria-live="polite">
+      <svg class="empty-state-icon"
+           width="48" height="48"
+           viewBox="0 0 48 48"
+           fill="none"
+           stroke="currentColor"
+           stroke-width="2"
+           stroke-linecap="round"
+           stroke-linejoin="round"
+           aria-hidden="true">
+        <!-- magnifyingglass 변형 (mockup §5.2) -->
+        <circle cx="20" cy="20" r="12"/>
+        <line x1="29" y1="29" x2="40" y2="40"/>
+      </svg>
+      <h2 class="empty-state-title">검색 결과가 없어요</h2>
+      <p class="empty-state-description">다른 키워드로 다시 검색해 보세요. 띄어쓰기·맞춤법을 한번 더 확인해 주세요.</p>
+    </div>
+  </section>
+</div>
+
+<!-- 채팅 빈 상태 — viewport 밖. role=status 만 (aria-live 미설정 — mockup §5.3) -->
+<div class="fixture-offscreen" style="top: 2400px;">
+  <section data-empty="chat" class="empty-state-container">
+    <div class="empty-state" role="status">
+      <svg class="empty-state-icon"
+           width="48" height="48"
+           viewBox="0 0 48 48"
+           fill="none"
+           stroke="currentColor"
+           stroke-width="2"
+           stroke-linecap="round"
+           stroke-linejoin="round"
+           aria-hidden="true">
+        <!-- bubble.left.and.bubble.right 변형 (mockup §5.3) -->
+        <path d="M6 12h22a4 4 0 014 4v12a4 4 0 01-4 4h-12l-6 6v-6H6a4 4 0 01-4-4V16a4 4 0 014-4z"
+              transform="translate(2 0)"/>
+        <path d="M16 18h22a4 4 0 014 4v12a4 4 0 01-4 4h-2v6l-6-6h-14a4 4 0 01-4-4V22a4 4 0 014-4z"
+              transform="translate(0 4)"
+              opacity="0.6"/>
+      </svg>
+      <h2 class="empty-state-title">대화를 시작해 보세요</h2>
+      <p class="empty-state-description">회의 내용에 대해 무엇이든 물어보세요. 화자별 요약·결정사항·다음 액션 등을 정리해 드려요.</p>
+    </div>
+  </section>
+</div>
+
+</body>
+</html>
