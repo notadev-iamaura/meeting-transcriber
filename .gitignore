@@ -73,3 +73,9 @@ progress.md
 
 # Superpowers 비주얼 컴패니언 세션 파일 (목업/이벤트)
 .superpowers/
+
+# UI/UX Harness — 영속 DB 와 시각 회귀 임시 산출물
+state/harness.db
+state/harness.db-journal
+tests/ui/visual/diffs/
+tests/ui/__snapshots__/
