@@ -1815,3 +1815,290 @@ class TestTranscribeMeetingEndpoint:
         assert response.status_code == 409
         # force=true 라도 failed 가 아니므로 force_set_status 는 호출되지 않음
         queue.force_set_status.assert_not_called()
+
+
+class TestGetMeetingAudio:
+    """GET /api/meetings/{meeting_id}/audio 엔드포인트 테스트.
+
+    발화 음성 재생 기능을 위한 오디오 스트리밍 (HTTP Range 지원) 검증.
+    """
+
+    @staticmethod
+    def _seed_audio_via_pipeline_state(
+        tmp_path: Path,
+        meeting_id: str,
+        wav_bytes: bytes,
+    ) -> Path:
+        """pipeline_state.json + wav_path 조합으로 회의 음성을 시드한다.
+
+        실제 운영 환경의 1순위 탐색 경로(pipeline_state.json 의 wav_path)를 재현.
+        """
+        outputs_dir = tmp_path / "outputs" / meeting_id
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = outputs_dir / "input_16k.wav"
+        wav_path.write_bytes(wav_bytes)
+
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        state_path = ckpt_dir / "pipeline_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "meeting_id": meeting_id,
+                    "audio_path": "/some/original/input.m4a",
+                    "wav_path": str(wav_path),
+                    "output_dir": str(outputs_dir),
+                    "status": "completed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return wav_path
+
+    @staticmethod
+    def _seed_audio_glob_only(
+        tmp_path: Path,
+        meeting_id: str,
+        wav_bytes: bytes,
+        filename: str = "test_16k.wav",
+    ) -> Path:
+        """state 파일 없이 outputs/{id}/*.wav 폴백 경로만 시드한다."""
+        outputs_dir = tmp_path / "outputs" / meeting_id
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = outputs_dir / filename
+        wav_path.write_bytes(wav_bytes)
+        return wav_path
+
+    def test_audio_endpoint_returns_full_file_without_range(self, tmp_path: Path) -> None:
+        """Range 헤더 없이 요청하면 200 + 전체 파일 바이트를 반환한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_test"
+        wav_bytes = b"RIFF" + b"\x00" * 100 + b"data" + b"\xab" * 200
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        assert response.status_code == 200
+        assert response.content == wav_bytes
+        assert response.headers.get("accept-ranges") == "bytes"
+        assert response.headers.get("content-type", "").startswith("audio/")
+
+    def test_audio_endpoint_returns_partial_for_explicit_range(self, tmp_path: Path) -> None:
+        """Range: bytes=START-END 요청은 206 + Content-Range + 부분 바이트."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_partial"
+        # 인덱스가 명확한 시드 — 0..255 반복 패턴
+        wav_bytes = bytes(i % 256 for i in range(1000))
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/meetings/{meeting_id}/audio",
+                headers={"Range": "bytes=100-199"},
+            )
+
+        assert response.status_code == 206
+        assert response.headers["content-range"] == f"bytes 100-199/{len(wav_bytes)}"
+        assert response.headers["content-length"] == "100"
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.content == wav_bytes[100:200]
+
+    def test_audio_endpoint_handles_open_ended_range(self, tmp_path: Path) -> None:
+        """bytes=START- 형식 (END 미지정) 은 파일 끝까지 반환한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_openend"
+        wav_bytes = bytes(range(50))
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/meetings/{meeting_id}/audio",
+                headers={"Range": "bytes=20-"},
+            )
+
+        assert response.status_code == 206
+        assert response.headers["content-range"] == "bytes 20-49/50"
+        assert response.content == wav_bytes[20:]
+
+    def test_audio_endpoint_handles_suffix_range(self, tmp_path: Path) -> None:
+        """bytes=-N 형식 (suffix range) 은 마지막 N 바이트를 반환한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_suffix"
+        wav_bytes = bytes(range(100))
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/meetings/{meeting_id}/audio",
+                headers={"Range": "bytes=-30"},
+            )
+
+        assert response.status_code == 206
+        assert response.headers["content-range"] == "bytes 70-99/100"
+        assert response.content == wav_bytes[70:]
+
+    def test_audio_endpoint_returns_416_for_out_of_range(self, tmp_path: Path) -> None:
+        """파일 크기를 넘는 Range 는 416 Range Not Satisfiable."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_oor"
+        wav_bytes = b"\x00" * 100
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/meetings/{meeting_id}/audio",
+                headers={"Range": "bytes=500-999"},
+            )
+
+        assert response.status_code == 416
+        assert response.headers.get("content-range") == "bytes */100"
+
+    def test_audio_endpoint_returns_404_when_file_missing(self, tmp_path: Path) -> None:
+        """state 도 outputs 도 없으면 404."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/no_such_meeting/audio")
+
+        assert response.status_code == 404
+
+    def test_audio_endpoint_rejects_invalid_meeting_id(self, tmp_path: Path) -> None:
+        """meeting_id 가 path traversal 또는 잘못된 형식이면 400."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            # 슬래시는 _MEETING_ID_PATTERN 에서 거부 (FastAPI 라우팅이 먼저 잡으면 404)
+            response = client.get("/api/meetings/bad id with space/audio")
+
+        # 공백 포함 → 정규식 미매치 → 400, 또는 라우팅 단계에서 404 둘 다 허용
+        assert response.status_code in (400, 404)
+
+    def test_audio_endpoint_falls_back_to_outputs_glob(self, tmp_path: Path) -> None:
+        """pipeline_state.json 이 없을 때 outputs/{id}/*.wav 폴백 경로로 응답한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_glob"
+        wav_bytes = b"WAVE" + b"\x11" * 60
+        self._seed_audio_glob_only(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        assert response.status_code == 200
+        assert response.content == wav_bytes
+
+    def test_audio_endpoint_uses_audio_path_when_wav_path_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """pipeline_state.json 의 wav_path 가 비어있으면 audio_path 폴백."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_audiopath"
+        wav_bytes = b"\xaa" * 200
+        outputs_dir = tmp_path / "outputs" / meeting_id
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        # audio_path 가 가리키는 실제 파일 (wav 가 아닌 위치)
+        orig_path = outputs_dir / "input.wav"
+        orig_path.write_bytes(wav_bytes)
+        # state 의 wav_path 는 빈 문자열, audio_path 만 채움
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "pipeline_state.json").write_text(
+            json.dumps({"wav_path": "", "audio_path": str(orig_path)}),
+            encoding="utf-8",
+        )
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        assert response.status_code == 200
+        assert response.content == wav_bytes
+
+    def test_audio_endpoint_handles_zero_byte_file(self, tmp_path: Path) -> None:
+        """0 바이트 wav 도 안전하게 처리한다 (200 + 빈 본문)."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_zero"
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, b"")
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        assert response.status_code == 200
+        assert response.content == b""
+
+    def test_audio_endpoint_416_on_zero_byte_with_range(self, tmp_path: Path) -> None:
+        """0 바이트 파일에 Range 요청 → 모든 start 가 file_size 이상 → 416."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_zerorange"
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, b"")
+
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/meetings/{meeting_id}/audio",
+                headers={"Range": "bytes=0-9"},
+            )
+
+        assert response.status_code == 416
+
+    def test_audio_endpoint_ignores_malformed_range(self, tmp_path: Path) -> None:
+        """잘못된 형식의 Range 헤더(bytes=abc) 는 416 으로 응답한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_malformed"
+        wav_bytes = b"\x00" * 100
+        self._seed_audio_via_pipeline_state(tmp_path, meeting_id, wav_bytes)
+
+        with TestClient(app) as client:
+            for bad_range in ("bytes=abc-def", "bytes=", "bytes=10-5", "kilobytes=0-9"):
+                response = client.get(
+                    f"/api/meetings/{meeting_id}/audio",
+                    headers={"Range": bad_range},
+                )
+                # 비정상 형식 → 416, 또는 prefix 부터 다른 형식("kilobytes=")은 Range 미지원으로 간주 → 200
+                assert response.status_code in (200, 416), f"bad_range={bad_range}"
+
+    def test_audio_endpoint_returns_correct_mime_for_mp3(self, tmp_path: Path) -> None:
+        """원본이 mp3 면 audio/mpeg MIME 으로 응답한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_mp3"
+        outputs_dir = tmp_path / "outputs" / meeting_id
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        mp3_path = outputs_dir / "input.mp3"
+        mp3_path.write_bytes(b"ID3" + b"\x00" * 100)
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "pipeline_state.json").write_text(
+            json.dumps({"wav_path": str(mp3_path), "audio_path": str(mp3_path)}),
+            encoding="utf-8",
+        )
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/mpeg"
+
+    def test_audio_endpoint_skips_unplayable_extension(self, tmp_path: Path) -> None:
+        """state.wav_path 가 .txt 등 재생 불가 확장자면 무시하고 폴백."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "20260428_120000_unplayable"
+        outputs_dir = tmp_path / "outputs" / meeting_id
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        # 잘못된 wav_path: 확장자가 .txt
+        bad_path = outputs_dir / "garbage.txt"
+        bad_path.write_bytes(b"not audio")
+        # 폴백용 진짜 wav
+        real_wav = outputs_dir / "real_16k.wav"
+        real_wav.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "pipeline_state.json").write_text(
+            json.dumps({"wav_path": str(bad_path), "audio_path": str(bad_path)}),
+            encoding="utf-8",
+        )
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/meetings/{meeting_id}/audio")
+
+        # state 파일의 잘못된 확장자는 무시되고 outputs 글롭 폴백으로 real_16k.wav 응답
+        assert response.status_code == 200
+        assert response.content.startswith(b"RIFF")
