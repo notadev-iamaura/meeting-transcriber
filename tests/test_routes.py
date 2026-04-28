@@ -1987,9 +1987,7 @@ class TestGetMeetingAudio:
         assert response.status_code == 200
         assert response.content == wav_bytes
 
-    def test_audio_endpoint_uses_audio_path_when_wav_path_missing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_audio_endpoint_uses_audio_path_when_wav_path_missing(self, tmp_path: Path) -> None:
         """pipeline_state.json 의 wav_path 가 비어있으면 audio_path 폴백."""
         app = _make_test_app(tmp_path)
         meeting_id = "20260428_120000_audiopath"
