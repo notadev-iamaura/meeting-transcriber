@@ -1451,6 +1451,91 @@ button {
   line-height: 1.6;
 }
 
+/* === 빈 상태 (Empty State) — Wave 1 Plan 1.1 / design.md §3.7 ===
+ * 신규 컴포넌트는 .empty-state-container > .empty-state 패턴.
+ * 기존 viewer/list 의 .empty-state / .empty-state-icon / .empty-state-text /
+ * .empty-state-sub 정의는 그대로 보존 (specificity 로 격리).
+ */
+.empty-state-container {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.empty-state-container .empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 25% 16px 16px;
+  gap: 8px;
+  text-align: center;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.empty-state-container .empty-state-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--text-muted);
+  margin-bottom: 0;
+  /* 기존 .empty-state-icon 의 font-size/opacity 무력화 (svg 직접 색 적용) */
+  font-size: inherit;
+  opacity: 1;
+}
+
+.empty-state-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.empty-state-description {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  max-width: 280px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.empty-state-cta {
+  /* design.md §3.2 Secondary 버튼 — accent 보더 + 투명 배경 */
+  margin-top: 12px;
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--accent);
+  border: 0.5px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--duration-fast) var(--ease-macos),
+              transform var(--duration-fast) var(--ease-macos);
+}
+
+.empty-state-cta:hover {
+  background: var(--bg-hover);
+}
+
+.empty-state-cta:active {
+  transform: scale(0.97);
+}
+
+.empty-state-cta:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-state-cta {
+    transition: none;
+  }
+}
+
 /* 파이프라인 진행 상태 표시 */
 .pipeline-progress {
   margin-top: 24px;

@@ -80,6 +80,8 @@ dev = [
     # `playwright install chromium` 명령으로 별도 설치 필요.
     "playwright>=1.58.0",
     "pytest-playwright>=0.7.2",
+    "axe-playwright-python>=0.1.4",
+    "Pillow>=10.0",
 ]
 
 [project.urls]
@@ -94,7 +96,7 @@ meeting-transcriber = "main:main"
 py-modules = ["main", "config"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "steps*", "search*", "api*", "ui*", "security*"]
+include = ["core*", "steps*", "search*", "api*", "ui*", "security*", "harness*"]
 
 [tool.setuptools.package-data]
 "core.defaults" = ["*.json"]
@@ -109,6 +111,8 @@ testpaths = ["tests"]
 addopts = "-m 'not e2e'"
 markers = [
     "e2e: Playwright 기반 브라우저 E2E 테스트 (기본 실행에서 제외, `-m e2e` 로 명시 실행)",
+    "harness: 하네스 자체 단위 테스트",
+    "ui: UI/UX overhaul 테스트 (Wave 1/2/3 산출물)",
 ]
 
 # === 코드 품질 도구 ===
@@ -116,7 +120,7 @@ markers = [
 [tool.ruff]
 target-version = "py311"
 line-length = 99
-src = [".", "core", "steps", "search", "api", "ui", "security"]
+src = [".", "core", "steps", "search", "api", "ui", "security", "harness"]
 
 [tool.ruff.lint]
 select = [
@@ -147,7 +151,7 @@ ignore = [
 "scripts/*" = ["E402"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["config", "core", "steps", "search", "api", "ui", "security"]
+known-first-party = ["config", "core", "steps", "search", "api", "ui", "security", "harness"]
 
 [tool.mypy]
 python_version = "3.11"

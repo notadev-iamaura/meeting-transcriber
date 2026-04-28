@@ -947,10 +947,34 @@
             _listEl.innerHTML = "";
 
             if (meetings.length === 0) {
+                // 빈 상태 (mockup §5.1) — fixture 의 마크업 인터페이스와 일치
                 var empty = document.createElement("div");
-                empty.className = "list-empty";
-                empty.textContent = "회의 없음";
+                empty.className = "empty-state-container";
+                empty.setAttribute("data-empty", "meeting-list");
+                empty.innerHTML =
+                    '<div class="empty-state" role="status" aria-live="polite">' +
+                    '  <svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                    '    <circle cx="24" cy="24" r="20"/>' +
+                    '    <line x1="14" y1="20" x2="14" y2="28"/>' +
+                    '    <line x1="19" y1="16" x2="19" y2="32"/>' +
+                    '    <line x1="24" y1="14" x2="24" y2="34"/>' +
+                    '    <line x1="29" y1="16" x2="29" y2="32"/>' +
+                    '    <line x1="34" y1="20" x2="34" y2="28"/>' +
+                    '  </svg>' +
+                    '  <h2 class="empty-state-title">아직 회의가 없어요</h2>' +
+                    '  <p class="empty-state-description">첫 회의를 녹음하면 자동으로 전사·요약돼요.</p>' +
+                    '  <button class="empty-state-cta" type="button" data-action="start-recording">녹음 시작</button>' +
+                    '</div>';
                 _listEl.appendChild(empty);
+                // CTA → /api/recording/start 호출 (메뉴바 _on_start_recording 과 동일 엔드포인트)
+                var cta = empty.querySelector('[data-action="start-recording"]');
+                if (cta) {
+                    cta.addEventListener("click", function () {
+                        App.apiRequest("/recording/start", { method: "POST" }).catch(function (err) {
+                            console.error("녹음 시작 실패:", err);
+                        });
+                    });
+                }
                 return;
             }
 
@@ -1255,10 +1279,16 @@
             '      <span class="loading-spinner" aria-hidden="true"></span>',
             '      <span>검색 중...</span>',
             '    </div>',
-            '    <div class="empty-state" id="searchEmpty" style="display:none;">',
-            '      <div class="empty-state-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="20" cy="20" r="14" stroke="currentColor" stroke-width="3"/><path d="M30 30l12 12" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg></div>',
-            '      <div class="empty-state-text" id="searchEmptyText">검색 결과가 없습니다</div>',
-            '      <div class="empty-state-sub" id="searchEmptySub">다른 검색어나 필터를 시도해보세요</div>',
+            // 검색 빈 상태 (mockup §5.2) — fixture 마크업 인터페이스와 일치
+            '    <div class="empty-state-container" id="searchEmpty" data-empty="search" style="display:none;">',
+            '      <div class="empty-state" role="status" aria-live="polite">',
+            '        <svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '          <circle cx="20" cy="20" r="12"/>',
+            '          <line x1="29" y1="29" x2="40" y2="40"/>',
+            '        </svg>',
+            '        <h2 class="empty-state-title" id="searchEmptyText">검색 결과가 없어요</h2>',
+            '        <p class="empty-state-description" id="searchEmptySub">다른 키워드로 다시 검색해 보세요. 띄어쓰기·맞춤법을 한번 더 확인해 주세요.</p>',
+            '      </div>',
             '    </div>',
             '  </section>',
 
@@ -3871,12 +3901,16 @@
      * @returns {string} 환영 메시지 HTML 문자열
      */
     ChatView.prototype._createWelcomeHtml = function () {
-        return '<div class="welcome-message" id="chatWelcomeMessage">' +
-            '<div class="welcome-icon"><svg class="icon icon-lg" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8h36a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H18l-8 6V32H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="20" r="2" fill="currentColor"/><circle cx="24" cy="20" r="2" fill="currentColor"/><circle cx="32" cy="20" r="2" fill="currentColor"/></svg></div>' +
-            '<div class="welcome-title">회의 어시스턴트</div>' +
-            '<div class="welcome-desc">' +
-                '회의 내용에 대해 자유롭게 질문하세요.<br>' +
-                '관련 회의 내용을 검색해 답변을 드려요.' +
+        // 채팅 빈 상태 (mockup §5.3) — empty-state 패턴 + 기존 welcome-tips 보존
+        // Hidden AI 원칙(design.md §5.1)에 따라 'AI' 단어 사용 금지
+        return '<div class="empty-state-container" id="chatWelcomeMessage" data-empty="chat">' +
+            '<div class="empty-state" role="status">' +
+            '<svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<path d="M6 12h22a4 4 0 014 4v12a4 4 0 01-4 4h-12l-6 6v-6H6a4 4 0 01-4-4V16a4 4 0 014-4z" transform="translate(2 0)"/>' +
+            '<path d="M16 18h22a4 4 0 014 4v12a4 4 0 01-4 4h-2v6l-6-6h-14a4 4 0 01-4-4V22a4 4 0 014-4z" transform="translate(0 4)" opacity="0.6"/>' +
+            '</svg>' +
+            '<h2 class="empty-state-title">대화를 시작해 보세요</h2>' +
+            '<p class="empty-state-description">회의 내용에 대해 무엇이든 물어보세요. 화자별 요약·결정사항·다음 액션 등을 정리해 드려요.</p>' +
             '</div>' +
             '<div class="welcome-tips">' +
                 '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "지난 회의에서 결정된 일정이 뭐야?"</div>' +

@@ -60,3 +60,20 @@ clean: ## 캐시 및 임시 파일 정리
 help: ## 사용 가능한 명령어 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+# === UI/UX Overhaul 하네스 ===
+
+.PHONY: harness-test harness-board harness-clean
+
+harness-test:
+	pytest -m harness -v
+
+harness-board:
+	python -m harness board rebuild
+	@echo "📋 보드: docs/superpowers/ui-ux-overhaul/00-overview.md"
+
+harness-clean:
+	@echo "⚠️  state/harness.db 와 모든 시각 회귀 임시 산출물을 삭제합니다."
+	rm -f state/harness.db state/harness.db-journal
+	rm -rf tests/ui/visual/diffs tests/ui/__snapshots__
+	rm -rf state/gate-logs
