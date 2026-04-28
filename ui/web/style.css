@@ -2394,6 +2394,24 @@ button {
   100% { background-position: 200% 0; }
 }
 
+/* 스켈레톤 컨테이너 (loading-overlay 대체 wrapper)
+   mockup §3.2 — spa.js 의 검색·viewer 로딩에서 spinner 를 대체.
+   카드형 (검색): .skeleton-card 들이 직접 자식이며 gap 12px 로 나열.
+   라인형 (viewer): [data-skeleton="lines"] 자식이 .skeleton-line 들을 gap 8px 로 나열. */
+.skeleton-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+/* 라인형 컨테이너 — viewer transcript / summary 본문 단락 모방 */
+.skeleton-container [data-skeleton="lines"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 
 /* ════════���═════════════════════════════════
    12. 뷰어뷰 — 회의 상세 보기
