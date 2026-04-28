@@ -13,10 +13,10 @@ pytestmark = pytest.mark.harness
 
 
 def _stub_axis(passed: bool, detail_path=None):
-    """축 함수의 모킹 헬퍼."""
+    """축 함수의 모킹 헬퍼 — 새 시그니처 (ticket_id, component)."""
     from harness import gate
 
-    def _fn(ticket_id: str) -> gate.AxisResult:
+    def _fn(ticket_id: str, component: str) -> gate.AxisResult:
         return gate.AxisResult(passed=passed, detail_path=detail_path)
     return _fn
 
@@ -121,3 +121,34 @@ def test_red_gate_does_not_check_reviews(
     # 예외 없이 실행되어야 함
     result = gate.run_gate(db_conn, ticket_id=t.id, phase="red")
     assert result.all_passed is False
+
+
+def test_run_gate_raises_when_visual_test_missing(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """visual test 파일 부재 시 GateMisconfigured (NO-OP PASS 방지)."""
+    from harness import gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="nonexistent-component")
+    # axes 는 실제 구현 사용 — _component_to_filename + Path.exists() 검증
+    # behavior / a11y 도 없을 것이므로 visual 에서 가장 먼저 raise
+    with pytest.raises(gate.GateMisconfigured, match="visual test missing"):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="red")
+
+
+def test_run_gate_raises_when_ticket_missing(
+    db_conn: sqlite3.Connection
+) -> None:
+    """ticket lookup 실패 시 ValueError."""
+    from harness import gate
+
+    with pytest.raises(ValueError, match="ticket not found"):
+        gate.run_gate(db_conn, ticket_id="T-NEVER", phase="red")
+
+
+def test_component_to_filename_normalizes_dashes() -> None:
+    from harness import gate
+
+    assert gate._component_to_filename("empty-state") == "empty_state"
+    assert gate._component_to_filename("cmd-palette") == "cmd_palette"
+    assert gate._component_to_filename("simple") == "simple"

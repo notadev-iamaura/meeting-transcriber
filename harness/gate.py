@@ -16,17 +16,23 @@ from __future__ import annotations
 import shlex
 import sqlite3
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from harness import review
+from harness import ticket as _ticket
 
 VALID_PHASES: tuple[str, ...] = ("red", "green")
 
 
 class ReviewIncomplete(Exception):
     """green 단계 진입 전에 모든 review 가 approved 가 아닌 경우."""
+
+
+class GateMisconfigured(Exception):
+    """게이트 실행 전 필수 테스트 파일이 누락된 경우 — silent NO-OP PASS 방지."""
 
 
 @dataclass(frozen=True)
@@ -63,7 +69,8 @@ def _run_pytest(test_path: str, ticket_id: str) -> tuple[bool, Path | None]:
     """
     log_path = Path(f"state/gate-logs/{ticket_id}-{Path(test_path).name}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["pytest", test_path, "-v", "-m", "ui"]
+    # PATH 의존 제거 — 가상환경 미활성 상태에서도 동일 인터프리터 사용.
+    cmd = [sys.executable, "-m", "pytest", test_path, "-v", "-m", "ui"]
     completed = subprocess.run(
         cmd,
         capture_output=True,
@@ -79,31 +86,42 @@ def _run_pytest(test_path: str, ticket_id: str) -> tuple[bool, Path | None]:
     return completed.returncode == 0, log_path if completed.returncode != 0 else None
 
 
-def _run_visual_axis(ticket_id: str) -> AxisResult:
-    """tests/ui/visual/test_{component}.py 호출 — 실제 컴포넌트별 매핑은 Wave 1+ 에서."""
-    test_dir = Path("tests/ui/visual")
-    if not any(test_dir.glob("test_*.py")):
-        # Wave 1 시작 전: 시각 테스트가 아직 없으므로 NO-OP PASS.
-        return AxisResult(passed=True, detail_path=None)
-    passed, log = _run_pytest(str(test_dir), ticket_id)
+def _component_to_filename(component: str) -> str:
+    """component 식별자를 테스트 파일명으로 변환 (`demo-swatch` -> `demo_swatch`)."""
+    return component.replace("-", "_")
+
+
+def _run_visual_axis(ticket_id: str, component: str) -> AxisResult:
+    """tests/ui/visual/test_{component}.py 를 실행. 파일 미존재 시 GateMisconfigured."""
+    test_file = Path(f"tests/ui/visual/test_{_component_to_filename(component)}.py")
+    if not test_file.exists():
+        raise GateMisconfigured(
+            f"visual test missing for component {component!r}: {test_file}. "
+            "QA-A 가 시나리오 작성 전에 게이트 실행 시도."
+        )
+    passed, log = _run_pytest(str(test_file), ticket_id)
     return AxisResult(passed=passed, detail_path=log)
 
 
-def _run_behavior_axis(ticket_id: str) -> AxisResult:
-    """tests/ui/behavior/ 의 행동 시나리오 테스트 실행."""
-    test_dir = Path("tests/ui/behavior")
-    if not any(test_dir.glob("test_*.py")):
-        return AxisResult(passed=True, detail_path=None)
-    passed, log = _run_pytest(str(test_dir), ticket_id)
+def _run_behavior_axis(ticket_id: str, component: str) -> AxisResult:
+    """tests/ui/behavior/test_{component}.py 를 실행. 파일 미존재 시 GateMisconfigured."""
+    test_file = Path(f"tests/ui/behavior/test_{_component_to_filename(component)}.py")
+    if not test_file.exists():
+        raise GateMisconfigured(
+            f"behavior test missing for component {component!r}: {test_file}."
+        )
+    passed, log = _run_pytest(str(test_file), ticket_id)
     return AxisResult(passed=passed, detail_path=log)
 
 
-def _run_a11y_axis(ticket_id: str) -> AxisResult:
-    """tests/ui/a11y/ 의 접근성 테스트 실행."""
-    test_dir = Path("tests/ui/a11y")
-    if not any(test_dir.glob("test_*.py")):
-        return AxisResult(passed=True, detail_path=None)
-    passed, log = _run_pytest(str(test_dir), ticket_id)
+def _run_a11y_axis(ticket_id: str, component: str) -> AxisResult:
+    """tests/ui/a11y/test_{component}.py 를 실행. 파일 미존재 시 GateMisconfigured."""
+    test_file = Path(f"tests/ui/a11y/test_{_component_to_filename(component)}.py")
+    if not test_file.exists():
+        raise GateMisconfigured(
+            f"a11y test missing for component {component!r}: {test_file}."
+        )
+    passed, log = _run_pytest(str(test_file), ticket_id)
     return AxisResult(passed=passed, detail_path=log)
 
 
@@ -133,6 +151,10 @@ def run_gate(
     if phase not in VALID_PHASES:
         raise ValueError(f"phase must be {VALID_PHASES}, got {phase!r}")
 
+    t = _ticket.get_ticket(conn, ticket_id)
+    if t is None:
+        raise ValueError(f"ticket not found: {ticket_id}")
+
     if phase == "green" and not review.all_passed(conn, ticket_id=ticket_id):
         raise ReviewIncomplete(
             f"ticket {ticket_id}: green gate requires all peer-review and "
@@ -140,9 +162,9 @@ def run_gate(
             f"Run `python -m harness review status --ticket {ticket_id}` to inspect."
         )
 
-    visual = _run_visual_axis(ticket_id)
-    behavior = _run_behavior_axis(ticket_id)
-    a11y = _run_a11y_axis(ticket_id)
+    visual = _run_visual_axis(ticket_id, t.component)
+    behavior = _run_behavior_axis(ticket_id, t.component)
+    a11y = _run_a11y_axis(ticket_id, t.component)
 
     conn.execute(
         "INSERT INTO gate_runs ("

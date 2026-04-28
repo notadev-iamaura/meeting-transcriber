@@ -64,22 +64,27 @@
 ### 4.1 디렉토리 구조
 
 ```
-.claude/agents/ui-ux/        # 4 서브에이전트 정의 (Markdown frontmatter)
-  ├─ pm.md                   # PM (티켓 발급·게이트 결과 검토)
-  ├─ designer.md             # Designer (목업·시각 토큰·스냅샷 베이스라인)
-  ├─ frontend.md             # Frontend (구현·리팩터)
-  └─ qa.md                   # QA (행동 시나리오·접근성 룰셋)
+.claude/agents/ui-ux/        # 8 서브에이전트 정의 (Producer + Reviewer 페어)
+  ├─ pm-a.md                 # PM Producer (티켓 발급·디스패치·게이트 호출)
+  ├─ pm-b.md                 # PM Reviewer (머지 최종 승인 권한)
+  ├─ designer-a.md           # Designer Producer (목업·시각 베이스라인)
+  ├─ designer-b.md           # Designer Reviewer (토큰 일관성·색 대비 검토)
+  ├─ frontend-a.md           # Frontend Producer (ui/web/* 최소 변경 구현)
+  ├─ frontend-b.md           # Frontend Reviewer (코드 리뷰·DRY·회귀 위험)
+  ├─ qa-a.md                 # QA Producer (행동 시나리오·a11y 룰셋)
+  └─ qa-b.md                 # QA Reviewer (시나리오 완전성·Red 의도성)
 
-scripts/harness/             # Python CLI 하네스
+harness/                     # Python CLI 하네스 (루트 패키지로 등록)
   ├─ __main__.py             # `python -m harness` 진입
-  ├─ cli.py                  # argparse 라우팅
-  ├─ db.py                   # SQLite 스키마·마이그레이션·쿼리
-  ├─ ticket.py               # 티켓 모델·상태 전이
-  ├─ gate.py                 # QA 게이트 오케스트레이터
-  ├─ snapshot.py             # Playwright 시각 회귀 베이스라인 관리
-  ├─ a11y.py                 # axe-core 통합
-  ├─ behavior.py             # Playwright 행동 시나리오 통합
-  └─ board.py                # docs 마크다운 진행 보드 자동 생성
+  ├─ cli.py                  # argparse 라우팅 (ticket / gate / review / board 서브명령)
+  ├─ db.py                   # SQLite 스키마·연결 헬퍼
+  ├─ ticket.py               # 티켓 모델·상태 전이·CRUD
+  ├─ review.py               # 8 에이전트 크로스체크 이벤트 기록
+  ├─ gate.py                 # 3축 통합 게이트 + review 통과 강제
+  ├─ snapshot.py             # 시각 회귀 베이스라인 + 픽셀 diff (Pillow + numpy)
+  ├─ a11y.py                 # axe-core 결과 기록
+  ├─ behavior.py             # Playwright 행동 시나리오 결과 기록
+  └─ board.py                # docs 마크다운 진행 보드 + 리뷰 컬럼
 
 state/
   └─ harness.db              # SQLite — 티켓·산출물 레퍼런스·게이트 결과·이벤트
@@ -307,7 +312,7 @@ harness board rebuild
 
 ### 6.2 하네스 자체 실패 시
 - SQLite 마이그레이션 실패 → DB 재생성 명령(`harness db reset`) 제공
-- Playwright 환경 문제 → `scripts/harness/doctor.py` 로 진단
+- Playwright 환경 문제 → `harness/doctor.py` 로 진단
 
 ### 6.3 세션 중단 → 재개
 - SQLite 가 영속이므로 새 세션에서 `harness ticket list --status in-progress` 로 즉시 복원
@@ -317,7 +322,7 @@ harness board rebuild
 
 ## 7. 마이그레이션·기존 코드 정리
 
-본 작업은 신규 디렉토리(`scripts/harness/`, `tests/ui/`, `docs/superpowers/ui-ux-overhaul/`, `.claude/agents/ui-ux/`)를 만들고, 기존 `ui/web/*` 만 변경합니다. 다음 부수 정리도 포함합니다 (audit 에서 식별된 작업 영역 내 항목):
+본 작업은 신규 디렉토리(`harness/`, `tests/ui/`, `docs/superpowers/ui-ux-overhaul/`, `.claude/agents/ui-ux/`)를 만들고, 기존 `ui/web/*` 만 변경합니다. 다음 부수 정리도 포함합니다 (audit 에서 식별된 작업 영역 내 항목):
 
 - `ui/web/style.css` 의 다크모드 색상 변수 재정렬 (Wave 1)
 - `ui/web/spa.js:7616~8194` 의 미통합 Command Palette 모듈 활성화 (Wave 2)
@@ -329,7 +334,7 @@ harness board rebuild
 
 | 단계 | 산출물 | 예상 |
 |------|--------|------|
-| 하네스 셋업 | `scripts/harness/`, SQLite 스키마, 4 에이전트 정의, 첫 게이트 통과 데모 | 1-2일 |
+| 하네스 셋업 | `harness/`, SQLite 스키마, 8 에이전트 정의 (역할당 Producer + Reviewer), 첫 게이트 통과 데모 | 1-2일 |
 | Wave 1 (Visual Polish, 3 티켓) | 빈 상태 / 스켈레톤 / 다크모드 토큰 | 2-3일 |
 | Wave 2 (Interaction & Focus, 2 티켓) | Command Palette / focus-visible | 2일 |
 | Wave 3 (Accessibility & Mobile, 2 티켓) | ARIA / 모바일 반응형 | 2일 |

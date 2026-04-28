@@ -77,7 +77,9 @@ def latest_status(
     ).fetchone()
     if row is None:
         return None
-    return json.loads(row["payload"])["status"]
+    payload: dict = json.loads(row["payload"])
+    status = payload["status"]
+    return str(status) if status is not None else None
 
 
 def all_passed(conn: sqlite3.Connection, *, ticket_id: str) -> bool:
