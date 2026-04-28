@@ -30,6 +30,7 @@
 | Q2 | 작업 묶음 단위 | **3-Wave** — Visual Polish → Interaction & Focus → Accessibility & Mobile |
 | Q3 | TDD 첫 테스트 형태 | **Hybrid 3축 Red** — 행동 + 시각 + 접근성 동시 FAIL 후 통과 |
 | Q4 | 오케스트레이터 형태 | **Hybrid Conductor** — 메인 Claude 세션이 PM + Python CLI 헬퍼 + SQLite |
+| Q5 | 에이전트 팀 구성 | **8 에이전트 (역할당 Producer + Reviewer)** — 단일 실패점 제거 + 크로스체크 게이트 강제 |
 
 ---
 
@@ -152,55 +153,96 @@ CREATE TABLE events (
 );
 ```
 
-### 4.3 4 서브에이전트 — 책임·인터페이스
+### 4.3 8 서브에이전트 — 책임·인터페이스 (역할당 Producer + Reviewer 페어)
 
-| 에이전트 | 입력 | 출력 | 도구 |
-|---------|------|------|------|
-| **PM** (메인 세션) | 본 spec, 우선순위 | 티켓 발급 (`harness ticket open`), 게이트 결과 검토, 머지 결정 | `Agent` 툴로 Designer/Frontend/QA 디스패치 |
-| **Designer** | 티켓(componentId, design.md 참조) | 마크다운 목업(`docs/superpowers/ui-ux-overhaul/wave-N/{component}-mockup.md`) + Playwright 시각 베이스라인 PNG | Read, Write, Bash(Playwright snapshot) |
-| **Frontend** | 티켓 + Designer 산출물 + QA 산출물 | 구현(`ui/web/*` 변경) | Read, Edit, Write, Bash(테스트 실행) |
-| **QA** | 티켓 + Designer 목업 | Playwright 행동 시나리오(`tests/ui/behavior/`) + axe-core 룰셋(`tests/ui/a11y/`) | Read, Write, Bash(테스트 실행) |
+각 역할마다 **Producer(A)** 와 **Reviewer(B)** 를 분리해 단일 실패점을 제거하고 상호 검증을 강제한다. 같은 역할의 두 에이전트는 **다른 시스템 프롬프트** 를 가지며 (Producer 는 만들기에, Reviewer 는 트집 잡기에 집중), 같은 산출물을 두 번 만들지 않는다.
 
-### 4.4 TDD 사이클 — Hybrid 3축 Red
+| 페어 | 에이전트 | 책임 |
+|------|---------|------|
+| **PM** | `pm-a` (Producer) | 티켓 발급, Designer/Frontend/QA Producer 디스패치, 게이트 결과 1차 검토, 합의 안 되면 사용자에게 에스컬레이션 |
+| | `pm-b` (Reviewer) | 게이트 결과 2차 독립 검토, **머지 최종 승인 권한**, 회귀 위험·spec 비목표 침범 감시. PM-A 와 다른 의견이면 사용자 결정 요청 |
+| **Designer** | `designer-a` | 마크다운 목업, Playwright 시각 베이스라인 3 변종(라이트/다크/모바일) |
+| | `designer-b` | A 의 산출물에 대한 토큰 일관성·색 대비(WCAG AA 4.5:1)·다크모드 단계 톤·`docs/design.md` 적합성 리뷰. **승인 또는 수정 요구**. 새 베이스라인 직접 작성 금지 |
+| **Frontend** | `frontend-a` | `ui/web/*` 의 최소 변경 구현 |
+| | `frontend-b` | A 의 diff 에 대한 코드 리뷰: DRY 위반·SPA 라우터 영향·기존 패턴 준수·회귀 위험. **승인 또는 수정 요구**. 직접 구현 금지 |
+| **QA** | `qa-a` | Playwright 행동 시나리오(Given-When-Then) + axe-core 룰셋 |
+| | `qa-b` | 시나리오 완전성(엣지 케이스 누락) · Red 의도성(첫 실행 시 정확히 FAIL 하는지) · 픽셀 비교가 behavior 에 섞이지 않았는지 리뷰 |
+
+**도구 권한 (모든 에이전트 공통)**: Read, Glob, Grep · **Producer만**: Edit, Write, Bash · **Reviewer만**: Read 와 코멘트(이벤트 기록)
+
+### 4.3.1 크로스체크 게이트
+
+산출물(목업/베이스라인/시나리오/구현)마다 다음 두 단계를 거친다:
+
+1. **자가 검증** — Producer 가 자기 산출물에 대한 짧은 self-check (체크리스트 형태) 수행 후 events 에 `review.self` 기록
+2. **동료 리뷰** — Reviewer 가 독립 검토 후 events 에 `review.peer` 이벤트 (`approved` | `changes_requested`) 기록
+
+**합의 규칙**:
+- Reviewer 가 `approved` → 다음 단계 진행
+- Reviewer 가 `changes_requested` → Producer 가 수정 → 다시 Reviewer 검토
+- 3 회 왕복해도 합의 안 되면 → PM-B(Reviewer) 가 사용자에게 에스컬레이션
+
+**검증되는 산출물**:
+- Designer-A 의 목업 + 베이스라인 → Designer-B 검토
+- QA-A 의 시나리오 + 룰셋 → QA-B 검토
+- Frontend-A 의 구현 diff → Frontend-B 검토
+- PM-A 의 게이트 결과 판정 → PM-B 의 머지 승인
+
+### 4.4 TDD 사이클 — Hybrid 3축 Red + 크로스체크
 
 ```
-[PM]                    티켓 발급 (harness ticket open)
+[PM-A]                  티켓 발급 (harness ticket open)
    │
-   ├─ [Designer]        목업 + 시각 베이스라인 PNG (라이트/다크/모바일)
+   ├─ [Designer-A]      목업 + 시각 베이스라인 PNG (라이트/다크/모바일)
    │       │
-   │       └─ artifact: docs/.../wave-N/{c}-mockup.md, tests/ui/visual/baselines/{c}-{variant}.png
+   │       └─ events: review.self (체크리스트 통과 확인)
+   │       │
+   ├─ [Designer-B]      독립 리뷰 → events: review.peer (approved | changes_requested)
+   │       │           (changes_requested 시 Designer-A 가 수정 후 재제출)
    │
-   ├─ [QA]              Playwright 행동 시나리오 + axe-core 룰셋
+   ├─ [QA-A]            Playwright 행동 시나리오 + axe-core 룰셋
    │       │
-   │       └─ artifact: tests/ui/behavior/test_{c}.py, tests/ui/a11y/test_{c}.py
+   │       └─ events: review.self
+   │       │
+   ├─ [QA-B]            독립 리뷰 → events: review.peer
    │
    ▼
-[harness gate run --phase red]
+[harness gate run --phase red]    (PM-A 트리거)
    ┌─ visual    ✗ (베이스라인 vs 현재 = 다름)
    ├─ behavior  ✗ (시나리오 미통과)
    └─ a11y      ✗ (axe 위반)
    → DB.gate_runs INSERT (red)
-   → board.py 가 docs/.../00-overview.md 갱신
+   → 셋 다 ✗ 가 아니면 Red 무효 → QA-B 가 시나리오 보강
    │
    ▼
-[Frontend]              3개 모두 통과시키는 최소 구현
+[Frontend-A]            3개 모두 통과시키는 최소 구현
+   │
+[Frontend-B]            diff 코드 리뷰 → events: review.peer (approved | changes_requested)
    │
    ▼
-[harness gate run --phase green]
+[harness gate run --phase green]  (PM-A 트리거)
    ┌─ visual    ✓
    ├─ behavior  ✓
    └─ a11y      ✓
    → DB.gate_runs INSERT (green)
    │
    ▼
-[Refactor 합동 리뷰]    PM/Designer/QA — 토큰 일관성·회귀 누락·코드 품질
+[Refactor 합동 리뷰]    Designer-A/B + Frontend-A/B + QA-A/B 짧은 합동 검토
    │
    ▼
-[PM] harness ticket close --pr <N>
+[PM-A]                  머지 제안 (모든 review.peer 가 approved 인지 확인)
+   │
+[PM-B]                  머지 최종 승인 (PM-A 와 독립적인 spec 비목표·회귀 위험 검토)
+   │                    승인 안 되면 사용자 에스컬레이션
+   │
+   ▼
+[PM-A] harness ticket close --pr <N>
    → status: merged → closed
 ```
 
 **PR 단위 규칙**: PR = 티켓 단위 (한 컴포넌트 = 한 PR). Wave 안의 모든 티켓이 closed 되면 `harness board rebuild` 가 자동으로 Wave 완료 보드 스냅샷을 생성하고 별도 docs 커밋으로 영속화.
+
+**크로스체크 위반 시**: review.peer 가 `changes_requested` 인 채로 게이트 진행 시도 → CLI 가 에러 반환 (`harness gate run` 에 review 통과 체크 포함).
 
 ### 4.5 CLI 명령 (계약)
 
