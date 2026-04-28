@@ -290,6 +290,9 @@ class PipelineStep(StrEnum):
     MERGE = "merge"  # STT + 화자분리 → 병합 발화
     CORRECT = "correct"  # 병합 발화 → LLM 보정
     SUMMARIZE = "summarize"  # 보정 발화 → 마크다운 회의록
+    # Phase 1 (LLM Wiki) — non-fatal 9단계. PIPELINE_STEPS 메인 루프에는 포함되지
+    # 않으며 run() 끝에서 별도로 호출된다 (실패해도 RAG 결과는 정상 반환).
+    WIKI_COMPILE = "wiki_compile"  # 요약/발화 → 영구 wiki 페이지 (Phase 1 dry-run)
 
 
 # 실행 순서를 보장하는 단계 목록
@@ -1052,6 +1055,69 @@ class PipelineManager:
 
         return result
 
+    async def _run_step_wiki_compile(
+        self,
+        *,
+        meeting_id: str,
+        state: PipelineState,
+        state_path: Path,
+    ) -> None:
+        """9단계 Wiki 컴파일 (Phase 1 dry-run, non-fatal).
+
+        Phase 1 동작:
+            - WikiCompiler 가 wiki/log.md 에 dry-run 한 줄 기록 + git commit
+            - 실패 시 PipelineError 를 catch 하여 state.warnings 에 기록만 하고
+              메인 파이프라인은 정상 종료 ("completed" 유지)
+
+        Args:
+            meeting_id: 회의 ID — wiki log 마커에 기록.
+            state: 파이프라인 상태 — step_results / warnings 에 결과 기록.
+            state_path: 상태 파일 경로 — non-fatal 실패 시도 저장.
+        """
+        # 지연 import — wiki 패키지가 없는 테스트 환경에서 import 비용 회피
+        from steps.wiki_compiler import WikiCompiler  # noqa: PLC0415
+
+        step_start = time.monotonic()
+        step_name = PipelineStep.WIKI_COMPILE.value
+        try:
+            wiki = WikiCompiler(self._config, self._model_manager)
+            wiki_result = await wiki.run(meeting_id=meeting_id)
+            elapsed = time.monotonic() - step_start
+            logger.info(
+                "wiki 9단계 완료 (non-fatal): %s — %s",
+                wiki_result.get("status"),
+                wiki_result,
+            )
+            state.step_results.append(
+                StepResult(
+                    step=step_name,
+                    success=True,
+                    elapsed_seconds=round(elapsed, 2),
+                    error_message="",
+                    checkpoint_path="",
+                ).to_dict()
+            )
+        except Exception as exc:  # noqa: BLE001 — non-fatal 9단계 catch-all
+            elapsed = time.monotonic() - step_start
+            logger.error(
+                "wiki 9단계 실패 (non-fatal): meeting_id=%s, error=%s",
+                meeting_id,
+                exc,
+            )
+            state.warnings.append(f"wiki 9단계 실패 (non-fatal): {exc}")
+            state.step_results.append(
+                StepResult(
+                    step=step_name,
+                    success=False,
+                    elapsed_seconds=round(elapsed, 2),
+                    error_message=str(exc),
+                    checkpoint_path="",
+                ).to_dict()
+            )
+        finally:
+            # 9단계 결과 반영 — state 는 항상 저장 (성공/실패 무관)
+            state.save(state_path)
+
     async def run(
         self,
         audio_path: Path,
@@ -1419,6 +1485,21 @@ class PipelineManager:
         state.status = "completed"
         state.current_step = ""
         state.save(state_path)
+
+        # ── Step 9 (Phase 1): Wiki Compile (dry-run) ─────────────────────
+        # PRD §5.1 호출 위치 + §9 Phase 1: 요약 단계 직후 영구 위키 컴파일 트리거.
+        # 9단계는 **non-fatal** — Wiki 실패가 메인 RAG 파이프라인을 중단시키지 않으며,
+        # 단계 결과는 state.step_results 에 기록되지만 status="completed" 는 유지된다.
+        # config.wiki.enabled=False 가 기본값이라 활성화 전까지는 즉시 no-op.
+        # `is True` 명시 비교는 MagicMock 등 Truthy 객체가 우회 진입하는 것을 차단
+        # (기존 mock_config 기반 단위 테스트가 9단계를 실수로 실행하지 않도록).
+        wiki_cfg = getattr(self._config, "wiki", None)
+        if wiki_cfg is not None and getattr(wiki_cfg, "enabled", False) is True:
+            await self._run_step_wiki_compile(
+                meeting_id=meeting_id,
+                state=state,
+                state_path=state_path,
+            )
 
         # PERF: 파이프라인 성능 프로파일 — 각 단계별 소요 시간 요약 로그
         step_timing_parts: list[str] = []

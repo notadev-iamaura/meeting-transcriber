@@ -568,6 +568,48 @@ class LifecycleConfig(BaseModel):
         return v
 
 
+class WikiConfig(BaseModel):
+    """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
+
+    LLM Wiki 는 회의 요약 결과를 영구 위키 페이지(decisions/people/projects/
+    topics) 로 컴파일하는 9단계 파이프라인 확장이다. Phase 1 에서는 실제 LLM
+    호출 없이 골격만 통합하므로 기본값은 `enabled=False`, `dry_run=True` 로
+    안전하게 비활성화되어 있다.
+
+    필드:
+        enabled: 9단계(WIKI_COMPILE) 활성화 여부. False 이면 PipelineManager 가
+            wiki 단계를 호출하지 않고 곧바로 종료한다.
+        root: wiki 루트 디렉토리. `~` 확장은 호출 측이 명시적으로 수행해야 한다.
+        compiler_model: 향후 Phase 2 부터 사용할 컴파일러 LLM 모델. Phase 1
+            에서는 dry_run 이므로 실제 사용되지 않는다.
+        lint_interval: D4 (cross-page lint) 를 N 회의마다 실행. Phase 2 도입.
+        confidence_threshold: D3 (페이지 confidence 컷오프). 0~10 정수 중 7 이상이
+            기본값. Phase 2 도입.
+        dry_run: Phase 1 골격에서는 항상 True. 실제 LLM 호출/페이지 작성은 안 함.
+
+    환경변수 오버라이드 (PRD §9 Phase 1.B):
+        - MT_WIKI_ENABLED=true|false → enabled
+        - MT_WIKI_ROOT=/path → root
+        - MT_WIKI_DRY_RUN=true|false → dry_run
+    """
+
+    enabled: bool = False
+    root: Path = Path("~/.meeting-transcriber/wiki/")
+    compiler_model: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+    lint_interval: int = Field(default=5, ge=1)
+    confidence_threshold: int = Field(default=7, ge=0, le=10)
+    dry_run: bool = True
+
+    @property
+    def resolved_root(self) -> Path:
+        """root 의 ~ 확장 + 절대 경로 변환.
+
+        Returns:
+            확장된 wiki 루트의 절대 경로.
+        """
+        return Path(self.root).expanduser().resolve()
+
+
 class AppConfig(BaseModel):
     """애플리케이션 전체 설정을 관리하는 최상위 모델.
 
@@ -602,6 +644,23 @@ class AppConfig(BaseModel):
         default_factory=NumberNormalizationConfig
     )
     audio_quality: AudioQualityConfig = Field(default_factory=AudioQualityConfig)
+    wiki: WikiConfig = Field(default_factory=WikiConfig)
+
+
+def _parse_bool(value: str) -> bool:
+    """문자열을 bool 로 변환한다 (환경변수 오버라이드 헬퍼).
+
+    `true`, `1`, `yes`, `on` (대소문자 무시) → True. 그 외 (`false`, `0`, `no`,
+    `off`, 빈 문자열 등) → False. 복잡한 인자 검증 라이브러리 의존성을 피하기
+    위해 단순 매칭 사용.
+
+    Args:
+        value: 환경변수에서 읽은 문자열.
+
+    Returns:
+        파싱된 bool 값.
+    """
+    return value.strip().lower() in {"true", "1", "yes", "on"}
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
@@ -650,6 +709,16 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     # LLM 모델명 오버라이드 (MLX 백엔드)
     if env_model := os.environ.get("MT_LLM_MODEL"):
         data.setdefault("llm", {})["mlx_model_name"] = env_model
+
+    # LLM Wiki 오버라이드 (Phase 1)
+    # `MT_WIKI_ENABLED`, `MT_WIKI_ROOT`, `MT_WIKI_DRY_RUN` 환경변수 처리.
+    # _parse_bool 헬퍼는 "true"/"false"/"1"/"0"/대소문자 혼용을 모두 받는다.
+    if (env_wiki_enabled := os.environ.get("MT_WIKI_ENABLED")) is not None:
+        data.setdefault("wiki", {})["enabled"] = _parse_bool(env_wiki_enabled)
+    if env_wiki_root := os.environ.get("MT_WIKI_ROOT"):
+        data.setdefault("wiki", {})["root"] = env_wiki_root
+    if (env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN")) is not None:
+        data.setdefault("wiki", {})["dry_run"] = _parse_bool(env_wiki_dry)
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰
