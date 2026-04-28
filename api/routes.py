@@ -4547,3 +4547,179 @@ async def cancel_ab_test(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ABTestStartedResponse(test_id=test_id, status="cancelling")
+
+
+# === LLM Wiki Phase 1 엔드포인트 (PRD §7.1 부분 구현) ===
+#
+# Phase 1 범위: wiki 페이지 목록 조회 + HEALTH 상태 조회 두 가지만.
+# - 컴파일/생성/수정/삭제는 Phase 2 이후 도입.
+# - wiki.enabled=False 또는 wiki 디렉토리 부재 시 반드시 빈 목록을 돌려준다
+#   (404 가 아님). 사용자 경험상 "위키 미활성화" 와 "위키 페이지 0개" 는
+#   동일한 의미이므로 200 OK + 빈 배열로 통일한다.
+# - core/wiki/* 는 lazy import 하여 wiki 비활성 시 import 비용을 0 으로 둔다.
+
+
+class WikiPageItem(BaseModel):
+    """위키 페이지 목록 항목 응답 스키마.
+
+    Attributes:
+        path: wiki 루트 기준 상대 경로 (예: "decisions/2026-04-15-foo.md").
+        type: PageType.value 문자열 (예: "decision", "person", "project", "topic").
+        title: frontmatter 의 title 필드. 없으면 None.
+        last_updated: frontmatter 의 last_updated 필드 (ISO 8601 권장). 없으면 None.
+    """
+
+    path: str
+    type: str
+    title: str | None = None
+    last_updated: str | None = None
+
+
+class WikiPagesResponse(BaseModel):
+    """GET /api/wiki/pages 응답 스키마.
+
+    Attributes:
+        pages: 위키 페이지 항목 리스트.
+        total: 전체 페이지 수.
+    """
+
+    pages: list[WikiPageItem]
+    total: int
+
+
+class WikiHealthResponse(BaseModel):
+    """GET /api/wiki/health 응답 스키마.
+
+    Phase 1 에서는 D4 자동 lint 가 아직 동작하지 않으므로 status="no_lint_yet"
+    을 기본값으로 사용한다. HEALTH.md 가 디스크에 존재하는 경우에는 raw_markdown
+    필드로 그대로 노출해 클라이언트가 직접 파싱하도록 한다 (Phase 2 에서
+    구조화된 필드로 확장 예정).
+
+    Attributes:
+        status: "no_lint_yet" | "ok" | "warnings".
+        last_lint_at: 최근 lint 시각 (ISO 8601). 미실행이면 None.
+        raw_markdown: HEALTH.md 의 원문 마크다운. 파일이 없으면 None.
+    """
+
+    status: str
+    last_lint_at: str | None = None
+    raw_markdown: str | None = None
+
+
+@router.get(
+    "/wiki/pages",
+    response_model=WikiPagesResponse,
+    summary="위키 페이지 목록 조회",
+    description=(
+        "LLM Wiki Phase 1 — wiki 디렉토리 하위의 일반 페이지(decisions/people/"
+        "projects/topics) 목록을 반환한다. wiki.enabled=False 거나 디렉토리가 "
+        "없으면 빈 목록을 돌려준다."
+    ),
+)
+async def list_wiki_pages(request: Request) -> WikiPagesResponse:
+    """위키 페이지 목록을 반환한다 (PRD §7.1).
+
+    동작:
+        1. config.wiki.enabled=False → 빈 목록 (200 OK)
+        2. wiki 루트 디렉토리 부재 → 빈 목록
+        3. wiki 루트 존재 → WikiStore.all_pages() 결과를 직렬화
+
+    Args:
+        request: FastAPI Request 객체.
+
+    Returns:
+        WikiPagesResponse — 페이지 목록 + 총 개수.
+    """
+    config = _get_config(request)
+    wiki_cfg = getattr(config, "wiki", None)
+
+    # Phase 1 — wiki 비활성 시 즉시 종료.
+    if wiki_cfg is None or not getattr(wiki_cfg, "enabled", False):
+        return WikiPagesResponse(pages=[], total=0)
+
+    wiki_root: Path = wiki_cfg.resolved_root
+    if not wiki_root.exists():
+        # 디렉토리 자체가 없으면 위키 페이지도 0개 — 사용자 관점에서는 동일.
+        return WikiPagesResponse(pages=[], total=0)
+
+    # core.wiki 는 wiki 활성 시에만 lazy import 한다 (RAG 경로 import 부담 0).
+    from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
+
+    store = WikiStore(wiki_root)
+    items: list[WikiPageItem] = []
+    for rel_path in store.all_pages():
+        try:
+            page = store.read_page(rel_path)
+        except WikiStoreError as exc:
+            # 깨진 페이지 1건 때문에 전체 목록이 깨지지 않도록 경고만 남기고 skip.
+            logger.warning(
+                "wiki 페이지 read 실패: %s (%s)", rel_path, exc.detail or exc.reason
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — 미지의 파싱 오류 방어
+            logger.warning("wiki 페이지 처리 실패: %s (%s)", rel_path, exc)
+            continue
+
+        # frontmatter 에서 title / last_updated 만 안전하게 추출.
+        fm = page.frontmatter or {}
+        title = fm.get("title")
+        last_updated = fm.get("last_updated") or fm.get("updated_at")
+        items.append(
+            WikiPageItem(
+                path=str(rel_path),
+                type=str(page.page_type.value),
+                title=str(title) if title is not None else None,
+                last_updated=str(last_updated) if last_updated is not None else None,
+            )
+        )
+
+    # 경로 사전순 정렬 — 응답을 deterministic 하게 유지.
+    items.sort(key=lambda item: item.path)
+    return WikiPagesResponse(pages=items, total=len(items))
+
+
+@router.get(
+    "/wiki/health",
+    response_model=WikiHealthResponse,
+    summary="위키 건강 상태 조회",
+    description=(
+        "LLM Wiki Phase 1 — wiki/HEALTH.md 의 raw 마크다운을 반환한다. 파일이 "
+        "없으면 status=no_lint_yet 을 돌려준다 (D4 자동 lint Phase 2 도입 예정)."
+    ),
+)
+async def get_wiki_health(request: Request) -> WikiHealthResponse:
+    """위키 HEALTH.md 의 현재 상태를 반환한다 (PRD §7.1, §6 D4).
+
+    Phase 1 동작:
+        - HEALTH.md 가 없으면 status=no_lint_yet, last_lint_at=None.
+        - 파일이 있으면 raw_markdown 으로 원문 노출.
+        - wiki.enabled=False 라도 HEALTH.md 가 있으면 그대로 반환 (감사용).
+
+    Args:
+        request: FastAPI Request 객체.
+
+    Returns:
+        WikiHealthResponse — status / last_lint_at / raw_markdown.
+    """
+    config = _get_config(request)
+    wiki_cfg = getattr(config, "wiki", None)
+
+    # wiki 설정이 없거나 root 가 부재면 즉시 no_lint_yet.
+    if wiki_cfg is None:
+        return WikiHealthResponse(status="no_lint_yet", last_lint_at=None)
+
+    wiki_root: Path = wiki_cfg.resolved_root
+    health_path = wiki_root / "HEALTH.md"
+
+    if not health_path.exists():
+        return WikiHealthResponse(status="no_lint_yet", last_lint_at=None)
+
+    try:
+        raw = health_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("HEALTH.md 읽기 실패: %s (%s)", health_path, exc)
+        return WikiHealthResponse(status="no_lint_yet", last_lint_at=None)
+
+    # Phase 1 — 마크다운 본문은 그대로 두고 status 는 보수적으로 ok 로 표시.
+    # Phase 2 D4 도입 시 frontmatter 또는 첫 줄 메타데이터에서 status 를 파싱.
+    return WikiHealthResponse(status="ok", last_lint_at=None, raw_markdown=raw)
