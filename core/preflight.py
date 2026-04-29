@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -91,9 +92,20 @@ def _check_metal_availability() -> bool:
     MLX의 Metal 초기화가 실패하면 C++ abort()를 호출하여
     프로세스 전체가 종료되므로, 별도 서브프로세스에서 검증한다.
 
+    CI 환경(GitHub Actions 등)에서는 macOS runner가 Apple Silicon 이라도
+    가상화 계층 때문에 `mlx.core` 본 프로세스 import 시점에 SIGABRT 가
+    발생하는 사례가 있다 (subprocess preflight 는 통과하지만 본 프로세스
+    cleanup path 의 `import mlx.core` 가 abort). CI 에서는 mlx 백엔드를
+    사용할 일이 없으므로 (단위 테스트는 모두 mock 으로 동작) 일찍 False
+    반환하여 SIGABRT 를 원천 차단한다.
+
     Returns:
         Metal GPU 사용 가능 여부
     """
+    if os.environ.get("CI", "").lower() in ("true", "1"):
+        logger.info("CI 환경 감지 — Metal/MLX 검증 스킵 (mlx import abort 방지)")
+        return False
+
     try:
         result = subprocess.run(
             [
