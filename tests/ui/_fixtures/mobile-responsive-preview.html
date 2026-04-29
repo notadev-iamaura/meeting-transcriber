@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<!--
+  mobile-responsive preview fixture (T-302) — 정식 위치
+
+  단일 진실 공급원 (Source of Truth):
+    본 fixture 는 Designer-A 가 mockup §3 마크업 인터페이스 그대로 햄버거 +
+    사이드바 drawer + 백드롭을 렌더링한 결과를 self-contained HTML 로 담은
+    것이다. mockup §4 의 CSS 패턴을 인라인 <style> 로 그대로 갖고 있어
+    style.css 미마이그레이션 상태에서도 fixture 만으로 시각·행동·a11y 검증
+    가능.
+
+  2 변종 캡처 (mockup §7 / spec §4.5, §5.3):
+    - closed: 페이지 로드 직후 — 햄버거만 보임, 사이드바·백드롭 숨김
+    - open  : 햄버거 클릭 후 — drawer 슬라이드인, 백드롭 dim
+    두 변종 모두 viewport 375×667 @ DPR=2 → PNG 750×1334.
+
+  3 영역 인터랙션 (mockup §5):
+    1. 햄버거 클릭 → drawer 열림/닫힘 토글
+    2. ESC 키 → drawer 닫힘
+    3. 백드롭 클릭 → drawer 닫힘
+    모든 닫힘 동작에서 focus 가 햄버거 버튼으로 복귀.
+-->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mobile-responsive fixture (T-302)</title>
+  <link rel="stylesheet" href="../../../ui/web/style.css">
+  <style>
+    /* fixture 본문 레이아웃 — mockup §4 의 CSS 패턴을 그대로 인라인. */
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 0.5px solid var(--border);
+      background: var(--bg-canvas);
+      position: relative;
+      z-index: 1;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* 햄버거 버튼 — 데스크톱은 숨김, 모바일에서만 보임. */
+    .mobile-menu-toggle {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      padding: 8px;
+      cursor: pointer;
+      color: var(--text-primary);
+      font-size: 20px;
+      line-height: 1;
+      border-radius: var(--radius);
+      transition: background var(--duration-fast) var(--ease-macos);
+    }
+    .mobile-menu-toggle:hover { background: var(--bg-hover); }
+    .mobile-menu-toggle:focus-visible {
+      box-shadow: var(--focus-ring);
+      outline: none;
+    }
+
+    /* 사이드바 (drawer 본체) */
+    #sidebar {
+      background: var(--bg-sidebar);
+      padding: 24px 16px;
+      width: 280px;
+      box-sizing: border-box;
+    }
+    #sidebar h2 {
+      margin: 0 0 12px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    #sidebar ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    #sidebar li {
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-primary);
+      transition: background var(--duration-fast) var(--ease-macos);
+    }
+    #sidebar li:hover { background: var(--bg-hover); }
+    #sidebar li:focus-visible {
+      box-shadow: var(--focus-ring);
+      outline: none;
+    }
+
+    /* 콘텐츠 영역 */
+    main {
+      padding: 24px 16px;
+    }
+    main p {
+      margin: 0;
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    /* 백드롭 — 기본은 display:none (데스크톱) */
+    .drawer-backdrop {
+      display: none;
+    }
+
+    /* ──────────────────────────────────────────────────────────────────
+     * 모바일 (≤768px) — 햄버거 + drawer 패턴 (mockup §4)
+     * ────────────────────────────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .mobile-menu-toggle {
+        display: inline-flex;
+      }
+      #sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        transform: translateX(-100%);
+        transition: transform var(--duration-base) var(--ease-macos);
+        z-index: 100;
+      }
+      #sidebar.is-open {
+        transform: translateX(0);
+        box-shadow: var(--shadow-lg);
+      }
+      .drawer-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 99;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity var(--duration-base) var(--ease-macos);
+      }
+      .drawer-backdrop.visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
+    }
+
+    /* ──────────────────────────────────────────────────────────────────
+     * 데스크톱 (≥769px) — drawer 비활성, 기존 레이아웃 유지
+     * ────────────────────────────────────────────────────────────────── */
+    @media (min-width: 769px) {
+      .mobile-menu-toggle { display: none; }
+      .drawer-backdrop { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <button
+      id="mobile-menu-toggle"
+      class="mobile-menu-toggle"
+      type="button"
+      aria-label="메뉴 열기"
+      aria-expanded="false"
+      aria-controls="sidebar"
+    >☰</button>
+    <h1>Recap</h1>
+  </header>
+
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+
+  <aside id="sidebar" aria-label="회의 목록">
+    <h2>회의 목록</h2>
+    <ul>
+      <li tabindex="0">2026-04-27 오후 2시 회의</li>
+      <li tabindex="0">2026-04-26 스프린트 회고</li>
+      <li tabindex="0">2026-04-25 디자인 리뷰</li>
+    </ul>
+  </aside>
+
+  <main>
+    <p>콘텐츠 영역 — 모바일 뷰포트(≤768px)에서는 햄버거를 눌러 사이드바 drawer 를 열 수 있습니다.</p>
+  </main>
+
+  <script>
+    // mockup §5 의 인터랙션을 그대로 구현 (Frontend 가 spa.js 로 옮길 때 참고).
+    (function () {
+      var toggleBtn = document.getElementById("mobile-menu-toggle");
+      var sidebar = document.getElementById("sidebar");
+      var backdrop = document.getElementById("drawer-backdrop");
+
+      // drawer 안 첫 focusable 요소 — focus trap 의 시작점.
+      function firstFocusable() {
+        return sidebar.querySelector(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+      }
+
+      function open() {
+        toggleBtn.setAttribute("aria-expanded", "true");
+        toggleBtn.setAttribute("aria-label", "메뉴 닫기");
+        sidebar.classList.add("is-open");
+        backdrop.classList.add("visible");
+        document.body.style.overflow = "hidden";
+        // focus 이동 — drawer 안 첫 항목으로
+        var first = firstFocusable();
+        if (first) first.focus();
+      }
+
+      function close() {
+        toggleBtn.setAttribute("aria-expanded", "false");
+        toggleBtn.setAttribute("aria-label", "메뉴 열기");
+        sidebar.classList.remove("is-open");
+        backdrop.classList.remove("visible");
+        document.body.style.overflow = "";
+        // focus 복귀 — 햄버거 버튼으로
+        toggleBtn.focus();
+      }
+
+      toggleBtn.addEventListener("click", function () {
+        var isOpen = sidebar.classList.contains("is-open");
+        if (isOpen) close(); else open();
+      });
+
+      backdrop.addEventListener("click", close);
+
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape" && sidebar.classList.contains("is-open")) {
+          close();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

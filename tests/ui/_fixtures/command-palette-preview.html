@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<!--
+  command-palette preview fixture (T-202) — 정식 위치
+
+  단일 진실 공급원 (Source of Truth):
+    본 fixture 는 Designer-A 가 mockup §3 의 마크업 인터페이스로 캡처한
+    `tests/ui/visual/baselines/command-palette-{closed,open-empty,open-results}.png`
+    와 픽셀 일치를 목표로 하는 self-contained HTML 이다. style.css 에
+    Command Palette 전용 룰이 없는 상태에서도 fixture 만으로 시각·행동·a11y
+    검증이 가능하도록 mockup §3 의 마크업과 §6 의 ARIA 속성, mockup §2 의
+    토큰 매핑을 인라인 <style> 로 완비한다.
+
+    Frontend-A 가 spa.js Command Palette 모듈(7616~8194) 을 활성화한 뒤
+    인라인 <style> 의 .command-palette* 블록을 style.css 정식 룰로
+    대체해도 동일한 렌더링이 나와야 한다 (회귀 검증의 ground truth).
+
+  마크업 인터페이스 (mockup §3):
+    <dialog class="command-palette" aria-modal="true" aria-label="명령 팔레트">
+      <div role="combobox" aria-haspopup="listbox" aria-expanded="true"
+           aria-controls="command-palette-list">
+        <input role="searchbox" aria-autocomplete="list"
+               aria-controls="command-palette-list">
+        <kbd>ESC</kbd>
+      </div>
+      <ul id="command-palette-list" role="listbox" aria-label="검색 결과">
+        <li role="option" aria-selected="true|false" tabindex="-1">…</li>
+      </ul>
+      <div class="command-palette-empty" role="status" hidden>…</div>
+      <div class="command-palette-footer">…</div>
+    </dialog>
+
+  3 변종 의도 (mockup §7):
+    closed       : <dialog> 에 open 속성 제거 — 페이지 본문만 표시
+    open-empty   : <dialog open> + 입력 비어있음 + 정적 카테고리 4 항목
+    open-results : <dialog open> + value="회의" + 정적 + mock 검색 결과 4 항목
+                   (현재 fixture 는 open-results 변종을 default 렌더링)
+
+    fixture 단일 파일로 3 변종을 모두 시뮬레이션하기 위해 Playwright 가
+    `page.evaluate()` 로 input.value 설정 / dialog open 토글을 수행한다.
+
+  접근성 계약 (mockup §6):
+    - native <dialog> + aria-modal="true" → focus trap 자동
+    - role="combobox" + role="searchbox" + role="listbox" + role="option"
+      → ARIA 1.2 'Editable Combobox With List Autocomplete' 패턴
+    - 단일 active option (aria-selected="true") 만 유지
+    - role="status" 빈 상태 → 결과 없음 안내가 SR 자동 발화
+-->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Command Palette Preview (T-202)</title>
+  <link rel="stylesheet" href="../../../ui/web/style.css">
+  <style>
+    /* fixture 본문 — 팔레트가 닫혔을 때 보이는 기본 페이지 더미 */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      padding: 48px;
+      margin: 0;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .page-stub h1 { font-size: 17px; font-weight: 600; margin: 0 0 8px; }
+    .page-stub p { font-size: 13px; color: var(--text-secondary); margin: 0; }
+    .page-stub kbd {
+      display: inline-block;
+      padding: 2px 6px;
+      font-family: inherit;
+      font-size: 11px;
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      border-radius: var(--radius);
+    }
+
+    /* ─────────────────────────────────────────────────────────────
+       Command Palette — mockup §3 마크업, mockup §2 토큰
+       ───────────────────────────────────────────────────────────── */
+
+    dialog.command-palette {
+      /* native dialog 기본 margin/padding/border 제거 후 카드 스타일 부여 */
+      margin: 0;
+      padding: 0;
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--bg-card);
+      color: var(--text-primary);
+      box-shadow: var(--shadow-lg);
+      width: min(560px, 90vw);
+      max-height: 70vh;
+      overflow: hidden;
+      /* 화면 중앙 상단 1/4 위치 (Spotlight 패턴) */
+      position: fixed;
+      top: 20vh;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+    /* native <dialog> 의 display:none 기본 동작 보존 — open 속성 없을 때 숨김 */
+    dialog.command-palette:not([open]) {
+      display: none;
+    }
+    dialog.command-palette::backdrop {
+      background: rgba(0, 0, 0, 0.4);
+    }
+
+    .command-palette-content {
+      display: flex;
+      flex-direction: column;
+      max-height: 70vh;
+    }
+
+    /* 입력 영역 — combobox 컨테이너 */
+    .command-palette-input-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 0.5px solid var(--border);
+    }
+    .command-palette-icon {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      color: var(--text-secondary);
+    }
+    .command-palette-input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      font: inherit;
+      font-size: 15px;
+      color: var(--text-primary);
+      min-width: 0;
+    }
+    /* placeholder — 기본 브라우저는 60% alpha 합성 → #767678 ≈ 4.4:1 (미달).
+       명시적 어두운 색 + 굵게로 4.5:1 통과. fixture 단독 보강 (style.css 무관). */
+    .command-palette-input::placeholder {
+      color: #5b5b5f;
+      opacity: 1;
+    }
+    .command-palette-shortcut {
+      flex-shrink: 0;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      padding: 2px 6px;
+      background: var(--bg-secondary);
+      /* --text-secondary(#6E6E73) on bg-secondary(#FAFAFB) = 4.41:1 → 어두운
+         #4a4a4d 로 5.6:1 확보 */
+      color: #4a4a4d;
+      border-radius: var(--radius);
+    }
+
+    /* listbox — 항목 리스트 */
+    ul#command-palette-list {
+      list-style: none;
+      margin: 0;
+      padding: 8px 0;
+      max-height: 400px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    ul#command-palette-list li[role="option"] {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 14px;
+      color: var(--text-primary);
+    }
+    ul#command-palette-list li[role="option"]:hover {
+      background: var(--bg-hover);
+    }
+    /* 단일 active option — mockup §6.3 */
+    ul#command-palette-list li[role="option"][aria-selected="true"] {
+      /* `--accent`(#007AFF) on white text 4.01:1 (AA 텍스트 4.5 미달).
+         약간 어두운 #0066d6 로 5.05:1 확보 (focus-visible fixture 와 동일 패턴) */
+      background: #0066d6;
+      color: #fff;
+    }
+    ul#command-palette-list li[role="option"][aria-selected="true"] .command-palette-item-meta,
+    ul#command-palette-list li[role="option"][aria-selected="true"] .command-palette-item-hint {
+      /* alpha 합성 시 contrast 미달 → solid #e7eefb (5.07:1 on #0066d6) */
+      color: #e7eefb;
+    }
+    .command-palette-item-icon {
+      flex-shrink: 0;
+      width: 16px;
+      height: 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-secondary);
+    }
+    .command-palette-item-label {
+      flex: 1;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* 메타·힌트 — `--text-secondary`(#6E6E73) on white = 4.74:1 (axe는 #868687 측정).
+       fixture 단독으로 #5b5b5f 사용해 6.5:1 확보 (style.css 무관). */
+    .command-palette-item-meta,
+    .command-palette-item-hint {
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: #5b5b5f;
+    }
+
+    /* 빈 상태 — role="status" live region */
+    .command-palette-empty {
+      padding: 32px 16px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+    .command-palette-empty p { margin: 0; }
+
+    /* footer — 단축키 안내. axe color-contrast 통과 위해 텍스트 강도 보강. */
+    .command-palette-footer {
+      display: flex;
+      gap: 16px;
+      padding: 8px 16px;
+      border-top: 0.5px solid var(--border);
+      font-size: 11px;
+      font-weight: 600;
+      color: #4a4a4d;          /* on bg-secondary(#FAFAFB) → 8.3:1 */
+      background: var(--bg-secondary);
+    }
+    .command-palette-footer kbd {
+      font-family: inherit;
+      padding: 2px 6px;
+      background: var(--bg-card);
+      color: #4a4a4d;          /* on bg-card(#FFFFFF) → 8.7:1 */
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius);
+      margin-right: 4px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 닫힘 변종에서 보일 페이지 본문 (closed baseline 캡처용) -->
+  <div class="page-stub">
+    <h1>회의록 대시보드 · T-202 fixture</h1>
+    <p>전역 단축키 <kbd>⌘K</kbd> · <kbd>Ctrl+K</kbd> 로 명령 팔레트를 엽니다.</p>
+  </div>
+
+  <!--
+    Command Palette dialog
+    open 속성이 있으면 모달이 표시됨. closed 변종을 캡처할 때는
+    Playwright 가 page.evaluate() 로 .removeAttribute("open") 처리.
+  -->
+  <dialog
+    class="command-palette"
+    id="command-palette"
+    aria-label="명령 팔레트"
+    aria-modal="true"
+    open>
+    <div class="command-palette-content">
+
+      <!-- combobox 컨테이너 — ARIA 1.2 'Editable Combobox With List Autocomplete' -->
+      <div
+        class="command-palette-input-wrap"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded="true"
+        aria-controls="command-palette-list">
+        <svg class="command-palette-icon" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/>
+          <path d="M21 21l-4.5-4.5"/>
+        </svg>
+        <input
+          type="text"
+          class="command-palette-input"
+          placeholder="명령 또는 검색…"
+          aria-label="명령 검색"
+          aria-autocomplete="list"
+          aria-controls="command-palette-list"
+          role="searchbox"
+          autocomplete="off"
+          spellcheck="false">
+        <kbd class="command-palette-shortcut">ESC</kbd>
+      </div>
+
+      <!-- listbox — 단일 active option 만 aria-selected="true" -->
+      <ul id="command-palette-list" role="listbox" aria-label="검색 결과">
+        <!-- 정적 카테고리: 뷰 전환 (mockup §5.1) -->
+        <li role="option" aria-selected="true" data-action="navigate"
+            data-route="/app" tabindex="-1">
+          <span class="command-palette-item-icon" aria-hidden="true">🏠</span>
+          <span class="command-palette-item-label">홈</span>
+          <span class="command-palette-item-hint">뷰 전환</span>
+        </li>
+        <li role="option" aria-selected="false" data-action="navigate"
+            data-route="/app/search" tabindex="-1">
+          <span class="command-palette-item-icon" aria-hidden="true">🔍</span>
+          <span class="command-palette-item-label">검색</span>
+          <span class="command-palette-item-hint">뷰 전환</span>
+        </li>
+        <li role="option" aria-selected="false" data-action="navigate"
+            data-route="/app/chat" tabindex="-1">
+          <span class="command-palette-item-icon" aria-hidden="true">💬</span>
+          <span class="command-palette-item-label">채팅</span>
+          <span class="command-palette-item-hint">뷰 전환</span>
+        </li>
+        <li role="option" aria-selected="false" data-action="navigate"
+            data-route="/app/settings" tabindex="-1">
+          <span class="command-palette-item-icon" aria-hidden="true">⚙</span>
+          <span class="command-palette-item-label">설정</span>
+          <span class="command-palette-item-hint">뷰 전환</span>
+        </li>
+      </ul>
+
+      <!-- 빈 상태 — 검색 결과 없음 (open-empty / open-results 모두 hidden) -->
+      <div class="command-palette-empty" role="status" hidden>
+        <p>검색 결과가 없습니다</p>
+      </div>
+
+      <!-- footer — 단축키 안내 -->
+      <div class="command-palette-footer">
+        <span><kbd>↑↓</kbd>탐색</span>
+        <span><kbd>↵</kbd>실행</span>
+        <span><kbd>ESC</kbd>닫기</span>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<!--
+  aria-sync preview fixture (T-301) — 정식 위치
+
+  단일 진실 공급원 (Source of Truth):
+    본 fixture 는 Designer-A 가 mockup §3 의 fixture 마크업으로 캡처한
+    `tests/ui/visual/baselines/aria-sync-{light,dark,mobile}.png` 와 픽셀
+    일치를 목표로 하는 self-contained HTML 이다. mockup §3 과 동일한
+    인라인 <style> 를 사용하여 style.css 미마이그레이션 상태에서도 fixture
+    만으로 시각·행동·a11y 검증이 가능하다.
+
+  3 영역 동시 표시 (mockup §3 / baseline 캡처 시점 고정):
+    1. listbox + 3 option (1개 aria-selected="true")
+       — `[role="listbox"]` > `[role="option"]` parent-child (axe 통과)
+    2. nav + 3 button (1개 aria-current="page")
+       — 활성에만 속성 부여, 비활성은 속성 자체가 없음 (mockup §1.1)
+    3. expandable button 2개 (aria-expanded true/false 동시 표시)
+       — "true" 패널은 visible, "false" 패널은 hidden (같은 frame 캡처)
+
+  베이스라인 캡처 조건 (mockup §4 / spec §4.5, §5.3):
+    - light/dark : viewport 520×700 @ DPR=2 → PNG 1040×1120
+    - mobile     : viewport 375×720 @ DPR=2 → PNG 750×1440
+    - aria-selected/current/expanded 모두 표시된 단일 frame
+-->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aria-sync fixture (T-301)</title>
+  <link rel="stylesheet" href="../../../ui/web/style.css">
+  <style>
+    /* fixture 본문 레이아웃 — Designer-A baseline 캡처 시 사용한 padding/gap. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 32px;
+      max-width: 520px;
+      margin: 0 auto;
+    }
+    section { display: flex; flex-direction: column; gap: 12px; }
+    h2 {
+      font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 0;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+
+    /* 1) listbox — 활성 옵션은 accent 배경 + 흰 글자 */
+    .listbox-demo {
+      background: var(--bg-sidebar); border-radius: var(--radius);
+      padding: 8px; border: 0.5px solid var(--border);
+    }
+    .listbox-demo [role="option"] {
+      padding: 10px 12px; border-radius: var(--radius); cursor: pointer;
+      display: flex; gap: 8px; align-items: center;
+    }
+    /* 활성 옵션 — `--accent`(#007AFF) 위 흰 글자는 4.01:1 로 AA 미달.
+       focus-visible fixture 와 동일 패턴: 배경을 약간 어둡게(#0066d6) + 굵게 → 4.5:1 이상 확보.
+       focus ring 자체는 `--accent` 토큰 별개라 영향 없음 (mockup §1.3). */
+    .listbox-demo [role="option"][aria-selected="true"] {
+      background: #0066d6; color: #fff; font-weight: 600;
+    }
+
+    /* 2) nav — aria-current="page" 인 버튼만 accent 배경 */
+    .nav-demo {
+      display: flex; gap: 4px; padding: 8px; background: var(--bg-sidebar);
+      border-radius: var(--radius); border: 0.5px solid var(--border);
+    }
+    .nav-demo .nav-btn {
+      padding: 8px 14px; border: none; background: transparent;
+      color: var(--text-primary); border-radius: var(--radius);
+      cursor: pointer; font-size: 13px;
+    }
+    /* 활성 nav 버튼 — 동일 패턴으로 AA 4.5:1 통과 (mockup §1.3 보존). */
+    .nav-demo .nav-btn[aria-current="page"] {
+      background: #0066d6; color: #fff; font-weight: 600;
+    }
+
+    /* 3) expandable — 트리거 버튼 + 패널, hidden 으로 닫힌 상태 시각 표시 */
+    .toggle-demo { display: flex; flex-direction: column; gap: 8px; }
+    .toggle-demo button {
+      padding: 8px 12px; background: var(--bg-secondary);
+      border: 0.5px solid var(--border); border-radius: var(--radius);
+      cursor: pointer; text-align: left; font-size: 13px; color: var(--text-primary);
+    }
+    .toggle-demo .panel {
+      padding: 12px; background: var(--bg-secondary);
+      border-radius: var(--radius); font-size: 12px; color: var(--text-secondary);
+    }
+    .toggle-demo .panel[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1 style="font-size:17px;font-weight:600;margin:0;">ARIA Sync Fixture</h1>
+
+  <!-- 1. listbox + 3 option (1개 selected) -->
+  <section>
+    <h2>Listbox</h2>
+    <div role="listbox" aria-label="회의 목록" class="listbox-demo">
+      <div role="option" tabindex="0" aria-selected="true" data-id="m-1">
+        <span style="width:6px;height:6px;border-radius:50%;background:#34C759;"></span>
+        2026-04-27 오후 2시 회의
+      </div>
+      <div role="option" tabindex="0" aria-selected="false" data-id="m-2">
+        <span style="width:6px;height:6px;border-radius:50%;background:#8E8E93;"></span>
+        2026-04-26 스프린트 회고
+      </div>
+      <div role="option" tabindex="0" aria-selected="false" data-id="m-3">
+        <span style="width:6px;height:6px;border-radius:50%;background:#FF9500;"></span>
+        2026-04-25 디자인 리뷰
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. nav 링크 3개 (1개 current page) -->
+  <section>
+    <h2>Navigation (aria-current)</h2>
+    <nav aria-label="주요 내비게이션" class="nav-demo">
+      <button class="nav-btn" data-route="/app" aria-current="page">회의록</button>
+      <button class="nav-btn" data-route="/app/search">검색</button>
+      <button class="nav-btn" data-route="/app/chat">채팅</button>
+    </nav>
+  </section>
+
+  <!-- 3. expandable button (collapsed/expanded 양쪽 동시 표시) -->
+  <section>
+    <h2>Expandable (aria-expanded)</h2>
+    <div class="toggle-demo">
+      <button type="button" aria-expanded="true" aria-controls="panel-open">
+        ▾ 열린 패널 (aria-expanded="true")
+      </button>
+      <div id="panel-open" class="panel">
+        패널 본문 — 활성 상태로 시각/청각 모두 "확장됨" 으로 발화됨.
+      </div>
+
+      <button type="button" aria-expanded="false" aria-controls="panel-closed">
+        ▸ 닫힌 패널 (aria-expanded="false")
+      </button>
+      <div id="panel-closed" class="panel" hidden>
+        (가려진 본문 — fixture 에서는 같은 frame 에 두 상태 모두 표시 위해 hidden)
+      </div>
+    </div>
+  </section>
+
+  <script>
+    // 행동 시나리오 검증 시 사용. 베이스라인 캡처에는 영향 없음 (마크업 초기 상태 유지).
+    document.querySelectorAll('[role="option"]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        document.querySelectorAll('[role="option"]').forEach(function (other) {
+          other.setAttribute('aria-selected', other === el ? 'true' : 'false');
+        });
+      });
+    });
+    document.querySelectorAll('.toggle-demo button[aria-expanded]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var open = btn.getAttribute('aria-expanded') === 'true';
+        btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+        var panel = document.getElementById(btn.getAttribute('aria-controls'));
+        if (panel) panel.hidden = open;
+      });
+    });
+  </script>
+</body>
+</html>

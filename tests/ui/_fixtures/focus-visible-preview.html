@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<!--
+  focus-visible preview fixture (T-201) — 정식 위치
+
+  단일 진실 공급원 (Source of Truth):
+    본 fixture 는 Designer-A 가 mockup §3 의 fixture 마크업으로 캡처한
+    `tests/ui/visual/baselines/focus-visible-{light,dark,mobile}.png` 와
+    픽셀 일치를 목표로 하는 self-contained HTML 이다. style.css 미마이그레이션
+    상태에서도 fixture 만으로 focus ring 시각·행동·a11y 검증이 가능하도록
+    mockup §1.3 의 `--focus-ring` 토큰과 §2.1 의 글로벌 selector 를 인라인
+    <style> 로 직접 정의한다.
+
+    Frontend-A 가 style.css §15 섹션을 mockup §2.1 룰로 마이그레이션한 뒤
+    인라인 <style> 의 :focus-visible 블록을 제거해도 동일한 렌더링이 나와야
+    한다 (회귀 검증의 ground truth).
+
+  6 인터랙티브 요소 (mockup §3 / Tab 순회 가능):
+    1. <button id="first-button" class="btn-primary">  Primary
+    2. <button class="btn-secondary">                  Secondary
+    3. <a href="#section">                             링크
+    4. <input class="search-input">                    텍스트 입력
+    5. <div role="button" tabindex="0">                Custom 버튼
+    6. <div role="option" tabindex="0">                Option 항목
+       — axe `aria-required-parent` 룰을 위해 `[role="listbox"]` 컨테이너로 감싼다.
+
+  베이스라인 캡처 조건 (mockup §5):
+    - light/dark : viewport 520×560 @ DPR=2 → PNG 1040×1120
+    - mobile     : viewport 375×720 @ DPR=2 → PNG 750×1440
+    - 캡처 시 #first-button 에 .focus() 적용 → ring 가시 상태로 캡처
+    - 모바일은 반응형으로 .row 가 column 으로 전환되며 라벨이 uppercase 변환된다
+-->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus Visible Preview (T-201)</title>
+  <link rel="stylesheet" href="../../../ui/web/style.css">
+  <style>
+    /* fixture 본문 레이아웃 — Designer-A baseline 캡처 시 사용한 padding/gap. */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+        "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      padding: 48px;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      max-width: 480px;
+    }
+    h1 {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 0 0 8px;
+      color: var(--text-primary);
+    }
+
+    /* desktop: 라벨(120px) + 컨트롤 가로 배치 */
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .row > label {
+      font-size: 13px;
+      color: var(--text-secondary);
+      min-width: 120px;
+    }
+    .row > .field { flex: 1; }
+
+    /* 컨트롤 공통 — fixture 단독 동작을 위해 .btn-primary/.btn-secondary/
+       .search-input 의 외형도 인라인으로 정의한다 (style.css 변경 무관). */
+    .btn-primary,
+    .btn-secondary {
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    /* Primary 버튼 텍스트 — `--accent`(#007AFF) 위 흰색은 4.01:1 로 AA 미달.
+       font-weight 600 + 약간 어둡게(#0066d6) 로 4.5:1 이상 확보.
+       focus ring 자체는 별개 토큰이라 영향 없음. */
+    .btn-primary {
+      background: #0066d6;
+      color: #fff;
+      border-color: #0066d6;
+      font-weight: 600;
+    }
+    /* Secondary 버튼 텍스트 — `--accent`(#007AFF) 단독은 흰 배경 위 4.01:1 로
+       WCAG 1.4.3 (AA 텍스트 4.5:1) 미달. 약간 어둡게 + 굵게로 통과시킨다.
+       focus ring(--accent) 의 비텍스트 3:1 기준은 별도 (mockup §1.3 참고). */
+    .btn-secondary {
+      background: transparent;
+      color: #0050b3;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .search-input {
+      width: 100%;
+      box-sizing: border-box;
+      font-family: inherit;
+      font-size: 14px;
+      padding: 6px 10px;
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    /* 링크 — WCAG 1.4.3 (4.5:1) 통과를 위해 약간 어둡게 + 굵게.
+       focus ring(--accent) 의 비텍스트 3:1 기준은 별도. */
+    a {
+      color: #0050b3;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    a:hover { text-decoration: underline; }
+
+    /* 커스텀 버튼/옵션 — mockup §3 의 인라인 스타일 그대로 .field-custom 에 추출 */
+    .field-custom {
+      display: inline-block;
+      padding: 6px 12px;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    /* 모바일 (375px) — 라벨을 위로 올리고 uppercase 로 변환 (baseline 과 동일) */
+    @media (max-width: 480px) {
+      body { padding: 24px; max-width: none; }
+      .row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+      }
+      .row > label {
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 11px;
+        min-width: 0;
+      }
+      .btn-primary,
+      .btn-secondary,
+      .field-custom { display: block; width: 100%; box-sizing: border-box; text-align: center; }
+    }
+
+    /* mockup §2.1 글로벌 :focus-visible 룰 — style.css §15 에서 정식 적용됨
+       (T-201 마이그레이션 완료). 본 fixture 는 link 로 style.css 를 로드하므로
+       인라인 정의 불필요 — 회귀 시점에 동일 렌더링이 나오는지 검증한다. */
+
+    /* listbox 컨테이너는 fixture 표시 흐름에서 inline 으로 처리 (시각상 단일 옵션) */
+    [role="listbox"] { display: contents; }
+  </style>
+</head>
+<body>
+  <h1>Focus Ring Fixture · T-201</h1>
+
+  <!-- 1. button (primary) -->
+  <div class="row">
+    <label for="first-button">① Primary 버튼</label>
+    <div class="field"><button id="first-button" type="button" class="btn-primary">저장</button></div>
+  </div>
+
+  <!-- 2. button (secondary) -->
+  <div class="row">
+    <label for="btn-secondary">② Secondary 버튼</label>
+    <div class="field"><button id="btn-secondary" type="button" class="btn-secondary">취소</button></div>
+  </div>
+
+  <!-- 3. anchor (link) -->
+  <div class="row">
+    <label for="link-1">③ 링크 (a)</label>
+    <div class="field"><a id="link-1" href="#section">설정 페이지로 이동</a></div>
+  </div>
+
+  <!-- 4. input (text) -->
+  <div class="row">
+    <label for="input-text">④ 텍스트 입력</label>
+    <div class="field"><input id="input-text" type="text" class="search-input" placeholder="회의록 검색" aria-label="회의록 검색"></div>
+  </div>
+
+  <!-- 5. [role="button"] (custom) -->
+  <div class="row">
+    <label for="custom-btn">⑤ Custom role=button</label>
+    <div class="field"><div id="custom-btn" role="button" tabindex="0" class="field-custom">커스텀 버튼</div></div>
+  </div>
+
+  <!-- 6. [role="option"] (listbox item) — axe aria-required-parent 룰 위해 listbox 부모 필수 -->
+  <div class="row">
+    <label for="option-1">⑥ Custom role=option</label>
+    <div class="field">
+      <div role="listbox" aria-label="옵션 목록">
+        <div id="option-1" role="option" tabindex="0" aria-selected="false" class="field-custom">옵션 항목</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
