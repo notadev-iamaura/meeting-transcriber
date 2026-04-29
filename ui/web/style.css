@@ -3525,6 +3525,99 @@ button {
 }
 
 
+/* --- 13-7b. Phase 5 Wiki Router 출처 배지 + 위키 페이지 카드 --- */
+
+/*
+ * 답변 버블 위에 표시되는 작은 inline 배지.
+ * source_type=="wiki" 또는 "both" 일 때만 등장 (router_enabled=False 면 표시 안 됨).
+ * macOS 디자인 토큰 준수: 0.5px hairline, 작은 라벨, 무채색 배경.
+ */
+.chat-source-badge {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 2px 8px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  user-select: none;
+  cursor: default;
+  transition: background var(--duration-fast) var(--ease-macos);
+}
+
+.chat-source-badge[data-source="wiki"] {
+  /* 위키 출처 — 약한 강조 (accent-light) */
+  color: var(--accent);
+  background: var(--accent-light);
+  border-color: var(--accent-light);
+}
+
+.chat-source-badge[data-source="both"] {
+  /* RAG + 위키 통합 — 더 진한 텍스트 */
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+/*
+ * 답변 본문 아래 노출되는 위키 페이지 출처 카드 영역.
+ * references 와 시각적으로 구분되도록 별도 클래스 사용.
+ */
+.wiki-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--border);
+}
+
+.wiki-sources-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+}
+
+.wiki-source-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--ref-bg);
+  border: 0.5px solid var(--ref-border);
+  border-radius: var(--radius);
+}
+
+.wiki-source-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wiki-source-card-path {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+
+.wiki-source-card-snippet {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+
 /* --- 13-8. 메시지 액션 --- */
 
 .message-actions {

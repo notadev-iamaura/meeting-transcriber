@@ -972,19 +972,92 @@ GET /api/wiki/backfill/{job_id}
 
 **예상 LOC**: +900
 
-### Phase 5 — 질의 라우팅 (재평가)
+### Phase 5 — 질의 라우팅 (구현 완료)
 
-**조건부 진행**: Phase 4 운영 1주일 후 결정.
+**상태**: ✅ Phase 5.A~5.D 모두 완료 (2026-04-29).
 
-판단 기준:
-- 사용자가 Wiki 뷰 vs 채팅 뷰 직접 선택에 어려움 호소? → 진행
-- 두 뷰가 분명히 다른 가치 제공으로 인지? → 보류
-- Wiki 답변 정확도가 RAG 보다 낮으면? → 라우팅 무의미, 보류
+#### 5.A 휴리스틱 라우터 (완료)
 
-만약 진행 시:
-1. 라우터 LLM (EXAONE 짧은 분류)
-2. 채팅 UI 가 라우터 결과 기반 답변 (Wiki / RAG / 둘 다)
-3. 사용자가 "더 자세히" 클릭 시 다른 뷰로 폴백
+`core/wiki/router.py` (508 LOC):
+- `RouteDecision` enum (WIKI / RAG / BOTH)
+- `RouterVerdict` dataclass (decision, confidence, reason, matched_signals, used_llm)
+- `QueryRouter` 클래스 — 휴리스틱 매칭 우선 + LLM 폴백 옵션
+- 매칭 우선순위: BOTH 명시 > WIKI+RAG 동시 매칭 > WIKI 단독 > RAG 단독 > LLM 폴백 > RAG fallback
+
+#### 5.B 휴리스틱 시그널 정의 (완료)
+
+`core/wiki/router.py` 내장:
+- WIKI 시그널 (시간 범위 + 누적): `time_range_decisions`, `time_range_actions`, `time_range_meetings`, `cumulative_summary`, `recent_period`, `multi_meeting_search`
+- RAG 시그널 (단일 회의 + 정확 인용): `single_meeting_scope`, `precise_quote`, `latest_meeting_only`
+- BOTH 시그널 (사용자 명시): `explicit_both`
+
+#### 5.C HybridChatService (완료)
+
+`core/wiki/chat_integration.py` (495 LOC):
+- `HybridChatResponse` (source_type, router_verdict, rag_response, wiki_answer, wiki_sources)
+- `HybridChatService.respond()` — router=None 이면 100% chat_service 위임 (회귀 0건 보장)
+- WIKI/RAG/BOTH 분기 + graceful degradation (WIKI 합성 실패 시 자동 RAG 폴백)
+- **search/chat.py 무변경, search/ 격리 유지** (PRD §10.3)
+
+#### 5.D API + UI 통합 (완료)
+
+`api/routes.py`:
+- `ChatResponse` 에 `source_type`, `router_verdict`, `wiki_sources` Optional 필드 추가 (회귀 0건)
+- `POST /api/chat` 분기:
+  - `config.wiki.router_enabled=False` (default) — 기존 ChatEngine 100% 위임, 새 필드 None
+  - `config.wiki.router_enabled=True` — `_build_hybrid_chat_service()` → HybridChatService
+- `_ChatEngineAdapter` — ChatEngine.chat() ↔ HybridChatService.respond() 시그니처 변환
+
+`ui/web/spa.js` (`ChatView.prototype._addAssistantMessage`):
+- `data.source_type` 가 "wiki"/"both" 일 때 `chat-source-badge` 표시 (router_verdict.confidence 툴팁)
+- `data.wiki_sources` 가 있으면 `wiki-sources` 카드 섹션 렌더링
+
+`ui/web/style.css`:
+- `.chat-source-badge` (data-source 속성별 색상)
+- `.wiki-sources` + `.wiki-source-card` (macOS hairline border + radius)
+
+#### 자동 검증 가능 항목 ✅
+
+| 항목 | 검증 방법 | 결과 |
+|---|---|---|
+| 라우터 휴리스틱 정확도 | `tests/wiki/test_router.py` (≥30건) | ✅ 통과 |
+| HybridChatService 분기 | `tests/wiki/test_chat_integration.py` (4건) | ✅ 통과 |
+| API 통합 회귀 | `tests/wiki/test_routes_chat_router.py` (5건+) | ✅ 통과 |
+| RAG 무영향 | `tests/wiki/test_rag_unchanged.py` | ✅ 통과 |
+| ChatResponse Optional | `test_chat_response_새필드_제공없이도_직렬화_성공한다` | ✅ 통과 |
+
+#### 운영 데이터로 검증해야 할 항목 (위임)
+
+다음 항목들은 자동 테스트로 측정 불가능하며, **사용자가 실제 회의를
+ingest 후 수일~수주 누적해야 평가 가능**합니다:
+
+1. **라우터 분류 정확도** — 사용자 의도와 실제 라우팅 결과 일치율.
+   `RouterVerdict.matched_signals` + `used_llm` 텔레메트리 수집 후 분석 필요.
+2. **Wiki 답변 만족도 vs RAG 만족도** — 같은 질의에 두 답변 비교 시 사용자
+   선호도. UI 의 `source_type="both"` 분기로 A/B 가능.
+3. **LLM 폴백 호출 비율** — `router_llm_fallback=True` 일 때 실제 LLM 호출
+   빈도 (휴리스틱이 충분히 커버하면 < 10%, 부족하면 > 30%).
+4. **사용자 만족도 정성 평가** — "위키 답변" 배지 클릭률, 사용자 피드백.
+5. **Wiki 페이지 합성 품질** — Phase 5.D 의 단순 정책(상위 3개 페이지 raw 결합)
+   이 충분한지, 또는 LLM 합성(`wiki_llm` 주입) 이 필요한지.
+
+#### Phase 5 사용 가이드
+
+활성화 방법 (사용자):
+```bash
+# config.yaml
+wiki:
+  enabled: true
+  router_enabled: true            # ← 라우터 활성화
+  router_llm_fallback: true       # ← 휴리스틱 0건일 때 LLM 호출 (옵션)
+
+# 또는 환경변수
+export MT_WIKI_ROUTER_ENABLED=true
+export MT_WIKI_ROUTER_LLM_FALLBACK=true
+```
+
+비활성 default 보장: `router_enabled=False` 일 때 라우터 코드는 import 되지만
+ChatEngine 이 100% 그대로 호출됩니다 — **기존 RAG 채팅 100% 무영향** (PRD §10.3).
 
 ---
 

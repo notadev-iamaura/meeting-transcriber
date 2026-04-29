@@ -4250,6 +4250,83 @@
 
         body.appendChild(bubble);
 
+        // Phase 5: 라우터 출처 배지 — source_type 이 있을 때만 표시
+        // (router_enabled=False 면 source_type=null 이라 배지 없음 — 기존 UX 보존)
+        if (data.source_type === "wiki" || data.source_type === "both") {
+            var badge = document.createElement("span");
+            badge.className = "chat-source-badge";
+            // text 기반 — 이모지 없이 명시적 라벨
+            if (data.source_type === "wiki") {
+                badge.textContent = "위키 답변";
+                badge.setAttribute("title", "위키 페이지 누적 합성 답변");
+                badge.setAttribute("data-source", "wiki");
+            } else {
+                badge.textContent = "통합 답변 (RAG + 위키)";
+                badge.setAttribute(
+                    "title",
+                    "RAG 검색과 위키 페이지를 모두 합친 답변"
+                );
+                badge.setAttribute("data-source", "both");
+            }
+            // 라우터 신뢰도 정보가 있으면 title 에 부가
+            if (
+                data.router_verdict &&
+                typeof data.router_verdict.confidence === "number"
+            ) {
+                var conf = data.router_verdict.confidence;
+                var reason = data.router_verdict.reason || "";
+                badge.setAttribute(
+                    "title",
+                    badge.getAttribute("title") +
+                        " (신뢰도 " +
+                        conf +
+                        "/10" +
+                        (reason ? ", " + App.escapeHtml(reason) : "") +
+                        ")"
+                );
+            }
+            // 버블 바로 위(같은 body 컨테이너) 에 삽입
+            body.insertBefore(badge, bubble);
+        }
+
+        // Phase 5: 위키 인용 출처 — wiki_sources 가 있을 때만 표시
+        if (data.wiki_sources && data.wiki_sources.length > 0) {
+            var wikiSection = document.createElement("div");
+            wikiSection.className = "wiki-sources";
+
+            var wikiTitle = document.createElement("div");
+            wikiTitle.className = "wiki-sources-title";
+            wikiTitle.textContent =
+                "위키 페이지 (" + data.wiki_sources.length + "건)";
+            wikiSection.appendChild(wikiTitle);
+
+            data.wiki_sources.forEach(function (src) {
+                var card = document.createElement("div");
+                card.className = "wiki-source-card";
+
+                var titleEl = document.createElement("div");
+                titleEl.className = "wiki-source-card-title";
+                titleEl.textContent = src.title || src.page_path || "";
+
+                var pathEl = document.createElement("div");
+                pathEl.className = "wiki-source-card-path";
+                pathEl.textContent = src.page_path || "";
+
+                var snippetEl = document.createElement("div");
+                snippetEl.className = "wiki-source-card-snippet";
+                snippetEl.textContent = src.snippet || "";
+
+                card.appendChild(titleEl);
+                card.appendChild(pathEl);
+                if (src.snippet) {
+                    card.appendChild(snippetEl);
+                }
+                wikiSection.appendChild(card);
+            });
+
+            body.appendChild(wikiSection);
+        }
+
         // LLM 미사용 경고
         if (!data.llm_used && data.error_message) {
             var notice = document.createElement("div");
