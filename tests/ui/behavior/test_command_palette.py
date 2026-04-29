@@ -12,6 +12,7 @@
     Command Palette 모듈 활성화 시 마크업 계약 보강(mockup §8.2)을 누락하면
     잡아내는 것이 진짜 목적.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,9 +43,7 @@ def test_input_is_searchbox(page: Page) -> None:
     Then:  role="searchbox" — ARIA 1.2 combobox 패턴 (mockup §6.2).
     """
     page.goto(PREVIEW_URL)
-    expect(page.locator("input.command-palette-input")).to_have_attribute(
-        "role", "searchbox"
-    )
+    expect(page.locator("input.command-palette-input")).to_have_attribute("role", "searchbox")
 
 
 def test_input_aria_autocomplete_list(page: Page) -> None:
@@ -64,9 +63,7 @@ def test_listbox_has_four_static_options(page: Page) -> None:
     Then:  4 개 — 정적 카테고리 4 항목 (홈/검색/채팅/설정, mockup §5.1).
     """
     page.goto(PREVIEW_URL)
-    expect(
-        page.locator("[role='listbox'] [role='option']")
-    ).to_have_count(4)
+    expect(page.locator("[role='listbox'] [role='option']")).to_have_count(4)
 
 
 def test_exactly_one_option_selected(page: Page) -> None:
@@ -75,9 +72,7 @@ def test_exactly_one_option_selected(page: Page) -> None:
     Then:  정확히 1 개 — 단일 active 모델 (mockup §6.3).
     """
     page.goto(PREVIEW_URL)
-    expect(
-        page.locator("[role='option'][aria-selected='true']")
-    ).to_have_count(1)
+    expect(page.locator("[role='option'][aria-selected='true']")).to_have_count(1)
 
 
 def test_combobox_aria_controls_listbox(page: Page) -> None:

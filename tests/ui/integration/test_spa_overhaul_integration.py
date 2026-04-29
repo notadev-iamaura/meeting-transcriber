@@ -15,6 +15,7 @@
 
 SKIP 또는 FAIL → SPA 통합 갭. fixture 가 PASS 했더라도 실제 SPA 미적용일 수 있음.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -94,27 +95,21 @@ def _spa_page(
 # ============================================================
 
 
-def test_t101_meeting_list_empty_state(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t101_meeting_list_empty_state(browser: Browser, spa_static_server: str) -> None:
     """회의 0개 → '아직 회의가 없어요' empty-state 노출."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         # SPA 가 listContent 에 회의 목록 fetch 후 empty 렌더링
         page.wait_for_timeout(800)
         empty = page.locator('[data-empty="meeting-list"]')
         if empty.count() == 0:
-            pytest.fail(
-                "회의 목록 empty-state 미렌더 — [data-empty='meeting-list'] 부재"
-            )
+            pytest.fail("회의 목록 empty-state 미렌더 — [data-empty='meeting-list'] 부재")
         title = empty.locator(".empty-state-title").first
         assert title.inner_text().strip() == "아직 회의가 없어요", (
             f"empty-state 제목 불일치: {title.inner_text()!r}"
         )
 
 
-def test_t101_search_empty_markup_present(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t101_search_empty_markup_present(browser: Browser, spa_static_server: str) -> None:
     """검색 라우트 진입 시 검색 empty 마크업 존재 (미표시 상태도 OK)."""
     with _spa_page(
         browser,
@@ -125,9 +120,7 @@ def test_t101_search_empty_markup_present(
         page.wait_for_timeout(800)
         empty = page.locator('[data-empty="search"], #searchEmpty')
         if empty.count() == 0:
-            pytest.fail(
-                "검색 empty-state 마크업 미존재 — [data-empty='search'] 또는 #searchEmpty"
-            )
+            pytest.fail("검색 empty-state 마크업 미존재 — [data-empty='search'] 또는 #searchEmpty")
         # 텍스트 확인 — 표시되지 않더라도 마크업 안에 텍스트는 있어야 함
         title = empty.locator(".empty-state-title").first
         assert "검색 결과가 없어요" in title.inner_text(), (
@@ -156,9 +149,7 @@ def test_t101_chat_empty_state(browser: Browser, spa_static_server: str) -> None
 # ============================================================
 
 
-def test_t102_dark_text_secondary_token(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t102_dark_text_secondary_token(browser: Browser, spa_static_server: str) -> None:
     """다크 모드에서 --text-secondary 가 보강된 #98989D."""
     with _spa_page(
         browser,
@@ -188,9 +179,7 @@ def test_t102_dark_text_secondary_token(
 # ============================================================
 
 
-def test_t103_skeleton_card_css_defined(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t103_skeleton_card_css_defined(browser: Browser, spa_static_server: str) -> None:
     """style.css 에 .skeleton-card 정의됨."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         has_skeleton = page.evaluate(
@@ -203,9 +192,7 @@ def test_t103_skeleton_card_css_defined(
         assert has_skeleton, ".skeleton-card CSS 정의 부재"
 
 
-def test_t103_search_loading_skeleton_markup(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t103_search_loading_skeleton_markup(browser: Browser, spa_static_server: str) -> None:
     """검색 라우트의 #searchLoading 이 .skeleton-container + 3 .skeleton-card."""
     with _spa_page(
         browser,
@@ -227,9 +214,7 @@ def test_t103_search_loading_skeleton_markup(
         )
 
 
-def test_t103_viewer_skeleton_markup(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t103_viewer_skeleton_markup(browser: Browser, spa_static_server: str) -> None:
     """viewer 라우트 → #viewerTranscriptLoading + #viewerSummaryLoading 마크업."""
     with _spa_page(
         browser,
@@ -260,9 +245,7 @@ def test_t103_viewer_skeleton_markup(
 # ============================================================
 
 
-def test_t201_focus_ring_token_defined(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t201_focus_ring_token_defined(browser: Browser, spa_static_server: str) -> None:
     """:root 에 --focus-ring 토큰 정의."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         focus_ring = page.evaluate(
@@ -276,9 +259,7 @@ def test_t201_focus_ring_token_defined(
         )
 
 
-def test_t201_first_interactive_focus_visible(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t201_first_interactive_focus_visible(browser: Browser, spa_static_server: str) -> None:
     """Tab → 첫 인터랙티브 요소에 box-shadow (focus ring) 적용."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(500)
@@ -296,8 +277,7 @@ def test_t201_first_interactive_focus_visible(
             pytest.skip("Tab 으로 활성 요소 도달 못 함 (focusable 요소 부재)")
         # box-shadow 가 'none' 이 아니면 focus-visible 적용
         assert info["boxShadow"] != "none", (
-            f"focus 요소({info['tag']}#{info['id']})에 box-shadow none — "
-            "focus-visible 미적용"
+            f"focus 요소({info['tag']}#{info['id']})에 box-shadow none — focus-visible 미적용"
         )
 
 
@@ -306,9 +286,7 @@ def test_t201_first_interactive_focus_visible(
 # ============================================================
 
 
-def test_t202_palette_dialog_in_dom_after_init(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t202_palette_dialog_in_dom_after_init(browser: Browser, spa_static_server: str) -> None:
     """SPA init → dialog.command-palette 요소 DOM 존재."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(800)  # CommandPalette 초기화 대기
@@ -318,17 +296,11 @@ def test_t202_palette_dialog_in_dom_after_init(
         page.wait_for_timeout(300)
         dialog = page.locator("dialog.command-palette")
         if dialog.count() == 0:
-            pytest.fail(
-                "dialog.command-palette 미존재 — Command Palette init 실패"
-            )
-        assert dialog.count() == 1, (
-            f"command-palette dialog 중복: {dialog.count()}"
-        )
+            pytest.fail("dialog.command-palette 미존재 — Command Palette init 실패")
+        assert dialog.count() == 1, f"command-palette dialog 중복: {dialog.count()}"
 
 
-def test_t202_cmd_k_opens_palette(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t202_cmd_k_opens_palette(browser: Browser, spa_static_server: str) -> None:
     """⌘K (Meta+K) 또는 Ctrl+K → 팔레트 open 상태."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(800)
@@ -354,9 +326,7 @@ def test_t202_cmd_k_opens_palette(
 # ============================================================
 
 
-def test_t301_active_nav_has_aria_current(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t301_active_nav_has_aria_current(browser: Browser, spa_static_server: str) -> None:
     """초기 라우트(/app)에서 활성 nav-btn 에 aria-current='page'."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(500)
@@ -369,9 +339,7 @@ def test_t301_active_nav_has_aria_current(
         )
 
 
-def test_t301_inactive_nav_no_aria_current(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t301_inactive_nav_no_aria_current(browser: Browser, spa_static_server: str) -> None:
     """비활성 nav-btn 에 aria-current 속성 자체 없음 (removeAttribute 패턴)."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(500)
@@ -389,14 +357,11 @@ def test_t301_inactive_nav_no_aria_current(
             pytest.skip("비활성 nav-btn 없음")
         violations = [r for r in result if r["hasAttr"]]
         assert not violations, (
-            f"비활성 nav-btn 에 aria-current 잔존 (removeAttribute 위반): "
-            f"{violations}"
+            f"비활성 nav-btn 에 aria-current 잔존 (removeAttribute 위반): {violations}"
         )
 
 
-def test_t301_route_change_updates_aria_current(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t301_route_change_updates_aria_current(browser: Browser, spa_static_server: str) -> None:
     """라우트 변경 후 활성 nav-btn 의 aria-current 가 동기화됨."""
     with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
         page.wait_for_timeout(500)
@@ -415,9 +380,7 @@ def test_t301_route_change_updates_aria_current(
         assert result["search"] == "page", (
             f"#navSearch 에 aria-current='page' 누락 (실제: {result['search']!r})"
         )
-        assert result["home"] is None, (
-            f"#navHome 에 aria-current 잔존 (실제: {result['home']!r})"
-        )
+        assert result["home"] is None, f"#navHome 에 aria-current 잔존 (실제: {result['home']!r})"
 
 
 # ============================================================
@@ -425,9 +388,7 @@ def test_t301_route_change_updates_aria_current(
 # ============================================================
 
 
-def test_t302_hamburger_visible_on_mobile(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t302_hamburger_visible_on_mobile(browser: Browser, spa_static_server: str) -> None:
     """375px viewport → 햄버거 버튼 보임."""
     with _spa_page(browser, spa_static_server, {"width": 375, "height": 667}) as page:
         page.wait_for_timeout(500)
@@ -437,14 +398,10 @@ def test_t302_hamburger_visible_on_mobile(
         display = page.evaluate(
             "() => getComputedStyle(document.querySelector('#mobile-menu-toggle')).display"
         )
-        assert display != "none", (
-            f"햄버거 버튼이 모바일에서 display={display!r} (미노출)"
-        )
+        assert display != "none", f"햄버거 버튼이 모바일에서 display={display!r} (미노출)"
 
 
-def test_t302_hamburger_click_opens_drawer(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t302_hamburger_click_opens_drawer(browser: Browser, spa_static_server: str) -> None:
     """햄버거 클릭 → 사이드바 .is-open + aria-expanded='true'."""
     with _spa_page(browser, spa_static_server, {"width": 375, "height": 667}) as page:
         page.wait_for_timeout(500)
@@ -464,14 +421,10 @@ def test_t302_hamburger_click_opens_drawer(
         assert result["ariaExpanded"] == "true", (
             f"햄버거 클릭 후 aria-expanded={result['ariaExpanded']!r} (true 기대)"
         )
-        assert result["panelOpen"], (
-            "햄버거 클릭 후 #list-panel.is-open 미적용"
-        )
+        assert result["panelOpen"], "햄버거 클릭 후 #list-panel.is-open 미적용"
 
 
-def test_t302_escape_closes_drawer(
-    browser: Browser, spa_static_server: str
-) -> None:
+def test_t302_escape_closes_drawer(browser: Browser, spa_static_server: str) -> None:
     """ESC → drawer 닫힘."""
     with _spa_page(browser, spa_static_server, {"width": 375, "height": 667}) as page:
         page.wait_for_timeout(500)
@@ -501,6 +454,4 @@ def test_t302_escape_closes_drawer(
         assert result["ariaExpanded"] == "false", (
             f"ESC 후 aria-expanded={result['ariaExpanded']!r} (false 기대)"
         )
-        assert not result["panelOpen"], (
-            "ESC 후 #list-panel.is-open 잔존"
-        )
+        assert not result["panelOpen"], "ESC 후 #list-panel.is-open 잔존"

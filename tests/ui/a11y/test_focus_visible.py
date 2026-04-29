@@ -10,6 +10,7 @@ Red 의도성:
     [role="button"]/[role="option"] 마크업에서 tabindex 를 누락하면 통합 e2e
     가 잡아내도록 하는 마크업 계약 확립.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,9 +24,7 @@ from harness.a11y import DEFAULT_RULESET
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html").as_uri()
 
 
 def test_focus_visible_no_axe_violations(page: Page) -> None:
@@ -44,13 +43,9 @@ def test_focus_visible_no_axe_violations(page: Page) -> None:
         },
     )
     violations = results.response.get("violations", [])
-    assert violations == [], (
-        "a11y violations found:\n"
-        + "\n".join(
-            f"  - {v['id']} ({v['impact']}): {v['help']}\n"
-            f"    nodes: {len(v.get('nodes', []))}"
-            for v in violations
-        )
+    assert violations == [], "a11y violations found:\n" + "\n".join(
+        f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+        for v in violations
     )
 
 

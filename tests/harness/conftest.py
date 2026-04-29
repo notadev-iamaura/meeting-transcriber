@@ -2,6 +2,7 @@
 
 각 테스트마다 격리된 DB 파일을 생성하고 종료 시 자동 삭제한다.
 """
+
 from __future__ import annotations
 
 import sqlite3

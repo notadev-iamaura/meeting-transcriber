@@ -1,4 +1,5 @@
 """harness.behavior — 행동 시나리오 결과 기록 단위 테스트."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -22,9 +23,7 @@ def test_record_behavior_run_pass(db_conn: sqlite3.Connection) -> None:
     assert '"passed": true' in row["payload"]
 
 
-def test_record_behavior_run_fail_with_log(
-    db_conn: sqlite3.Connection, tmp_path: Path
-) -> None:
+def test_record_behavior_run_fail_with_log(db_conn: sqlite3.Connection, tmp_path: Path) -> None:
     from harness import behavior, ticket
 
     t = ticket.open_ticket(db_conn, wave=1, component="x")

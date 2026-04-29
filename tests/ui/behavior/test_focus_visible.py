@@ -11,6 +11,7 @@ Red 의도성:
     글로벌 :focus-visible 룰을 mockup §2.1 selector 로 교체할 때, fixture 의
     인라인 <style> 을 제거해도 동일한 box-shadow 가 나오도록 강제하는 것.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,9 +22,7 @@ from playwright.sync_api import Page
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html").as_uri()
 
 
 def test_tab_focuses_first_interactive(page: Page) -> None:
@@ -58,9 +57,7 @@ def test_tab_traverses_all_six_elements(page: Page) -> None:
             ")"
         )
         seen_focused.add(tag)
-    assert len(seen_focused) == 6, (
-        f"6개 요소 모두 통과해야 함: {seen_focused}"
-    )
+    assert len(seen_focused) == 6, f"6개 요소 모두 통과해야 함: {seen_focused}"
 
 
 def test_focus_visible_box_shadow_applied(page: Page) -> None:
@@ -71,9 +68,7 @@ def test_focus_visible_box_shadow_applied(page: Page) -> None:
     """
     page.goto(PREVIEW_URL)
     page.locator("#first-button").focus()
-    box_shadow = page.locator("#first-button").evaluate(
-        "el => getComputedStyle(el).boxShadow"
-    )
+    box_shadow = page.locator("#first-button").evaluate("el => getComputedStyle(el).boxShadow")
     assert box_shadow and "rgb" in box_shadow.lower(), (
         f"focus 시 box-shadow 가 적용되어야 함: {box_shadow!r}"
     )

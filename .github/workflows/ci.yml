@@ -59,6 +59,9 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Playwright 브라우저 설치 (a11y/visual 테스트용)
+        run: playwright install --with-deps chromium
+
       - name: 단위 테스트 실행
         run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
 

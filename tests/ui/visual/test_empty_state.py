@@ -12,6 +12,7 @@ Red 의도성:
     전까지는 폰트 크기·색·여백이 baseline 과 다르게 렌더되어 visual 이
     정확히 FAIL 한다. Frontend-A 가 추가하면 자동으로 PASS.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,9 +26,7 @@ pytestmark = [pytest.mark.ui]
 
 # 프로젝트 루트 — tests/ui/visual/test_empty_state.py 기준 3 단계 위.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html").as_uri()
 ACTUAL_DIR = PROJECT_ROOT / "tests" / "ui" / "visual" / "_actual"
 
 

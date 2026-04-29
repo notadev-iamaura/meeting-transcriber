@@ -1,4 +1,5 @@
 """harness.ticket — 티켓 CRUD 단위 테스트."""
+
 from __future__ import annotations
 
 import sqlite3

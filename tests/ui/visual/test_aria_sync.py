@@ -19,6 +19,7 @@ DPR (device_scale_factor) 일치:
     단일 frame 을 갖도록 마크업이 작성되어 있어 page.goto + networkidle
     만으로 baseline 과 동일한 frame 캡처가 가능하다.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -35,9 +36,7 @@ pytestmark = [pytest.mark.ui]
 
 # 프로젝트 루트 — tests/ui/visual/test_aria_sync.py 기준 3 단계 위.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html").as_uri()
 ACTUAL_DIR = PROJECT_ROOT / "tests" / "ui" / "visual" / "_actual"
 
 # Designer-A baseline 이 DPR=2 (Retina) 로 캡처되어 있어 동일 DPR 강제.

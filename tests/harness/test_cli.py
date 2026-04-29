@@ -2,6 +2,7 @@
 
 CliRunner 패턴 대신 monkeypatch 로 sys.argv + db_path 환경변수 주입.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -68,9 +69,7 @@ def test_cli_board_rebuild_creates_overview(
     assert "T-101" in overview.read_text()
 
 
-def test_cli_no_args_prints_usage(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_cli_no_args_prints_usage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db = tmp_path / "harness.db"
     rc = _run_cli(monkeypatch, db, [])
     # argparse 가 인자 없을 때 비정상 종료
@@ -86,36 +85,70 @@ def test_cli_review_record_and_status(
     capsys.readouterr()
 
     # peer-review 만 approved → status 미충족
-    _run_cli(monkeypatch, db, [
-        "review", "record", "--ticket", "T-101",
-        "--agent", "designer-b", "--kind", "peer-review", "--status", "approved",
-    ])
+    _run_cli(
+        monkeypatch,
+        db,
+        [
+            "review",
+            "record",
+            "--ticket",
+            "T-101",
+            "--agent",
+            "designer-b",
+            "--kind",
+            "peer-review",
+            "--status",
+            "approved",
+        ],
+    )
     capsys.readouterr()
     rc = _run_cli(monkeypatch, db, ["review", "status", "--ticket", "T-101"])
     assert rc != 0  # incomplete
     assert "incomplete" in capsys.readouterr().out
 
     # merge-final 까지 approved → status 충족
-    _run_cli(monkeypatch, db, [
-        "review", "record", "--ticket", "T-101",
-        "--agent", "pm-b", "--kind", "merge-final", "--status", "approved",
-    ])
+    _run_cli(
+        monkeypatch,
+        db,
+        [
+            "review",
+            "record",
+            "--ticket",
+            "T-101",
+            "--agent",
+            "pm-b",
+            "--kind",
+            "merge-final",
+            "--status",
+            "approved",
+        ],
+    )
     capsys.readouterr()
     rc = _run_cli(monkeypatch, db, ["review", "status", "--ticket", "T-101"])
     assert rc == 0
     assert "all reviews approved" in capsys.readouterr().out
 
 
-def test_cli_review_record_with_note(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_cli_review_record_with_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """--note 인자로 짧은 사유 기록."""
     db = tmp_path / "harness.db"
     _run_cli(monkeypatch, db, ["ticket", "open", "--wave", "1", "--component", "x"])
-    rc = _run_cli(monkeypatch, db, [
-        "review", "record", "--ticket", "T-101",
-        "--agent", "frontend-b", "--kind", "peer-review",
-        "--status", "changes_requested",
-        "--note", "ui/web/spa.js:1234 — 중복 라우터 정의",
-    ])
+    rc = _run_cli(
+        monkeypatch,
+        db,
+        [
+            "review",
+            "record",
+            "--ticket",
+            "T-101",
+            "--agent",
+            "frontend-b",
+            "--kind",
+            "peer-review",
+            "--status",
+            "changes_requested",
+            "--note",
+            "ui/web/spa.js:1234 — 중복 라우터 정의",
+        ],
+    )
     assert rc == 0
