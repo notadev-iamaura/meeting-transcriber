@@ -568,6 +568,69 @@ class LifecycleConfig(BaseModel):
         return v
 
 
+class WikiConfig(BaseModel):
+    """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
+
+    LLM Wiki 는 회의 요약 결과를 영구 위키 페이지(decisions/people/projects/
+    topics) 로 컴파일하는 9단계 파이프라인 확장이다. Phase 1 에서는 실제 LLM
+    호출 없이 골격만 통합하므로 기본값은 `enabled=False`, `dry_run=True` 로
+    안전하게 비활성화되어 있다.
+
+    필드:
+        enabled: 9단계(WIKI_COMPILE) 활성화 여부. False 이면 PipelineManager 가
+            wiki 단계를 호출하지 않고 곧바로 종료한다.
+        root: wiki 루트 디렉토리. `~` 확장은 호출 측이 명시적으로 수행해야 한다.
+        compiler_model: Wiki 컴파일러 LLM 모델. Gemma 4 사용 (사용자 환경에
+            맞춤). EXAONE 도 가능하지만 별도 설치가 필요하다. 8단계(요약)에서
+            이미 Gemma 가 메모리에 로드되어 있으면 9단계(Wiki) 가 그대로
+            재사용한다.
+        lint_interval: D4 (cross-page lint) 를 N 회의마다 실행. Phase 2 도입.
+        confidence_threshold: D3 (페이지 confidence 컷오프). 0~10 정수 중 7 이상이
+            기본값. Phase 2 도입.
+        dry_run: Phase 1 골격에서는 항상 True. 실제 LLM 호출/페이지 작성은 안 함.
+
+    환경변수 오버라이드 (PRD §9 Phase 1.B + Phase 5):
+        - MT_WIKI_ENABLED=true|false → enabled
+        - MT_WIKI_ROOT=/path → root
+        - MT_WIKI_DRY_RUN=true|false → dry_run
+        - MT_WIKI_ROUTER_ENABLED=true|false → router_enabled (Phase 5)
+        - MT_WIKI_ROUTER_LLM_FALLBACK=true|false → router_llm_fallback (Phase 5)
+    """
+
+    enabled: bool = False
+    root: Path = Path("~/.meeting-transcriber/wiki/")
+    compiler_model: str = "mlx-community/gemma-4-e4b-it-4bit"
+    lint_interval: int = Field(default=5, ge=1)
+    confidence_threshold: int = Field(default=7, ge=0, le=10)
+    dry_run: bool = True
+
+    # ─── Phase 5 신규 ─────────────────────────────────────────────────
+    router_enabled: bool = False
+    """질의 라우터(QueryRouter) 활성화 여부. False(default) 면 라우터 코드는
+    로드되지만 ChatEngine 이 그대로 호출된다 — 기존 RAG 채팅 100% 무영향
+    (PRD §10.3 회귀 테스트 보장). 사용자가 명시적으로 True 로 바꾼 경우만
+    HybridChatService 가 라우팅을 수행한다.
+
+    환경변수: MT_WIKI_ROUTER_ENABLED=true|false
+    """
+
+    router_llm_fallback: bool = True
+    """라우터의 LLM 폴백(휴리스틱 매칭 0건일 때 LLM 분류) 활성화 여부.
+    False 면 매칭 실패 시 즉시 RAG fallback (저비용 + 결정성 우선).
+
+    환경변수: MT_WIKI_ROUTER_LLM_FALLBACK=true|false
+    """
+
+    @property
+    def resolved_root(self) -> Path:
+        """root 의 ~ 확장 + 절대 경로 변환.
+
+        Returns:
+            확장된 wiki 루트의 절대 경로.
+        """
+        return Path(self.root).expanduser().resolve()
+
+
 class AppConfig(BaseModel):
     """애플리케이션 전체 설정을 관리하는 최상위 모델.
 
@@ -602,6 +665,23 @@ class AppConfig(BaseModel):
         default_factory=NumberNormalizationConfig
     )
     audio_quality: AudioQualityConfig = Field(default_factory=AudioQualityConfig)
+    wiki: WikiConfig = Field(default_factory=WikiConfig)
+
+
+def _parse_bool(value: str) -> bool:
+    """문자열을 bool 로 변환한다 (환경변수 오버라이드 헬퍼).
+
+    `true`, `1`, `yes`, `on` (대소문자 무시) → True. 그 외 (`false`, `0`, `no`,
+    `off`, 빈 문자열 등) → False. 복잡한 인자 검증 라이브러리 의존성을 피하기
+    위해 단순 매칭 사용.
+
+    Args:
+        value: 환경변수에서 읽은 문자열.
+
+    Returns:
+        파싱된 bool 값.
+    """
+    return value.strip().lower() in {"true", "1", "yes", "on"}
 
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
@@ -651,6 +731,22 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     if env_model := os.environ.get("MT_LLM_MODEL"):
         data.setdefault("llm", {})["mlx_model_name"] = env_model
 
+    # LLM Wiki 오버라이드 (Phase 1)
+    # `MT_WIKI_ENABLED`, `MT_WIKI_ROOT`, `MT_WIKI_DRY_RUN` 환경변수 처리.
+    # _parse_bool 헬퍼는 "true"/"false"/"1"/"0"/대소문자 혼용을 모두 받는다.
+    if (env_wiki_enabled := os.environ.get("MT_WIKI_ENABLED")) is not None:
+        data.setdefault("wiki", {})["enabled"] = _parse_bool(env_wiki_enabled)
+    if env_wiki_root := os.environ.get("MT_WIKI_ROOT"):
+        data.setdefault("wiki", {})["root"] = env_wiki_root
+    if (env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN")) is not None:
+        data.setdefault("wiki", {})["dry_run"] = _parse_bool(env_wiki_dry)
+
+    # LLM Wiki Phase 5 오버라이드 — 라우터 활성화 + LLM 폴백 제어
+    if (env_router := os.environ.get("MT_WIKI_ROUTER_ENABLED")) is not None:
+        data.setdefault("wiki", {})["router_enabled"] = _parse_bool(env_router)
+    if (env_router_fb := os.environ.get("MT_WIKI_ROUTER_LLM_FALLBACK")) is not None:
+        data.setdefault("wiki", {})["router_llm_fallback"] = _parse_bool(env_router_fb)
+
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰
     env_hf = os.environ.get("HUGGINGFACE_TOKEN")
@@ -660,6 +756,23 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
             env_hf = hf_token_path.read_text().strip()
     if env_hf:
         data.setdefault("diarization", {})["huggingface_token"] = env_hf
+
+    # Wiki 환경변수 (PRD §9 Phase 1.B)
+    if env_wiki_enabled := os.environ.get("MT_WIKI_ENABLED"):
+        # "true"/"True"/"1" → True, 그 외 → False
+        data.setdefault("wiki", {})["enabled"] = env_wiki_enabled.lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+    if env_wiki_root := os.environ.get("MT_WIKI_ROOT"):
+        data.setdefault("wiki", {})["root"] = env_wiki_root
+    if env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN"):
+        data.setdefault("wiki", {})["dry_run"] = env_wiki_dry.lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     return data
 

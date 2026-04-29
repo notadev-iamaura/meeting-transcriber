@@ -14,6 +14,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from core.preflight import (
     PreflightResult,
     _check_apple_silicon,
@@ -160,7 +162,18 @@ class TestCheckPythonVersion:
 
 
 class TestCheckMetalAvailability:
-    """_check_metal_availability() subprocess 검증 테스트."""
+    """_check_metal_availability() subprocess 검증 테스트.
+
+    `_check_metal_availability` 는 CI 환경변수를 만나면 곧바로 False 를
+    반환하는 SIGABRT 가드(GitHub macOS runner 의 mlx import abort 회피)를
+    가지고 있다. 본 클래스의 테스트들은 subprocess mock 결과를 검증하므로
+    autouse fixture 로 CI 변수를 제거하여 가드 분기를 우회한다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _disable_ci_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """모든 테스트 시작 시 CI 환경변수를 제거 (가드 우회)."""
+        monkeypatch.delenv("CI", raising=False)
 
     @patch("core.preflight.subprocess.run")
     def test_metal_가용(self, mock_run: MagicMock) -> None:
@@ -181,6 +194,15 @@ class TestCheckMetalAvailability:
     def test_metal_파일없음(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError("python not found")
         assert _check_metal_availability() is False
+
+    def test_CI_환경변수면_subprocess_호출_없이_False(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CI=true 면 subprocess 호출 자체를 회피하고 False 반환 (SIGABRT 방지)."""
+        monkeypatch.setenv("CI", "true")
+        with patch("core.preflight.subprocess.run") as mock_run:
+            assert _check_metal_availability() is False
+            mock_run.assert_not_called()
 
 
 class TestCheckMlxImportable:
