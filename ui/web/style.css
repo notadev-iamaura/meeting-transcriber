@@ -6924,3 +6924,588 @@ ul#command-palette-list li[role="option"][aria-selected="true"] .command-palette
     grid-template-columns: 1fr;
   }
 }
+
+/* =================================================================
+ * LLM Wiki Phase 2.F — WikiView 스타일
+ * 디자인 토큰만 사용 (var(--bg-*), var(--text-*), var(--accent), var(--border) 등)
+ * macOS 디자인 가이드 준수: 0.5px hairline, var(--ease-macos), Vibrancy
+ * ================================================================= */
+
+/* 메인 컨테이너 — 헤더 + body (트리 + 미리보기) 의 flex 컬럼 */
+.wiki-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+/* 상단 헤더 — 검색 input + Health 배지 */
+.wiki-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-canvas);
+  /* Vibrancy — 사이드바/헤더 패턴 */
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  flex-shrink: 0;
+}
+
+/* 검색 input — 헤더 좌측 flex:1 영역 차지 */
+.wiki-search-wrapper {
+  position: relative;
+  flex: 1;
+  max-width: 480px;
+}
+
+.wiki-search-input {
+  width: 100%;
+  padding: 7px 12px 7px 32px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color var(--duration-fast) var(--ease-macos),
+    box-shadow var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.wiki-search-input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.wiki-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+
+/* 헤더 우측 spacer — 검색과 배지 사이 */
+.wiki-header-spacer {
+  flex: 1;
+}
+
+/* Health 배지 — 클릭 가능한 button 형태 */
+.wiki-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-health-badge:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+}
+
+.wiki-health-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Health 도트 — status 별 색상 */
+.wiki-health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wiki-health-dot--ok {
+  background: var(--success);
+}
+
+.wiki-health-dot--warning {
+  background: var(--warning);
+}
+
+.wiki-health-dot--no-lint {
+  background: var(--text-muted);
+}
+
+/* 본문 — 트리(좌) + 미리보기(우) 의 flex row */
+.wiki-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 좌측 트리 패널 — 250px 고정 */
+.wiki-tree {
+  width: 250px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  background: var(--bg-sidebar);
+  border-right: 0.5px solid var(--border);
+  padding: 8px 0;
+}
+
+/* 카테고리 그룹 컨테이너 */
+.wiki-tree__category {
+  margin-bottom: 4px;
+}
+
+/* 카테고리 헤더 — 클릭 시 펼침/접힘 토글 */
+.wiki-tree__category-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-tree__category-header:hover {
+  color: var(--text-primary);
+}
+
+.wiki-tree__category-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.wiki-tree__category-header--disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.wiki-tree__category-header--disabled:hover {
+  color: var(--text-secondary);
+}
+
+/* 펼침 caret — ▾ / ▸ 회전 */
+.wiki-tree__caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-tree__category--collapsed .wiki-tree__caret {
+  transform: rotate(-90deg);
+}
+
+.wiki-tree__category-name {
+  flex: 1;
+}
+
+.wiki-tree__category-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* 카테고리 아이템 리스트 */
+.wiki-tree__items {
+  display: flex;
+  flex-direction: column;
+}
+
+.wiki-tree__category--collapsed .wiki-tree__items {
+  display: none;
+}
+
+/* 페이지 항목 — 클릭 → 미리보기 표시 */
+.wiki-tree__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 14px 6px 30px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-tree__item:hover {
+  background: var(--bg-hover);
+}
+
+.wiki-tree__item:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+  border-left-color: var(--accent);
+}
+
+.wiki-tree__item--active {
+  background: var(--accent-light);
+  border-left-color: var(--accent);
+}
+
+.wiki-tree__item-title {
+  font-weight: 500;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.wiki-tree__item-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 트리 빈 상태 (검색 결과 0건 등) */
+.wiki-tree__empty {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* 우측 미리보기 영역 */
+.wiki-preview {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+  background: var(--bg-canvas);
+}
+
+/* 미리보기 빈 상태 */
+.wiki-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.wiki-preview-empty-icon {
+  font-size: 36px;
+  opacity: 0.4;
+  margin-bottom: 12px;
+}
+
+.wiki-preview-empty-title {
+  font-size: 15px;
+  color: var(--text-secondary);
+  margin: 0 0 4px;
+}
+
+.wiki-preview-empty-desc {
+  font-size: 13px;
+  margin: 0;
+}
+
+/* 미리보기 본문 컨테이너 */
+.wiki-preview-content {
+  max-width: 760px;
+  margin: 0 auto;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+/* 미리보기 페이지 헤더 (제목 + 경로) */
+.wiki-preview-page-header {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.wiki-preview-page-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  letter-spacing: -0.4px;
+}
+
+.wiki-preview-page-path {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+}
+
+/* frontmatter 메타 박스 */
+.wiki-preview-frontmatter {
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wiki-preview-frontmatter-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.wiki-preview-frontmatter-key {
+  flex-shrink: 0;
+  min-width: 80px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.wiki-preview-frontmatter-value {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+/* 마크다운 본문 — 기존 .markdown-rendered 와 충돌하지 않도록 wiki- 접두 */
+.wiki-preview-markdown h1,
+.wiki-preview-markdown h2,
+.wiki-preview-markdown h3 {
+  margin-top: 1.4em;
+  margin-bottom: 0.6em;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  color: var(--text-primary);
+}
+
+.wiki-preview-markdown h1 { font-size: 20px; }
+.wiki-preview-markdown h2 { font-size: 17px; }
+.wiki-preview-markdown h3 { font-size: 15px; }
+
+.wiki-preview-markdown p {
+  margin: 0.6em 0;
+}
+
+.wiki-preview-markdown ul,
+.wiki-preview-markdown ol {
+  padding-left: 1.4em;
+  margin: 0.6em 0;
+}
+
+.wiki-preview-markdown li {
+  margin: 0.2em 0;
+}
+
+.wiki-preview-markdown code {
+  padding: 1px 5px;
+  font-size: 0.9em;
+  background: var(--bg-input);
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+}
+
+.wiki-preview-markdown strong {
+  font-weight: 700;
+}
+
+.wiki-preview-markdown em {
+  font-style: italic;
+}
+
+/* 인용 마커 — [meeting:abc12345@00:23:45] → 클릭 시 음성 재생 점프 */
+.wiki-citation {
+  display: inline-block;
+  margin: 0 1px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  color: var(--accent-text);
+  background: var(--accent-light);
+  border-radius: 3px;
+  text-decoration: none;
+  border: 0.5px dashed transparent;
+  cursor: pointer;
+  vertical-align: baseline;
+  transition: background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-citation:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.wiki-citation:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wiki-citation::before {
+  content: "▶ ";
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+/* 위키 빈 상태 (페이지 0건) */
+.wiki-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 40px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.wiki-empty-state-icon {
+  width: 56px;
+  height: 56px;
+  margin-bottom: 16px;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.wiki-empty-state-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+
+.wiki-empty-state-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+/* Health 모달 — 백드롭 + 카드 (기존 .modal-overlay 패턴 참고) */
+.wiki-health-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.4);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+.wiki-health-modal-content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 600px;
+  max-height: 80vh;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.wiki-health-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.wiki-health-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.wiki-health-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 16px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+    color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-health-modal-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.wiki-health-modal-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wiki-health-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.wiki-health-modal-body pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.wiki-health-modal-empty {
+  padding: 20px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* WikiView 반응형 — 모바일에서 트리 축소 */
+@media (max-width: 640px) {
+  .wiki-tree {
+    width: 200px;
+  }
+  .wiki-preview {
+    padding: 16px 20px;
+  }
+  .wiki-health-modal-content {
+    max-width: 100%;
+    max-height: 100%;
+    height: 100vh;
+    border-radius: 0;
+  }
+}
