@@ -726,6 +726,10 @@ class WikiLinter:
         WikiStore.read_page() 는 frontmatter 를 분리하지만 lint 는 raw text 가
         필요하므로 직접 read 한다.
 
+        보안: wiki 루트 밖으로 탈출하는 경로를 차단한다.
+            - ".." segment 포함 시 거부
+            - resolve() 후 root 기준 상대 경로 검사
+
         Args:
             rel_path: wiki 루트 기준 상대 경로.
 
@@ -734,8 +738,24 @@ class WikiLinter:
 
         Raises:
             WikiStoreError 또는 OSError: 디스크 read 실패 시.
+            ValueError: path traversal 시도 감지 시.
         """
+        # path traversal 방어 — all_pages() 경로는 안전하지만
+        # 향후 외부 입력이 직접 전달될 경우를 대비한 심층 방어
+        if ".." in rel_path.parts or rel_path.is_absolute():
+            raise ValueError(
+                f"lint._read_page_content: path traversal 또는 절대 경로 거부: {rel_path}"
+            )
         abs_path = self._store.root / rel_path
+        # symlink resolve 후 root 내부인지 이중 검사
+        try:
+            resolved = abs_path.resolve()
+            root_resolved = self._store.root.resolve()
+            resolved.relative_to(root_resolved)  # ValueError if outside
+        except ValueError:
+            raise ValueError(
+                f"lint._read_page_content: root 외부 경로 거부: {rel_path}"
+            )
         return abs_path.read_text(encoding="utf-8")
 
     @staticmethod

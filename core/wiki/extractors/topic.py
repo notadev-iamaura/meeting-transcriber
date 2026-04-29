@@ -41,6 +41,11 @@ _META_FILENAME: str = ".topic_mentions.json"
 # 메타파일 스키마 버전 — 이후 변경 시 마이그레이션 트리거.
 _META_VERSION: int = 1
 
+# aggregate_and_render 에서 단일 회의당 처리할 최대 개념 수.
+# 한 회의에서 LLM 이 수십 개의 개념을 추출해도 렌더 LLM 호출이 폭주하지 않도록 상한 설정.
+# TODO(Phase 5): 상한 초과분은 confidence 내림차순 우선 처리로 개선.
+_MAX_RENDER_PER_MEETING: int = 8
+
 # slug 에 허용되는 문자 — 한글/영숫자/하이픈/언더스코어.
 _TOPIC_SLUG_ALLOWED: re.Pattern[str] = re.compile(
     r"^[\uAC00-\uD7A3A-Za-z0-9\-_]+$"
@@ -499,6 +504,10 @@ class TopicExtractor:
         # ── 4. 페이지 렌더 후보 결정 ─────────────────────────────────
         rendered_pages: list[tuple[str, str, int]] = []
 
+        # LLM 호출 폭주 방지 — 단일 회의당 최대 _MAX_RENDER_PER_MEETING 건만 처리.
+        # 초과분은 다음 회의 ingest 시 재시도된다 (mention.page_created=False 유지).
+        render_count = 0
+
         for concept in new_concepts:
             slug = concept.slug or _normalize_concept_slug(concept.name)
             if not slug:
@@ -512,6 +521,14 @@ class TopicExtractor:
                 # 임계 미달 — 페이지 변경 X
                 continue
 
+            # 단일 회의 LLM 호출 상한 초과 시 중단
+            if render_count >= _MAX_RENDER_PER_MEETING:
+                logger.warning(
+                    "TopicExtractor: 단일 회의 렌더 상한(%d) 도달 — 나머지 개념은 다음 ingest 에서 처리",
+                    _MAX_RENDER_PER_MEETING,
+                )
+                break
+
             try:
                 if not mention.page_created:
                     # 신규 페이지 생성
@@ -523,6 +540,7 @@ class TopicExtractor:
                     )
                     if result is not None:
                         rendered_pages.append(result)
+                        render_count += 1
                         # 메타 갱신: page_created=True
                         mention.page_created = True
                 else:
@@ -536,6 +554,7 @@ class TopicExtractor:
                     )
                     if result is not None:
                         rendered_pages.append(result)
+                        render_count += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "TopicExtractor: 페이지 렌더 실패 — skip: slug=%s, %r",

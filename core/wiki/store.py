@@ -346,6 +346,34 @@ class WikiStore:
                 "---\ntype: action_items\n---\n\n# Action Items\n\n## Open (0)\n\n## Closed (0)\n",
             )
 
+        # ── 2b. .gitignore 생성 (없을 때만) — 런타임 전용 파일 추적 방지
+        # .topic_mentions.json 은 in-memory 카운터의 디스크 영속화 파일로
+        # git 추적 대상이 아니다. `git add -A` 시 자동 커밋되지 않도록 차단.
+        gitignore_path = self._root / ".gitignore"
+        if not gitignore_path.exists():
+            self._atomic_write(
+                gitignore_path,
+                "# wiki 런타임 전용 파일 — git 추적 제외\n"
+                ".topic_mentions.json\n"
+                ".topic_mentions.json.tmp\n",
+            )
+        else:
+            # 기존 .gitignore 에 누락된 항목만 append
+            try:
+                existing = gitignore_path.read_text(encoding="utf-8")
+                lines_to_add: list[str] = []
+                for entry in (".topic_mentions.json", ".topic_mentions.json.tmp"):
+                    if entry not in existing:
+                        lines_to_add.append(entry)
+                if lines_to_add:
+                    suffix = "\n" if existing.endswith("\n") else "\n\n"
+                    gitignore_path.write_text(
+                        existing + suffix + "\n".join(lines_to_add) + "\n",
+                        encoding="utf-8",
+                    )
+            except OSError as exc:
+                logger.warning(".gitignore 갱신 실패 (비치명적): %r", exc)
+
         # ── 3. git 초기화 (멱등) ──────────────────────────────────────
         git_dir = self._root / ".git"
         if git_dir.exists():

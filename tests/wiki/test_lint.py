@@ -513,10 +513,10 @@ class TestReverifyCitations:
         # Arrange — 총 10개 인용 (7개 통과, 3개 phantom)
         # 5개씩 2페이지에 나눠서 인용 배치
         citations_page1 = "\n".join([
-            f"[meeting:abc12345@00:0{i}:00]" for i in range(1, 6)
+            f"[meeting:abc12345@00:{i:02d}:00]" for i in range(1, 6)
         ])
         citations_page2 = "\n".join([
-            f"[meeting:abc12345@00:0{i}:00]" for i in range(6, 11)
+            f"[meeting:abc12345@00:{i:02d}:00]" for i in range(6, 11)
         ])
         initialized_store.write_page(
             Path("decisions/결정A.md"),
