@@ -230,11 +230,11 @@ class TestRouterDisabledRegression:
         )
 
         # Act
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/chat",
-                json={"query": "이번 회의 요약 알려줘"},
-            )
+        client = TestClient(app)
+        response = client.post(
+            "/api/chat",
+            json={"query": "이번 회의 요약 알려줘"},
+        )
 
         # Assert
         assert response.status_code == 200
@@ -290,11 +290,11 @@ class TestRouterEnabledWikiRouting:
         )
 
         # Act
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/chat",
-                json={"query": "지난주 결정사항 정리해줘"},
-            )
+        client = TestClient(app)
+        response = client.post(
+            "/api/chat",
+            json={"query": "지난주 결정사항 정리해줘"},
+        )
 
         # Assert
         assert response.status_code == 200
@@ -343,11 +343,11 @@ class TestRouterEnabledRagRouting:
         )
 
         # Act
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/chat",
-                json={"query": "이번 회의에서 뭐 얘기했어?"},
-            )
+        client = TestClient(app)
+        response = client.post(
+            "/api/chat",
+            json={"query": "이번 회의에서 뭐 얘기했어?"},
+        )
 
         # Assert
         assert response.status_code == 200
@@ -433,11 +433,11 @@ class TestRouterAmbiguousQueryFallback:
             "_build_hybrid_chat_service",
             side_effect=_patched_builder,
         ):
-            with TestClient(app) as client:
-                response = client.post(
-                    "/api/chat",
-                    json={"query": ambiguous_query},
-                )
+            client = TestClient(app)
+            response = client.post(
+                "/api/chat",
+                json={"query": ambiguous_query},
+            )
 
         # 후처리 — original 복원 (안전성)
         routes_module._build_hybrid_chat_service = original_builder
