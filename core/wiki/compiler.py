@@ -31,6 +31,8 @@ from core.wiki.extractors.action_item import (
     OpenActionItem,
 )
 from core.wiki.extractors.decision import DecisionExtractor
+from core.wiki.extractors.person import ExtractedPerson, PersonExtractor
+from core.wiki.extractors.project import ExtractedProject, ProjectExtractor
 from core.wiki.guard import GuardVerdict, WikiGuard
 from core.wiki.llm_client import WikiLLMClient, WikiLLMError
 from core.wiki.store import WikiStore, WikiStoreError
@@ -69,12 +71,48 @@ class CompileResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 5.2 컴파일러
+# 5.2 CompileTargets — 4종 페이지 분기 결과
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CompileTargets:
+    """이번 회의 ingest 가 갱신할 페이지 목록 (LLM 의 영향 페이지 결정 결과).
+
+    Phase 2 까지는 _decide_pages 가 별도 dataclass 없이 (decisions, action_items_flag)
+    만 받았으나 Phase 3 에서 4종 분기로 확장하므로 명시적 타입을 도입한다.
+
+    Phase 3 에서는 라우터(_decide_pages) 를 도입하지 않고 모든 extractor 를 직접
+    호출하는 패턴을 유지하므로, CompileTargets 는 후속 단계용 결과 컨테이너로
+    사용된다.
+
+    Attributes:
+        decisions: ExtractedDecision 후보들.
+        action_items: 항상 True (action_items.md 는 단일 통합 파일).
+        people: ExtractedPerson 후보들 (PersonExtractor 결과).
+        projects: ExtractedProject 후보들 (ProjectExtractor 결과).
+        topics: Phase 4 placeholder. 현재는 항상 빈 리스트.
+    """
+
+    decisions: list = field(default_factory=list)
+    action_items: bool = True
+    people: list = field(default_factory=list)
+    projects: list = field(default_factory=list)
+    topics: list = field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 5.3 컴파일러
 # ─────────────────────────────────────────────────────────────────────────
 
 
 class WikiCompilerV2:
-    """Phase 2 실제 컴파일러. Decision + ActionItem 페이지 생성 + 5중 방어 통과.
+    """Phase 2 실제 컴파일러. 4종 추출기 + 5중 방어 통과.
+
+    Phase 3 변경:
+        - PersonExtractor / ProjectExtractor 를 추가 의존성으로 주입.
+        - compile_meeting 에 단계 5b (people) + 5c (projects) 추가.
+        - speaker_name_map 인자로 화자 정규화를 person/action_item 에 전달.
 
     Threading: 단일 코루틴에서 직렬 호출 가정.
     """
@@ -88,6 +126,8 @@ class WikiCompilerV2:
         guard: WikiGuard,
         decision_extractor: DecisionExtractor,
         action_item_extractor: ActionItemExtractor,
+        person_extractor: PersonExtractor,
+        project_extractor: ProjectExtractor,
     ) -> None:
         """모든 의존성을 주입받는다 — DI 로 테스트 격리.
 
@@ -98,6 +138,8 @@ class WikiCompilerV2:
             guard: WikiGuard 인스턴스.
             decision_extractor: DecisionExtractor 인스턴스.
             action_item_extractor: ActionItemExtractor 인스턴스.
+            person_extractor: PersonExtractor 인스턴스 (Phase 3).
+            project_extractor: ProjectExtractor 인스턴스 (Phase 3).
         """
         self._config = config
         self._store: WikiStore = store
@@ -105,6 +147,8 @@ class WikiCompilerV2:
         self._guard: WikiGuard = guard
         self._decision_extractor: DecisionExtractor = decision_extractor
         self._action_item_extractor: ActionItemExtractor = action_item_extractor
+        self._person_extractor: PersonExtractor = person_extractor
+        self._project_extractor: ProjectExtractor = project_extractor
 
     async def compile_meeting(
         self,
@@ -113,14 +157,31 @@ class WikiCompilerV2:
         meeting_date: date,
         summary: str,
         utterances: list,
+        speaker_name_map: dict[str, str] | None = None,
     ) -> CompileResult:
         """단일 회의를 컴파일하여 wiki 를 갱신한다.
+
+        Phase 3 흐름:
+            1. DecisionExtractor.extract → ExtractedDecision[].
+            2. ActionItemExtractor.extract_new + detect_closed.
+            3. 기존 action_items.md 파싱.
+            4. DecisionExtractor.render_pages → decision pages.
+            5. ActionItemExtractor.render_unified_page → action_items.md.
+            5b. PersonExtractor.extract_speakers + render_or_update_pages → people pages.
+            5c. ProjectExtractor.extract_projects + detect_status_transitions
+                + render_or_update_pages → project pages.
+            6. WikiGuard.verify 적용 후 store.write_page.
+            7. log.md append + git_commit_atomic.
+
+        실패 격리: person/project 어느 한쪽 실패해도 decisions/action_items 는 살아남음.
 
         Args:
             meeting_id: 8자리 hex.
             meeting_date: 회의 날짜.
             summary: 8단계 요약 마크다운.
             utterances: 5단계 corrector 결과.
+            speaker_name_map: corrector 가 제공한 {SPEAKER_XX: 한국어이름}.
+                None 이면 person/action_item 의 fuzzy matching 비활성화.
 
         Returns:
             CompileResult.
@@ -158,6 +219,7 @@ class WikiCompilerV2:
                 meeting_id=meeting_id,
                 meeting_date=meeting_date,
                 utterances=utterances,
+                speaker_name_map=speaker_name_map,
             )
         except WikiLLMError as exc:
             logger.warning("ActionItemExtractor.extract_new 실패: %r", exc)
@@ -224,8 +286,84 @@ class WikiCompilerV2:
             logger.warning("render_unified_page 실패: %r", exc)
             action_pages = []
 
+        # ── 6b. PersonExtractor (Phase 3) — graceful degradation ─────
+        person_pages: list[tuple[str, str, int]] = []
+        try:
+            persons = await self._person_extractor.extract_speakers(
+                meeting_id=meeting_id,
+                meeting_date=meeting_date,
+                utterances=utterances,
+                speaker_name_map=speaker_name_map,
+            )
+            if persons:
+                person_pages = await self._person_extractor.render_or_update_pages(
+                    persons=persons,
+                    meeting_id=meeting_id,
+                    meeting_date=meeting_date,
+                    existing_store=self._store,
+                    meeting_decisions=decisions,
+                    meeting_new_actions=new_actions,
+                    existing_open_actions=existing_open,
+                )
+        except WikiLLMError as exc:
+            logger.warning("PersonExtractor 실패 — people 페이지 0건: %r", exc)
+            person_pages = []
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True
+            )
+            person_pages = []
+
+        # ── 6c. ProjectExtractor (Phase 3) — graceful degradation ────
+        project_pages: list[tuple[str, str, int]] = []
+        try:
+            projects = await self._project_extractor.extract_projects(
+                meeting_id=meeting_id,
+                meeting_date=meeting_date,
+                utterances=utterances,
+                summary=summary,
+            )
+            # 기존 ExistingProject 목록은 Phase 3 에서 별도 인덱스 도입 전까지
+            # 빈 리스트로 둔다 — detect_status_transitions 는 빈 리스트에서
+            # LLM 호출 0회로 즉시 반환하므로 안전.
+            existing_projects: list = []
+            status_transitions = await self._project_extractor.detect_status_transitions(
+                existing_projects=existing_projects,
+                meeting_id=meeting_id,
+                utterances=utterances,
+            )
+            if projects:
+                project_pages = await self._project_extractor.render_or_update_pages(
+                    projects=projects,
+                    status_transitions=status_transitions,
+                    meeting_id=meeting_id,
+                    meeting_date=meeting_date,
+                    existing_store=self._store,
+                    meeting_decisions=decisions,
+                    meeting_new_actions=new_actions,
+                    existing_open_actions=existing_open,
+                )
+        except WikiLLMError as exc:
+            logger.warning("ProjectExtractor 실패 — project 페이지 0건: %r", exc)
+            project_pages = []
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True
+            )
+            project_pages = []
+
         # ── 7. 페이지별 WikiGuard.verify + write ─────────────────────
-        all_pages: list[tuple[str, str]] = list(decision_pages) + list(action_pages)
+        # Phase 3: people / projects 는 (path, content, confidence) 튜플 형식이므로
+        #   2-tuple 로 정규화. confidence 는 D3 검증에서 사용되며, guard 가 본문의
+        #   <!-- confidence: N --> 마커를 직접 읽으므로 추가 인자 전달은 불요.
+        people_pages_pairs = [(p, c) for p, c, _ in person_pages]
+        project_pages_pairs = [(p, c) for p, c, _ in project_pages]
+        all_pages: list[tuple[str, str]] = (
+            list(decision_pages)
+            + list(action_pages)
+            + people_pages_pairs
+            + project_pages_pairs
+        )
 
         for rel_path, content in all_pages:
             verdict = await self._guard.verify(

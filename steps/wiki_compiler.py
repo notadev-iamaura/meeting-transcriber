@@ -58,6 +58,8 @@ def _create_wiki_compiler_v2(
     from core.wiki.compiler import WikiCompilerV2
     from core.wiki.extractors.action_item import ActionItemExtractor
     from core.wiki.extractors.decision import DecisionExtractor
+    from core.wiki.extractors.person import PersonExtractor
+    from core.wiki.extractors.project import ProjectExtractor
     from core.wiki.guard import WikiGuard
     from core.wiki.llm_client import MlxWikiClient
 
@@ -83,6 +85,9 @@ def _create_wiki_compiler_v2(
     )
     decision_extractor = DecisionExtractor(llm)
     action_item_extractor = ActionItemExtractor(llm)
+    # Phase 3 — people / projects extractor 추가
+    person_extractor = PersonExtractor(llm)
+    project_extractor = ProjectExtractor(llm)
     return WikiCompilerV2(
         config=config,
         store=store,
@@ -90,6 +95,8 @@ def _create_wiki_compiler_v2(
         guard=guard,
         decision_extractor=decision_extractor,
         action_item_extractor=action_item_extractor,
+        person_extractor=person_extractor,
+        project_extractor=project_extractor,
     )
 
 
