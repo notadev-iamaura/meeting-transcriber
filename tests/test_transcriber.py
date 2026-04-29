@@ -430,9 +430,23 @@ class TestParseSegments:
 
 
 class TestLoadWhisperModule:
-    """mlx_whisper 모듈 로드 테스트."""
+    """mlx_whisper 모듈 로드 테스트.
 
-    def test_임포트_실패(self, transcriber: Transcriber) -> None:
+    `_load_whisper_module` 은 진입 즉시 `run_preflight()` 로 Metal 가용성을
+    확인하고 불가 시 일찍 에러 던진다. 본 클래스의 테스트들은 import 실패/
+    성공 분기 자체를 검증하므로 preflight 를 항상 통과로 mock 한다.
+    (CI 환경의 preflight 가드 — `_check_metal_availability` 의 CI 분기 —
+    가 false 를 반환하면 import 분기까지 도달하지 못해 regex 가 어긋남.)
+    """
+
+    @pytest.fixture
+    def _preflight_ok(self) -> Any:
+        """preflight 를 항상 통과로 만들어 import 분기까지 흐름을 진행시킨다."""
+        with patch("steps.transcriber.run_preflight") as mock:
+            mock.return_value = MagicMock(can_use_mlx=True, warnings=())
+            yield mock
+
+    def test_임포트_실패(self, transcriber: Transcriber, _preflight_ok: Any) -> None:
         """mlx_whisper가 없으면 ModelNotAvailableError를 발생시킨다."""
         with (
             patch.dict("sys.modules", {"mlx_whisper": None}),
@@ -440,7 +454,7 @@ class TestLoadWhisperModule:
         ):
             transcriber._load_whisper_module()
 
-    def test_임포트_성공(self, transcriber: Transcriber) -> None:
+    def test_임포트_성공(self, transcriber: Transcriber, _preflight_ok: Any) -> None:
         """mlx_whisper 모듈이 있으면 모듈 객체를 반환한다."""
         mock_module = MagicMock()
         with patch.dict("sys.modules", {"mlx_whisper": mock_module}):
