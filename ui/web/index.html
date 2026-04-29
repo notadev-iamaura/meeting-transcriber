@@ -9,6 +9,27 @@
 </head>
 <body>
   <div id="app">
+    <!-- 모바일 햄버거 토글 (T-302) — 768px 이하에서만 표시.
+         aria-expanded 가 drawer 상태의 단일 진실 공급원(SSOT).
+         aria-controls 는 사이드바 element id (list-panel) 를 가리킨다.
+         사이드바(<aside>) 자체에는 aria-expanded/aria-modal 부여 금지
+         (axe aria-allowed-attr — complementary role 에서 거부됨). -->
+    <button
+      id="mobile-menu-toggle"
+      class="mobile-menu-toggle"
+      type="button"
+      aria-label="메뉴 열기"
+      aria-expanded="false"
+      aria-controls="list-panel"
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 12h18M3 6h18M3 18h18"/>
+      </svg>
+    </button>
+
+    <!-- drawer 백드롭 — 모바일 drawer 열림 상태에서 콘텐츠 영역을 dim 처리. -->
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+
     <!-- 1. 네비게이션 바 (56px, 좌측 고정) -->
     <nav id="nav-bar" aria-label="주요 내비게이션">
       <div class="nav-top">

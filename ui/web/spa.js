@@ -8505,6 +8505,67 @@
     // 글로벌 리소스 모니터 시작 (모든 탭 공통 상단 표시)
     GlobalResourceBar.start();
 
+    // 모바일 drawer 토글 초기화 (T-302)
+    // - 768px 이하에서 햄버거 클릭 → 사이드바 drawer 열림/닫힘
+    // - SSOT: 햄버거 버튼의 aria-expanded (사이드바에는 ARIA 상태 부여 금지)
+    // - 시각 토글: 사이드바의 .is-open 클래스
+    // - ESC 키 + 백드롭 클릭으로 닫힘 (WCAG 2.1.2 No Keyboard Trap)
+    // - 닫힘 시 햄버거 버튼으로 focus 복귀 (mockup §6.3)
+    (function initMobileDrawer() {
+        var toggleBtn = document.getElementById("mobile-menu-toggle");
+        var panel = document.getElementById("list-panel");
+        var backdrop = document.getElementById("drawer-backdrop");
+        if (!toggleBtn || !panel || !backdrop) {
+            return;
+        }
+
+        // drawer 안 첫 focusable 요소 — focus trap 시작점
+        function firstFocusable() {
+            return panel.querySelector(
+                'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            );
+        }
+
+        function openDrawer() {
+            toggleBtn.setAttribute("aria-expanded", "true");
+            toggleBtn.setAttribute("aria-label", "메뉴 닫기");
+            panel.classList.add("is-open");
+            backdrop.classList.add("visible");
+            document.body.style.overflow = "hidden";
+            // focus 이동 — drawer 안 첫 focusable 항목으로
+            var first = firstFocusable();
+            if (first) {
+                first.focus();
+            }
+        }
+
+        function closeDrawer() {
+            toggleBtn.setAttribute("aria-expanded", "false");
+            toggleBtn.setAttribute("aria-label", "메뉴 열기");
+            panel.classList.remove("is-open");
+            backdrop.classList.remove("visible");
+            document.body.style.overflow = "";
+            // focus 복귀 — 햄버거 버튼으로
+            toggleBtn.focus();
+        }
+
+        toggleBtn.addEventListener("click", function () {
+            if (toggleBtn.getAttribute("aria-expanded") === "true") {
+                closeDrawer();
+            } else {
+                openDrawer();
+            }
+        });
+
+        backdrop.addEventListener("click", closeDrawer);
+
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && toggleBtn.getAttribute("aria-expanded") === "true") {
+                closeDrawer();
+            }
+        });
+    })();
+
     // 테마 토글 초기화
     (function initThemeToggle() {
         var btn = document.getElementById("themeToggle");

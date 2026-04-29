@@ -3928,10 +3928,70 @@ button {
    17. 반응형 — 태블릿/모바일 대응
    ═══════════════════���══════════════════════ */
 
-/* 태블릿 이하: Nav Bar 하단바, List Panel 숨김 */
+/* ════════════════════════════════════════════════════════════════════════
+ * 모바일 햄버거 + drawer (T-302) — 데스크톱 기본 숨김.
+ * 768px 이하에서만 햄버거가 보이고, 사이드바(#list-panel)가 drawer 로 동작.
+ * 단일 진실 공급원(SSOT): 햄버거 버튼의 aria-expanded.
+ * 시각 토글: 사이드바의 .is-open 클래스 (ARIA 속성 부여 금지).
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* 햄버거 버튼 — 데스크톱 기본 숨김 */
+.mobile-menu-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--text-primary);
+  border-radius: var(--radius);
+  transition: background var(--duration-fast) var(--ease-macos);
+}
+.mobile-menu-toggle:hover { background: var(--bg-hover); }
+.mobile-menu-toggle:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+/* 백드롭 — 데스크톱 기본 숨김 */
+.drawer-backdrop {
+  display: none;
+}
+
+/* 태블릿 이하: Nav Bar 하단바, List Panel → drawer */
 @media (max-width: 768px) {
   #app {
     flex-direction: column;
+  }
+
+  /* 햄버거 버튼 — 모바일에서 보임 (display 만 토글, 위치는 부모 컨텍스트별로 지정) */
+  .mobile-menu-toggle {
+    display: inline-flex;
+  }
+  /* SPA 통합 — #app 직속 자식만 좌상단 fixed (nav-bar 가 하단 탭바로 내려가므로).
+     fixture (<header> 자식) 에는 영향 없음 → baseline 보호. */
+  #app > .mobile-menu-toggle {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 101;
+  }
+
+  /* 백드롭 — 모바일에서만 활성화 */
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 99;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-base) var(--ease-macos);
+  }
+  .drawer-backdrop.visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   /* Nav Bar → 하단 가로 바로 변환 (iOS 탭바 스타일) */
@@ -3967,16 +4027,33 @@ button {
     font-size: 10px;
   }
 
-  /* List Panel 숨김 (모바일에서는 콘텐츠 영역에 통합) */
+  /* List Panel → drawer 화 (좌측에서 슬라이드인) */
   #list-panel {
-    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 280px;
+    max-width: 280px;
+    min-width: 280px;
+    transform: translateX(-100%);
+    transition: transform var(--duration-base) var(--ease-macos);
+    z-index: 100;
+    background: var(--bg-sidebar);
+    border-right: 0.5px solid var(--border);
+    border-bottom: none;
+  }
+  #list-panel.is-open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
   }
 
   #content {
     order: 1;
   }
 
-  /* 이전 사이드바 호환 */
+  /* 레거시 #sidebar 호환 (현재 사용 처 없음) — fixture 의 baseline 은 이 규칙으로
+     캡처되었으므로 그대로 유지. SPA 의 drawer 동작은 #list-panel 에서만 처리. */
   #sidebar {
     width: 100%;
     max-width: 100%;
@@ -4013,6 +4090,14 @@ button {
     align-items: stretch;
     gap: 8px;
   }
+}
+
+/* 데스크톱 (≥769px) — drawer 비활성, 기존 레이아웃 유지 (T-302) */
+@media (min-width: 769px) {
+  .mobile-menu-toggle { display: none; }
+  .drawer-backdrop { display: none; }
+  /* 데스크톱에서 .is-open 이 우연히 남아 있어도 transform 무력화 */
+  #list-panel.is-open { transform: none; box-shadow: none; }
 }
 
 /* 소형 모바일 */
