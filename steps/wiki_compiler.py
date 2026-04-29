@@ -39,55 +39,71 @@ def _create_wiki_compiler_v2(
     config: AppConfig,
     store: WikiStore,
     model_manager: Any | None,
+    utterances: list[Any] | None = None,
+    meeting_id: str | None = None,
 ) -> Any:
-    """Phase 2 V2 컴파일러 팩토리. 테스트 monkeypatch 진입점.
+    """Phase 4 V2 컴파일러 팩토리. 테스트 monkeypatch 진입점.
 
-    실제 의존성 (MlxWikiClient, WikiGuard, DecisionExtractor, ActionItemExtractor)
-    을 lazy import 하여 wiki 비활성 시 import 비용을 0 으로 둔다. 테스트는 이
-    함수를 monkeypatch 하여 mock V2 인스턴스를 주입할 수 있다.
+    Phase 4 변경:
+        - `_NullVerifier` 제거. utterances + meeting_id 기반의 실제
+          `UtterancesCitationVerifier` 를 주입한다.
+        - `TopicExtractor`, `WikiLinter` 추가 의존성을 주입한다.
+
+    실제 의존성을 lazy import 하여 wiki 비활성 시 import 비용을 0 으로 둔다.
+    테스트는 이 함수를 monkeypatch 하여 mock V2 인스턴스를 주입할 수 있다.
 
     Args:
         config: AppConfig — wiki 컴파일러 설정.
         store: 초기화된 WikiStore.
         model_manager: ModelLoadManager (실제 LLM 호출 시 필요).
+        utterances: 5단계 보정 발화 리스트. None 이면 빈 verifier (백필 등).
+        meeting_id: 8자리 hex 회의 ID. utterances 와 함께 사용.
 
     Returns:
         WikiCompilerV2 인스턴스 (또는 mock).
     """
     # Lazy import — 실제 LLM 호출 경로에서만 로드
+    from core.wiki.citation_verifier import UtterancesCitationVerifier
     from core.wiki.compiler import WikiCompilerV2
     from core.wiki.extractors.action_item import ActionItemExtractor
     from core.wiki.extractors.decision import DecisionExtractor
     from core.wiki.extractors.person import PersonExtractor
     from core.wiki.extractors.project import ProjectExtractor
+    from core.wiki.extractors.topic import TopicExtractor
     from core.wiki.guard import WikiGuard
+    from core.wiki.lint import WikiLinter
     from core.wiki.llm_client import MlxWikiClient
 
     llm = MlxWikiClient(config=config, model_manager=model_manager)
-    # Phase 2.E: CitationVerifier 는 wiki_compiler.py 가 자체 회의 단위 verifier
-    # 를 빌드해서 주입 (utterances 기반). 여기서는 placeholder.
-    from core.wiki.guard import CitationVerifier
 
-    class _NullVerifier:
-        """Phase 2.E placeholder. Phase 3 에서 RAG 기반 verifier 로 교체."""
-
-        async def verify_exists(self, meeting_id: str, timestamp_seconds: int) -> bool:
-            return True
-
-        async def fetch_utterance(
-            self, meeting_id: str, timestamp_seconds: int
-        ) -> str | None:
-            return None
+    # Phase 4: 실제 utterances 기반 verifier
+    utts_map: dict[str, list[Any]] = {}
+    if utterances and meeting_id:
+        utts_map[meeting_id] = utterances
+    verifier = UtterancesCitationVerifier(
+        utterances_by_meeting=utts_map,
+        tolerance_seconds=2,
+    )
 
     guard = WikiGuard(
-        verifier=_NullVerifier(),
+        verifier=verifier,
         confidence_threshold=config.wiki.confidence_threshold,
     )
     decision_extractor = DecisionExtractor(llm)
     action_item_extractor = ActionItemExtractor(llm)
-    # Phase 3 — people / projects extractor 추가
+    # Phase 3 — people / projects extractor
     person_extractor = PersonExtractor(llm)
     project_extractor = ProjectExtractor(llm)
+    # Phase 4 — topic extractor
+    topic_extractor = TopicExtractor(llm)
+    # Phase 4 — linter
+    linter = WikiLinter(
+        store=store,
+        verifier=verifier,
+        llm=None,  # 모순 탐지는 기본 비활성화 (LLM 비용 절감)
+        enable_contradictions=False,
+    )
+
     return WikiCompilerV2(
         config=config,
         store=store,
@@ -97,6 +113,8 @@ def _create_wiki_compiler_v2(
         action_item_extractor=action_item_extractor,
         person_extractor=person_extractor,
         project_extractor=project_extractor,
+        topic_extractor=topic_extractor,
+        linter=linter,
     )
 
 
@@ -238,6 +256,8 @@ class WikiCompiler:
                 config=self._config,
                 store=store,
                 model_manager=self._model_manager,
+                utterances=utterances,
+                meeting_id=meeting_id,
             )
             result = await v2.compile_meeting(
                 meeting_id=meeting_id,

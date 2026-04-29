@@ -33,7 +33,9 @@ from core.wiki.extractors.action_item import (
 from core.wiki.extractors.decision import DecisionExtractor
 from core.wiki.extractors.person import ExtractedPerson, PersonExtractor
 from core.wiki.extractors.project import ExtractedProject, ProjectExtractor
+from core.wiki.extractors.topic import TopicExtractor
 from core.wiki.guard import GuardVerdict, WikiGuard
+from core.wiki.lint import WikiLinter
 from core.wiki.llm_client import WikiLLMClient, WikiLLMError
 from core.wiki.store import WikiStore, WikiStoreError
 
@@ -128,6 +130,8 @@ class WikiCompilerV2:
         action_item_extractor: ActionItemExtractor,
         person_extractor: PersonExtractor,
         project_extractor: ProjectExtractor,
+        topic_extractor: TopicExtractor | None = None,
+        linter: WikiLinter | None = None,
     ) -> None:
         """모든 의존성을 주입받는다 — DI 로 테스트 격리.
 
@@ -140,6 +144,8 @@ class WikiCompilerV2:
             action_item_extractor: ActionItemExtractor 인스턴스.
             person_extractor: PersonExtractor 인스턴스 (Phase 3).
             project_extractor: ProjectExtractor 인스턴스 (Phase 3).
+            topic_extractor: TopicExtractor 인스턴스 (Phase 4, 선택).
+            linter: WikiLinter 인스턴스 (Phase 4, 선택). N회의마다 lint 실행.
         """
         self._config = config
         self._store: WikiStore = store
@@ -149,6 +155,11 @@ class WikiCompilerV2:
         self._action_item_extractor: ActionItemExtractor = action_item_extractor
         self._person_extractor: PersonExtractor = person_extractor
         self._project_extractor: ProjectExtractor = project_extractor
+        # Phase 4 신규
+        self._topic_extractor: TopicExtractor | None = topic_extractor
+        self._linter: WikiLinter | None = linter
+        # lint 트리거용 카운터 — 매 compile_meeting 직후 +1
+        self._meeting_count: int = 0
 
     async def compile_meeting(
         self,
@@ -352,17 +363,48 @@ class WikiCompilerV2:
             )
             project_pages = []
 
+        # ── 6d. TopicExtractor (Phase 4) — graceful degradation ──────
+        topic_pages: list[tuple[str, str, int]] = []
+        if self._topic_extractor is not None:
+            try:
+                new_concepts = await self._topic_extractor.extract_concepts(
+                    meeting_id=meeting_id,
+                    meeting_date=meeting_date,
+                    utterances=utterances,
+                    summary=summary,
+                )
+                if new_concepts:
+                    topic_pages = await self._topic_extractor.aggregate_and_render(
+                        new_concepts=new_concepts,
+                        meeting_id=meeting_id,
+                        meeting_date=meeting_date,
+                        existing_store=self._store,
+                    )
+            except WikiLLMError as exc:
+                logger.warning(
+                    "TopicExtractor 실패 — topic 페이지 0건: %r", exc
+                )
+                topic_pages = []
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "TopicExtractor 예상치 못한 오류: %r", exc, exc_info=True
+                )
+                topic_pages = []
+
         # ── 7. 페이지별 WikiGuard.verify + write ─────────────────────
         # Phase 3: people / projects 는 (path, content, confidence) 튜플 형식이므로
         #   2-tuple 로 정규화. confidence 는 D3 검증에서 사용되며, guard 가 본문의
         #   <!-- confidence: N --> 마커를 직접 읽으므로 추가 인자 전달은 불요.
         people_pages_pairs = [(p, c) for p, c, _ in person_pages]
         project_pages_pairs = [(p, c) for p, c, _ in project_pages]
+        # Phase 4: topics 도 동일 형식
+        topic_pages_pairs = [(p, c) for p, c, _ in topic_pages]
         all_pages: list[tuple[str, str]] = (
             list(decision_pages)
             + list(action_pages)
             + people_pages_pairs
             + project_pages_pairs
+            + topic_pages_pairs
         )
 
         for rel_path, content in all_pages:
@@ -383,6 +425,37 @@ class WikiCompilerV2:
                 pages_pending=pages_pending,
                 pages_rejected=pages_rejected,
             )
+
+        # ── 9. lint 트리거 (Phase 4 신규) ────────────────────────────
+        # 매 compile_meeting 후 카운터 +1. lint_interval 도달 시 lint_all 실행.
+        # lint 자체 실패는 ingest 를 막지 않는다 (graceful).
+        if self._linter is not None:
+            self._meeting_count += 1
+            lint_interval = int(
+                getattr(getattr(self._config, "wiki", self._config), "lint_interval", 5)
+            )
+            if self._meeting_count >= lint_interval:
+                try:
+                    report = await self._linter.lint_all(
+                        meetings_since_last_lint=self._meeting_count,
+                    )
+                    self._store.write_page(
+                        Path("HEALTH.md"),
+                        report.to_health_md(),
+                    )
+                    logger.info(
+                        "D4 lint 완료 — citation_pass_rate=%.2f, orphans=%d, "
+                        "cyclic=%d, contradictions=%d",
+                        report.citation_pass_rate,
+                        len(report.orphans),
+                        len(report.cyclic_citations),
+                        len(report.contradictions),
+                    )
+                    self._meeting_count = 0
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "lint 실행 실패 — 다음 ingest 에서 재시도: %r", exc
+                    )
 
         # ── 8. git commit ─────────────────────────────────────────────
         commit_sha = ""
