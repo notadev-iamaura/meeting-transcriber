@@ -1632,6 +1632,131 @@ button {
   color: var(--error);
 }
 
+/* 홈 뷰 컨테이너 — 대시보드 + 액션 + 빈 안내를 세로로 적층 */
+.home-view {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 32px 32px 24px;
+  max-width: 920px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 대시보드 통계 카드 그리드 — 4 칼럼, 모바일에서 2 칼럼으로 떨어짐 */
+.home-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .home-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .home-view {
+    padding: 16px 16px 12px;
+  }
+}
+
+.home-stat-card {
+  background: var(--bg-card, var(--bg-secondary));
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 84px;
+}
+
+.home-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.home-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.home-stat-sub {
+  font-size: 12px;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+/* 액션 버튼 행 — 좌측 정렬, wrap 으로 좁은 화면 대응 */
+.home-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.home-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-card, var(--bg-secondary));
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.home-action-btn:hover:not(:disabled) {
+  background: var(--bg-secondary);
+  border-color: var(--accent, var(--border));
+}
+
+.home-action-btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.home-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.home-action-btn:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 2px;
+}
+
+.home-action-btn svg {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+/* 액션 결과 안내 — toast 가 아닌 in-flow 메시지 (선택적, 비어있을 때 자리만 차지하지 않음) */
+.home-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-height: 16px;
+  line-height: 1.4;
+}
+
+.home-status:empty {
+  display: none;
+}
+
+/* home-view 내부의 .empty-view 는 dashboard 영역과 겹치지 않게 최소 높이 축소 */
+.home-view .empty-view {
+  padding: 40px 24px;
+  min-height: 220px;
+}
+
 /* 빈 뷰: 콘텐츠 영역 초기 안내 (홈 빈 상태) */
 .empty-view {
   display: flex;

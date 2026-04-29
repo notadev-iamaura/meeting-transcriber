@@ -754,16 +754,80 @@
                 });
             }
             if (_importStartBtn) {
-                _importStartBtn.addEventListener("click", function () {
-                    _closeImportModal();
-                    showInfoModal(
-                        "가져오기",
-                        "업로드 API 는 아직 준비 중입니다.\n" +
-                        "현재는 ~/.meeting-transcriber/audio_input 폴더에 파일을 직접 복사해 주세요. " +
-                        "파이프라인이 자동으로 감지해 처리합니다."
-                    );
-                    _importFiles = [];
-                    _renderImportQueue();
+                _importStartBtn.addEventListener("click", async function () {
+                    if (_importFiles.length === 0) return;
+                    var originalLabel = _importStartBtn.textContent;
+                    _importStartBtn.disabled = true;
+                    if (_importNotice) {
+                        _importNotice.hidden = false;
+                        _importNotice.textContent = "업로드 시작…";
+                    }
+
+                    var succeeded = 0;
+                    var failed = [];
+                    // 직렬 업로드 — 동시 업로드는 디스크/네트워크 경합만 늘림.
+                    for (var i = 0; i < _importFiles.length; i++) {
+                        var file = _importFiles[i];
+                        if (_importNotice) {
+                            _importNotice.textContent =
+                                "업로드 중 (" + (i + 1) + "/" + _importFiles.length + ") · " +
+                                file.name;
+                        }
+                        try {
+                            var resp = await fetch("/api/uploads", {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": "application/octet-stream",
+                                    // RFC 3986 unreserved 외 문자(한글 등) 안전하게 전달.
+                                    "X-Filename": encodeURIComponent(file.name),
+                                },
+                                body: file,
+                            });
+                            if (!resp.ok) {
+                                var errText = "";
+                                try {
+                                    var errJson = await resp.json();
+                                    errText = errJson && errJson.detail ? errJson.detail : "";
+                                } catch (_e) {
+                                    errText = String(resp.status);
+                                }
+                                failed.push({ name: file.name, reason: errText });
+                            } else {
+                                succeeded++;
+                            }
+                        } catch (e) {
+                            failed.push({ name: file.name, reason: e.message || String(e) });
+                        }
+                    }
+
+                    _importStartBtn.disabled = false;
+                    _importStartBtn.textContent = originalLabel;
+
+                    if (failed.length === 0) {
+                        if (_importNotice) {
+                            _importNotice.textContent =
+                                succeeded + "건 업로드 완료. 자동 감지 후 큐에 등록됩니다.";
+                        }
+                        _importFiles = [];
+                        _renderImportQueue();
+                        // 업로드 직후 사이드바 + 대시보드를 즉시 한 번 갱신.
+                        if (window.ListPanel && ListPanel.loadMeetings) {
+                            try { ListPanel.loadMeetings(); } catch (_) {}
+                        }
+                        document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
+                        // 사용자가 결과를 인지할 수 있게 짧게 노출 후 닫기.
+                        setTimeout(_closeImportModal, 800);
+                    } else {
+                        if (_importNotice) {
+                            var summary =
+                                succeeded + "건 성공, " + failed.length + "건 실패";
+                            var detail = failed
+                                .slice(0, 3)
+                                .map(function (f) { return f.name + ": " + (f.reason || "오류"); })
+                                .join(" · ");
+                            _importNotice.textContent = summary + " — " + detail;
+                        }
+                    }
                 });
             }
             // importModal 배경 클릭으로 닫기 + ESC 로 닫기 (infoModal 과 동일 패턴)
@@ -1154,34 +1218,95 @@
     // =================================================================
 
     /**
-     * 회의 목록에서 아무것도 선택하지 않은 초기 상태.
-     * 시스템 리소스 모니터와 일괄 요약 기능을 포함한다.
+     * 회의 목록에서 아무것도 선택하지 않은 초기 상태(홈 뷰).
+     * 대시보드 통계 + 액션 버튼(폴더 열기 / 일괄 업로드 / 일괄 요약) + 안내 메시지를 포함한다.
      * @constructor
      */
     function EmptyView() {
         // 리소스 모니터는 GlobalResourceBar 가 모든 탭에서 표시하므로 EmptyView 자체에서는 렌더하지 않음.
-        this._render();
+        var self = this;
+        self._statsTimer = null;
+        self._dashboardRefreshHandler = function () {
+            self._loadStats();
+        };
+        self._render();
+        self._loadStats();
+        // 대시보드는 가벼운 카운트 집계라 30 초 폴링 — 대시보드 정확도 vs 부하 절충.
+        self._statsTimer = setInterval(function () { self._loadStats(); }, 30000);
+        // 업로드/회의 변경 직후 즉시 갱신을 트리거할 수 있게 커스텀 이벤트 구독.
+        document.addEventListener("recap:dashboard-refresh", self._dashboardRefreshHandler);
     }
 
     /**
      * EmptyView DOM을 생성한다.
-     * 리소스 모니터 + 일괄 요약 버튼 + 안내 메시지를 표시한다.
+     * 대시보드 통계 카드 + 액션 버튼 + 안내 메시지.
      */
     EmptyView.prototype._render = function () {
         var contentEl = Router.getContentEl();
         contentEl.innerHTML = "";
 
+        // 통계 카드 4 개 — id 로 _loadStats 가 값을 채운다.
+        // 처음에는 "—" 로 placeholder 표시 (스켈레톤 대신 단순 dash).
         var html = [
-            // 메인 안내 영역
-            '<div class="empty-view">',
-            '  <div class="empty-view-icon">' + Icons.clipboard + '</div>',
-            '  <h2 class="empty-view-title">회의를 선택하세요</h2>',
-            '  <p class="empty-view-desc">왼쪽 목록에서 회의를 선택하면 전사 내용을 볼 수 있습니다.</p>',
-            '  <div style="margin-top:16px;">',
-            '    <button class="batch-summarize-btn" id="batch-summarize-btn">일괄 요약 생성</button>',
-            '  </div>',
-            '  <div class="empty-view-shortcuts">',
-            '    <div class="empty-view-shortcut">\u2318K 검색</div>',
+            '<div class="home-view">',
+            '  <section class="home-stats" aria-label="대시보드 통계">',
+            '    <div class="home-stat-card">',
+            '      <div class="home-stat-label">이번 주</div>',
+            '      <div class="home-stat-value" id="homeStatThisWeek">—</div>',
+            '      <div class="home-stat-sub">최근 7 일 회의</div>',
+            '    </div>',
+            '    <div class="home-stat-card">',
+            '      <div class="home-stat-label">전체 회의</div>',
+            '      <div class="home-stat-value" id="homeStatTotal">—</div>',
+            '      <div class="home-stat-sub">누적 등록 수</div>',
+            '    </div>',
+            '    <div class="home-stat-card">',
+            '      <div class="home-stat-label">대기열</div>',
+            '      <div class="home-stat-value" id="homeStatQueue">—</div>',
+            '      <div class="home-stat-sub">전사 대기 중</div>',
+            '    </div>',
+            '    <div class="home-stat-card">',
+            '      <div class="home-stat-label">진행 중</div>',
+            '      <div class="home-stat-value" id="homeStatActive">—</div>',
+            '      <div class="home-stat-sub">현재 처리 중</div>',
+            '    </div>',
+            '  </section>',
+            '',
+            '  <section class="home-actions" aria-label="홈 빠른 작업">',
+            '    <button class="home-action-btn" id="homeActionOpenFolder" type="button">',
+            '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '        <path d="M3 5a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5z"/>',
+            '      </svg>',
+            '      <span>전사 폴더 열기</span>',
+            '    </button>',
+            '    <button class="home-action-btn" id="homeActionImport" type="button">',
+            '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '        <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/>',
+            '        <polyline points="6,7 10,3 14,7"/>',
+            '        <line x1="10" y1="3" x2="10" y2="13"/>',
+            '      </svg>',
+            '      <span>일괄 업로드</span>',
+            '    </button>',
+            '    <button class="home-action-btn" id="batch-summarize-btn" type="button">',
+            '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '        <path d="M5 3h7l3 3v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>',
+            '        <path d="M12 3v3h3"/>',
+            '        <line x1="7" y1="11" x2="13" y2="11"/>',
+            '        <line x1="7" y1="14" x2="11" y2="14"/>',
+            '      </svg>',
+            '      <span>일괄 요약 생성</span>',
+            '    </button>',
+            '  </section>',
+            '',
+            '  <div class="home-status" id="homeStatusMessage" role="status" aria-live="polite"></div>',
+            '',
+            '  <div class="empty-view">',
+            '    <div class="empty-view-icon">' + Icons.clipboard + '</div>',
+            '    <h2 class="empty-view-title">회의를 선택하세요</h2>',
+            '    <p class="empty-view-desc">왼쪽 목록에서 회의를 선택하면 전사 내용을 볼 수 있습니다.</p>',
+            '    <div class="empty-view-shortcuts">',
+            '      <div class="empty-view-shortcut">\u2318K 검색</div>',
+            '    </div>',
             '  </div>',
             '</div>',
         ].join("\n");
@@ -1189,40 +1314,108 @@
         contentEl.innerHTML = html;
         document.title = "회의록 · Recap";
 
-        // 일괄 요약 버튼 이벤트
         var self = this;
+
+        // 일괄 요약 버튼 (기존 동작 유지)
         var batchBtn = document.getElementById("batch-summarize-btn");
         if (batchBtn) {
             batchBtn.addEventListener("click", function () {
                 self._batchSummarize(batchBtn);
             });
         }
+
+        // 전사 폴더 열기 — POST /api/system/open-audio-folder
+        var openBtn = document.getElementById("homeActionOpenFolder");
+        if (openBtn) {
+            openBtn.addEventListener("click", function () {
+                self._openAudioFolder(openBtn);
+            });
+        }
+
+        // 일괄 업로드 — 기존 importModal 재사용 (헤더의 importBtn 과 동일한 트리거).
+        var importBtn = document.getElementById("homeActionImport");
+        if (importBtn) {
+            importBtn.addEventListener("click", function () {
+                var modal = document.getElementById("importModal");
+                if (modal) {
+                    modal.classList.remove("hidden");
+                    var dz = document.getElementById("importDropzone");
+                    if (dz) dz.focus();
+                }
+            });
+        }
     };
 
     /**
-     * 일괄 요약 생성을 실행한다.
-     * POST /api/meetings/summarize-batch
+     * 대시보드 통계를 비동기로 로드해 카드에 채운다.
+     * 실패 시 placeholder 유지 (사용자에게 차단성 에러를 띄우지 않음).
+     */
+    EmptyView.prototype._loadStats = function () {
+        App.apiRequest("/dashboard/stats")
+            .then(function (data) {
+                if (!data) return;
+                _setStatCard("homeStatThisWeek", data.this_week_meetings);
+                _setStatCard("homeStatTotal", data.total_meetings);
+                _setStatCard("homeStatQueue", data.queue_pending);
+                _setStatCard("homeStatActive", data.active_processing);
+            })
+            .catch(function () {
+                // 통계 실패는 무시 — 헤더 status indicator 가 별도로 알림 책임.
+            });
+    };
+
+    /**
+     * 폴더 열기 액션. 성공 시 toast/badge 메시지로 결과 표시.
+     */
+    EmptyView.prototype._openAudioFolder = function (btn) {
+        var msgEl = document.getElementById("homeStatusMessage");
+        btn.disabled = true;
+        var original = btn.querySelector("span") ? btn.querySelector("span").textContent : "";
+        if (btn.querySelector("span")) btn.querySelector("span").textContent = "여는 중…";
+        App.apiPost("/system/open-audio-folder", {})
+            .then(function (data) {
+                if (msgEl) {
+                    msgEl.textContent = data && data.opened
+                        ? "Finder 에서 폴더를 열었습니다: " + (data.path || "")
+                        : "폴더를 열 수 없습니다. 경로: " + (data && data.path ? data.path : "—");
+                }
+                setTimeout(function () { if (msgEl) msgEl.textContent = ""; }, 5000);
+            })
+            .catch(function (err) {
+                if (msgEl) {
+                    msgEl.textContent = "폴더 열기 실패: " + (err && err.message ? err.message : "알 수 없는 오류");
+                }
+            })
+            .then(function () {
+                btn.disabled = false;
+                if (btn.querySelector("span")) btn.querySelector("span").textContent = original || "전사 폴더 열기";
+            });
+    };
+
+    /**
+     * 일괄 요약 생성을 실행한다. POST /api/meetings/summarize-batch
      * @param {HTMLButtonElement} btn - 버튼 요소 (비활성화용)
      */
     EmptyView.prototype._batchSummarize = function (btn) {
+        var span = btn.querySelector("span");
+        var setLabel = function (text) { if (span) { span.textContent = text; } else { btn.textContent = text; } };
+        var originalLabel = span ? span.textContent : btn.textContent;
         btn.disabled = true;
-        btn.textContent = "요약 실행 중...";
+        setLabel("요약 실행 중…");
         App.apiPost("/meetings/summarize-batch", {})
             .then(function (data) {
-                var total = data.total || 0;
-                btn.textContent = total > 0
-                    ? total + "건 요약 시작됨"
-                    : "요약 대상 없음";
+                var total = data && data.total ? data.total : 0;
+                setLabel(total > 0 ? total + "건 요약 시작됨" : "요약 대상 없음");
                 setTimeout(function () {
                     btn.disabled = false;
-                    btn.textContent = "일괄 요약 생성";
+                    setLabel(originalLabel);
                 }, 3000);
             })
             .catch(function () {
-                btn.textContent = "요약 실패";
+                setLabel("요약 실패");
                 setTimeout(function () {
                     btn.disabled = false;
-                    btn.textContent = "일괄 요약 생성";
+                    setLabel(originalLabel);
                 }, 3000);
             });
     };
@@ -1230,7 +1423,30 @@
     /**
      * 뷰를 정리한다. (리소스 모니터는 GlobalResourceBar 가 관리)
      */
-    EmptyView.prototype.destroy = function () {};
+    EmptyView.prototype.destroy = function () {
+        if (this._statsTimer) {
+            clearInterval(this._statsTimer);
+            this._statsTimer = null;
+        }
+        if (this._dashboardRefreshHandler) {
+            document.removeEventListener("recap:dashboard-refresh", this._dashboardRefreshHandler);
+            this._dashboardRefreshHandler = null;
+        }
+    };
+
+    /**
+     * 통계 카드 값을 안전하게 설정한다 (null/undefined 는 "—" 로 표시).
+     * 모듈 스코프 헬퍼로 EmptyView 의 인스턴스 메서드 의존성을 줄인다.
+     */
+    function _setStatCard(elementId, value) {
+        var el = document.getElementById(elementId);
+        if (!el) return;
+        if (value === null || value === undefined) {
+            el.textContent = "—";
+        } else {
+            el.textContent = String(value);
+        }
+    }
 
 
     // =================================================================
