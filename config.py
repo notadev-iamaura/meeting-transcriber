@@ -589,10 +589,12 @@ class WikiConfig(BaseModel):
             기본값. Phase 2 도입.
         dry_run: Phase 1 골격에서는 항상 True. 실제 LLM 호출/페이지 작성은 안 함.
 
-    환경변수 오버라이드 (PRD §9 Phase 1.B):
+    환경변수 오버라이드 (PRD §9 Phase 1.B + Phase 5):
         - MT_WIKI_ENABLED=true|false → enabled
         - MT_WIKI_ROOT=/path → root
         - MT_WIKI_DRY_RUN=true|false → dry_run
+        - MT_WIKI_ROUTER_ENABLED=true|false → router_enabled (Phase 5)
+        - MT_WIKI_ROUTER_LLM_FALLBACK=true|false → router_llm_fallback (Phase 5)
     """
 
     enabled: bool = False
@@ -601,6 +603,23 @@ class WikiConfig(BaseModel):
     lint_interval: int = Field(default=5, ge=1)
     confidence_threshold: int = Field(default=7, ge=0, le=10)
     dry_run: bool = True
+
+    # ─── Phase 5 신규 ─────────────────────────────────────────────────
+    router_enabled: bool = False
+    """질의 라우터(QueryRouter) 활성화 여부. False(default) 면 라우터 코드는
+    로드되지만 ChatEngine 이 그대로 호출된다 — 기존 RAG 채팅 100% 무영향
+    (PRD §10.3 회귀 테스트 보장). 사용자가 명시적으로 True 로 바꾼 경우만
+    HybridChatService 가 라우팅을 수행한다.
+
+    환경변수: MT_WIKI_ROUTER_ENABLED=true|false
+    """
+
+    router_llm_fallback: bool = True
+    """라우터의 LLM 폴백(휴리스틱 매칭 0건일 때 LLM 분류) 활성화 여부.
+    False 면 매칭 실패 시 즉시 RAG fallback (저비용 + 결정성 우선).
+
+    환경변수: MT_WIKI_ROUTER_LLM_FALLBACK=true|false
+    """
 
     @property
     def resolved_root(self) -> Path:
@@ -721,6 +740,16 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("wiki", {})["root"] = env_wiki_root
     if (env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN")) is not None:
         data.setdefault("wiki", {})["dry_run"] = _parse_bool(env_wiki_dry)
+
+    # LLM Wiki Phase 5 오버라이드 — 라우터 활성화 + LLM 폴백 제어
+    if (env_router := os.environ.get("MT_WIKI_ROUTER_ENABLED")) is not None:
+        data.setdefault("wiki", {})["router_enabled"] = _parse_bool(env_router)
+    if (
+        env_router_fb := os.environ.get("MT_WIKI_ROUTER_LLM_FALLBACK")
+    ) is not None:
+        data.setdefault("wiki", {})["router_llm_fallback"] = _parse_bool(
+            env_router_fb
+        )
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰
