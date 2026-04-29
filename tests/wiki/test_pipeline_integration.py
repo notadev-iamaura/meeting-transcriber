@@ -19,9 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from config import AppConfig, WikiConfig
+from config import WikiConfig
 from core.pipeline import PipelineManager
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # 헬퍼
@@ -112,9 +111,7 @@ def _make_mock_step_results() -> dict[str, MagicMock]:
     diarization.save_checkpoint = MagicMock()
 
     merged = MagicMock()
-    merged.utterances = [
-        MagicMock(text="안녕하세요", speaker="SPEAKER_00", start=0.0, end=2.0)
-    ]
+    merged.utterances = [MagicMock(text="안녕하세요", speaker="SPEAKER_00", start=0.0, end=2.0)]
     merged.num_speakers = 1
     merged.save_checkpoint = MagicMock()
 
@@ -206,9 +203,7 @@ async def test_wiki_disabled_시_pipeline은_정상_완료_wiki_디렉토리_없
     audio = _make_audio_file(tmp_path)
     wav = _make_mock_wav(tmp_path)
     wiki_root = tmp_path / "wiki"
-    config = _build_config(
-        tmp_path=tmp_path, wiki_enabled=False, wiki_root=wiki_root
-    )
+    config = _build_config(tmp_path=tmp_path, wiki_enabled=False, wiki_root=wiki_root)
     pipeline = PipelineManager(config, MagicMock())
 
     patches = _patched_pipeline(pipeline, wav)
@@ -238,9 +233,7 @@ async def test_wiki_enabled_시_log_md와_git이_생성된다(tmp_path: Path) ->
     audio = _make_audio_file(tmp_path)
     wav = _make_mock_wav(tmp_path)
     wiki_root = tmp_path / "wiki"
-    config = _build_config(
-        tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root
-    )
+    config = _build_config(tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root)
     pipeline = PipelineManager(config, MagicMock())
 
     patches = _patched_pipeline(pipeline, wav)
@@ -258,9 +251,7 @@ async def test_wiki_enabled_시_log_md와_git이_생성된다(tmp_path: Path) ->
     log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
     assert "bbb22222" in log_text
     # 9단계 결과가 step_results 에 기록되었는지
-    wiki_steps = [
-        sr for sr in state.step_results if sr.get("step") == "wiki_compile"
-    ]
+    wiki_steps = [sr for sr in state.step_results if sr.get("step") == "wiki_compile"]
     assert len(wiki_steps) == 1
     assert wiki_steps[0]["success"] is True
 
@@ -278,9 +269,7 @@ async def test_wiki_실패해도_pipeline은_정상_종료_non_fatal(tmp_path: P
     audio = _make_audio_file(tmp_path)
     wav = _make_mock_wav(tmp_path)
     wiki_root = tmp_path / "wiki-denied"
-    config = _build_config(
-        tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root
-    )
+    config = _build_config(tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root)
     pipeline = PipelineManager(config, MagicMock())
 
     # WikiStore.init_repo 가 항상 권한 오류를 던지도록 강제
@@ -305,9 +294,7 @@ async def test_wiki_실패해도_pipeline은_정상_종료_non_fatal(tmp_path: P
     # 경고에 기록되었어야 함
     assert any("wiki 9단계" in w for w in state.warnings)
     # step_results 에 실패 기록
-    wiki_steps = [
-        sr for sr in state.step_results if sr.get("step") == "wiki_compile"
-    ]
+    wiki_steps = [sr for sr in state.step_results if sr.get("step") == "wiki_compile"]
     assert len(wiki_steps) == 1
     assert wiki_steps[0]["success"] is False
 
@@ -325,9 +312,7 @@ async def test_같은_meeting_id_두_번_ingest_시_log_md_두_줄(tmp_path: Pat
     audio2.write_bytes(b"fake audio 2")
     wav = _make_mock_wav(tmp_path)
     wiki_root = tmp_path / "wiki"
-    config = _build_config(
-        tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root
-    )
+    config = _build_config(tmp_path=tmp_path, wiki_enabled=True, wiki_root=wiki_root)
 
     # 두 번 다 같은 meeting_id 로 호출 — wiki 입장에서는 각각 별개 ingest 라인
     for audio_file, mid in [(audio1, "ddd44444"), (audio2, "eee55555")]:
@@ -342,9 +327,7 @@ async def test_같은_meeting_id_두_번_ingest_시_log_md_두_줄(tmp_path: Pat
                 p.stop()
 
     log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
-    ingest_lines = [
-        ln for ln in log_text.splitlines() if "ingest meeting:" in ln
-    ]
+    ingest_lines = [ln for ln in log_text.splitlines() if "ingest meeting:" in ln]
     assert len(ingest_lines) == 2
     assert any("ddd44444" in ln for ln in ingest_lines)
     assert any("eee55555" in ln for ln in ingest_lines)

@@ -438,7 +438,7 @@ class DecisionExtractor:
             f"회의 날짜: {meeting_date.isoformat()}\n\n"
             f"## 8단계 요약\n{summary}\n\n"
             f"## 발화 목록\n" + "\n".join(lines) + "\n\n"
-            f"위 컨텍스트에서 결정사항을 JSON 배열로 추출하세요."
+            "위 컨텍스트에서 결정사항을 JSON 배열로 추출하세요."
         )
 
         # 1차 호출
@@ -520,9 +520,7 @@ class DecisionExtractor:
 
         # ── 0. confidence 내림차순 정렬 + 상위 N개 slice ────────────────
         # PRD R3: 회의당 페이지 폭증 방지. tie-break 는 입력 순서 보존을 위해 stable sort.
-        sorted_decisions = sorted(
-            decisions, key=lambda d: d.confidence, reverse=True
-        )
+        sorted_decisions = sorted(decisions, key=lambda d: d.confidence, reverse=True)
         capped = sorted_decisions[:_MAX_PAGES_PER_MEETING]
         if len(decisions) > _MAX_PAGES_PER_MEETING:
             logger.info(
@@ -583,9 +581,7 @@ class DecisionExtractor:
 
         # ── 2. asyncio.gather 로 병렬 실행 ─────────────────────────────
         # 예외는 _render_one 내부에서 catch → None 반환되므로 gather 가 raise 하지 않음.
-        rendered = await asyncio.gather(
-            *[_render_one(d) for d in capped]
-        )
+        rendered = await asyncio.gather(*[_render_one(d) for d in capped])
 
         # ── 3. None 제거 (실패한 페이지) ────────────────────────────────
         results: list[tuple[str, str]] = [r for r in rendered if r is not None]

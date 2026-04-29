@@ -28,12 +28,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.wiki.llm_client import (
-    WIKI_DEFAULT_MAX_TOKENS,
     WIKI_DEFAULT_TEMPERATURE,
     ExaoneWikiClient,
     WikiLLMError,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # 픽스처 — config 와 model_manager 를 mock 으로 대체

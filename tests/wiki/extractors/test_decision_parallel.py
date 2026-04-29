@@ -21,7 +21,6 @@ import pytest
 
 from core.wiki.extractors.decision import DecisionExtractor, ExtractedDecision
 
-
 # ─────────────────────────────────────────────────────────────────────────
 # Mock 헬퍼
 # ─────────────────────────────────────────────────────────────────────────

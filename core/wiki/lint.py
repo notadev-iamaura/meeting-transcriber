@@ -61,14 +61,10 @@ _ALWAYS_VISIBLE_PAGES: frozenset[str] = frozenset(
 #   [topics/B.md](topics/B.md)
 #   [../people/철수.md](../people/철수.md)
 #   [../../decisions/2026-04-15-x.md]
-_MD_LINK_PATTERN: re.Pattern[str] = re.compile(
-    r"\[[^\]]+\]\(([^)]+\.md)\)"
-)
+_MD_LINK_PATTERN: re.Pattern[str] = re.compile(r"\[[^\]]+\]\(([^)]+\.md)\)")
 
 # `[../path/file.md]` 형식의 단순 페이지 링크.
-_BARE_PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(
-    r"\[((?:\.\./)+[^\]\s]+\.md)\]"
-)
+_BARE_PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(r"\[((?:\.\./)+[^\]\s]+\.md)\]")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -148,9 +144,7 @@ class LintHealthReport:
         lines.append("# 위키 건강 보고서")
         lines.append("")
         lines.append(f"- 최종 lint: {self.last_lint_at}")
-        lines.append(
-            f"- 마지막 lint 이후 회의 수: {self.meetings_since_last_lint}"
-        )
+        lines.append(f"- 마지막 lint 이후 회의 수: {self.meetings_since_last_lint}")
         lines.append("")
 
         # ── ✅ 통과 섹션 ──
@@ -159,9 +153,7 @@ class LintHealthReport:
         if self.citation_pass_rate >= 1.0:
             lines.append("- 모든 인용이 D2 재검증을 통과했습니다.")
         else:
-            lines.append(
-                f"- 인용 검증 통과율 {pass_rate_pct:.1f}% — 일부 phantom citation 존재."
-            )
+            lines.append(f"- 인용 검증 통과율 {pass_rate_pct:.1f}% — 일부 phantom citation 존재.")
         if not self.cyclic_citations:
             lines.append("- 순환 인용 없음.")
         lines.append("")
@@ -201,8 +193,7 @@ class LintHealthReport:
             lines.append(f"- 탐지된 모순 {len(self.contradictions)}건:")
             for item in self.contradictions:
                 lines.append(
-                    f"  - `{item.page_path}` (confidence {item.confidence}): "
-                    f"{item.description}"
+                    f"  - `{item.page_path}` (confidence {item.confidence}): {item.description}"
                 )
         lines.append("")
 
@@ -439,8 +430,8 @@ class WikiLinter:
 
         # ── 3. citation 통과율 ──────────────────────────────────────
         try:
-            pass_rate, total_citations, _pages_with_citations = (
-                await self._reverify_citations(pages)
+            pass_rate, total_citations, _pages_with_citations = await self._reverify_citations(
+                pages
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("lint: _reverify_citations 실패: %r", exc)
@@ -514,9 +505,7 @@ class WikiLinter:
         orphans.sort()
         return orphans
 
-    async def _find_cyclic_citations(
-        self, pages: list[Path]
-    ) -> list[CyclicChain]:
+    async def _find_cyclic_citations(self, pages: list[Path]) -> list[CyclicChain]:
         """순환 인용 탐지 (정적, DFS, LLM 0회).
 
         알고리즘:
@@ -591,9 +580,7 @@ class WikiLinter:
                         edges: list[tuple[str, str]] = []
                         for i in range(len(cycle_nodes) - 1):
                             edges.append((cycle_nodes[i], cycle_nodes[i + 1]))
-                        cycles_found.append(
-                            CyclicChain(pages=cycle_nodes, edges=edges)
-                        )
+                        cycles_found.append(CyclicChain(pages=cycle_nodes, edges=edges))
                     continue
                 if color.get(neighbor, WHITE) == WHITE:
                     visit(neighbor)
@@ -608,9 +595,7 @@ class WikiLinter:
 
         return cycles_found
 
-    async def _reverify_citations(
-        self, pages: list[Path]
-    ) -> tuple[float, int, int]:
+    async def _reverify_citations(self, pages: list[Path]) -> tuple[float, int, int]:
         """citation 검증 통과율 재계산.
 
         Args:
@@ -627,9 +612,7 @@ class WikiLinter:
             try:
                 content = self._read_page_content(page_path)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "lint: 페이지 read 실패 — skip: %s, %r", page_path, exc
-                )
+                logger.warning("lint: 페이지 read 실패 — skip: %s, %r", page_path, exc)
                 continue
 
             page_had_citation = False
@@ -661,9 +644,7 @@ class WikiLinter:
         pass_rate = passed_citations / total_citations
         return (pass_rate, total_citations, pages_with_citations)
 
-    async def _find_contradictions(
-        self, pages: list[Path]
-    ) -> list[ContradictionItem]:
+    async def _find_contradictions(self, pages: list[Path]) -> list[ContradictionItem]:
         """모순 탐지 (LLM 호출, enable_contradictions=True 일 때만).
 
         Args:
@@ -752,10 +733,8 @@ class WikiLinter:
             resolved = abs_path.resolve()
             root_resolved = self._store.root.resolve()
             resolved.relative_to(root_resolved)  # ValueError if outside
-        except ValueError:
-            raise ValueError(
-                f"lint._read_page_content: root 외부 경로 거부: {rel_path}"
-            )
+        except ValueError as exc:
+            raise ValueError(f"lint._read_page_content: root 외부 경로 거부: {rel_path}") from exc
         return abs_path.read_text(encoding="utf-8")
 
     @staticmethod

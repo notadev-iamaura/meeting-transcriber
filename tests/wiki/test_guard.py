@@ -21,24 +21,15 @@ WikiGuard TDD Red 단계 테스트 모듈
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
 
 import pytest
 import pytest_asyncio  # noqa: F401 — pytest-asyncio 설치 확인용
 
 # ─── Phase 1 실제 구현 (변경 금지) ────────────────────────────────────────────
-from core.wiki.citations import (
-    WikiGuardError,
-    enforce_citations,
-)
-from core.wiki.models import Citation
-
 # ─── Phase 2 대상 모듈 (아직 미구현 → ImportError Red) ──────────────────────
 from core.wiki.guard import (  # type: ignore[import]  # noqa: E402
     CitationVerifier,
     GuardVerdict,
-    InMemoryCitationVerifier,
     WikiGuard,
     extract_confidence,
 )
@@ -226,9 +217,7 @@ class TestMockCitationVerifier:
         Assert:  True 반환
         """
         # Arrange
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, 60): "철수: 5월 1일로 확정"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, 60): "철수: 5월 1일로 확정"})
 
         # Act
         result = await verifier.verify_exists(MEETING_ID, 60)
@@ -498,9 +487,7 @@ class TestWikiGuardVerifyD3Failure:
         # Arrange
         ts1 = "00:01:00"
         s1 = ts_to_seconds(ts1)
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, s1): "철수: 발언"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, s1): "철수: 발언"})
         content = make_content(citations=[(ts1, "사실 진술")], confidence=5)
         guard = WikiGuard(verifier, confidence_threshold=7)
 
@@ -516,9 +503,7 @@ class TestWikiGuardVerifyD3Failure:
         assert verdict.reason == "low_confidence", (
             f"D3 미달 시 reason='low_confidence' 이어야 하나 '{verdict.reason}'"
         )
-        assert verdict.confidence == 5, (
-            f"추출된 confidence 가 5 여야 하나 {verdict.confidence}"
-        )
+        assert verdict.confidence == 5, f"추출된 confidence 가 5 여야 하나 {verdict.confidence}"
 
     @pytest.mark.asyncio
     async def test_d3_confidence_마커_누락_시_malformed_confidence_또는_low_confidence_반환(
@@ -535,13 +520,10 @@ class TestWikiGuardVerifyD3Failure:
         # Arrange
         ts1 = "00:01:00"
         s1 = ts_to_seconds(ts1)
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, s1): "철수: 발언"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, s1): "철수: 발언"})
         # confidence 마커 없이 콘텐츠 구성
         content = (
-            "---\ntype: decision\n---\n\n# 제목\n\n"
-            f"사실 진술. [meeting:{MEETING_ID}@{ts1}]\n"
+            f"---\ntype: decision\n---\n\n# 제목\n\n사실 진술. [meeting:{MEETING_ID}@{ts1}]\n"
         )
         guard = WikiGuard(verifier, confidence_threshold=CONFIDENCE_THRESHOLD)
 
@@ -653,11 +635,7 @@ class TestWikiGuardVerifyPriorityAndEdgeCases:
         """
         # Arrange
         verifier = MockCitationVerifier(known_citations={})  # 인용 없어도 D2 체크 없음
-        content = (
-            "---\ntype: decision\n---\n\n"
-            "# 빈 페이지\n\n"
-            "<!-- confidence: 8 -->\n"
-        )
+        content = "---\ntype: decision\n---\n\n# 빈 페이지\n\n<!-- confidence: 8 -->\n"
         guard = WikiGuard(
             verifier, confidence_threshold=CONFIDENCE_THRESHOLD, d1_min_sample_size=4
         )
@@ -687,9 +665,7 @@ class TestWikiGuardVerifyPriorityAndEdgeCases:
         # Arrange — 인용 있는 줄 10,000개
         ts = "00:01:00"
         ts_sec = ts_to_seconds(ts)
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, ts_sec): "발언"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, ts_sec): "발언"})
         lines = ["---", "type: decision", "---", "", "# 대용량 페이지", ""]
         for i in range(10_000):
             lines.append(f"사실 진술 {i + 1}번. [meeting:{MEETING_ID}@{ts}]")
@@ -740,9 +716,7 @@ class TestWikiGuardPromptInjectionBehavior:
         # Arrange
         ts = "00:01:00"
         ts_sec = ts_to_seconds(ts)
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, ts_sec): "발언 내용"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, ts_sec): "발언 내용"})
         # 프롬프트 흔적이 포함된 콘텐츠 — 하지만 인용은 있음
         content = (
             "---\ntype: decision\n---\n\n# 결정\n\n"
@@ -780,9 +754,7 @@ class TestWikiGuardPromptInjectionBehavior:
         # Arrange
         ts = "00:02:00"
         ts_sec = ts_to_seconds(ts)
-        verifier = MockCitationVerifier(
-            known_citations={(MEETING_ID, ts_sec): "배미령 발언"}
-        )
+        verifier = MockCitationVerifier(known_citations={(MEETING_ID, ts_sec): "배미령 발언"})
         content = (
             "---\ntype: decision\n---\n\n# 결정\n\n"
             f"배미령(Baimilong) 담당자가 확정됐다. [meeting:{MEETING_ID}@{ts}]\n"
@@ -823,9 +795,7 @@ class TestWikiGuardPromptInjectionBehavior:
                 """항상 RuntimeError 발생."""
                 raise RuntimeError("RAG 연결 실패 시뮬레이션")
 
-            async def fetch_utterance(
-                self, meeting_id: str, timestamp_seconds: int
-            ) -> str | None:
+            async def fetch_utterance(self, meeting_id: str, timestamp_seconds: int) -> str | None:
                 """항상 None 반환."""
                 return None
 
@@ -845,11 +815,7 @@ class TestWikiGuardPromptInjectionBehavior:
                 meeting_id=MEETING_ID,
             )
         except Exception as exc:  # noqa: BLE001
-            pytest.fail(
-                f"WikiGuard.verify() 가 내부 오류를 raise 하면 안 됨: {exc!r}"
-            )
+            pytest.fail(f"WikiGuard.verify() 가 내부 오류를 raise 하면 안 됨: {exc!r}")
         else:
             # verdict 가 반환됐다면 passed=False 이어야 함 (D2 오류는 거부 처리)
-            assert isinstance(verdict, GuardVerdict), (
-                "반환값이 GuardVerdict 인스턴스여야 함"
-            )
+            assert isinstance(verdict, GuardVerdict), "반환값이 GuardVerdict 인스턴스여야 함"

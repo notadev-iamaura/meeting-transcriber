@@ -31,8 +31,8 @@ from core.wiki.extractors.action_item import (
     OpenActionItem,
 )
 from core.wiki.extractors.decision import DecisionExtractor
-from core.wiki.extractors.person import ExtractedPerson, PersonExtractor
-from core.wiki.extractors.project import ExtractedProject, ProjectExtractor
+from core.wiki.extractors.person import PersonExtractor
+from core.wiki.extractors.project import ProjectExtractor
 from core.wiki.extractors.topic import TopicExtractor
 from core.wiki.guard import GuardVerdict, WikiGuard
 from core.wiki.lint import WikiLinter
@@ -213,14 +213,10 @@ class WikiCompilerV2:
                 utterances=utterances,
             )
         except WikiLLMError as exc:
-            logger.warning(
-                "DecisionExtractor 실패 — decisions 페이지 0건: %r", exc
-            )
+            logger.warning("DecisionExtractor 실패 — decisions 페이지 0건: %r", exc)
             decisions = []
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "DecisionExtractor 예상치 못한 오류: %r", exc, exc_info=True
-            )
+            logger.error("DecisionExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             decisions = []
 
         # ── 2. ActionItemExtractor.extract_new ────────────────────────
@@ -236,18 +232,14 @@ class WikiCompilerV2:
             logger.warning("ActionItemExtractor.extract_new 실패: %r", exc)
             new_actions = []
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "ActionItemExtractor.extract_new 오류: %r", exc, exc_info=True
-            )
+            logger.error("ActionItemExtractor.extract_new 오류: %r", exc, exc_info=True)
             new_actions = []
 
         # ── 3. 기존 action_items.md 파싱 ──────────────────────────────
         try:
             existing_open, existing_closed = await self._parse_existing_action_items()
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "기존 action_items.md 파싱 실패 — 빈 목록으로 진행: %r", exc
-            )
+            logger.warning("기존 action_items.md 파싱 실패 — 빈 목록으로 진행: %r", exc)
             existing_open, existing_closed = [], []
 
         # ── 4. detect_closed ─────────────────────────────────────────
@@ -320,9 +312,7 @@ class WikiCompilerV2:
             logger.warning("PersonExtractor 실패 — people 페이지 0건: %r", exc)
             person_pages = []
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True
-            )
+            logger.error("PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             person_pages = []
 
         # ── 6c. ProjectExtractor (Phase 3) — graceful degradation ────
@@ -358,9 +348,7 @@ class WikiCompilerV2:
             logger.warning("ProjectExtractor 실패 — project 페이지 0건: %r", exc)
             project_pages = []
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True
-            )
+            logger.error("ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             project_pages = []
 
         # ── 6d. TopicExtractor (Phase 4) — graceful degradation ──────
@@ -381,14 +369,10 @@ class WikiCompilerV2:
                         existing_store=self._store,
                     )
             except WikiLLMError as exc:
-                logger.warning(
-                    "TopicExtractor 실패 — topic 페이지 0건: %r", exc
-                )
+                logger.warning("TopicExtractor 실패 — topic 페이지 0건: %r", exc)
                 topic_pages = []
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "TopicExtractor 예상치 못한 오류: %r", exc, exc_info=True
-                )
+                logger.error("TopicExtractor 예상치 못한 오류: %r", exc, exc_info=True)
                 topic_pages = []
 
         # ── 7. 페이지별 WikiGuard.verify + write ─────────────────────
@@ -414,7 +398,9 @@ class WikiCompilerV2:
                 meeting_id=meeting_id,
             )
             # verdict.cleaned_content 가 있는 경우 D1 후처리 결과를 쓰기에 사용한다.
-            final_content = verdict.cleaned_content if verdict.cleaned_content is not None else content
+            final_content = (
+                verdict.cleaned_content if verdict.cleaned_content is not None else content
+            )
             self._dispatch_page_by_verdict(
                 rel_path=rel_path,
                 content=final_content,
@@ -453,16 +439,12 @@ class WikiCompilerV2:
                     )
                     self._meeting_count = 0
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "lint 실행 실패 — 다음 ingest 에서 재시도: %r", exc
-                    )
+                    logger.warning("lint 실행 실패 — 다음 ingest 에서 재시도: %r", exc)
 
         # ── 8. git commit ─────────────────────────────────────────────
         commit_sha = ""
         try:
-            commit_sha = self._store.git_commit_atomic(
-                f"wiki: {meeting_id} 컴파일 결과"
-            )
+            commit_sha = self._store.git_commit_atomic(f"wiki: {meeting_id} 컴파일 결과")
         except WikiStoreError as exc:
             logger.warning("git_commit_atomic 실패: %r", exc)
         except Exception as exc:  # noqa: BLE001
@@ -553,9 +535,7 @@ class WikiCompilerV2:
                 else:
                     pages_created.append(rel_path)
             except WikiStoreError as exc:
-                logger.error(
-                    "store.write_page 실패: path=%s, reason=%s", rel_path, exc.reason
-                )
+                logger.error("store.write_page 실패: path=%s, reason=%s", rel_path, exc.reason)
                 pages_rejected.append((rel_path, "write_failed"))
             except Exception as exc:  # noqa: BLE001
                 logger.error("store.write_page 예상치 못한 오류: path=%s, %r", rel_path, exc)
@@ -568,9 +548,7 @@ class WikiCompilerV2:
                 store.write_page(pending_path, content)
                 pages_pending.append(rel_path)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "pending 저장 실패 — rejected 처리: path=%s, %r", rel_path, exc
-                )
+                logger.warning("pending 저장 실패 — rejected 처리: path=%s, %r", rel_path, exc)
                 pages_pending.append(rel_path)  # 기록은 유지 (write 실패여도 pending 분류)
 
         else:

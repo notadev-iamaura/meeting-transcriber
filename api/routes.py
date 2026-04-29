@@ -2213,9 +2213,7 @@ def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
             wiki_root = config.wiki.resolved_root
             wiki_store = WikiStore(root=wiki_root)
         except Exception as exc:  # noqa: BLE001 — WikiStore 실패 시 RAG 폴백 가능
-            logger.warning(
-                "WikiStore 초기화 실패, WIKI 분기는 RAG 폴백됨: %s", exc
-            )
+            logger.warning("WikiStore 초기화 실패, WIKI 분기는 RAG 폴백됨: %s", exc)
             wiki_store = None
 
     # LLM 폴백 — router_llm_fallback=True 면 MlxWikiClient 시도
@@ -2226,19 +2224,14 @@ def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
 
             model_manager = getattr(request.app.state, "model_manager", None)
             if model_manager is not None:
-                wiki_llm = MlxWikiClient(
-                    config=config, model_manager=model_manager
-                )
+                wiki_llm = MlxWikiClient(config=config, model_manager=model_manager)
         except Exception as exc:  # noqa: BLE001 — LLM 폴백은 옵션
-            logger.warning(
-                "MlxWikiClient 초기화 실패, LLM 폴백 비활성: %s", exc
-            )
+            logger.warning("MlxWikiClient 초기화 실패, LLM 폴백 비활성: %s", exc)
             wiki_llm = None
 
     router_obj = QueryRouter(
         llm=wiki_llm,
-        enable_llm_fallback=config.wiki.router_llm_fallback
-        and wiki_llm is not None,
+        enable_llm_fallback=config.wiki.router_llm_fallback and wiki_llm is not None,
     )
 
     chat_adapter = _ChatEngineAdapter(chat_engine)
@@ -2278,8 +2271,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     # 라우터 활성 여부 결정 — config 없거나 router_enabled=False 면 기존 경로
     router_enabled: bool = bool(
-        config is not None
-        and getattr(getattr(config, "wiki", None), "router_enabled", False)
+        config is not None and getattr(getattr(config, "wiki", None), "router_enabled", False)
     )
 
     try:
@@ -2337,9 +2329,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
 
         if hybrid_result.source_type == "both":
             # BOTH — RAG answer + wiki answer 병합 (UI 가 둘 다 표시)
-            rag_answer = (
-                rag_response.answer if rag_response is not None else ""
-            )
+            rag_answer = rag_response.answer if rag_response is not None else ""
             wiki_answer = hybrid_result.wiki_answer or ""
             combined = rag_answer
             if wiki_answer:
@@ -2349,9 +2339,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                     else wiki_answer
                 )
             refs = (
-                _build_chat_references(rag_response.references)
-                if rag_response is not None
-                else []
+                _build_chat_references(rag_response.references) if rag_response is not None else []
             )
             return ChatResponse(
                 answer=combined,
@@ -2374,8 +2362,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 query=body.query,
                 has_context=False,
                 llm_used=False,
-                error_message=hybrid_result.error_message
-                or "rag_response_missing",
+                error_message=hybrid_result.error_message or "rag_response_missing",
                 source_type="rag",
                 router_verdict=verdict_dict,
                 wiki_sources=None,
@@ -2387,8 +2374,7 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             query=rag_response.query,
             has_context=rag_response.has_context,
             llm_used=rag_response.llm_used,
-            error_message=rag_response.error_message
-            or hybrid_result.error_message,
+            error_message=rag_response.error_message or hybrid_result.error_message,
             source_type="rag",
             router_verdict=verdict_dict,
             wiki_sources=None,
@@ -4927,9 +4913,7 @@ async def list_wiki_pages(request: Request) -> WikiPagesResponse:
             page = store.read_page(rel_path)
         except WikiStoreError as exc:
             # 깨진 페이지 1건 때문에 전체 목록이 깨지지 않도록 경고만 남기고 skip.
-            logger.warning(
-                "wiki 페이지 read 실패: %s (%s)", rel_path, exc.detail or exc.reason
-            )
+            logger.warning("wiki 페이지 read 실패: %s (%s)", rel_path, exc.detail or exc.reason)
             continue
         except Exception as exc:  # noqa: BLE001 — 미지의 파싱 오류 방어
             logger.warning("wiki 페이지 처리 실패: %s (%s)", rel_path, exc)
@@ -5105,9 +5089,7 @@ class WikiSearchResponse(BaseModel):
     query: str
 
 
-def _extract_title_from_markdown(
-    frontmatter: dict[str, Any], content: str
-) -> str | None:
+def _extract_title_from_markdown(frontmatter: dict[str, Any], content: str) -> str | None:
     """페이지 제목을 frontmatter → 첫 H1 → None 순으로 결정한다.
 
     Args:
@@ -5159,9 +5141,7 @@ def _resolve_wiki_root(request: Request) -> Path | None:
         "page_type 화이트리스트 위반·path traversal 시도 시 400 반환."
     ),
 )
-async def get_wiki_page_detail(
-    request: Request, page_type: str, slug: str
-) -> WikiPageDetail:
+async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> WikiPageDetail:
     """위키 단일 페이지의 상세 정보를 반환한다 (PRD §7.1).
 
     동작:
@@ -5186,9 +5166,7 @@ async def get_wiki_page_detail(
     # ── 1. wiki 활성·디렉토리 검사 → 미활성이면 404 ─────────────────
     wiki_root = _resolve_wiki_root(request)
     if wiki_root is None:
-        raise HTTPException(
-            status_code=404, detail="위키가 활성화되어 있지 않습니다."
-        )
+        raise HTTPException(status_code=404, detail="위키가 활성화되어 있지 않습니다.")
 
     # ── 2. page_type 화이트리스트 검증 → 위반 시 400 ────────────────
     dirname = _WIKI_PAGE_TYPE_TO_DIRNAME.get(page_type)
@@ -5364,9 +5342,7 @@ async def search_wiki(
         # 디렉토리명을 type 필드로 직접 사용 (단수/복수 혼동 회피).
         first_part = rel_path.parts[0] if rel_path.parts else ""
         type_str = (
-            first_part
-            if first_part in _WIKI_PAGE_TYPE_TO_DIRNAME
-            else str(page.page_type.value)
+            first_part if first_part in _WIKI_PAGE_TYPE_TO_DIRNAME else str(page.page_type.value)
         )
 
         title = _extract_title_from_markdown(page.frontmatter, page.content)
@@ -5636,8 +5612,7 @@ async def start_wiki_backfill(
         job_id=job_id,
         started_at=started_at,
         message=(
-            "백필 작업을 시작했습니다. "
-            f"GET /api/wiki/backfill/{job_id} 로 진행을 확인하세요."
+            f"백필 작업을 시작했습니다. GET /api/wiki/backfill/{job_id} 로 진행을 확인하세요."
         ),
     )
 

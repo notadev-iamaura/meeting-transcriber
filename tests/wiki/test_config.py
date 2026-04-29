@@ -12,7 +12,6 @@ ImportError 또는 AttributeError 로 실패해야 한다.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest

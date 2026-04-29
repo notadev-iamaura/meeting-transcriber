@@ -143,9 +143,7 @@ _CITATION_PATTERN: re.Pattern[str] = re.compile(
 )
 
 # person slug 에 허용되는 문자 — 한글/영숫자/하이픈/언더스코어.
-_PERSON_SLUG_ALLOWED: re.Pattern[str] = re.compile(
-    r"^[\uAC00-\uD7A3A-Za-z0-9\-_]+$"
-)
+_PERSON_SLUG_ALLOWED: re.Pattern[str] = re.compile(r"^[\uAC00-\uD7A3A-Za-z0-9\-_]+$")
 
 
 def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
@@ -360,7 +358,7 @@ class PersonExtractor:
             f"회의 날짜: {meeting_date.isoformat()}\n\n"
             f"{map_text}"
             f"## 발화 목록\n" + "\n".join(lines) + "\n\n"
-            f"위 컨텍스트에서 인물 정보를 JSON 배열로 추출하세요."
+            "위 컨텍스트에서 인물 정보를 JSON 배열로 추출하세요."
         )
 
         try:
@@ -461,9 +459,7 @@ class PersonExtractor:
             existing_state: ExistingPersonState | None = None
             existing_raw = self._read_existing(existing_store, rel_path)
             if existing_raw:
-                existing_state = self._parse_existing_person_state(
-                    existing_raw, Path(rel_path)
-                )
+                existing_state = self._parse_existing_person_state(existing_raw, Path(rel_path))
 
             # LLM 호출 — role/topic 보강
             try:
@@ -611,21 +607,15 @@ class PersonExtractor:
         s = raw.strip()
         # path traversal 방어 — 슬래시 / `..` / NUL 거부
         if ".." in s or "/" in s or "\\" in s or "\x00" in s:
-            raise ValueError(
-                f"path traversal 시도가 감지되었습니다: {raw!r}"
-            )
+            raise ValueError(f"path traversal 시도가 감지되었습니다: {raw!r}")
         # 공백은 언더스코어로 치환
         s = re.sub(r"\s+", "_", s)
         # 허용 문자만 검증
         if not _PERSON_SLUG_ALLOWED.match(s):
-            raise ValueError(
-                f"허용되지 않는 문자가 포함된 person slug 입니다: {raw!r}"
-            )
+            raise ValueError(f"허용되지 않는 문자가 포함된 person slug 입니다: {raw!r}")
         # 슬러그 길이 상한 — 파일시스템 안전 + ReDoS 방지
         if len(s) > 64:
-            raise ValueError(
-                f"person slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}..."
-            )
+            raise ValueError(f"person slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}...")
         return s
 
     @staticmethod
@@ -756,8 +746,7 @@ class PersonExtractor:
         # action_item.py 의 _resolve_owner 와 동일 정책 적용
         if allowed_names is not None and name not in allowed_names:
             logger.warning(
-                "PersonExtractor: 허용되지 않은 인물명 환각 감지 — skip: name=%r, "
-                "allowed=%r",
+                "PersonExtractor: 허용되지 않은 인물명 환각 감지 — skip: name=%r, allowed=%r",
                 name,
                 allowed_names,
             )
@@ -843,9 +832,7 @@ class PersonExtractor:
                     f"- {tm.topic} [meeting:{tm.citation.meeting_id}@{tm.citation.timestamp_str}]"
                 )
         parts.append("")
-        parts.append(
-            "위 정보를 바탕으로 role_update 와 new_topics 를 JSON 객체로 출력하세요."
-        )
+        parts.append("위 정보를 바탕으로 role_update 와 new_topics 를 JSON 객체로 출력하세요.")
         return "\n".join(parts)
 
     @staticmethod
@@ -857,7 +844,7 @@ class PersonExtractor:
         meeting_date: date,
         existing_raw: str | None,
     ) -> list[str]:
-        """"최근 결정" 섹션의 마크다운 라인 리스트.
+        """ "최근 결정" 섹션의 마크다운 라인 리스트.
 
         meeting_decisions 중 person_name 이 participants 에 포함된 항목만 필터.
         기존 페이지에 같은 결정이 이미 있으면 중복 추가하지 않는다.
@@ -899,7 +886,7 @@ class PersonExtractor:
         meeting_decisions: list[ExtractedDecision],
         meeting_new_actions: list[NewActionItem],
     ) -> list[str]:
-        """"담당 프로젝트" 섹션의 마크다운 라인 리스트.
+        """ "담당 프로젝트" 섹션의 마크다운 라인 리스트.
 
         meeting_decisions + meeting_new_actions 의 project_slug 합집합.
 
@@ -939,7 +926,7 @@ class PersonExtractor:
         existing_open_actions: list[OpenActionItem],
         meeting_id: str,
     ) -> list[str]:
-        """"미해결 액션아이템" 섹션의 마크다운 라인 리스트.
+        """ "미해결 액션아이템" 섹션의 마크다운 라인 리스트.
 
         Args:
             person_name: 인물 이름.
@@ -977,9 +964,7 @@ class PersonExtractor:
             cit = action.citation
             cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
             due = f" (due: {action.due_date})" if action.due_date else ""
-            lines.append(
-                f"- [ ] {action.description} (from {action.from_date}){due} {cit_str}"
-            )
+            lines.append(f"- [ ] {action.description} (from {action.from_date}){due} {cit_str}")
             if len(lines) >= _MAX_OPEN_ACTIONS_IN_PAGE:
                 break
 

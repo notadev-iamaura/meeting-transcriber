@@ -22,11 +22,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
-
 
 # ─── 헬퍼 ───────────────────────────────────────────────────────────────
 
@@ -172,9 +170,7 @@ class TestWikiPagesEndpoint:
         for special in ("log.md", "index.md", "HEALTH.md", "CLAUDE.md", "action_items.md"):
             (wiki_root / special).write_text("# special\n", encoding="utf-8")
         (wiki_root / "decisions").mkdir()
-        (wiki_root / "decisions" / "real.md").write_text(
-            "# 실제 페이지\n", encoding="utf-8"
-        )
+        (wiki_root / "decisions" / "real.md").write_text("# 실제 페이지\n", encoding="utf-8")
 
         config = _make_test_config(tmp_path, wiki_enabled=True, wiki_root=wiki_root)
         app = _make_test_app(config)
@@ -226,9 +222,7 @@ class TestWikiHealthEndpoint:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         health_content = (
-            "# HEALTH\n\n"
-            "- last_lint_at: 2026-04-28T10:00:00\n"
-            "- citation_pass_rate: 1.0\n"
+            "# HEALTH\n\n- last_lint_at: 2026-04-28T10:00:00\n- citation_pass_rate: 1.0\n"
         )
         (wiki_root / "HEALTH.md").write_text(health_content, encoding="utf-8")
 

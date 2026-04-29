@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from core.wiki.models import PageType
+
 # TDD Red: core/wiki/schema.py 가 존재하지 않으므로 아래 import 가
 # ImportError 를 발생시켜 모든 테스트가 실패해야 한다.
 from core.wiki.schema import (
@@ -31,8 +33,6 @@ from core.wiki.schema import (
     render_project_template,
     render_topic_template,
 )
-from core.wiki.models import PageType
-
 
 # ──────────────────────────────────────────────
 # 1. generate_schema_md() 테스트 (2건)
@@ -55,12 +55,8 @@ class TestGenerateSchemaMd:
         result = generate_schema_md()
 
         # Assert
-        assert "[meeting:" in result, (
-            "LLM 시스템 프롬프트에 인용 마커 접두사 '[meeting:' 이 없음"
-        )
-        assert "HH:MM:SS" in result, (
-            "인용 형식 표준에 타임스탬프 형식 'HH:MM:SS' 가 없음"
-        )
+        assert "[meeting:" in result, "LLM 시스템 프롬프트에 인용 마커 접두사 '[meeting:' 이 없음"
+        assert "HH:MM:SS" in result, "인용 형식 표준에 타임스탬프 형식 'HH:MM:SS' 가 없음"
 
     def test_한국어_고유명사_병기_금지_규칙이_포함된다(self) -> None:
         """출력에 한국어 고유명사 영어·중국어 병기 금지 규칙이 명시되어야 한다.
@@ -78,9 +74,7 @@ class TestGenerateSchemaMd:
         result = generate_schema_md()
 
         # Assert — "병기 금지" 구문 또는 "배미령(Baimilong)" 같은 예시로 규칙 존재 확인
-        has_rule = ("병기 금지" in result) or (
-            "병기" in result and "금지" in result
-        )
+        has_rule = ("병기 금지" in result) or ("병기" in result and "금지" in result)
         assert has_rule, (
             "LLM 시스템 프롬프트에 한국어 고유명사 외국어 병기 금지 규칙이 없음. "
             "'병기 금지' 또는 이에 상응하는 구문이 포함되어야 한다."
@@ -126,9 +120,7 @@ class TestRenderDecisionTemplate:
         )
 
         # Act + Assert
-        assert f"{field}:" in result, (
-            f"decisions frontmatter 에 필수 필드 '{field}' 가 없음"
-        )
+        assert f"{field}:" in result, f"decisions frontmatter 에 필수 필드 '{field}' 가 없음"
 
     def test_본문_4개_섹션_헤더가_모두_포함된다(self) -> None:
         """PRD §4.2 decisions 본문의 4섹션 헤더가 출력에 존재해야 한다.
@@ -147,9 +139,7 @@ class TestRenderDecisionTemplate:
         # Act + Assert
         expected_sections = ["## 결정 내용", "## 배경", "## 후속 액션", "## 참고 회의"]
         for section in expected_sections:
-            assert section in result, (
-                f"decisions 템플릿 본문에 섹션 '{section}' 이 없음"
-            )
+            assert section in result, f"decisions 템플릿 본문에 섹션 '{section}' 이 없음"
 
 
 # ──────────────────────────────────────────────
@@ -190,9 +180,7 @@ class TestRenderPersonTemplate:
         )
 
         # Act + Assert
-        assert f"{field}:" in result, (
-            f"people frontmatter 에 필수 필드 '{field}' 가 없음"
-        )
+        assert f"{field}:" in result, f"people frontmatter 에 필수 필드 '{field}' 가 없음"
 
     def test_본문_4개_섹션_헤더가_모두_포함된다(self) -> None:
         """PRD §4.2 people 본문의 4섹션 헤더가 출력에 존재해야 한다.
@@ -212,9 +200,7 @@ class TestRenderPersonTemplate:
             "## 미해결 액션아이템",
         ]
         for section in expected_sections:
-            assert section in result, (
-                f"people 템플릿 본문에 섹션 '{section}' 이 없음"
-            )
+            assert section in result, f"people 템플릿 본문에 섹션 '{section}' 이 없음"
 
 
 # ──────────────────────────────────────────────
@@ -243,14 +229,10 @@ class TestRenderProjectTemplate:
         result = render_project_template(slug="new-onboarding", status=valid_status)
 
         # Assert
-        assert valid_status in result, (
-            f"status '{valid_status}' 가 출력 frontmatter 에 없음"
-        )
+        assert valid_status in result, f"status '{valid_status}' 가 출력 frontmatter 에 없음"
 
     @pytest.mark.parametrize("invalid_status", INVALID_STATUSES)
-    def test_유효하지_않은_status_값은_ValueError_를_발생시킨다(
-        self, invalid_status: str
-    ) -> None:
+    def test_유효하지_않은_status_값은_ValueError_를_발생시킨다(self, invalid_status: str) -> None:
         """허용 목록 외 status 값으로 호출 시 ValueError 가 발생해야 한다.
 
         PRD §4.2 projects frontmatter: status 는 in-progress|blocked|shipped|cancelled
@@ -324,16 +306,12 @@ class TestRenderActionItemsTemplate:
         result = render_action_items_template()
 
         # Assert — 헤더 존재 여부 (숫자 포함 형식 "## Open (0)")
-        assert "## Open" in result, (
-            "비어있는 action_items 에도 '## Open' 섹션 헤더가 있어야 함"
-        )
+        assert "## Open" in result, "비어있는 action_items 에도 '## Open' 섹션 헤더가 있어야 함"
         assert "## Closed" in result, (
             "비어있는 action_items 에도 '## Closed' 섹션 헤더가 있어야 함"
         )
         # 빈 상태에서 카운트가 0 임을 표시해야 함
-        assert "(0)" in result, (
-            "빈 action_items 의 헤더에 아이템 수 '(0)' 이 표시되어야 함"
-        )
+        assert "(0)" in result, "빈 action_items 의 헤더에 아이템 수 '(0)' 이 표시되어야 함"
 
 
 # ──────────────────────────────────────────────
@@ -409,26 +387,24 @@ class TestRenderIndexMd:
         # Assert — 순서 검증: 각 카테고리 헤더의 첫 등장 위치 비교
         # 헤더 키워드는 구현에 따라 영문/한글 혼용 가능 — 여기서는 최소 식별자 사용
         category_keywords = [
-            "decision",   # Decisions 카테고리
-            "people",     # People 카테고리 (또는 "person")
-            "project",    # Projects 카테고리
-            "topic",      # Topics 카테고리
-            "action",     # Action Items 카테고리
+            "decision",  # Decisions 카테고리
+            "people",  # People 카테고리 (또는 "person")
+            "project",  # Projects 카테고리
+            "topic",  # Topics 카테고리
+            "action",  # Action Items 카테고리
         ]
 
         result_lower = result.lower()
         positions = []
         for keyword in category_keywords:
             pos = result_lower.find(keyword)
-            assert pos != -1, (
-                f"index.md 출력에 카테고리 키워드 '{keyword}' 가 없음"
-            )
+            assert pos != -1, f"index.md 출력에 카테고리 키워드 '{keyword}' 가 없음"
             positions.append(pos)
 
         # 순서 검증 — 앞 위치가 뒤 위치보다 항상 작아야 함
         for i in range(len(positions) - 1):
             assert positions[i] < positions[i + 1], (
                 f"index.md 카테고리 순서 오류: '{category_keywords[i]}' (pos={positions[i]}) "
-                f"이 '{category_keywords[i+1]}' (pos={positions[i+1]}) 보다 뒤에 있음. "
+                f"이 '{category_keywords[i + 1]}' (pos={positions[i + 1]}) 보다 뒤에 있음. "
                 f"PRD 순서: Decisions → People → Projects → Topics → Action Items"
             )

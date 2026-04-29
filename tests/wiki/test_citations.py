@@ -16,8 +16,6 @@ Wiki 인용 마커 파싱·검증 테스트 모듈 (TDD Red 단계)
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,16 +44,17 @@ FAKE_MEETING_ID = "abc12345"
 # 1. CITATION_PATTERN 정규식 테스트
 # ════════════════════════════════════════════════════════════════════
 
+
 class TestCitationPatternValid:
     """CITATION_PATTERN 이 유효한 인용 형식과 매칭되는지 검증한다."""
 
     @pytest.mark.parametrize(
         "valid_citation",
         [
-            "[meeting:abc12345@00:23:45]",   # PRD §4.3 기본 예시
-            "[meeting:00000000@00:00:00]",   # 최소값: 전부 0
-            "[meeting:ffffffff@23:59:59]",   # 최대 hex 값 + 최대 시각
-            "[meeting:a1b2c3d4@01:30:00]",   # 혼합 hex
+            "[meeting:abc12345@00:23:45]",  # PRD §4.3 기본 예시
+            "[meeting:00000000@00:00:00]",  # 최소값: 전부 0
+            "[meeting:ffffffff@23:59:59]",  # 최대 hex 값 + 최대 시각
+            "[meeting:a1b2c3d4@01:30:00]",  # 혼합 hex
             "결정 [meeting:abc12345@00:23:45] 입니다.",  # 문장 중간 삽입
             "[meeting:abc12345@00:23:45], [meeting:def67890@01:00:00]",  # 두 개 연속
         ],
@@ -65,9 +64,7 @@ class TestCitationPatternValid:
         # Arrange & Act
         match = CITATION_PATTERN.search(valid_citation)
         # Assert
-        assert match is not None, (
-            f"유효한 인용 '{valid_citation}' 에서 매칭이 실패함"
-        )
+        assert match is not None, f"유효한 인용 '{valid_citation}' 에서 매칭이 실패함"
 
 
 class TestCitationPatternInvalid:
@@ -76,19 +73,19 @@ class TestCitationPatternInvalid:
     @pytest.mark.parametrize(
         "invalid_citation, reason",
         [
-            ("[meeting:abc@00:23:45]",        "id 길이 3자리 — 8자리 미만"),
-            ("[meeting:abc1234@00:23:45]",     "id 길이 7자리 — 8자리 미만"),
-            ("[meeting:ABC12345@00:23:45]",    "대문자 hex — 거부 대상"),
-            ("[meeting:ABC12345@00:23:45]",    "대문자 포함 — 거부 대상"),
-            ("[meeting:abc1234Z@00:23:45]",    "Z는 hex 아님"),
-            ("[meeting:abc12345@0:23:45]",     "시 자릿수 1자리 — 2자리 필요"),
-            ("[meeting:abc12345@00:2:45]",     "분 자릿수 1자리 — 2자리 필요"),
-            ("[meeting:abc12345@00:23:4]",     "초 자릿수 1자리 — 2자리 필요"),
-            ("[meeting:abc12345 00:23:45]",    "@ 구분자 누락"),
-            ("meeting:abc12345@00:23:45",      "[ ] 브래킷 누락"),
-            ("[meeting:abc12345@00:23:45",     "닫힌 브래킷 누락"),
-            ("",                              "빈 문자열"),
-            ("아무 관련 없는 문장.",            "인용 없는 일반 텍스트"),
+            ("[meeting:abc@00:23:45]", "id 길이 3자리 — 8자리 미만"),
+            ("[meeting:abc1234@00:23:45]", "id 길이 7자리 — 8자리 미만"),
+            ("[meeting:ABC12345@00:23:45]", "대문자 hex — 거부 대상"),
+            ("[meeting:ABC12345@00:23:45]", "대문자 포함 — 거부 대상"),
+            ("[meeting:abc1234Z@00:23:45]", "Z는 hex 아님"),
+            ("[meeting:abc12345@0:23:45]", "시 자릿수 1자리 — 2자리 필요"),
+            ("[meeting:abc12345@00:2:45]", "분 자릿수 1자리 — 2자리 필요"),
+            ("[meeting:abc12345@00:23:4]", "초 자릿수 1자리 — 2자리 필요"),
+            ("[meeting:abc12345 00:23:45]", "@ 구분자 누락"),
+            ("meeting:abc12345@00:23:45", "[ ] 브래킷 누락"),
+            ("[meeting:abc12345@00:23:45", "닫힌 브래킷 누락"),
+            ("", "빈 문자열"),
+            ("아무 관련 없는 문장.", "인용 없는 일반 텍스트"),
         ],
     )
     def test_citation_pattern_잘못된_형식을_거부한다(
@@ -106,6 +103,7 @@ class TestCitationPatternInvalid:
 # ════════════════════════════════════════════════════════════════════
 # 2. parse_citation() 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestParseCitation:
     """parse_citation() 의 정상 파싱과 오류 처리를 검증한다."""
@@ -137,28 +135,25 @@ class TestParseCitation:
     @pytest.mark.parametrize(
         "garbage_input",
         [
-            "",                                      # 빈 문자열
-            "일반 사실 진술 문장",                    # 인용 없는 일반 텍스트
-            "[meeting:ABC12345@00:23:45]",            # 대문자 hex — 거부
-            "[meeting:abc@00:23:45]",                # id 길이 부족
-            "   \t\n",                               # 공백/탭/개행만 있음
+            "",  # 빈 문자열
+            "일반 사실 진술 문장",  # 인용 없는 일반 텍스트
+            "[meeting:ABC12345@00:23:45]",  # 대문자 hex — 거부
+            "[meeting:abc@00:23:45]",  # id 길이 부족
+            "   \t\n",  # 공백/탭/개행만 있음
         ],
     )
-    def test_parse_citation_잘못된_입력에_None을_반환한다(
-        self, garbage_input: str
-    ) -> None:
+    def test_parse_citation_잘못된_입력에_None을_반환한다(self, garbage_input: str) -> None:
         """인용 마커가 없거나 형식이 잘못된 입력에 대해 None 을 반환한다."""
         # Arrange & Act
         result = parse_citation(garbage_input)
         # Assert
-        assert result is None, (
-            f"'{garbage_input!r}' 에 대해 None 이어야 하나 {result!r} 반환됨"
-        )
+        assert result is None, f"'{garbage_input!r}' 에 대해 None 이어야 하나 {result!r} 반환됨"
 
 
 # ════════════════════════════════════════════════════════════════════
 # 3. is_factual_statement() 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestIsFactualStatement:
     """is_factual_statement() 의 면제/의무 구분 로직을 검증한다."""
@@ -167,18 +162,18 @@ class TestIsFactualStatement:
     @pytest.mark.parametrize(
         "exempt_line, reason",
         [
-            ("",                        "빈 줄 — 면제"),
-            ("   ",                     "공백만 있는 줄 — 면제"),
-            ("# 결정 내용",              "H1 제목 — 면제"),
-            ("## 배경",                  "H2 제목 — 면제"),
-            ("### 세부 항목",            "H3 제목 — 면제"),
-            ("---",                     "frontmatter 구분자 — 면제"),
-            ("[../people/철수.md]",      "순수 페이지 링크 — 면제"),
-            ("[../../decisions/x.md]",  "깊은 상대 페이지 링크 — 면제"),
-            ("<!-- confidence: 9 -->",  "HTML 주석(confidence 마커) — 면제"),
-            ("|---|---|---|",            "표 구분자 줄 — 면제"),
-            ("```python",               "코드블록 펜스 시작 — 면제"),
-            ("```",                     "코드블록 펜스 종료 — 면제"),
+            ("", "빈 줄 — 면제"),
+            ("   ", "공백만 있는 줄 — 면제"),
+            ("# 결정 내용", "H1 제목 — 면제"),
+            ("## 배경", "H2 제목 — 면제"),
+            ("### 세부 항목", "H3 제목 — 면제"),
+            ("---", "frontmatter 구분자 — 면제"),
+            ("[../people/철수.md]", "순수 페이지 링크 — 면제"),
+            ("[../../decisions/x.md]", "깊은 상대 페이지 링크 — 면제"),
+            ("<!-- confidence: 9 -->", "HTML 주석(confidence 마커) — 면제"),
+            ("|---|---|---|", "표 구분자 줄 — 면제"),
+            ("```python", "코드블록 펜스 시작 — 면제"),
+            ("```", "코드블록 펜스 종료 — 면제"),
         ],
     )
     def test_is_factual_statement_면제_줄은_False를_반환한다(
@@ -196,14 +191,14 @@ class TestIsFactualStatement:
     @pytest.mark.parametrize(
         "factual_line, reason",
         [
-            ("5월 1일 출시를 결정했다.",            "평문 사실 진술"),
-            ("- 5월 1일 출시 결정",               "리스트 항목 본문"),
-            ("| 항목 | 값 |",                    "표 셀 본문"),
+            ("5월 1일 출시를 결정했다.", "평문 사실 진술"),
+            ("- 5월 1일 출시 결정", "리스트 항목 본문"),
+            ("| 항목 | 값 |", "표 셀 본문"),
             (
                 "결정 [meeting:abc12345@00:23:45].",
                 "인용이 이미 있는 사실 진술 — D1 통과 대상",
             ),
-            ("배포 일정이 변경되었다.",              "한국어 일반 사실 진술"),
+            ("배포 일정이 변경되었다.", "한국어 일반 사실 진술"),
         ],
     )
     def test_is_factual_statement_의무_줄은_True를_반환한다(
@@ -222,6 +217,7 @@ class TestIsFactualStatement:
 # 4. enforce_citations() 테스트
 # ════════════════════════════════════════════════════════════════════
 
+
 class TestEnforceCitationsBasic:
     """enforce_citations() 의 핵심 동작(보존·제거·반환)을 검증한다."""
 
@@ -233,12 +229,8 @@ class TestEnforceCitationsBasic:
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert
-        assert cited_line in result_content, (
-            "인용이 있는 사실 진술 줄이 결과에서 사라짐"
-        )
-        assert len(rejected) == 0, (
-            f"인용 있는 줄인데 거부 목록에 포함됨: {rejected}"
-        )
+        assert cited_line in result_content, "인용이 있는 사실 진술 줄이 결과에서 사라짐"
+        assert len(rejected) == 0, f"인용 있는 줄인데 거부 목록에 포함됨: {rejected}"
 
     def test_인용_없는_사실_문장은_제거되고_거부_목록에_기록된다(self) -> None:
         """인용 마커가 없는 사실 진술 줄이 제거되고 rejected 목록에 원문으로 기록된다."""
@@ -251,31 +243,19 @@ class TestEnforceCitationsBasic:
         assert uncited_line not in result_content, (
             "인용 없는 사실 진술 줄이 결과 content 에 남아 있음"
         )
-        assert uncited_line in rejected, (
-            f"거부된 줄이 rejected 목록에 없음: {rejected}"
-        )
+        assert uncited_line in rejected, f"거부된 줄이 rejected 목록에 없음: {rejected}"
 
     def test_메타_제목_링크는_인용_없어도_보존된다(self) -> None:
         """frontmatter 구분자, 제목, 페이지 링크는 인용 없어도 결과에 남아야 한다."""
         # Arrange
-        content = (
-            "---\n"
-            "type: decision\n"
-            "---\n"
-            "\n"
-            "# 결정 내용\n"
-            "\n"
-            "[../people/철수.md]\n"
-        )
+        content = "---\ntype: decision\n---\n\n# 결정 내용\n\n[../people/철수.md]\n"
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert — 면제 줄들이 모두 결과에 포함되어야 한다
         assert "---" in result_content, "frontmatter 구분자가 제거됨"
         assert "# 결정 내용" in result_content, "H1 제목이 제거됨"
         assert "[../people/철수.md]" in result_content, "페이지 링크가 제거됨"
-        assert len(rejected) == 0, (
-            f"면제 줄이 거부 목록에 잘못 포함됨: {rejected}"
-        )
+        assert len(rejected) == 0, f"면제 줄이 거부 목록에 잘못 포함됨: {rejected}"
 
     def test_한_줄에_여러_인용이_있어도_사실_진술로_보존된다(self) -> None:
         """콤마로 구분된 여러 인용이 포함된 줄도 인용 있는 줄로 간주해 보존한다."""
@@ -289,9 +269,7 @@ class TestEnforceCitationsBasic:
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert
-        assert multi_cited in result_content, (
-            "여러 인용이 포함된 줄이 잘못 제거됨"
-        )
+        assert multi_cited in result_content, "여러 인용이 포함된 줄이 잘못 제거됨"
         assert len(rejected) == 0
 
     def test_빈_content에_대해_빈_content와_빈_rejected를_반환한다(self) -> None:
@@ -347,9 +325,7 @@ class TestEnforceCitationsThreshold:
         # Act — 예외가 발생하지 않아야 한다 (30% 초과가 아님)
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert
-        assert len(rejected) == 3, (
-            f"거부된 줄이 3개여야 하나 {len(rejected)}개 임"
-        )
+        assert len(rejected) == 3, f"거부된 줄이 3개여야 하나 {len(rejected)}개 임"
 
 
 class TestEnforceCitationsFrontmatterAndCodeblock:
@@ -358,15 +334,7 @@ class TestEnforceCitationsFrontmatterAndCodeblock:
     def test_frontmatter_내부_줄은_사실_진술로_취급하지_않는다(self) -> None:
         """--- 로 둘러싸인 frontmatter 내부의 key: value 줄은 제거하지 않는다."""
         # Arrange
-        content = (
-            "---\n"
-            "type: decision\n"
-            "date: 2026-04-28\n"
-            "confidence: 9\n"
-            "---\n"
-            "\n"
-            "# 결정 내용\n"
-        )
+        content = "---\ntype: decision\ndate: 2026-04-28\nconfidence: 9\n---\n\n# 결정 내용\n"
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert — frontmatter 내 키값 줄이 rejected 에 들어가면 안 됨
@@ -377,14 +345,7 @@ class TestEnforceCitationsFrontmatterAndCodeblock:
     def test_코드블록_내부_줄은_사실_진술로_취급하지_않는다(self) -> None:
         """``` 로 둘러싸인 코드블록 내부의 줄은 인용 의무 대상에서 제외된다."""
         # Arrange — 코드블록 내 줄에는 인용 없음
-        content = (
-            "# 예제\n"
-            "\n"
-            "```python\n"
-            "x = 인용없는코드줄()\n"
-            "return x\n"
-            "```\n"
-        )
+        content = "# 예제\n\n```python\nx = 인용없는코드줄()\nreturn x\n```\n"
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert — 코드 줄이 제거되거나 거부되면 안 됨
@@ -404,12 +365,8 @@ class TestEnforceCitationsEdgeCases:
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert
-        assert cjk_uncited not in result_content, (
-            "CJK/이모지 포함 인용 없는 줄이 제거되지 않음"
-        )
-        assert cjk_uncited in rejected, (
-            "CJK/이모지 포함 거부 줄이 rejected 목록에 없음"
-        )
+        assert cjk_uncited not in result_content, "CJK/이모지 포함 인용 없는 줄이 제거되지 않음"
+        assert cjk_uncited in rejected, "CJK/이모지 포함 거부 줄이 rejected 목록에 없음"
 
     def test_멀티라인_입력_혼합_케이스에서_올바르게_처리된다(self) -> None:
         """제목·메타·인용 있는 줄·인용 없는 줄이 혼합된 실제 페이지 형태를 처리한다."""
@@ -440,26 +397,17 @@ class TestEnforceCitationsEdgeCases:
     def test_의무_대상_줄이_전혀_없는_경우_빈_rejected를_반환한다(self) -> None:
         """제목·메타만 있는 content 는 의무 줄 0개이므로 rejected 도 비어야 한다."""
         # Arrange
-        content = (
-            "---\n"
-            "type: health\n"
-            "---\n"
-            "\n"
-            "# 상태 보고\n"
-            "\n"
-            "## 요약\n"
-        )
+        content = "---\ntype: health\n---\n\n# 상태 보고\n\n## 요약\n"
         # Act
         result_content, rejected = enforce_citations(content, FAKE_MEETING_ID)
         # Assert
-        assert rejected == [], (
-            f"의무 대상 없는 content 에서 rejected={rejected!r} 임"
-        )
+        assert rejected == [], f"의무 대상 없는 content 에서 rejected={rejected!r} 임"
 
 
 # ════════════════════════════════════════════════════════════════════
 # 5. WikiGuardError 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestWikiGuardError:
     """WikiGuardError 의 생성과 reason 코드 접근을 검증한다."""
@@ -470,12 +418,9 @@ class TestWikiGuardError:
         error = WikiGuardError("too_many_uncited_statements", "40% 거부됨")
         # Assert — reason 은 args[0] 또는 전용 속성으로 접근 가능해야 한다
         reason_accessible = (
-            (len(error.args) > 0 and error.args[0] == "too_many_uncited_statements")
-            or (hasattr(error, "reason") and error.reason == "too_many_uncited_statements")
-        )
-        assert reason_accessible, (
-            f"reason 코드에 접근할 수 없음: args={error.args!r}"
-        )
+            len(error.args) > 0 and error.args[0] == "too_many_uncited_statements"
+        ) or (hasattr(error, "reason") and error.reason == "too_many_uncited_statements")
+        assert reason_accessible, f"reason 코드에 접근할 수 없음: args={error.args!r}"
 
     def test_WikiGuardError는_Exception의_하위_클래스이다(self) -> None:
         """WikiGuardError 가 Exception 을 상속해야 일반 except 에서 잡힌다."""
@@ -494,9 +439,7 @@ class TestWikiGuardError:
             "decide_pages_failed",
         ],
     )
-    def test_WikiGuardError_모든_예약_reason_코드로_생성_가능하다(
-        self, reason: str
-    ) -> None:
+    def test_WikiGuardError_모든_예약_reason_코드로_생성_가능하다(self, reason: str) -> None:
         """인터페이스에 문서화된 5개 reason 코드 각각으로 예외를 생성할 수 있다."""
         # Arrange & Act
         error = WikiGuardError(reason)

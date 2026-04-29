@@ -188,9 +188,7 @@ class TestBackfillFailureIsolated:
     """회의 1건 실패해도 다음 회의가 정상 진행되는 격리 정책."""
 
     @pytest.mark.asyncio
-    async def test_backfill_3번째_실패_4번째_진행(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_backfill_3번째_실패_4번째_진행(self, tmp_path: Path) -> None:
         """3번째 회의가 예외를 던져도 4번째가 정상 처리되어야 한다."""
         from scripts.backfill_wiki import backfill
 

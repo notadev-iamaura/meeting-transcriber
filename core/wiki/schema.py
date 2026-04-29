@@ -288,10 +288,7 @@ def render_project_template(
     """
     # status 화이트리스트 검증 — 오탈자/대소문자 불일치도 즉시 거부
     if status not in _VALID_PROJECT_STATUSES:
-        raise ValueError(
-            f"잘못된 status 값: '{status}'. "
-            f"허용: {sorted(_VALID_PROJECT_STATUSES)}"
-        )
+        raise ValueError(f"잘못된 status 값: '{status}'. 허용: {sorted(_VALID_PROJECT_STATUSES)}")
 
     display_title = title if title is not None else slug
 
@@ -457,9 +454,7 @@ def render_index_md(pages_metadata: dict[PageType, list[dict[str, Any]]]) -> str
                 open_count = item.get("open")
                 closed_count = item.get("closed")
                 if open_count is not None or closed_count is not None:
-                    meta_suffix = (
-                        f" — Open {open_count or 0} / Closed {closed_count or 0}"
-                    )
+                    meta_suffix = f" — Open {open_count or 0} / Closed {closed_count or 0}"
 
             parts.append(f"- [{title}]({path}) ({last_updated}){meta_suffix}")
 

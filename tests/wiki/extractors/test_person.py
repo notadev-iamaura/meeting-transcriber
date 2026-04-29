@@ -25,19 +25,16 @@
 from __future__ import annotations
 
 import re
-from dataclasses import fields
 from datetime import date
-from pathlib import Path
-from typing import Any
 
 import pytest
+
+from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase 2 모듈 — 이미 구현 완료, import 가능
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.extractors.decision import ExtractedDecision
-from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
-from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/person.py 가 없으므로
@@ -47,8 +44,8 @@ from core.wiki.extractors.person import (  # noqa: E402
     ExtractedPerson,
     PersonExtractor,
     TopicMention,
-    ExistingPersonState,
 )
+from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # PRD §4.2 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
 CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
@@ -140,7 +137,7 @@ def mock_utterances(speakers: list[str]) -> list[_FakeUtterance]:
     for i, speaker in enumerate(speakers):
         utterances.append(
             _FakeUtterance(
-                text=f"{speaker}의 발화 내용 {i+1}",
+                text=f"{speaker}의 발화 내용 {i + 1}",
                 speaker=speaker,
                 start=float(i * 30),
                 end=float(i * 30 + 20),
@@ -394,9 +391,7 @@ async def test_extract_speakers_speaker_name_map_적용_정규화():
     Assert: 반환된 ExtractedPerson 의 name=="철수".
     """
     # Arrange
-    mock_llm = MockPersonLLM(
-        responses=[_build_single_person_json(name="철수", ts="00:05:00")]
-    )
+    mock_llm = MockPersonLLM(responses=[_build_single_person_json(name="철수", ts="00:05:00")])
     extractor = PersonExtractor(llm=mock_llm)
     utterances = mock_utterances(speakers=["SPEAKER_00"])
 
@@ -496,7 +491,7 @@ async def test_render_or_update_pages_신규_인물_페이지_생성():
     # Assert
     assert len(pages) >= 1
     rel_path, content, confidence = pages[0]
-    assert "people/철수.md" == rel_path or rel_path.endswith("철수.md"), (
+    assert rel_path == "people/철수.md" or rel_path.endswith("철수.md"), (
         f"신규 인물의 rel_path 가 'people/철수.md' 여야 합니다. 실제: {rel_path}"
     )
     assert "meetings_count: 1" in content, (
@@ -632,9 +627,7 @@ async def test_render_or_update_pages_derived_최근_결정_섹션_자동_채워
     # Assert
     assert len(pages) >= 1
     _, content, _ = pages[0]
-    assert "## 최근 결정" in content, (
-        f"'## 최근 결정' 섹션이 없습니다.\n내용:\n{content}"
-    )
+    assert "## 최근 결정" in content, f"'## 최근 결정' 섹션이 없습니다.\n내용:\n{content}"
     assert "출시일 5월 1일 확정" in content or "launch-date" in content, (
         f"결정 항목이 '## 최근 결정' 섹션에 포함되지 않았습니다.\n내용:\n{content}"
     )
@@ -725,7 +718,9 @@ async def test_render_or_update_pages_prd_템플릿_4섹션_헤더_포함():
     meeting_id = "abc12345"
     meeting_date = date(2026, 4, 29)
 
-    role_topic_json = '{"role_update": "PM", "new_topics": [{"topic": "일정관리", "citation_ts": "00:05:00"}]}'
+    role_topic_json = (
+        '{"role_update": "PM", "new_topics": [{"topic": "일정관리", "citation_ts": "00:05:00"}]}'
+    )
     mock_llm = MockPersonLLM(responses=[role_topic_json])
     extractor = PersonExtractor(llm=mock_llm)
 
@@ -830,8 +825,8 @@ async def test_render_or_update_pages_인용_마커_포함():
 
     # LLM 이 인용이 포함된 페이지 응답을 반환하도록 설정
     role_topic_json = (
-        f'{{"role_update": "PM", "new_topics": [{{'
-        f'"topic": "pricing-strategy", "citation_ts": "00:10:00"}}]}}'
+        '{"role_update": "PM", "new_topics": [{'
+        '"topic": "pricing-strategy", "citation_ts": "00:10:00"}]}'
     )
     mock_llm = MockPersonLLM(responses=[role_topic_json])
     extractor = PersonExtractor(llm=mock_llm)

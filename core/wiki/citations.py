@@ -32,9 +32,7 @@ CITATION_PATTERN: re.Pattern[str] = re.compile(
 
 # 페이지 간 상대 링크 (frontmatter 헤더의 참고 회의, 후속 결정 링크 등).
 # 예: "[../people/철수.md]", "[../../decisions/2026-04-15-x.md]"
-PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(
-    r"\[(\.\./)+[a-z_]+/[^\]]+\.md\]"
-)
+PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(r"\[(\.\./)+[a-z_]+/[^\]]+\.md\]")
 
 # D1 거부율 임계 — 의무 대상 줄 중 거부된 줄이 30% 를 초과하면 페이지 자체 무효화
 D1_REJECTION_THRESHOLD: float = 0.30
@@ -153,10 +151,7 @@ def is_factual_statement(line: str) -> bool:
             return False
 
     # 순수 페이지 링크만 있는 줄 (`[../people/철수.md]`)
-    if PAGE_LINK_PATTERN.fullmatch(stripped):
-        return False
-
-    return True
+    return not PAGE_LINK_PATTERN.fullmatch(stripped)
 
 
 def _is_frontmatter_keyvalue(line: str) -> bool:

@@ -53,6 +53,7 @@ FAKE_TS_SECONDS = 25 * 60 + 12  # 1512
 # MockActionLLM 으로 별도 정의한다.
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class _MockResponse:
     """MockActionLLM 이 시퀀스로 반환할 단일 응답.
@@ -116,6 +117,7 @@ class MockActionLLM:
 # 픽스처
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def _make_citation(
     meeting_id: str = FAKE_MEETING_ID,
     ts_str: str = FAKE_TS_STR,
@@ -144,10 +146,7 @@ class _FakeUtterance:
 
 def _make_utterances(specs: list[tuple[str, str, float]]) -> list[_FakeUtterance]:
     """(text, speaker, start_seconds) 튜플 목록을 _FakeUtterance 리스트로 변환한다."""
-    return [
-        _FakeUtterance(text=t, speaker=s, start=st, end=st + 5.0)
-        for t, s, st in specs
-    ]
+    return [_FakeUtterance(text=t, speaker=s, start=st, end=st + 5.0) for t, s, st in specs]
 
 
 def _make_open_item(
@@ -172,6 +171,7 @@ def _make_open_item(
 # 1. extract_new() — 신규 액션아이템 추출 (4건)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestExtractNew:
     """ActionItemExtractor.extract_new() 의 동작을 검증한다."""
 
@@ -189,9 +189,11 @@ class TestExtractNew:
         )
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("철수가 5월 1일까지 캘린더 갱신할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("철수가 5월 1일까지 캘린더 갱신할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -222,9 +224,11 @@ class TestExtractNew:
         )
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("캘린더 갱신해야 합니다", "영희", 90.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신해야 합니다", "영희", 90.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -255,9 +259,11 @@ class TestExtractNew:
         )
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -287,11 +293,13 @@ class TestExtractNew:
         )
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "철수", 1512.0),
-            ("마케팅팀에 일정 공유할게요", "영희", 1550.0),
-            ("API 문서 업데이트하겠습니다", "민준", 1800.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "철수", 1512.0),
+                ("마케팅팀에 일정 공유할게요", "영희", 1550.0),
+                ("API 문서 업데이트하겠습니다", "민준", 1800.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -311,26 +319,31 @@ class TestExtractNew:
 # 2. detect_closed() — 기존 액션의 완료 감지 (4건)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestDetectClosed:
     """ActionItemExtractor.detect_closed() 의 동작을 검증한다."""
 
     @pytest.mark.asyncio
     async def test_detect_closed_explicit_completion(self):
         """명시적 완료: existing_open 에 'MVP 데모 자료 작성', utterances 에 '완료했습니다' → ClosedActionItem 1건."""
-        existing_open = [_make_open_item(
-            item_id="a1",
-            description="MVP 데모 자료 작성",
-            owner="영희",
-        )]
+        existing_open = [
+            _make_open_item(
+                item_id="a1",
+                description="MVP 데모 자료 작성",
+                owner="영희",
+            )
+        ]
         llm_json = (
             '[{"item_index": 0, "closed_reason": "completed",'
             ' "closed_citation_ts": "00:00:30", "confidence": 9}]'
         )
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("MVP 데모 자료 완료했습니다", "영희", 30.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("MVP 데모 자료 완료했습니다", "영희", 30.0),
+            ]
+        )
 
         result = await extractor.detect_closed(
             existing_open=existing_open,
@@ -352,10 +365,12 @@ class TestDetectClosed:
         llm_json = "[]"
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("오늘 회의 시작하겠습니다", "철수", 10.0),
-            ("다음 주 계획 논의합시다", "영희", 30.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("오늘 회의 시작하겠습니다", "철수", 10.0),
+                ("다음 주 계획 논의합시다", "영희", 30.0),
+            ]
+        )
 
         result = await extractor.detect_closed(
             existing_open=existing_open,
@@ -376,9 +391,11 @@ class TestDetectClosed:
         llm_json = "[]"
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("데모 자료 70% 작성했습니다", "영희", 300.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("데모 자료 70% 작성했습니다", "영희", 300.0),
+            ]
+        )
 
         result = await extractor.detect_closed(
             existing_open=existing_open,
@@ -401,9 +418,11 @@ class TestDetectClosed:
         llm_json = "[]"
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("그건 잘 됐어요", "철수", 120.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("그건 잘 됐어요", "철수", 120.0),
+            ]
+        )
 
         result = await extractor.detect_closed(
             existing_open=existing_open,
@@ -417,6 +436,7 @@ class TestDetectClosed:
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. render_unified_page() — LLM 호출 0회 결정적 (4건+)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestRenderUnifiedPage:
     """ActionItemExtractor.render_unified_page() 의 결정적 동작을 검증한다.
@@ -539,9 +559,7 @@ class TestRenderUnifiedPage:
 
         # frontmatter 블록 존재 확인
         assert result.startswith("---"), "frontmatter 가 '---' 로 시작해야 합니다."
-        assert "type: action_items" in result, (
-            "frontmatter 에 'type: action_items' 가 없습니다."
-        )
+        assert "type: action_items" in result, "frontmatter 에 'type: action_items' 가 없습니다."
         assert last_compiled in result, (
             f"frontmatter 에 last_compiled '{last_compiled}' 가 없습니다."
         )
@@ -558,13 +576,15 @@ class TestRenderUnifiedPage:
             timestamp_str="00:25:12",
             timestamp_seconds=1512,
         )
-        new_open = [NewActionItem(
-            owner="철수",
-            description="캘린더 갱신",
-            due_date="2026-05-01",
-            citation=citation,
-            confidence=8,
-        )]
+        new_open = [
+            NewActionItem(
+                owner="철수",
+                description="캘린더 갱신",
+                due_date="2026-05-01",
+                citation=citation,
+                confidence=8,
+            )
+        ]
 
         result = await extractor.render_unified_page(
             new_open=new_open,
@@ -619,13 +639,9 @@ class TestRenderUnifiedPage:
             "newly_closed 항목이 Open 섹션에서 제거되지 않았습니다."
         )
         # 취소선 형식
-        assert "~~MVP 데모 자료 작성~~" in result, (
-            "Closed 섹션에 취소선(~~...~~) 형식이 없습니다."
-        )
+        assert "~~MVP 데모 자료 작성~~" in result, "Closed 섹션에 취소선(~~...~~) 형식이 없습니다."
         # Closed by 인용
-        assert "Closed by" in result, (
-            "Closed 섹션에 'Closed by' 표기가 없습니다."
-        )
+        assert "Closed by" in result, "Closed 섹션에 'Closed by' 표기가 없습니다."
         # Closed 인용 마커
         assert f"[meeting:{FAKE_MEETING_ID}@00:00:30]" in result, (
             "Closed 인용 마커가 출력에서 누락되었습니다."
@@ -635,6 +651,7 @@ class TestRenderUnifiedPage:
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. 환각 방지 정책 (2건)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestHallucinationPrevention:
     """ActionItemExtractor 의 환각 방지 정책을 검증한다."""
@@ -657,9 +674,11 @@ class TestHallucinationPrevention:
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
         # 발화에 명시적 날짜 없음 — '다음 주' 같은 모호한 표현도 없음
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "철수", 600.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "철수", 600.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -694,10 +713,12 @@ class TestHallucinationPrevention:
         llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
         # 실제 화자는 "철수"와 "영희" 뿐
-        utterances = _make_utterances([
-            ("보고서 작성해야 해요", "철수", 300.0),
-            ("맞아요", "영희", 310.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("보고서 작성해야 해요", "철수", 300.0),
+                ("맞아요", "영희", 310.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -716,6 +737,7 @@ class TestHallucinationPrevention:
 # ──────────────────────────────────────────────────────────────────────────────
 # 5. id 생성 정책: 동일 description 이라도 다른 회의면 다른 id
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class TestIdGeneration:
     """OpenActionItem.item_id 생성 정책을 검증한다.
@@ -800,6 +822,7 @@ def _compute_item_id(owner: str, description: str, from_meeting_id: str) -> str:
 # 6. detect_closed() 단락(short-circuit) — existing_open=[] 시 LLM 호출 없음
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestDetectClosedShortCircuit:
     """detect_closed 의 성능 최적화: existing_open=[] 이면 LLM 호출 없이 즉시 반환."""
 
@@ -831,6 +854,7 @@ class TestDetectClosedShortCircuit:
 # 7. render_unified_page() — confidence 마커 (D3 자동 통과)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestRenderConfidenceMarker:
     """render_unified_page 출력에 D3 자동 통과용 confidence 마커가 포함되는지 검증한다."""
 
@@ -842,12 +866,14 @@ class TestRenderConfidenceMarker:
         N 은 new_open + newly_closed 의 confidence 평균이다.
         """
         extractor = ActionItemExtractor(llm=MockActionLLM(responses=[]))
-        new_open = [NewActionItem(
-            owner="철수",
-            description="캘린더 갱신",
-            citation=_make_citation(),
-            confidence=8,
-        )]
+        new_open = [
+            NewActionItem(
+                owner="철수",
+                description="캘린더 갱신",
+                citation=_make_citation(),
+                confidence=8,
+            )
+        ]
 
         result = await extractor.render_unified_page(
             new_open=new_open,

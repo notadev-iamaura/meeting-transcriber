@@ -222,8 +222,8 @@ async def test_권한_없는_root_시_PipelineError가_던져진다(
     실제 chmod 0 디렉토리는 OS·환경별로 동작이 다르므로 init_repo 를 monkeypatch
     하여 WikiStoreError 를 강제 발생시킨다.
     """
-    from core.wiki.store import WikiStoreError
     from core.pipeline import PipelineError
+    from core.wiki.store import WikiStoreError
     from steps.wiki_compiler import WikiCompiler
 
     root = tmp_path / "wiki"

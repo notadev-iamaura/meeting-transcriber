@@ -251,9 +251,7 @@ class HybridChatService:
         try:
             answer, sources = await self._synthesize_from_wiki(query, verdict)
         except Exception as exc:  # noqa: BLE001 — graceful degradation
-            logger.warning(
-                "WIKI 합성 실패, RAG 폴백 수행: %s", exc, exc_info=True
-            )
+            logger.warning("WIKI 합성 실패, RAG 폴백 수행: %s", exc, exc_info=True)
             rag_response = await self._chat_service.respond(query, **kwargs)
             return HybridChatResponse(
                 source_type="rag",
@@ -279,9 +277,7 @@ class HybridChatService:
         rag_task = self._chat_service.respond(query, **kwargs)
         wiki_task = self._synthesize_from_wiki(query, verdict)
 
-        rag_result, wiki_result = await asyncio.gather(
-            rag_task, wiki_task, return_exceptions=True
-        )
+        rag_result, wiki_result = await asyncio.gather(rag_task, wiki_task, return_exceptions=True)
 
         # RAG 실패 시 — None 으로 두고 error_message 기록
         rag_response: Any = None
@@ -359,18 +355,13 @@ class HybridChatService:
             try:
                 page = self._wiki_store.read_page(rel_path)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "wiki 페이지 읽기 실패: %s (%s)", rel_path, exc
-                )
+                logger.warning("wiki 페이지 읽기 실패: %s (%s)", rel_path, exc)
                 continue
 
             # 제목 추출 — frontmatter.title > 첫 # 제목 > path stem
             title = self._extract_title(page, rel_path)
             snippet = self._make_snippet(page.content, max_chars=200)
-            citation_strs = [
-                f"[meeting:{c.meeting_id}@{c.timestamp_str}]"
-                for c in page.citations
-            ]
+            citation_strs = [f"[meeting:{c.meeting_id}@{c.timestamp_str}]" for c in page.citations]
 
             sources.append(
                 WikiAnswerSource(
@@ -414,10 +405,7 @@ class HybridChatService:
             "주어진 위키 페이지 발췌를 근거로 사용자 질문에 한국어로 답하라. "
             "인용 마커 [meeting:id@HH:MM:SS] 는 그대로 유지하라."
         )
-        user_prompt = (
-            f"질문: {query}\n\n"
-            "위키 페이지 발췌:\n\n" + "\n\n---\n\n".join(body_parts)
-        )
+        user_prompt = f"질문: {query}\n\n위키 페이지 발췌:\n\n" + "\n\n---\n\n".join(body_parts)
         return await self._wiki_llm.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,

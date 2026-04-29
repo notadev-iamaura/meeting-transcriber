@@ -744,12 +744,8 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     # LLM Wiki Phase 5 오버라이드 — 라우터 활성화 + LLM 폴백 제어
     if (env_router := os.environ.get("MT_WIKI_ROUTER_ENABLED")) is not None:
         data.setdefault("wiki", {})["router_enabled"] = _parse_bool(env_router)
-    if (
-        env_router_fb := os.environ.get("MT_WIKI_ROUTER_LLM_FALLBACK")
-    ) is not None:
-        data.setdefault("wiki", {})["router_llm_fallback"] = _parse_bool(
-            env_router_fb
-        )
+    if (env_router_fb := os.environ.get("MT_WIKI_ROUTER_LLM_FALLBACK")) is not None:
+        data.setdefault("wiki", {})["router_llm_fallback"] = _parse_bool(env_router_fb)
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰

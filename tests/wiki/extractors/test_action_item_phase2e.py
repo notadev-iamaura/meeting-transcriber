@@ -17,10 +17,7 @@ import pytest
 
 from core.wiki.extractors.action_item import (
     ActionItemExtractor,
-    NewActionItem,
 )
-from core.wiki.models import Citation
-
 
 FAKE_MEETING_ID = "abc12345"
 FAKE_MEETING_DATE = date(2026, 4, 28)
@@ -61,9 +58,7 @@ class _MockLLM:
         temperature: float = 0.2,
     ) -> str:
         """다음 응답 반환."""
-        self.calls.append(
-            {"system_prompt": system_prompt, "user_prompt": user_prompt}
-        )
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
         assert self._responses, "mock responses 소진"
         resp = self._responses.pop(0)
         if resp.raise_error:
@@ -83,10 +78,7 @@ class _FakeUtterance:
 
 def _make_utterances(specs: list[tuple[str, str, float]]) -> list[_FakeUtterance]:
     """(text, speaker, start) → _FakeUtterance 리스트."""
-    return [
-        _FakeUtterance(text=t, speaker=s, start=st, end=st + 5.0)
-        for t, s, st in specs
-    ]
+    return [_FakeUtterance(text=t, speaker=s, start=st, end=st + 5.0) for t, s, st in specs]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -110,9 +102,11 @@ class TestOwnerFuzzyMatching:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "SPEAKER_00", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "SPEAKER_00", 1512.0),
+            ]
+        )
         # corrector 가 제공한 매핑 (실제 이름)
         speaker_name_map = {"SPEAKER_00": "철수", "SPEAKER_01": "영희"}
 
@@ -138,9 +132,11 @@ class TestOwnerFuzzyMatching:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("API 문서 정리하겠습니다", "SPEAKER_00", 1800.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("API 문서 정리하겠습니다", "SPEAKER_00", 1800.0),
+            ]
+        )
         speaker_name_map = {"SPEAKER_00": "철수"}
 
         result = await extractor.extract_new(
@@ -167,9 +163,11 @@ class TestOwnerFuzzyMatching:
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
         # SPEAKER_00 라벨만 있고 매핑 없음 → "철수" 가 화자 set 에 없음
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "SPEAKER_00", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "SPEAKER_00", 1512.0),
+            ]
+        )
 
         # speaker_name_map 인자 미제공 (Phase 1 호환)
         result = await extractor.extract_new(
@@ -194,9 +192,11 @@ class TestOwnerFuzzyMatching:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("보고서 작성해야 합니다", "SPEAKER_00", 300.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("보고서 작성해야 합니다", "SPEAKER_00", 300.0),
+            ]
+        )
         speaker_name_map = {"SPEAKER_00": "철수"}
 
         result = await extractor.extract_new(
@@ -232,9 +232,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("내일까지 캘린더 갱신할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("내일까지 캘린더 갱신할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -257,9 +259,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("I will update the doc by tomorrow", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("I will update the doc by tomorrow", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -280,9 +284,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("모레 리뷰 부탁드립니다", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("모레 리뷰 부탁드립니다", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -303,9 +309,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("다음주에 보고서 제출하겠습니다", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("다음주에 보고서 제출하겠습니다", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -326,9 +334,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("다다음주에 기획안 마무리할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("다다음주에 기획안 마무리할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -349,9 +359,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("2026-05-15까지 캘린더 갱신할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("2026-05-15까지 캘린더 갱신할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -373,9 +385,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("이번주 금요일까지 보고할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("이번주 금요일까지 보고할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,
@@ -397,9 +411,11 @@ class TestRelativeDateResolver:
         )
         llm = _MockLLM(responses=[_MockResponse(body=llm_json)])
         extractor = ActionItemExtractor(llm=llm)
-        utterances = _make_utterances([
-            ("캘린더 갱신할게요", "철수", 1512.0),
-        ])
+        utterances = _make_utterances(
+            [
+                ("캘린더 갱신할게요", "철수", 1512.0),
+            ]
+        )
 
         result = await extractor.extract_new(
             meeting_id=FAKE_MEETING_ID,

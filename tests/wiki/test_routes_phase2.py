@@ -41,7 +41,6 @@ from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
 
-
 # ─── 헬퍼 ───────────────────────────────────────────────────────────────
 
 
@@ -225,9 +224,7 @@ class TestWikiPageDetailEndpoint:
     def test_wiki_disabled_404(self, tmp_path: Path) -> None:
         """wiki.enabled=False 면 페이지가 디스크에 있어도 404 반환."""
         wiki_root = tmp_path / "wiki"
-        _seed_wiki_page(
-            wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo\n"
-        )
+        _seed_wiki_page(wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo\n")
 
         config = _make_test_config(tmp_path, wiki_enabled=False, wiki_root=wiki_root)
         app = _make_test_app(config)
@@ -255,9 +252,7 @@ class TestWikiPageDetailEndpoint:
         wiki_root = tmp_path / "wiki"
         wiki_root.mkdir()
         # 다른 카테고리에 페이지를 둔다 — traversal 로 이걸 읽으려는 시도
-        _seed_wiki_page(
-            wiki_root, "topics/secret.md", "---\ntitle: secret\n---\n\n# secret\n"
-        )
+        _seed_wiki_page(wiki_root, "topics/secret.md", "---\ntitle: secret\n---\n\n# secret\n")
 
         config = _make_test_config(tmp_path, wiki_enabled=True, wiki_root=wiki_root)
         app = _make_test_app(config)
@@ -301,9 +296,7 @@ class TestWikiSearchEndpoint:
     def test_빈_쿼리_빈_결과(self, tmp_path: Path) -> None:
         """q 가 빈 문자열이면 빈 결과를 반환한다 (200 OK)."""
         wiki_root = tmp_path / "wiki"
-        _seed_wiki_page(
-            wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo bar\n"
-        )
+        _seed_wiki_page(wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo bar\n")
 
         config = _make_test_config(tmp_path, wiki_enabled=True, wiki_root=wiki_root)
         app = _make_test_app(config)
@@ -410,8 +403,7 @@ class TestWikiSearchEndpoint:
         _seed_wiki_page(
             wiki_root,
             "topics/many.md",
-            "---\ntitle: 많은 매칭\n---\n\n"
-            "키워드 키워드 키워드 키워드 키워드.\n",
+            "---\ntitle: 많은 매칭\n---\n\n키워드 키워드 키워드 키워드 키워드.\n",
         )
 
         config = _make_test_config(tmp_path, wiki_enabled=True, wiki_root=wiki_root)
@@ -433,9 +425,7 @@ class TestWikiSearchEndpoint:
     def test_wiki_disabled_빈_결과(self, tmp_path: Path) -> None:
         """wiki.enabled=False 면 페이지 존재해도 검색은 빈 결과 (200)."""
         wiki_root = tmp_path / "wiki"
-        _seed_wiki_page(
-            wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo\n"
-        )
+        _seed_wiki_page(wiki_root, "decisions/foo.md", "---\ntitle: x\n---\n\n# foo\n")
 
         config = _make_test_config(tmp_path, wiki_enabled=False, wiki_root=wiki_root)
         app = _make_test_app(config)

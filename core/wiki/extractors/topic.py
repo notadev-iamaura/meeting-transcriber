@@ -25,7 +25,6 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Protocol
 
 from core.wiki.llm_client import WikiLLMClient, sanitize_utterance_text
@@ -47,9 +46,7 @@ _META_VERSION: int = 1
 _MAX_RENDER_PER_MEETING: int = 8
 
 # slug 에 허용되는 문자 — 한글/영숫자/하이픈/언더스코어.
-_TOPIC_SLUG_ALLOWED: re.Pattern[str] = re.compile(
-    r"^[\uAC00-\uD7A3A-Za-z0-9\-_]+$"
-)
+_TOPIC_SLUG_ALLOWED: re.Pattern[str] = re.compile(r"^[\uAC00-\uD7A3A-Za-z0-9\-_]+$")
 
 # 페이지 인용 패턴 — citations.CITATION_PATTERN 와 동일.
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
@@ -156,11 +153,9 @@ def _normalize_concept_slug(name: str) -> str:
             out_chars.append("-")
         elif ch.isascii() and ch.isalpha():
             out_chars.append(ch.lower())
-        elif ch.isascii() and ch.isdigit():
+        elif ch.isascii() and ch.isdigit() or ch in {"-", "_"}:
             out_chars.append(ch)
-        elif ch in {"-", "_"}:
-            out_chars.append(ch)
-        elif "\uAC00" <= ch <= "\uD7A3":
+        elif "\uac00" <= ch <= "\ud7a3":
             # 한글 음절
             out_chars.append(ch)
         else:
@@ -570,9 +565,7 @@ class TopicExtractor:
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────────
 
-    def _build_concept(
-        self, item: dict[str, Any]
-    ) -> ExtractedConcept | None:
+    def _build_concept(self, item: dict[str, Any]) -> ExtractedConcept | None:
         """LLM JSON 항목을 ExtractedConcept 으로 변환한다.
 
         Args:
@@ -641,9 +634,7 @@ class TopicExtractor:
             raw = meta_path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
-            logger.warning(
-                "TopicExtractor: 메타파일 로드 실패 — 빈 dict 폴백: %r", exc
-            )
+            logger.warning("TopicExtractor: 메타파일 로드 실패 — 빈 dict 폴백: %r", exc)
             return {}
 
         if not isinstance(data, dict):
@@ -663,15 +654,11 @@ class TopicExtractor:
                     meeting_ids=list(item.get("meeting_ids", []) or []),
                     last_seen=str(item.get("last_seen", "")),
                     page_created=bool(item.get("page_created", False)),
-                    last_citations=_deserialize_citations(
-                        item.get("last_citations", [])
-                    ),
+                    last_citations=_deserialize_citations(item.get("last_citations", [])),
                     first_seen=str(item.get("first_seen", "")),
                 )
                 # meeting_ids 항목들이 모두 string 인지 확인
-                mention.meeting_ids = [
-                    str(mid) for mid in mention.meeting_ids if mid
-                ]
+                mention.meeting_ids = [str(mid) for mid in mention.meeting_ids if mid]
                 result[slug] = mention
             except (TypeError, ValueError) as exc:
                 logger.warning(
@@ -682,9 +669,7 @@ class TopicExtractor:
                 continue
         return result
 
-    def _save_meta(
-        self, store: WikiStore, meta: dict[str, ConceptMention]
-    ) -> None:
+    def _save_meta(self, store: WikiStore, meta: dict[str, ConceptMention]) -> None:
         """슬러그 → ConceptMention dict 를 `.topic_mentions.json` 에 저장.
 
         Args:
@@ -701,9 +686,7 @@ class TopicExtractor:
                     "meeting_ids": list(mention.meeting_ids),
                     "last_seen": mention.last_seen,
                     "page_created": mention.page_created,
-                    "last_citations": _serialize_citations(
-                        mention.last_citations
-                    ),
+                    "last_citations": _serialize_citations(mention.last_citations),
                     "first_seen": mention.first_seen,
                 }
                 for slug, mention in meta.items()

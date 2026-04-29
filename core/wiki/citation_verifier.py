@@ -85,9 +85,7 @@ class UtterancesCitationVerifier:
             ValueError: tolerance_seconds < 0.
         """
         if tolerance_seconds < 0:
-            raise ValueError(
-                f"tolerance_seconds 는 0 이상이어야 합니다: {tolerance_seconds}"
-            )
+            raise ValueError(f"tolerance_seconds 는 0 이상이어야 합니다: {tolerance_seconds}")
 
         # 외부 변경 영향 차단을 위해 즉시 복사 + 정렬 인덱스 빌드
         self._utterances_by_meeting: dict[str, list[Utterance]] = {}

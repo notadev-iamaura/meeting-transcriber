@@ -263,9 +263,7 @@ class WikiStore:
             TypeError: root 가 Path 인스턴스가 아닐 때.
         """
         if not isinstance(root, Path):
-            raise TypeError(
-                f"WikiStore.root 는 Path 타입이어야 합니다: {type(root).__name__}"
-            )
+            raise TypeError(f"WikiStore.root 는 Path 타입이어야 합니다: {type(root).__name__}")
         self._root: Path = root
 
     @property
@@ -488,9 +486,7 @@ class WikiStore:
             mid = match.group(1)
             ts_str = f"{match.group(2)}:{match.group(3)}:{match.group(4)}"
             ts_seconds = (
-                int(match.group(2)) * 3600
-                + int(match.group(3)) * 60
-                + int(match.group(4))
+                int(match.group(2)) * 3600 + int(match.group(3)) * 60 + int(match.group(4))
             )
             citations.append(
                 Citation(

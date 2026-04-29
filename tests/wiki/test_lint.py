@@ -29,15 +29,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-# ─── Phase 1 실제 구현 (변경 금지) ────────────────────────────────────────────
-from core.wiki.store import WikiStore
 
 # ─── Phase 4 대상 모듈 (아직 미구현 → ImportError Red) ──────────────────────
 from core.wiki.lint import (  # type: ignore[import]  # noqa: E402
@@ -47,6 +42,8 @@ from core.wiki.lint import (  # type: ignore[import]  # noqa: E402
     WikiLinter,
 )
 
+# ─── Phase 1 실제 구현 (변경 금지) ────────────────────────────────────────────
+from core.wiki.store import WikiStore
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 테스트 전용 MockVerifier — test_guard.py 의 MockCitationVerifier 와 동일 구조
@@ -269,8 +266,7 @@ class TestFindOrphans:
         )
         initialized_store.write_page(
             Path("topics/B.md"),
-            "---\ntype: topic\n---\n\n"
-            "B 페이지입니다. [people/C.md](people/C.md) 참조.\n",
+            "---\ntype: topic\n---\n\nB 페이지입니다. [people/C.md](people/C.md) 참조.\n",
         )
         initialized_store.write_page(
             Path("people/C.md"),
@@ -287,7 +283,9 @@ class TestFindOrphans:
         orphans = await linter._find_orphans(pages)
 
         # Assert
-        assert orphans == [], f"모든 페이지가 연결되어 있으므로 orphans 는 빈 리스트여야 합니다. 실제: {orphans}"
+        assert orphans == [], (
+            f"모든 페이지가 연결되어 있으므로 orphans 는 빈 리스트여야 합니다. 실제: {orphans}"
+        )
 
     async def test_들어오는_링크가_없는_페이지는_orphan으로_분류된다(
         self,
@@ -312,13 +310,11 @@ class TestFindOrphans:
         )
         initialized_store.write_page(
             Path("topics/B.md"),
-            "---\ntype: topic\n---\n\n"
-            "B 페이지. 다른 링크 없음.\n",
+            "---\ntype: topic\n---\n\nB 페이지. 다른 링크 없음.\n",
         )
         initialized_store.write_page(
             Path("topics/C.md"),
-            "---\ntype: topic\n---\n\n"
-            "C 페이지. 아무도 이 페이지를 링크하지 않습니다.\n",
+            "---\ntype: topic\n---\n\nC 페이지. 아무도 이 페이지를 링크하지 않습니다.\n",
         )
         pages = list(initialized_store.all_pages())
         linter = WikiLinter(
@@ -366,13 +362,11 @@ class TestFindCyclicCitations:
         )
         initialized_store.write_page(
             Path("topics/B.md"),
-            "---\ntype: topic\n---\n\n"
-            "B 토픽. [people/C.md](people/C.md) 관련자.\n",
+            "---\ntype: topic\n---\n\nB 토픽. [people/C.md](people/C.md) 관련자.\n",
         )
         initialized_store.write_page(
             Path("people/C.md"),
-            "---\ntype: person\nname: 영희\n---\n\n"
-            "C 사람. 링크 없음.\n",
+            "---\ntype: person\nname: 영희\n---\n\nC 사람. 링크 없음.\n",
         )
         pages = list(initialized_store.all_pages())
         linter = WikiLinter(
@@ -384,9 +378,7 @@ class TestFindCyclicCitations:
         cycles = await linter._find_cyclic_citations(pages)
 
         # Assert
-        assert cycles == [], (
-            f"단방향 연결만 있으므로 순환이 없어야 합니다. 실제: {cycles}"
-        )
+        assert cycles == [], f"단방향 연결만 있으므로 순환이 없어야 합니다. 실제: {cycles}"
 
     async def test_A_B_C_A_순환이_있으면_CyclicChain이_1건_발견된다(
         self,
@@ -412,8 +404,7 @@ class TestFindCyclicCitations:
         )
         initialized_store.write_page(
             Path("topics/B.md"),
-            "---\ntype: topic\n---\n\n"
-            "B 토픽. [people/C.md](people/C.md) 담당자.\n",
+            "---\ntype: topic\n---\n\nB 토픽. [people/C.md](people/C.md) 담당자.\n",
         )
         initialized_store.write_page(
             Path("people/C.md"),
@@ -473,8 +464,7 @@ class TestReverifyCitations:
         )
         initialized_store.write_page(
             Path("people/철수.md"),
-            "---\ntype: person\nname: 철수\n---\n\n"
-            "철수가 제안 [meeting:abc12345@00:02:00].\n",
+            "---\ntype: person\nname: 철수\n---\n\n철수가 제안 [meeting:abc12345@00:02:00].\n",
         )
         # 두 인용을 모두 통과시키는 verifier
         verifier = MockVerifier(
@@ -512,12 +502,8 @@ class TestReverifyCitations:
         """
         # Arrange — 총 10개 인용 (7개 통과, 3개 phantom)
         # 5개씩 2페이지에 나눠서 인용 배치
-        citations_page1 = "\n".join([
-            f"[meeting:abc12345@00:{i:02d}:00]" for i in range(1, 6)
-        ])
-        citations_page2 = "\n".join([
-            f"[meeting:abc12345@00:{i:02d}:00]" for i in range(6, 11)
-        ])
+        citations_page1 = "\n".join([f"[meeting:abc12345@00:{i:02d}:00]" for i in range(1, 6)])
+        citations_page2 = "\n".join([f"[meeting:abc12345@00:{i:02d}:00]" for i in range(6, 11)])
         initialized_store.write_page(
             Path("decisions/결정A.md"),
             f"---\ntype: decision\nmeeting_id: abc12345\ndate: 2026-04-29\nconfidence: 8\n---\n\n"
@@ -691,7 +677,9 @@ class TestEdgeCases:
         assert isinstance(report, LintHealthReport), (
             f"LintHealthReport 인스턴스를 반환해야 합니다. 실제: {type(report)}"
         )
-        assert report.orphans == [], f"빈 위키의 orphans 는 [] 이어야 합니다. 실제: {report.orphans}"
+        assert report.orphans == [], (
+            f"빈 위키의 orphans 는 [] 이어야 합니다. 실제: {report.orphans}"
+        )
         assert report.cyclic_citations == [], (
             f"빈 위키의 cyclic_citations 는 [] 이어야 합니다. 실제: {report.cyclic_citations}"
         )

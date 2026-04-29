@@ -31,17 +31,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import fields
 from datetime import date
 from pathlib import Path
-
-import pytest
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Phase 1 모듈 — 이미 구현 완료, import 가능
-# ──────────────────────────────────────────────────────────────────────────────
-from core.wiki.models import Citation
-from core.wiki.store import WikiStore
 
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/topic.py 가 없으므로
@@ -49,10 +40,15 @@ from core.wiki.store import WikiStore
 # 구현체가 생기면 아래 계약을 모두 통과해야 Green 이 된다.
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.extractors.topic import (  # noqa: E402
-    ConceptMention,
     ExtractedConcept,
     TopicExtractor,
 )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 1 모듈 — 이미 구현 완료, import 가능
+# ──────────────────────────────────────────────────────────────────────────────
+from core.wiki.models import Citation
+from core.wiki.store import WikiStore
 
 # PRD §4.3 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
 CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
@@ -241,11 +237,13 @@ async def test_extract_concepts_단일_개념_반환():
     # Arrange
     mock_llm = MockTopicLLM(responses=[_make_single_concept_json()])
     extractor = TopicExtractor(mock_llm)
-    utterances = _make_utterances([
-        "pricing strategy 가 가장 중요한 결정입니다.",
-        "pricing strategy 를 다음 분기까지 확정해야 합니다.",
-        "pricing strategy 에 대한 팀원 의견을 모아주세요.",
-    ])
+    utterances = _make_utterances(
+        [
+            "pricing strategy 가 가장 중요한 결정입니다.",
+            "pricing strategy 를 다음 분기까지 확정해야 합니다.",
+            "pricing strategy 에 대한 팀원 의견을 모아주세요.",
+        ]
+    )
 
     # Act
     results = await extractor.extract_concepts(
@@ -443,17 +441,23 @@ async def test_aggregate_3회_도달_시_페이지_처음_생성(tmp_path):
 
     # Act — m1, m2 는 페이지 생성 없이 진행
     await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m1111111",
-        meeting_date=date(2026, 4, 27), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m1111111",
+        meeting_date=date(2026, 4, 27),
+        existing_store=store,
     )
     await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m2222222",
-        meeting_date=date(2026, 4, 28), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m2222222",
+        meeting_date=date(2026, 4, 28),
+        existing_store=store,
     )
     # Act — m3 에서 3회 임계 도달
     results = await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m3333333",
-        meeting_date=date(2026, 4, 29), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m3333333",
+        meeting_date=date(2026, 4, 29),
+        existing_store=store,
     )
 
     # Assert — 페이지 1건 생성
@@ -462,7 +466,9 @@ async def test_aggregate_3회_도달_시_페이지_처음_생성(tmp_path):
     assert "topics/" in rel_path, f"rel_path 가 topics/ 아래 있어야 한다: {rel_path}"
     assert "pricing-strategy" in rel_path
     # LLM 1회 호출 (페이지 생성)
-    assert mock_llm.call_count == 1, f"LLM 은 페이지 생성 시 1회만 호출되어야 한다: {mock_llm.call_count}"
+    assert mock_llm.call_count == 1, (
+        f"LLM 은 페이지 생성 시 1회만 호출되어야 한다: {mock_llm.call_count}"
+    )
     # 메타파일 page_created 확인
     meta_path = store.root / ".topic_mentions.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -500,14 +506,18 @@ async def test_aggregate_4회_이상_기존_페이지_갱신(tmp_path):
         ("m3333333", date(2026, 4, 28)),
     ]:
         await extractor.aggregate_and_render(
-            new_concepts=[concept], meeting_id=meeting_id,
-            meeting_date=d, existing_store=store,
+            new_concepts=[concept],
+            meeting_id=meeting_id,
+            meeting_date=d,
+            existing_store=store,
         )
 
     # Act — 4번째 회의
     results = await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m4444444",
-        meeting_date=date(2026, 4, 29), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m4444444",
+        meeting_date=date(2026, 4, 29),
+        existing_store=store,
     )
 
     # Assert
@@ -584,12 +594,16 @@ async def test_aggregate_같은_meeting_id_중복_처리_멱등(tmp_path):
 
     # Act — 동일 meeting_id 로 두 번 호출
     await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m1111111",
-        meeting_date=date(2026, 4, 29), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m1111111",
+        meeting_date=date(2026, 4, 29),
+        existing_store=store,
     )
     await extractor.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m1111111",  # 동일 ID 재처리
-        meeting_date=date(2026, 4, 29), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m1111111",  # 동일 ID 재처리
+        meeting_date=date(2026, 4, 29),
+        existing_store=store,
     )
 
     # Assert — meeting_ids 에 중복 없음
@@ -597,8 +611,7 @@ async def test_aggregate_같은_meeting_id_중복_처리_멱등(tmp_path):
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     mention = meta["mentions"]["pricing-strategy"]
     assert len(mention["meeting_ids"]) == 1, (
-        f"같은 meeting_id 중복 처리 시 meeting_ids 는 1개여야 한다: "
-        f"{mention['meeting_ids']}"
+        f"같은 meeting_id 중복 처리 시 meeting_ids 는 1개여야 한다: {mention['meeting_ids']}"
     )
 
 
@@ -625,16 +638,20 @@ async def test_aggregate_topic_mentions_json_영속화(tmp_path):
 
     # Act — extractor1 으로 m1 처리
     await extractor1.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m1111111",
-        meeting_date=date(2026, 4, 28), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m1111111",
+        meeting_date=date(2026, 4, 28),
+        existing_store=store,
     )
 
     # 새 인스턴스로 m2 처리 (영속화 검증)
     mock_llm2 = MockTopicLLM(responses=[])
     extractor2 = TopicExtractor(mock_llm2)
     await extractor2.aggregate_and_render(
-        new_concepts=[concept], meeting_id="m2222222",
-        meeting_date=date(2026, 4, 29), existing_store=store,
+        new_concepts=[concept],
+        meeting_id="m2222222",
+        meeting_date=date(2026, 4, 29),
+        existing_store=store,
     )
 
     # Assert — 이전 카운트가 보존됨
@@ -642,9 +659,7 @@ async def test_aggregate_topic_mentions_json_영속화(tmp_path):
     assert meta_path.exists()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meeting_ids = meta["mentions"]["pricing-strategy"]["meeting_ids"]
-    assert len(meeting_ids) == 2, (
-        f"새 인스턴스에서도 이전 카운트가 보존되어야 한다: {meeting_ids}"
-    )
+    assert len(meeting_ids) == 2, f"새 인스턴스에서도 이전 카운트가 보존되어야 한다: {meeting_ids}"
     assert "m1111111" in meeting_ids
     assert "m2222222" in meeting_ids
 
@@ -681,9 +696,7 @@ async def test_extract_concepts_confidence_7_미만_필터링():
     )
 
     # Assert — confidence 7 미만이므로 필터링되어 빈 리스트
-    assert results == [], (
-        f"confidence < 7 인 개념은 반환되지 않아야 한다. 실제: {results}"
-    )
+    assert results == [], f"confidence < 7 인 개념은 반환되지 않아야 한다. 실제: {results}"
 
 
 async def test_slug_정규화_영문_소문자_하이픈(tmp_path):
@@ -760,8 +773,10 @@ async def test_aggregate_페이지_본문_인용_마커_포함(tmp_path):
     # Act — 3회 처리
     for i, mid in enumerate(["m1111111", "m2222222", "m3333333"]):
         results = await extractor.aggregate_and_render(
-            new_concepts=[concept], meeting_id=mid,
-            meeting_date=date(2026, 4, 27 + i), existing_store=store,
+            new_concepts=[concept],
+            meeting_id=mid,
+            meeting_date=date(2026, 4, 27 + i),
+            existing_store=store,
         )
 
     # Assert — 3회째 결과에 인용 마커 포함
@@ -806,8 +821,10 @@ async def test_aggregate_prd_topics_템플릿_준수(tmp_path):
     results_all = []
     for i, mid in enumerate(["m1111111", "m2222222", "m3333333"]):
         r = await extractor.aggregate_and_render(
-            new_concepts=[concept], meeting_id=mid,
-            meeting_date=date(2026, 4, 27 + i), existing_store=store,
+            new_concepts=[concept],
+            meeting_id=mid,
+            meeting_date=date(2026, 4, 27 + i),
+            existing_store=store,
         )
         results_all.extend(r)
 
@@ -831,9 +848,7 @@ async def test_aggregate_prd_topics_템플릿_준수(tmp_path):
 
     # 본문 섹션 확인 (PRD §4.2 topics 3개 필수 섹션)
     for section in ("## 정의", "## 관련 회의", "## 자주 함께 등장하는 개념"):
-        assert section in content, (
-            f"PRD §4.2 필수 섹션 '{section}' 이 topics 페이지에 없음"
-        )
+        assert section in content, f"PRD §4.2 필수 섹션 '{section}' 이 topics 페이지에 없음"
 
     # confidence 마커
     confidence_pattern = re.compile(r"<!--\s*confidence:\s*\d{1,2}\s*-->")

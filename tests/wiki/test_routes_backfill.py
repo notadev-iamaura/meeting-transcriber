@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
@@ -169,9 +168,7 @@ class TestGetBackfillStatus:
                 import time
 
                 for _ in range(10):
-                    status_resp = client.get(
-                        f"/api/wiki/backfill/{job_id}"
-                    )
+                    status_resp = client.get(f"/api/wiki/backfill/{job_id}")
                     if status_resp.status_code == 200:
                         data = status_resp.json()
                         if data["status"] in ("completed", "failed", "cancelled"):
@@ -238,9 +235,7 @@ class TestCancelBackfill:
                 assert start_resp.status_code in (200, 202)
                 job_id = start_resp.json()["job_id"]
 
-                cancel_resp = client.post(
-                    f"/api/wiki/backfill/{job_id}/cancel"
-                )
+                cancel_resp = client.post(f"/api/wiki/backfill/{job_id}/cancel")
 
         assert cancel_resp.status_code == 200
 
@@ -250,8 +245,6 @@ class TestCancelBackfill:
         app = _make_test_app(config)
 
         with TestClient(app) as client:
-            response = client.post(
-                "/api/wiki/backfill/non-existent-id-99999/cancel"
-            )
+            response = client.post("/api/wiki/backfill/non-existent-id-99999/cancel")
 
         assert response.status_code == 404

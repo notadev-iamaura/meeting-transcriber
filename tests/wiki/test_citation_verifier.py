@@ -39,14 +39,13 @@ from dataclasses import dataclass
 
 import pytest
 
-# ─── Phase 2 실제 구현 (변경 금지) ───────────────────────────────────────────
-from core.wiki.guard import CitationVerifier
-
 # ─── Phase 4 대상 모듈 (아직 미구현 → ImportError Red) ──────────────────────
 from core.wiki.citation_verifier import (  # type: ignore[import]  # noqa: E402
     UtterancesCitationVerifier,
 )
 
+# ─── Phase 2 실제 구현 (변경 금지) ───────────────────────────────────────────
+from core.wiki.guard import CitationVerifier
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixture — 인터페이스 정의 §1.2 Utterance Protocol 에 맞춘 FakeUtterance
@@ -142,8 +141,7 @@ class TestUtterancesCitationVerifierBasic:
 
         # Assert
         assert result is True, (
-            f"timestamp=60 이 발화 구간 [60.0, 65.0] 내에 있으므로 True 여야 함, "
-            f"got {result}"
+            f"timestamp=60 이 발화 구간 [60.0, 65.0] 내에 있으므로 True 여야 함, got {result}"
         )
 
     @pytest.mark.asyncio
@@ -170,9 +168,7 @@ class TestUtterancesCitationVerifierBasic:
         result = await verifier.verify_exists(MEETING_M1, 58)
 
         # Assert
-        assert result is True, (
-            "ts=58, tolerance=2 → 발화 [60.0, 65.0] 와 겹침 → True 여야 함"
-        )
+        assert result is True, "ts=58, tolerance=2 → 발화 [60.0, 65.0] 와 겹침 → True 여야 함"
 
     @pytest.mark.asyncio
     async def test_tolerance_2초_윈도우_밖_timestamp_false_반환(self) -> None:
@@ -256,9 +252,7 @@ class TestUtterancesCitationVerifierMultipleMeetings:
         # Assert
         assert result_m1_60 is True, "m1 ts=60 → 발화 [60.0, 65.0] 내 → True 여야 함"
         assert result_m2_100 is True, "m2 ts=100 → 발화 [100.0, 110.0] 내 → True 여야 함"
-        assert result_m1_100 is False, (
-            "m1 에 ts=100 에 해당하는 발화 없음 → False 여야 함"
-        )
+        assert result_m1_100 is False, "m1 에 ts=100 에 해당하는 발화 없음 → False 여야 함"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,9 +359,7 @@ class TestEdgeCases:
         """
         # Arrange
         utterances = [FakeUtterance(start=60.0, end=65.0, text="발화")]
-        verifier = UtterancesCitationVerifier(
-            {MEETING_M1: utterances}, tolerance_seconds=0
-        )
+        verifier = UtterancesCitationVerifier({MEETING_M1: utterances}, tolerance_seconds=0)
 
         # Act
         result_exact = await verifier.verify_exists(MEETING_M1, 60)
@@ -377,9 +369,7 @@ class TestEdgeCases:
         assert result_exact is True, (
             "tolerance=0 + ts=60 → utt.start=60.0 ≤ 60 ≤ 65.0 → True 여야 함"
         )
-        assert result_outside is False, (
-            "tolerance=0 + ts=58 → 58 < utt.start=60.0 → False 여야 함"
-        )
+        assert result_outside is False, "tolerance=0 + ts=58 → 58 < utt.start=60.0 → False 여야 함"
 
     def test_tolerance_seconds_음수_전달_시_valueerror_발생(self) -> None:
         """tolerance_seconds < 0 으로 생성 시 ValueError 를 발생시킨다.
@@ -396,9 +386,7 @@ class TestEdgeCases:
 
         # Act & Assert
         with pytest.raises(ValueError, match=r"tolerance"):
-            UtterancesCitationVerifier(
-                {MEETING_M1: utterances}, tolerance_seconds=-1
-            )
+            UtterancesCitationVerifier({MEETING_M1: utterances}, tolerance_seconds=-1)
 
     def test_utterances_citation_verifier_는_citation_verifier_protocol을_만족한다(
         self,
@@ -445,9 +433,7 @@ class TestIndexImmutability:
         Assert:  True (생성자에서 이미 인덱싱 완료, 외부 변경 무관)
         """
         # Arrange
-        utterances: list[FakeUtterance] = [
-            FakeUtterance(start=60.0, end=65.0, text="발화")
-        ]
+        utterances: list[FakeUtterance] = [FakeUtterance(start=60.0, end=65.0, text="발화")]
         verifier = UtterancesCitationVerifier({MEETING_M1: utterances})
         utterances.clear()  # 외부에서 원본 리스트 변경
 

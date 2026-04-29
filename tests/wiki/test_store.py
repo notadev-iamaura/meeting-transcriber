@@ -22,7 +22,6 @@ WikiStore 단위 테스트 모듈 (TDD Red 단계)
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -113,9 +112,7 @@ class TestWikiStoreConstructor:
 class TestInitRepo:
     """init_repo() 의 디렉토리 생성·git 초기화 동작을 테스트한다."""
 
-    def test_빈_디렉토리에서_git_repo와_서브디렉토리를_생성한다(
-        self, wiki_root: Path
-    ) -> None:
+    def test_빈_디렉토리에서_git_repo와_서브디렉토리를_생성한다(self, wiki_root: Path) -> None:
         """빈 경로에서 init_repo() 호출 시 .git 과 5개 서브디렉토리가 생성되어야 한다.
 
         Arrange: 아직 생성되지 않은 wiki_root Path.
@@ -132,9 +129,7 @@ class TestInitRepo:
         assert (wiki_root / ".git").is_dir(), ".git 디렉토리가 생성되어야 합니다"
         expected_subdirs = ["decisions", "people", "projects", "topics", "pending"]
         for subdir in expected_subdirs:
-            assert (wiki_root / subdir).is_dir(), (
-                f"{subdir}/ 서브디렉토리가 생성되어야 합니다"
-            )
+            assert (wiki_root / subdir).is_dir(), f"{subdir}/ 서브디렉토리가 생성되어야 합니다"
 
     def test_init_repo는_멱등성을_보장한다(self, wiki_root: Path) -> None:
         """이미 초기화된 경로에서 init_repo() 를 재호출해도 예외가 발생하지 않아야 한다.
@@ -262,9 +257,7 @@ class TestReadWritePage:
 
         assert exc_info.value.reason == "page_not_found"  # type: ignore[attr-defined]
 
-    def test_path_traversal_시도는_에러를_발생시킨다(
-        self, initialized_store: WikiStore
-    ) -> None:
+    def test_path_traversal_시도는_에러를_발생시킨다(self, initialized_store: WikiStore) -> None:
         """../../ 를 포함하는 경로로 write_page 를 호출하면 WikiStoreError(path_traversal) 가 발생해야 한다.
 
         Arrange: path traversal 시도 경로.
@@ -388,9 +381,7 @@ class TestGitCommitAtomic:
         # Assert
         assert sha == "", "변경사항이 없으므로 빈 문자열을 반환해야 합니다"
 
-    def test_커밋_SHA는_40자_hex_문자열이다(
-        self, initialized_store: WikiStore
-    ) -> None:
+    def test_커밋_SHA는_40자_hex_문자열이다(self, initialized_store: WikiStore) -> None:
         """git_commit_atomic() 이 변경사항 있을 때 반환하는 SHA 는 40자 hex 여야 한다.
 
         Arrange: 페이지 2개 작성.
@@ -412,9 +403,7 @@ class TestGitCommitAtomic:
         # Assert
         import re
 
-        assert re.fullmatch(r"[a-f0-9]{40}", sha), (
-            f"SHA 는 40자 소문자 hex 여야 합니다: '{sha}'"
-        )
+        assert re.fullmatch(r"[a-f0-9]{40}", sha), f"SHA 는 40자 소문자 hex 여야 합니다: '{sha}'"
 
 
 # ─── 7. all_pages() ──────────────────────────────────────────────────────────

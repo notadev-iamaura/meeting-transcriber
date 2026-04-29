@@ -323,9 +323,7 @@ class QueryRouter:
                         llm_verdict.confidence,
                         self._confidence_threshold,
                     )
-                    return self._rag_fallback(
-                        reason="llm_low_confidence_fallback"
-                    )
+                    return self._rag_fallback(reason="llm_low_confidence_fallback")
                 # 채택
                 return llm_verdict
 
@@ -356,10 +354,7 @@ class QueryRouter:
         matched_rag = [
             s
             for s in matched_rag_raw
-            if not (
-                s.signal_id == "single_meeting_scope"
-                and _TIME_RANGE_KEYWORDS.search(query)
-            )
+            if not (s.signal_id == "single_meeting_scope" and _TIME_RANGE_KEYWORDS.search(query))
         ]
 
         # 1. BOTH 명시 매칭 우선
@@ -375,9 +370,7 @@ class QueryRouter:
 
         # 2. WIKI + RAG 동시 매칭 → BOTH 격상
         if matched_wiki and matched_rag:
-            ids = [s.signal_id for s in matched_wiki] + [
-                s.signal_id for s in matched_rag
-            ]
+            ids = [s.signal_id for s in matched_wiki] + [s.signal_id for s in matched_rag]
             return RouterVerdict(
                 decision=RouteDecision.BOTH,
                 confidence=7,

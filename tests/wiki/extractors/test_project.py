@@ -28,35 +28,33 @@ from __future__ import annotations
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import pytest
+
+from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase 2 모듈 — 이미 구현 완료, import 가능
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.extractors.decision import ExtractedDecision
-from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
-from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/project.py 가 없으므로
 # 이 import 블록이 ImportError 를 일으켜 모든 테스트가 Red 상태가 된다.
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.extractors.project import (  # noqa: E402
-    ExtractedProject,
     ExistingProject,
+    ExtractedProject,
     ProjectExtractor,
     TimelineEntry,
 )
+from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # PRD §4.2 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
 CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
 
 # 한국어 고유명사 뒤 외국어 병기 패턴 (예: "철수(Chulsoo)")
-_FOREIGN_GLOSS_PATTERN = re.compile(
-    r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF\u3041-\u30FF]+\)"
-)
+_FOREIGN_GLOSS_PATTERN = re.compile(r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF\u3041-\u30FF]+\)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -415,11 +413,13 @@ async def test_extract_projects_여러_프로젝트_3건_반환():
     )
     mock_llm = MockProjectLLM(responses=[three_projects_json])
     extractor = ProjectExtractor(llm=mock_llm)
-    utterances = _make_utterances([
-        "신규 온보딩 프로젝트는 순조롭게 진행 중입니다.",
-        "결제 시스템 개편은 외부 API 블로커가 있어요.",
-        "Q3 런치는 9월 말 목표로 준비 중입니다.",
-    ])
+    utterances = _make_utterances(
+        [
+            "신규 온보딩 프로젝트는 순조롭게 진행 중입니다.",
+            "결제 시스템 개편은 외부 API 블로커가 있어요.",
+            "Q3 런치는 9월 말 목표로 준비 중입니다.",
+        ]
+    )
 
     # Act
     results = await extractor.extract_projects(
@@ -459,9 +459,7 @@ async def test_extract_projects_잘못된_json_재시도_후_빈_리스트():
     )
 
     # Assert
-    assert results == [], (
-        f"잘못된 JSON 에서 빈 리스트를 반환해야 합니다. 실제: {results}"
-    )
+    assert results == [], f"잘못된 JSON 에서 빈 리스트를 반환해야 합니다. 실제: {results}"
     assert mock_llm.call_count <= 2, (
         f"JSON 파싱 실패 시 최대 2회 (1회 재시도) 만 LLM 을 호출해야 합니다. "
         f"실제 호출: {mock_llm.call_count}회"
@@ -604,9 +602,7 @@ async def test_detect_status_transitions_낮은_confidence_무시():
     )
 
     # Assert
-    assert transitions == {}, (
-        f"confidence=7 (< 8) 은 무시되어야 합니다. 실제: {transitions}"
-    )
+    assert transitions == {}, f"confidence=7 (< 8) 은 무시되어야 합니다. 실제: {transitions}"
 
 
 async def test_detect_status_transitions_잘못된_status_enum_skip():
@@ -1013,9 +1009,7 @@ async def test_render_or_update_pages_derived_섹션_llm_호출_0회():
     # Assert
     assert len(pages) >= 1
     _, content, _ = pages[0]
-    assert "## 최근 결정사항" in content, (
-        f"'## 최근 결정사항' 섹션이 없습니다.\n내용:\n{content}"
-    )
+    assert "## 최근 결정사항" in content, f"'## 최근 결정사항' 섹션이 없습니다.\n내용:\n{content}"
     # 결정 제목 또는 slug 중 하나라도 포함되어야 한다
     assert "UI 프레임워크" in content or "ui-framework-decision" in content, (
         f"'최근 결정사항' 에 해당 결정 정보가 없습니다.\n내용:\n{content}"

@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
@@ -217,10 +217,7 @@ def _has_explicit_date(text: str) -> bool:
     """
     if not text:
         return False
-    for pat in _EXPLICIT_DATE_PATTERNS:
-        if pat.search(text):
-            return True
-    return False
+    return any(pat.search(text) for pat in _EXPLICIT_DATE_PATTERNS)
 
 
 def _generate_action_id(owner: str, description: str, meeting_id: str) -> str:
@@ -378,7 +375,7 @@ class ActionItemExtractor:
             f"회의 ID: {meeting_id}\n"
             f"회의 날짜: {meeting_date.isoformat()}\n\n"
             f"## 발화 목록\n" + "\n".join(lines) + "\n\n"
-            f"위 컨텍스트에서 신규 액션아이템을 JSON 배열로 추출하세요."
+            "위 컨텍스트에서 신규 액션아이템을 JSON 배열로 추출하세요."
         )
 
         try:
@@ -453,10 +450,8 @@ class ActionItemExtractor:
 
         user_prompt = (
             f"회의 ID: {meeting_id}\n\n"
-            f"## 기존 open 액션 목록 (인덱스 포함)\n"
-            + "\n".join(open_lines)
-            + "\n\n"
-            f"## 발화 목록\n" + "\n".join(utt_lines) + "\n\n"
+            f"## 기존 open 액션 목록 (인덱스 포함)\n" + "\n".join(open_lines) + "\n\n"
+            "## 발화 목록\n" + "\n".join(utt_lines) + "\n\n"
             "위 발화에서 완료/철회된 액션아이템을 JSON 배열로 알려주세요."
         )
 
@@ -550,9 +545,7 @@ class ActionItemExtractor:
         # newly_closed 는 confidence 가 없으므로 9 (자체 보고 → 신뢰도 높음) 기본값
         for _ in newly_closed:
             confidences.append(9)
-        avg_confidence = (
-            sum(confidences) // len(confidences) if confidences else 8
-        )  # 기본 8
+        avg_confidence = sum(confidences) // len(confidences) if confidences else 8  # 기본 8
 
         # ── 4. 마크다운 직렬화 ────────────────────────────────────────
         open_count = len(remaining_open) + len(new_open)
@@ -678,9 +671,7 @@ class ActionItemExtractor:
         ts_str = str(item.get("citation_ts", "") or "")
         cit = _citation_from_ts(meeting_id, ts_str)
         if cit is None:
-            cit = Citation(
-                meeting_id=meeting_id, timestamp_str="00:00:00", timestamp_seconds=0
-            )
+            cit = Citation(meeting_id=meeting_id, timestamp_str="00:00:00", timestamp_seconds=0)
 
         # confidence
         try:
@@ -723,9 +714,7 @@ class ActionItemExtractor:
         """기존 open 항목을 한 줄로 렌더링."""
         owner = item.owner
         desc = item.description
-        cit_str = (
-            f"[meeting:{item.citation.meeting_id}@{item.citation.timestamp_str}]"
-        )
+        cit_str = f"[meeting:{item.citation.meeting_id}@{item.citation.timestamp_str}]"
         due = f" (due: {item.due_date})" if item.due_date else ""
         return f"- [ ] {owner}: {desc}{due} {cit_str}"
 
@@ -734,9 +723,7 @@ class ActionItemExtractor:
         """신규 NewActionItem 을 한 줄로 렌더링."""
         owner = item.owner or "미지정"
         desc = item.description
-        cit_str = (
-            f"[meeting:{item.citation.meeting_id}@{item.citation.timestamp_str}]"
-        )
+        cit_str = f"[meeting:{item.citation.meeting_id}@{item.citation.timestamp_str}]"
         due = f" (due: {item.due_date})" if item.due_date else ""
         return f"- [ ] {owner}: {desc}{due} {cit_str}"
 
@@ -753,8 +740,7 @@ class ActionItemExtractor:
             f"[meeting:{original.citation.meeting_id}@{original.citation.timestamp_str}]"
         )
         closed_cit_str = (
-            f"[meeting:{closed.closed_citation.meeting_id}"
-            f"@{closed.closed_citation.timestamp_str}]"
+            f"[meeting:{closed.closed_citation.meeting_id}@{closed.closed_citation.timestamp_str}]"
         )
         return [
             f"- [x] ~~{original.description}~~ {orig_cit_str}",

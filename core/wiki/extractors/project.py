@@ -40,9 +40,7 @@ _MAX_PROJECTS_PER_MEETING: int = 8
 _STATUS_TRANSITION_MIN_CONFIDENCE: int = 8
 
 # 허용된 status — schema._VALID_PROJECT_STATUSES 와 동기화.
-_VALID_STATUSES: frozenset[str] = frozenset(
-    {"in-progress", "blocked", "shipped", "cancelled"}
-)
+_VALID_STATUSES: frozenset[str] = frozenset({"in-progress", "blocked", "shipped", "cancelled"})
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -375,7 +373,7 @@ class ProjectExtractor:
             f"회의 날짜: {meeting_date.isoformat()}\n\n"
             f"## 8단계 요약\n{summary}\n\n"
             f"## 발화 목록\n" + "\n".join(lines) + "\n\n"
-            f"위 컨텍스트에서 프로젝트를 JSON 배열로 추출하세요."
+            "위 컨텍스트에서 프로젝트를 JSON 배열로 추출하세요."
         )
 
         try:
@@ -473,7 +471,7 @@ class ProjectExtractor:
         user_prompt = (
             f"회의 ID: {meeting_id}\n\n"
             f"## 기존 프로젝트 목록\n" + "\n".join(existing_lines) + "\n\n"
-            f"## 발화 목록\n" + "\n".join(utt_lines) + "\n\n"
+            "## 발화 목록\n" + "\n".join(utt_lines) + "\n\n"
             "위 발화에서 status 전환 신호를 JSON 배열로 알려주세요."
         )
 
@@ -571,9 +569,7 @@ class ProjectExtractor:
             existing_state: ExistingProject | None = None
             existing_raw = self._read_existing(existing_store, rel_path)
             if existing_raw:
-                existing_state = self._parse_existing_project_state(
-                    existing_raw, Path(rel_path)
-                )
+                existing_state = self._parse_existing_project_state(existing_raw, Path(rel_path))
 
             # status 결정 — transitions 우선, 없으면 project.status, 신규면 그대로
             final_status = status_transitions.get(project.slug, project.status)
@@ -649,9 +645,7 @@ class ProjectExtractor:
             ValueError: 4종 외 또는 빈 문자열.
         """
         if not status or status not in _VALID_STATUSES:
-            raise ValueError(
-                f"invalid status: {status!r}. 허용: {sorted(_VALID_STATUSES)}"
-            )
+            raise ValueError(f"invalid status: {status!r}. 허용: {sorted(_VALID_STATUSES)}")
 
     @staticmethod
     def _normalize_project_slug(raw: str) -> str:
@@ -674,9 +668,7 @@ class ProjectExtractor:
         s = raw.strip()
         # path traversal 방어
         if ".." in s or "/" in s or "\\" in s or "\x00" in s:
-            raise ValueError(
-                f"path traversal 시도가 감지되었습니다: {raw!r}"
-            )
+            raise ValueError(f"path traversal 시도가 감지되었습니다: {raw!r}")
 
         # 한글 포함 여부 확인
         has_korean = bool(re.search(r"[\uAC00-\uD7A3]", s))
@@ -687,9 +679,7 @@ class ProjectExtractor:
             s = re.sub(r"\s+", "_", s)
             # 허용 문자 — 한글/영숫자/하이픈/언더스코어
             if not re.match(r"^[\uAC00-\uD7A3a-z0-9\-_]+$", s):
-                raise ValueError(
-                    f"허용되지 않는 문자가 포함된 slug 입니다: {raw!r}"
-                )
+                raise ValueError(f"허용되지 않는 문자가 포함된 slug 입니다: {raw!r}")
         else:
             # 영문 슬러그 — lowercase + 공백 → 하이픈
             s = s.lower()
@@ -699,15 +689,11 @@ class ProjectExtractor:
             if not s:
                 raise ValueError(f"빈 slug 결과: {raw!r}")
             if not re.match(r"^[a-z0-9\-_]+$", s):
-                raise ValueError(
-                    f"허용되지 않는 문자가 포함된 slug 입니다: {raw!r}"
-                )
+                raise ValueError(f"허용되지 않는 문자가 포함된 slug 입니다: {raw!r}")
 
         # 슬러그 길이 상한 — 파일시스템 안전 + ReDoS 방지
         if len(s) > 64:
-            raise ValueError(
-                f"project slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}..."
-            )
+            raise ValueError(f"project slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}...")
 
         return s
 
@@ -729,9 +715,7 @@ class ProjectExtractor:
         return None
 
     @staticmethod
-    def _parse_existing_project_state(
-        page_content: str, rel_path: Path
-    ) -> ExistingProject | None:
+    def _parse_existing_project_state(page_content: str, rel_path: Path) -> ExistingProject | None:
         """WikiStore.read_page() 결과를 ExistingProject 로 lift.
 
         Args:
@@ -776,9 +760,7 @@ class ProjectExtractor:
 
         # "## 진행 타임라인" 섹션 파싱
         timeline_lines: list[str] = []
-        timeline_section_re = re.compile(
-            r"##\s*진행\s*타임라인\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL
-        )
+        timeline_section_re = re.compile(r"##\s*진행\s*타임라인\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL)
         m = timeline_section_re.search(body)
         if m:
             for line in m.group(1).splitlines():
@@ -788,9 +770,7 @@ class ProjectExtractor:
 
         # "## 미해결 이슈" 섹션 파싱
         issue_lines: list[str] = []
-        issue_section_re = re.compile(
-            r"##\s*미해결\s*이슈\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL
-        )
+        issue_section_re = re.compile(r"##\s*미해결\s*이슈\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL)
         m2 = issue_section_re.search(body)
         if m2:
             for line in m2.group(1).splitlines():
@@ -955,9 +935,7 @@ class ProjectExtractor:
         parts.append("")
 
         # derived "최근 결정사항" — slug 가 일치하는 decisions
-        related_decisions = [
-            d for d in meeting_decisions if project.slug in (d.projects or [])
-        ]
+        related_decisions = [d for d in meeting_decisions if project.slug in (d.projects or [])]
         if related_decisions:
             parts.append("## 이번 회의의 관련 결정 (최근 결정사항 섹션 입력)")
             for d in related_decisions:
@@ -979,9 +957,7 @@ class ProjectExtractor:
         if project.unresolved_issues:
             parts.append("## 신규 미해결 이슈")
             for desc, cit in project.unresolved_issues:
-                parts.append(
-                    f"- {desc} [meeting:{cit.meeting_id}@{cit.timestamp_str}]"
-                )
+                parts.append(f"- {desc} [meeting:{cit.meeting_id}@{cit.timestamp_str}]")
             parts.append("")
 
         # 기존 페이지
@@ -1042,17 +1018,14 @@ class ProjectExtractor:
         merged: list[str] = list(existing)
         if new_entry is not None:
             cit_str = (
-                f"[meeting:{new_entry.citation.meeting_id}"
-                f"@{new_entry.citation.timestamp_str}]"
+                f"[meeting:{new_entry.citation.meeting_id}@{new_entry.citation.timestamp_str}]"
             )
             new_line = f"- {new_entry.entry_date}: {new_entry.description} {cit_str}"
             # 중복 검사 — 두 가지 기준:
             # 1) 동일 citation 마커 (meeting_id@timestamp) 가 이미 있으면 skip (원본 기준).
             # 2) 날짜 + 설명 접두사가 동일한 라인이 있으면 skip (citation 없이 직접 작성된 경우).
             desc_prefix = f"- {new_entry.entry_date}: {new_entry.description}"
-            already = any(
-                cit_str in line or line.startswith(desc_prefix) for line in merged
-            )
+            already = any(cit_str in line or line.startswith(desc_prefix) for line in merged)
             if not already:
                 merged.append(new_line)
         return merged

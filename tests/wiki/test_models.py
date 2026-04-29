@@ -25,24 +25,24 @@ import pytest
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.models import Citation, HealthReport, PageType, WikiPage  # noqa: E402
 
-
 # ════════════════════════════════════════════════════════════════════
 # 1. PageType StrEnum 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestPageType:
     """PageType StrEnum 의 값 존재 여부와 문자열 비교 동작을 검증한다."""
 
     # PRD §4.1 에 정의된 8개 멤버의 (이름, 기대 문자열 값) 목록
     _EXPECTED_MEMBERS = [
-        ("DECISION",     "decision"),
-        ("PERSON",       "person"),
-        ("PROJECT",      "project"),
-        ("TOPIC",        "topic"),
+        ("DECISION", "decision"),
+        ("PERSON", "person"),
+        ("PROJECT", "project"),
+        ("TOPIC", "topic"),
         ("ACTION_ITEMS", "action_items"),
-        ("INDEX",        "index"),
-        ("LOG",          "log"),
-        ("HEALTH",       "health"),
+        ("INDEX", "index"),
+        ("LOG", "log"),
+        ("HEALTH", "health"),
     ]
 
     @pytest.mark.parametrize("member_name, expected_value", _EXPECTED_MEMBERS)
@@ -62,9 +62,7 @@ class TestPageType:
         # Arrange & Act
         members = list(PageType)
         # Assert
-        assert len(members) == 8, (
-            f"PageType 멤버 수가 8개 여야 하나 {len(members)}개임: {members}"
-        )
+        assert len(members) == 8, f"PageType 멤버 수가 8개 여야 하나 {len(members)}개임: {members}"
 
     def test_pageType_json_직렬화에_문자열_값_사용된다(self) -> None:
         """StrEnum 이므로 str() 로 변환 시 값 문자열이 반환된다."""
@@ -76,6 +74,7 @@ class TestPageType:
 # ════════════════════════════════════════════════════════════════════
 # 2. Citation frozen dataclass 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestCitation:
     """Citation frozen dataclass 의 불변성과 timestamp 변환 정확성을 검증한다."""
@@ -95,13 +94,13 @@ class TestCitation:
     @pytest.mark.parametrize(
         "timestamp_str, expected_seconds",
         [
-            ("00:00:00", 0),       # 경계: 0초
-            ("00:00:01", 1),       # 1초
-            ("00:01:00", 60),      # 1분
-            ("00:23:45", 1425),    # PRD 예시 값
-            ("01:00:00", 3600),    # 1시간 정확히
-            ("01:30:30", 5430),    # 1시간 30분 30초
-            ("23:59:59", 86399),   # 최대 유효 값
+            ("00:00:00", 0),  # 경계: 0초
+            ("00:00:01", 1),  # 1초
+            ("00:01:00", 60),  # 1분
+            ("00:23:45", 1425),  # PRD 예시 값
+            ("01:00:00", 3600),  # 1시간 정확히
+            ("01:30:30", 5430),  # 1시간 30분 30초
+            ("23:59:59", 86399),  # 최대 유효 값
         ],
     )
     def test_citation_timestamp_seconds_HH_MM_SS_를_초로_정확히_변환한다(
@@ -139,6 +138,7 @@ class TestCitation:
 # ════════════════════════════════════════════════════════════════════
 # 3. WikiPage 기본값 독립성 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestWikiPage:
     """WikiPage mutable dataclass 의 기본값 팩토리 독립성을 검증한다."""
@@ -183,14 +183,13 @@ class TestWikiPage:
         # Arrange & Act
         page = WikiPage(path=Path("x.md"), page_type=PageType.LOG)
         # Assert
-        assert page.content == "", (
-            f"content 기본값이 '' 여야 하나 {page.content!r} 임"
-        )
+        assert page.content == "", f"content 기본값이 '' 여야 하나 {page.content!r} 임"
 
 
 # ════════════════════════════════════════════════════════════════════
 # 4. HealthReport 기본값 테스트
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestHealthReport:
     """HealthReport frozen dataclass 의 기본값과 citation_pass_rate 범위를 검증한다."""
@@ -203,9 +202,7 @@ class TestHealthReport:
         assert report.contradictions == [], (
             f"contradictions 기본값이 [] 여야 하나 {report.contradictions!r} 임"
         )
-        assert report.orphans == [], (
-            f"orphans 기본값이 [] 여야 하나 {report.orphans!r} 임"
-        )
+        assert report.orphans == [], f"orphans 기본값이 [] 여야 하나 {report.orphans!r} 임"
         assert report.cyclic_links == [], (
             f"cyclic_links 기본값이 [] 여야 하나 {report.cyclic_links!r} 임"
         )

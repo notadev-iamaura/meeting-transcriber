@@ -47,7 +47,6 @@ import traceback as tb_mod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -129,9 +128,7 @@ def _load_utterances(config: Any, meeting_id: str) -> list[Any] | None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "백필: utterances 파일 로드 실패 — %s (%r)", path, exc
-            )
+            logger.warning("백필: utterances 파일 로드 실패 — %s (%r)", path, exc)
             continue
         utterances = data.get("utterances", [])
         if utterances:
@@ -396,12 +393,8 @@ async def backfill(
 
         # ── 3a. 데이터 로드 (utterances + summary) ──────────────────
         try:
-            utterances = await asyncio.to_thread(
-                _load_utterances, config, meeting_id
-            )
-            summary = await asyncio.to_thread(
-                _load_summary, config, meeting_id
-            )
+            utterances = await asyncio.to_thread(_load_utterances, config, meeting_id)
+            summary = await asyncio.to_thread(_load_summary, config, meeting_id)
         except Exception as exc:  # noqa: BLE001
             result.failed += 1
             result.errors.append(
@@ -502,9 +495,7 @@ def _parse_iso_date(value: str) -> date:
     try:
         return datetime.fromisoformat(value).date()
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"날짜 형식 오류 (YYYY-MM-DD 사용): {value}"
-        ) from exc
+        raise argparse.ArgumentTypeError(f"날짜 형식 오류 (YYYY-MM-DD 사용): {value}") from exc
 
 
 def main() -> int:
@@ -559,9 +550,7 @@ def main() -> int:
 
     # 진행 표시 — 단순 stdout.
     def _progress(processed: int, total: int, current: str) -> None:
-        sys.stdout.write(
-            f"\r백필 진행: {processed}/{total} — {current}"
-        )
+        sys.stdout.write(f"\r백필 진행: {processed}/{total} — {current}")
         sys.stdout.flush()
 
     try:

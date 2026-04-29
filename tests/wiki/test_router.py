@@ -24,15 +24,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 # ─── Phase 5 대상 모듈 (아직 미구현 → ImportError Red) ─────────────────────
 from core.wiki.router import (  # type: ignore[import]  # noqa: E402
     QueryRouter,
     RouteDecision,
-    RouterVerdict,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mock — LLM 폴백 전용 (search/chat.py import 금지)
@@ -296,9 +292,7 @@ class TestBothSignals:
         router = QueryRouter(llm=None, enable_llm_fallback=False)
 
         # Act
-        verdict = await router.classify(
-            "지난주 회의에서 정확히 누가 출시 결정이라고 말했어?"
-        )
+        verdict = await router.classify("지난주 회의에서 정확히 누가 출시 결정이라고 말했어?")
 
         # Assert
         assert verdict.decision == RouteDecision.BOTH, (
@@ -341,9 +335,7 @@ class TestLlmFallback:
         assert verdict.decision == RouteDecision.RAG, (
             f"LLM confidence=8 + decision=rag 이면 RAG 여야 하나 {verdict.decision!r}"
         )
-        assert verdict.used_llm is True, (
-            "LLM 폴백이 호출됐으면 used_llm=True 여야 함"
-        )
+        assert verdict.used_llm is True, "LLM 폴백이 호출됐으면 used_llm=True 여야 함"
         assert mock_llm.call_count >= 1, (
             f"MockRouterLLM.generate() 가 호출되지 않음 (call_count={mock_llm.call_count})"
         )

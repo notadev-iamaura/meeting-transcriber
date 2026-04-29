@@ -28,11 +28,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
-
 
 # ─── 헬퍼 ───────────────────────────────────────────────────────────────
 
@@ -81,8 +79,7 @@ class TestStaticImportIsolation:
             module = __import__(module_name, fromlist=["*"])
             source = inspect.getsource(module)
             assert "core.wiki" not in source, (
-                f"{module_name} 가 core.wiki 를 import 하고 있습니다 — "
-                f"RAG 무영향 원칙 위반."
+                f"{module_name} 가 core.wiki 를 import 하고 있습니다 — RAG 무영향 원칙 위반."
             )
 
     def test_search_디렉토리_grep_으로_core_wiki_없음(self) -> None:
@@ -178,8 +175,7 @@ class TestRAGResponsesUnaffectedByWiki:
 
         # wiki disabled vs enabled 시 응답이 byte-level 로 동일해야 한다.
         assert responses_by_state[False] == responses_by_state[True], (
-            "wiki.enabled 토글이 /api/search 응답을 변화시켰습니다. "
-            "RAG 무영향 원칙 위반."
+            "wiki.enabled 토글이 /api/search 응답을 변화시켰습니다. RAG 무영향 원칙 위반."
         )
 
     def test_search_엔진_인스턴스_동일성(self, tmp_path: Path) -> None:

@@ -240,12 +240,16 @@ def _create_wiki_backend(config: Any) -> Any:
         )
         # Ollama 호환 필드 (사용 안 되더라도 create_backend 가 참조)
         model_name: str = compiler_model
-        host: str = getattr(base_llm, "host", "http://127.0.0.1:11434") if base_llm else (
-            "http://127.0.0.1:11434"
+        host: str = (
+            getattr(base_llm, "host", "http://127.0.0.1:11434")
+            if base_llm
+            else ("http://127.0.0.1:11434")
         )
-        temperature: float = getattr(base_llm, "temperature", WIKI_DEFAULT_TEMPERATURE) if (
-            base_llm
-        ) else WIKI_DEFAULT_TEMPERATURE
+        temperature: float = (
+            getattr(base_llm, "temperature", WIKI_DEFAULT_TEMPERATURE)
+            if (base_llm)
+            else WIKI_DEFAULT_TEMPERATURE
+        )
         max_context_tokens: int = (
             getattr(base_llm, "max_context_tokens", 8192) if base_llm else 8192
         )
@@ -337,9 +341,7 @@ class MlxWikiClient:
             import sys
 
             mod = sys.modules[__name__]
-            backend_factory = getattr(
-                mod, "_create_exaone_backend", _create_wiki_backend
-            )
+            backend_factory = getattr(mod, "_create_exaone_backend", _create_wiki_backend)
             return backend_factory(self._config)
 
         return _loader

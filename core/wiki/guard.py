@@ -86,9 +86,7 @@ class InMemoryCitationVerifier:
                 return True
         return False
 
-    async def fetch_utterance(
-        self, meeting_id: str, timestamp_seconds: int
-    ) -> str | None:
+    async def fetch_utterance(self, meeting_id: str, timestamp_seconds: int) -> str | None:
         """매핑된 발화 텍스트 반환."""
         for ts in range(
             timestamp_seconds - self.tolerance_sec,
@@ -139,9 +137,7 @@ class GuardVerdict(NamedTuple):
 
 # `<!-- confidence: 8 -->` 형식 — 공백 허용, 앞뒤 공백 모두 optional
 # `<!--confidence:8-->` 같이 공백 없는 형태도 허용
-_CONFIDENCE_PATTERN: re.Pattern[str] = re.compile(
-    r"<!--\s*confidence\s*:\s*(\d{1,2})\s*-->"
-)
+_CONFIDENCE_PATTERN: re.Pattern[str] = re.compile(r"<!--\s*confidence\s*:\s*(\d{1,2})\s*-->")
 
 
 def extract_confidence(content: str) -> int:
@@ -240,9 +236,7 @@ class WikiGuard:
                 cleaned_content=None,
             )
         except Exception as exc:  # noqa: BLE001 — guard 는 절대 raise 하지 않음
-            logger.error(
-                "D1 처리 중 예상치 못한 오류: page=%s, error=%r", page_path, exc
-            )
+            logger.error("D1 처리 중 예상치 못한 오류: page=%s, error=%r", page_path, exc)
             return GuardVerdict(
                 passed=False,
                 reason="uncited_overflow",

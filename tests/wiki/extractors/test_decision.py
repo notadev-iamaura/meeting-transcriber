@@ -26,18 +26,14 @@ import re
 from dataclasses import fields
 from datetime import date
 
-import pytest
-
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/decision.py 가 없으므로
 # 이 import 블록이 ImportError 를 일으켜 모든 테스트가 Red 상태가 된다.
 # ──────────────────────────────────────────────────────────────────────────────
 from core.wiki.extractors.decision import (  # noqa: E402
-    ActionItemRef,
     DecisionExtractor,
     ExtractedDecision,
 )
-from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # PRD §4.2 results 검증에 사용할 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
 CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
@@ -151,10 +147,7 @@ def _make_utterances(
             _SimpleUtterance("오늘 날씨가 좋네요.", "SPEAKER_00", 0.0, 3.0),
             _SimpleUtterance("네, 산책하기 좋겠어요.", "SPEAKER_01", 3.5, 6.0),
         ]
-    return [
-        _SimpleUtterance(text, speaker, start, end)
-        for text, speaker, start, end in decisions
-    ]
+    return [_SimpleUtterance(text, speaker, start, end) for text, speaker, start, end in decisions]
 
 
 def _make_decision_utterances() -> list[_SimpleUtterance]:
@@ -291,7 +284,7 @@ async def test_extract_여러_결정_3건_동시_반환():
     """
     # Arrange
     three_decisions_json = (
-        '['
+        "["
         '{"title": "출시일 확정", "decision_text": "5/1 출시 [meeting:abc12345@00:10:00]",'
         '"background": "일정 논의 [meeting:abc12345@00:08:00]",'
         '"follow_ups": [], "participants": ["SPEAKER_00"], "projects": [], "confidence": 8},'
@@ -301,7 +294,7 @@ async def test_extract_여러_결정_3건_동시_반환():
         '{"title": "팀장 변경", "decision_text": "영희 팀장 선임 [meeting:abc12345@00:30:00]",'
         '"background": "인사 논의 [meeting:abc12345@00:28:00]",'
         '"follow_ups": [], "participants": ["SPEAKER_00", "SPEAKER_01"], "projects": [], "confidence": 9}'
-        ']'
+        "]"
     )
     mock_llm = MockDecisionLLM(responses=[three_decisions_json])
     extractor = DecisionExtractor(llm=mock_llm)
@@ -393,9 +386,7 @@ def test_extracted_decision_dataclass_필드_존재():
         "citations",
         "confidence",
     }
-    assert required_fields.issubset(field_names), (
-        f"누락된 필드: {required_fields - field_names}"
-    )
+    assert required_fields.issubset(field_names), f"누락된 필드: {required_fields - field_names}"
 
 
 async def test_extracted_decision_slug_filename_safe_문자열():
@@ -545,8 +536,7 @@ async def test_render_pages_인용_마커_포함():
     _, content = pages[0]
     all_citations = CITATION_PATTERN.findall(content)
     assert len(all_citations) >= 1, (
-        f"출력 페이지에 인용 마커 [meeting:id@HH:MM:SS] 가 없음. "
-        f"발견된 인용: {all_citations}"
+        f"출력 페이지에 인용 마커 [meeting:id@HH:MM:SS] 가 없음. 발견된 인용: {all_citations}"
     )
 
 
@@ -562,7 +552,7 @@ async def test_render_pages_기존_페이지_존재_시_supersede_정책():
     """
     # Arrange
     meeting_id = "abc12345"
-    existing_rel_path = f"decisions/2026-04-28-launch-date.md"
+    existing_rel_path = "decisions/2026-04-28-launch-date.md"
     original_created_at = "2026-04-20T09:00:00+09:00"
     existing_content = (
         "---\n"
@@ -670,8 +660,7 @@ async def test_render_pages_confidence_마커_포함():
     _, content = pages[0]
     confidence_pattern = re.compile(r"<!--\s*confidence:\s*\d{1,2}\s*-->")
     assert confidence_pattern.search(content), (
-        f"출력 페이지에 '<!-- confidence: N -->' 마커가 없음. "
-        f"D3 검증을 위해 필수."
+        "출력 페이지에 '<!-- confidence: N -->' 마커가 없음. D3 검증을 위해 필수."
     )
 
 

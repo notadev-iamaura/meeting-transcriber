@@ -33,11 +33,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # 헬퍼
@@ -388,12 +386,8 @@ class TestRouterAmbiguousQueryFallback:
         from core.wiki.router import QueryRouter
 
         # Arrange — confidence=3 (< 7) 이므로 fallback 트리거
-        mock_llm_response = (
-            '{"decision": "wiki", "confidence": 3, "reason": "확신 낮음"}'
-        )
-        mock_llm = MockWikiLLMClient(
-            responses=[MockResponse(body=mock_llm_response)]
-        )
+        mock_llm_response = '{"decision": "wiki", "confidence": 3, "reason": "확신 낮음"}'
+        mock_llm = MockWikiLLMClient(responses=[MockResponse(body=mock_llm_response)])
 
         chat_response = _make_chat_response_mock(
             answer="모호한 질문에 대한 RAG 답변", references=[]

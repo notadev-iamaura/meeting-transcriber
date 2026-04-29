@@ -32,9 +32,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
-
-import pytest
 
 # ─── Phase 5 대상 모듈 (아직 미구현 → ImportError Red) ─────────────────────
 from core.wiki.chat_integration import (  # type: ignore[import]  # noqa: E402
@@ -44,12 +41,10 @@ from core.wiki.chat_integration import (  # type: ignore[import]  # noqa: E402
 
 # ─── Phase 1+2+3+4 실제 구현 (변경 금지) ────────────────────────────────────
 from core.wiki.router import (  # type: ignore[import]
-    QueryRouter,
     RouteDecision,
     RouterVerdict,
 )
 from core.wiki.store import WikiStore
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mock 정의
@@ -306,12 +301,8 @@ class TestHybridChatServiceWikiRouting:
         assert result.source_type == "wiki", (
             f"WIKI 결정 시 source_type='wiki' 여야 하나 '{result.source_type}'"
         )
-        assert result.wiki_answer is not None, (
-            "WIKI 분기에서 wiki_answer 가 None 이 아니어야 함"
-        )
-        assert isinstance(result.wiki_sources, list), (
-            "wiki_sources 가 list 여야 함"
-        )
+        assert result.wiki_answer is not None, "WIKI 분기에서 wiki_answer 가 None 이 아니어야 함"
+        assert isinstance(result.wiki_sources, list), "wiki_sources 가 list 여야 함"
         assert mock_chat.call_count == 0, (
             f"WIKI 분기에서 chat_service 는 호출되지 않아야 하나 {mock_chat.call_count}회 호출됨"
         )

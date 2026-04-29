@@ -198,8 +198,7 @@ class WikiCompiler:
             # summary 가 비어있으면 안전하게 dry_run 폴백 (8단계 실패 시).
             if not summary:
                 logger.warning(
-                    "wiki.dry_run=False 이지만 summary 가 비어있음 → "
-                    "dry_run 폴백 (meeting_id=%s)",
+                    "wiki.dry_run=False 이지만 summary 가 비어있음 → dry_run 폴백 (meeting_id=%s)",
                     meeting_id,
                 )
                 return await self._run_dry_run(store, meeting_id)
@@ -220,9 +219,7 @@ class WikiCompiler:
                 exc.reason,
                 exc.detail or exc,
             )
-            raise PipelineError(
-                f"wiki 컴파일 실패 ({exc.reason}): {exc.detail or exc}"
-            ) from exc
+            raise PipelineError(f"wiki 컴파일 실패 ({exc.reason}): {exc.detail or exc}") from exc
 
     async def _run_v2(
         self,
@@ -282,9 +279,7 @@ class WikiCompiler:
                 "pages_pending": list(getattr(result, "pages_pending", []) or []),
                 "pages_rejected": list(getattr(result, "pages_rejected", []) or []),
                 "commit_sha": getattr(result, "commit_sha", "") or "",
-                "duration_seconds": float(
-                    getattr(result, "duration_seconds", 0.0) or 0.0
-                ),
+                "duration_seconds": float(getattr(result, "duration_seconds", 0.0) or 0.0),
             }
         except Exception as exc:
             logger.error(
@@ -324,9 +319,7 @@ class WikiCompiler:
         store.write_page(Path("log.md"), new_text)
 
         # git 커밋
-        commit_sha = store.git_commit_atomic(
-            f"기능: dry-run ingest {meeting_id}"
-        )
+        commit_sha = store.git_commit_atomic(f"기능: dry-run ingest {meeting_id}")
         logger.info(
             "wiki dry-run 완료: meeting_id=%s, commit=%s",
             meeting_id,
