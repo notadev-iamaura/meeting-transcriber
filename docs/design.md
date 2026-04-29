@@ -124,6 +124,10 @@ button {
 
 --border: #D1D1D6;          /* macOS separator */
 --border-light: #E5E5EA;
+
+/* 포커스 링 (T-201 / §1.4 Keyboard-First) — 2-stop ring 패턴 */
+--focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+--focus-ring-soft: 0 0 0 3px rgba(0, 122, 255, 0.15);
 ```
 
 #### Dark (큰 톤 격차)
@@ -144,6 +148,10 @@ button {
 --accent: #0A84FF;
 --accent-text: #4DA1FF;     /* 본문 텍스트용 (WCAG AA 6.37:1 on #1C1C1E) */
 --border: #38383A;
+
+/* 포커스 링 (T-201 / §1.4 Keyboard-First) — 2-stop ring 패턴 */
+--focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+--focus-ring-soft: 0 0 0 3px rgba(10, 132, 255, 0.20);
 ```
 
 ### 2.3 스페이싱

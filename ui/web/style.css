@@ -54,6 +54,12 @@
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
 
+  /* 포커스 링 토큰 (T-201 / docs/design.md §1.4 Keyboard-First)
+     2-stop ring: 1px 캔버스 색으로 안쪽 spacer + 3px accent ring.
+     입력 필드는 --focus-ring-soft (3px tinted) 사용. */
+  --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+  --focus-ring-soft: 0 0 0 3px rgba(0, 122, 255, 0.15);
+
   /* 레이아웃 토큰 */
   --radius: 6px;
   --radius-lg: 10px;
@@ -177,6 +183,10 @@
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
 
+    /* 포커스 링 토큰 (T-201) — 다크 모드는 alpha 약간 키움 */
+    --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+    --focus-ring-soft: 0 0 0 3px rgba(10, 132, 255, 0.20);
+
     --highlight-bg: rgba(255, 214, 10, 0.15);
     --highlight-border: #FFD60A;
 
@@ -217,6 +227,10 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* 포커스 링 토큰 (T-201) — 다크 모드는 alpha 약간 키움 */
+  --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+  --focus-ring-soft: 0 0 0 3px rgba(10, 132, 255, 0.20);
 
   --highlight-bg: rgba(255, 214, 10, 0.15);
   --highlight-border: #FFD60A;
@@ -3829,24 +3843,43 @@ button {
    15. 접근성 (Accessibility)
    ══════════════════════════════════════════ */
 
-/* 키보드 포커스 링 */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
+/* ── focus-visible 일관 토큰 (T-201 / docs/design.md §1.4 Keyboard-First) ──
+   :where() selector specificity 0 — 컴포넌트별 override 가 항상 우선.
+   2-stop ring: 1px 캔버스 spacer + 3px accent ring 으로 어떤 배경 위에서도
+   링이 컴포넌트와 분리되어 보이도록 함. 입력 필드는 컴포넌트별 box-shadow
+   (--focus-ring-soft) 가 별도 정의되어 있어 본 룰의 outline 만 제거하면 됨. */
+:where(
+  button,
+  a,
+  input,
+  textarea,
+  select,
+  [role="button"],
+  [role="option"],
+  [tabindex]
+):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius);
 }
 
-/* 입력 필드는 자체 포커스 스타일 사용 */
-.search-input:focus-visible,
-.sidebar-search:focus-visible,
-.filter-input:focus-visible,
-.chat-input:focus-visible,
-.search-bar-input:focus-visible,
-.controls-select:focus-visible,
-.sort-select:focus-visible,
-.list-search input:focus-visible,
-.list-sort select:focus-visible {
-  outline: none;
+/* forced-colors 모드 fallback — Windows 고대비/시스템 강제 색상 환경에서
+   box-shadow 가 무시되므로 system color outline 으로 대체. */
+@media (forced-colors: active) {
+  :where(
+    button,
+    a,
+    input,
+    textarea,
+    select,
+    [role="button"],
+    [role="option"],
+    [tabindex]
+  ):focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
 }
 
 /* 스크린 리더 전용 */
