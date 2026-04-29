@@ -5117,3 +5117,361 @@ async def search_wiki(
     results = [item[1] for item in candidates[:limit]]
 
     return WikiSearchResponse(results=results, total=len(results), query=q)
+
+
+# === LLM Wiki Phase 4.E 엔드포인트 — 백필 (PRD §7.1, §9 Phase 4) =========
+#
+# 백필은 long-running 작업이라 동기 API 가 부적합하다. POST 로 작업을 등록
+# 하면 백그라운드 태스크가 실행되며 즉시 job_id 를 반환한다. GET 으로 진행
+# 상태를 조회하고 cancel 엔드포인트로 중단 가능.
+#
+# 작업 추적은 in-memory ProgressTracker (dict) 로 단순화 — 서버 재시작 시
+# 작업이 사라진다는 단점은 있으나, 백필은 사용자 명시 호출 시점에만 실행
+# 되므로 운영상 충분하다 (영속화는 필요 시 Phase 5 에서 SQLite 통합).
+
+
+# 백필 작업 추적용 in-memory 레지스트리.
+# {job_id: {"status": str, "result": BackfillResult|None, "task": asyncio.Task|None,
+#           "cancel_event": asyncio.Event, "started_at": str, "current_meeting_id": str|None,
+#           "processed": int, "total": int}}
+_wiki_backfill_jobs: dict[str, dict[str, Any]] = {}
+_wiki_backfill_lock = threading.Lock()
+
+
+class WikiBackfillRequest(BaseModel):
+    """POST /api/wiki/backfill 요청 스키마.
+
+    Attributes:
+        since: ISO 날짜 문자열 (예: "2026-04-01"). 지정 시 이 날짜 이후 회의만.
+        until: ISO 날짜 문자열. 지정 시 이 날짜 이전(포함) 회의만.
+        meeting_ids: 명시적 회의 ID 목록. 지정 시 since/until 무시.
+        dry_run: True 면 실제 컴파일 없이 대상 회의 수만 계산.
+    """
+
+    since: str | None = Field(
+        default=None,
+        description="ISO 날짜 (포함), 예: 2026-04-01.",
+    )
+    until: str | None = Field(
+        default=None,
+        description="ISO 날짜 (포함), 예: 2026-04-29.",
+    )
+    meeting_ids: list[str] | None = Field(
+        default=None,
+        description="명시적 회의 ID 목록. since/until 우선.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="True 면 컴파일 호출 없이 목록만 시뮬레이션.",
+    )
+
+
+class WikiBackfillStartedResponse(BaseModel):
+    """POST /api/wiki/backfill 응답 스키마.
+
+    Attributes:
+        job_id: 백필 작업 식별자 (UUID 문자열).
+        started_at: ISO8601 시작 시각.
+        message: 사람이 읽는 안내 메시지 (한국어).
+    """
+
+    job_id: str
+    started_at: str
+    message: str
+
+
+class WikiBackfillErrorItem(BaseModel):
+    """백필 오류 1건 — BackfillError 직렬화."""
+
+    meeting_id: str
+    error_type: str
+    message: str
+
+
+class WikiBackfillStatusResponse(BaseModel):
+    """GET /api/wiki/backfill/{job_id} 응답 스키마.
+
+    Attributes:
+        job_id: 작업 식별자.
+        status: "running" | "completed" | "failed" | "cancelled".
+        processed: 현재까지 처리된 회의 수.
+        total: 전체 대상 회의 수.
+        current_meeting_id: 현재 처리 중인 회의 ID (없으면 None).
+        succeeded: 성공한 회의 수.
+        skipped: 건너뛴 회의 수.
+        failed: 실패한 회의 수.
+        errors: 실패 항목 리스트.
+        started_at: 시작 시각 (ISO8601).
+        finished_at: 종료 시각 (ISO8601). 진행 중이면 None.
+        duration_seconds: 경과 시간. 진행 중이면 None.
+    """
+
+    job_id: str
+    status: str
+    processed: int = 0
+    total: int = 0
+    current_meeting_id: str | None = None
+    succeeded: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[WikiBackfillErrorItem] = Field(default_factory=list)
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float | None = None
+
+
+def _get_raw_job_queue(request: Request) -> Any:
+    """app.state.job_queue 에서 동기 JobQueue (queue 속성) 를 추출한다.
+
+    Returns:
+        ``core.job_queue.JobQueue`` 인스턴스.
+
+    Raises:
+        HTTPException: job_queue 가 초기화되지 않았을 때 (503).
+    """
+    async_queue = getattr(request.app.state, "job_queue", None)
+    if async_queue is None:
+        raise HTTPException(
+            status_code=503,
+            detail="작업 큐가 초기화되지 않았습니다.",
+        )
+    # AsyncJobQueue 는 .queue 속성으로 동기 인스턴스를 노출한다.
+    raw_queue = getattr(async_queue, "queue", async_queue)
+    return raw_queue
+
+
+@router.post(
+    "/wiki/backfill",
+    response_model=WikiBackfillStartedResponse,
+    status_code=202,
+    summary="기존 회의 일괄 위키화 시작",
+    description=(
+        "Phase 4.E 백필 — wiki.enabled=False 시기의 회의들을 일괄 컴파일한다. "
+        "백그라운드 태스크로 실행되며 즉시 job_id 반환. "
+        "GET /api/wiki/backfill/{job_id} 로 진행 조회."
+    ),
+)
+async def start_wiki_backfill(
+    request: Request,
+    body: WikiBackfillRequest,
+) -> WikiBackfillStartedResponse:
+    """백필 작업을 백그라운드 태스크로 시작한다.
+
+    Args:
+        request: FastAPI Request — app.state.job_queue 접근용.
+        body: 요청 파라미터.
+
+    Returns:
+        WikiBackfillStartedResponse — job_id 와 시작 시각.
+
+    Raises:
+        HTTPException(400): since/until 파싱 실패.
+        HTTPException(503): job_queue 미초기화.
+    """
+    import uuid as _uuid
+
+    # Lazy import — 백필 모듈 의존성을 wiki 비활성 환경에 노출하지 않음.
+    from scripts import backfill_wiki as _backfill_module  # noqa: PLC0415
+
+    config = _get_config(request)
+    raw_queue = _get_raw_job_queue(request)
+
+    # since / until 파싱 — 잘못된 형식은 400.
+    since_date: Any = None
+    until_date: Any = None
+    if body.since:
+        try:
+            since_date = _backfill_module._parse_iso_date(body.since)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400,
+                detail=f"since 형식 오류 (YYYY-MM-DD 사용): {body.since}",
+            ) from exc
+    if body.until:
+        try:
+            until_date = _backfill_module._parse_iso_date(body.until)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400,
+                detail=f"until 형식 오류 (YYYY-MM-DD 사용): {body.until}",
+            ) from exc
+
+    job_id = _uuid.uuid4().hex[:16]
+    cancel_event = asyncio.Event()
+    from datetime import datetime as _dt
+
+    started_at = _dt.now().isoformat()
+
+    # 작업 상태 슬롯 등록.
+    job_state: dict[str, Any] = {
+        "status": "running",
+        "result": None,
+        "task": None,
+        "cancel_event": cancel_event,
+        "started_at": started_at,
+        "finished_at": None,
+        "current_meeting_id": None,
+        "processed": 0,
+        "total": 0,
+    }
+    with _wiki_backfill_lock:
+        _wiki_backfill_jobs[job_id] = job_state
+
+    def _progress_cb(processed: int, total: int, current: str) -> None:
+        # 동시 접근은 dict 단위로 안전하지만, 명시적 락으로 일관성 보장.
+        with _wiki_backfill_lock:
+            job_state["processed"] = processed
+            job_state["total"] = total
+            job_state["current_meeting_id"] = current
+
+    async def _run_backfill() -> None:
+        """백그라운드에서 backfill 호출 후 결과를 job_state 에 저장."""
+        try:
+            # _backfill_module.backfill 을 직접 호출 (테스트가 monkeypatch 가능).
+            result = await _backfill_module.backfill(
+                config=config,
+                job_queue=raw_queue,
+                since=since_date,
+                until=until_date,
+                meeting_ids=body.meeting_ids,
+                dry_run=body.dry_run,
+                progress_callback=_progress_cb,
+                cancel_event=cancel_event,
+            )
+            with _wiki_backfill_lock:
+                job_state["result"] = result
+                if cancel_event.is_set():
+                    job_state["status"] = "cancelled"
+                elif result.failed > 0 and result.succeeded == 0 and result.total > 0:
+                    job_state["status"] = "failed"
+                else:
+                    job_state["status"] = "completed"
+                job_state["finished_at"] = _dt.now().isoformat()
+        except Exception as exc:  # noqa: BLE001 — 백그라운드 미처리 예외 격리.
+            logger.error("백필 백그라운드 실패: job_id=%s, %r", job_id, exc)
+            with _wiki_backfill_lock:
+                job_state["status"] = "failed"
+                job_state["finished_at"] = _dt.now().isoformat()
+
+    task = asyncio.create_task(_run_backfill(), name=f"wiki_backfill_{job_id}")
+    task.add_done_callback(_log_task_exception)
+    job_state["task"] = task
+
+    return WikiBackfillStartedResponse(
+        job_id=job_id,
+        started_at=started_at,
+        message=(
+            "백필 작업을 시작했습니다. "
+            f"GET /api/wiki/backfill/{job_id} 로 진행을 확인하세요."
+        ),
+    )
+
+
+@router.get(
+    "/wiki/backfill/{job_id}",
+    response_model=WikiBackfillStatusResponse,
+    summary="백필 작업 진행 조회",
+    description="등록된 백필 작업의 현재 진행 상태와 결과를 조회한다.",
+)
+async def get_wiki_backfill_status(
+    request: Request,
+    job_id: str,
+) -> WikiBackfillStatusResponse:
+    """백필 작업의 현재 상태를 반환한다.
+
+    Args:
+        request: FastAPI Request.
+        job_id: 백필 작업 식별자.
+
+    Returns:
+        WikiBackfillStatusResponse.
+
+    Raises:
+        HTTPException(404): 등록되지 않은 job_id.
+    """
+    with _wiki_backfill_lock:
+        state = _wiki_backfill_jobs.get(job_id)
+        if state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"백필 작업을 찾을 수 없습니다: {job_id}",
+            )
+        # 스냅샷 (락 안에서 dict 복사).
+        snapshot = dict(state)
+
+    result = snapshot.get("result")
+    errors_serialized: list[WikiBackfillErrorItem] = []
+    duration: float | None = None
+    succeeded = 0
+    skipped = 0
+    failed = 0
+    total = snapshot.get("total", 0)
+
+    if result is not None:
+        # BackfillResult 직렬화.
+        succeeded = getattr(result, "succeeded", 0)
+        skipped = getattr(result, "skipped", 0)
+        failed = getattr(result, "failed", 0)
+        total = getattr(result, "total", total)
+        duration = getattr(result, "duration_seconds", None)
+        for err in getattr(result, "errors", []) or []:
+            errors_serialized.append(
+                WikiBackfillErrorItem(
+                    meeting_id=getattr(err, "meeting_id", ""),
+                    error_type=getattr(err, "error_type", "unknown"),
+                    message=getattr(err, "message", ""),
+                )
+            )
+
+    return WikiBackfillStatusResponse(
+        job_id=job_id,
+        status=snapshot.get("status", "running"),
+        processed=snapshot.get("processed", 0),
+        total=total,
+        current_meeting_id=snapshot.get("current_meeting_id"),
+        succeeded=succeeded,
+        skipped=skipped,
+        failed=failed,
+        errors=errors_serialized,
+        started_at=snapshot.get("started_at"),
+        finished_at=snapshot.get("finished_at"),
+        duration_seconds=duration,
+    )
+
+
+@router.post(
+    "/wiki/backfill/{job_id}/cancel",
+    summary="백필 작업 취소",
+    description=(
+        "실행 중인 백필 작업의 cancel_event 를 set 한다. "
+        "현재 처리 중인 회의가 끝난 직후 중단되며, 이후 회의는 처리되지 않는다."
+    ),
+)
+async def cancel_wiki_backfill(
+    request: Request,
+    job_id: str,
+) -> dict[str, str]:
+    """백필 작업에 취소 신호를 전송한다.
+
+    Args:
+        request: FastAPI Request.
+        job_id: 백필 작업 식별자.
+
+    Returns:
+        {"job_id": ..., "status": "cancelling"} 형태의 응답.
+
+    Raises:
+        HTTPException(404): 등록되지 않은 job_id.
+    """
+    with _wiki_backfill_lock:
+        state = _wiki_backfill_jobs.get(job_id)
+        if state is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"백필 작업을 찾을 수 없습니다: {job_id}",
+            )
+        cancel_event: asyncio.Event = state["cancel_event"]
+
+    cancel_event.set()
+    logger.info("백필 취소 신호 전송: job_id=%s", job_id)
+    return {"job_id": job_id, "status": "cancelling"}
