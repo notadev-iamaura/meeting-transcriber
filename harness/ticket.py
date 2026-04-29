@@ -9,6 +9,7 @@ Wave 2 는 T-201, ... , Wave 3 은 T-301, ...
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.2, §4.4
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,13 @@ class Ticket:
 
 # 허용된 status 값 (db.py 의 CHECK 제약과 일치).
 _VALID_STATUSES = {
-    "pending", "design", "red", "green", "refactor", "merged", "closed",
+    "pending",
+    "design",
+    "red",
+    "green",
+    "refactor",
+    "merged",
+    "closed",
 }
 
 
@@ -57,7 +64,7 @@ def _next_ticket_id(conn: sqlite3.Connection, wave: int) -> str:
     ).fetchone()
     if row is None:
         return f"{prefix}01"
-    last_n = int(row["id"][len(prefix):])
+    last_n = int(row["id"][len(prefix) :])
     return f"{prefix}{last_n + 1:02d}"
 
 
@@ -88,8 +95,13 @@ def open_ticket(conn: sqlite3.Connection, *, wave: int, component: str) -> Ticke
     _emit_event(conn, ticket_id, "ticket.opened", {"wave": wave, "component": component})
     conn.commit()
     return Ticket(
-        id=ticket_id, wave=wave, component=component, status="pending",
-        pr_number=None, created_at=now, updated_at=now,
+        id=ticket_id,
+        wave=wave,
+        component=component,
+        status="pending",
+        pr_number=None,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -97,7 +109,8 @@ def get_ticket(conn: sqlite3.Connection, ticket_id: str) -> Ticket | None:
     """id 로 한 건 조회. 없으면 None."""
     row = conn.execute(
         "SELECT id, wave, component, status, pr_number, created_at, updated_at "
-        "FROM tickets WHERE id = ?", (ticket_id,),
+        "FROM tickets WHERE id = ?",
+        (ticket_id,),
     ).fetchone()
     if row is None:
         return None
@@ -147,7 +160,9 @@ def update_status(conn: sqlite3.Connection, ticket_id: str, new_status: str) -> 
         (new_status, now, ticket_id),
     )
     _emit_event(
-        conn, ticket_id, "status.changed",
+        conn,
+        ticket_id,
+        "status.changed",
         {"from": current.status, "to": new_status},
     )
     conn.commit()

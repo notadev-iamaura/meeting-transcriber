@@ -1,4 +1,5 @@
 """harness.db — 스키마 초기화·연결 헬퍼 단위 테스트."""
+
 from __future__ import annotations
 
 import sqlite3

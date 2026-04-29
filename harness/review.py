@@ -10,6 +10,7 @@
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.3.1
 """
+
 from __future__ import annotations
 
 import json
@@ -64,15 +65,12 @@ def record(
     conn.commit()
 
 
-def latest_status(
-    conn: sqlite3.Connection, *, ticket_id: str, kind: str
-) -> str | None:
+def latest_status(conn: sqlite3.Connection, *, ticket_id: str, kind: str) -> str | None:
     """주어진 kind 의 가장 최근 status 를 반환. 이벤트가 없으면 None."""
     if kind not in VALID_KINDS:
         raise ValueError(f"kind must be one of {VALID_KINDS}, got {kind!r}")
     row = conn.execute(
-        "SELECT payload FROM events WHERE ticket_id = ? AND type = ? "
-        "ORDER BY id DESC LIMIT 1",
+        "SELECT payload FROM events WHERE ticket_id = ? AND type = ? ORDER BY id DESC LIMIT 1",
         (ticket_id, f"review.{kind}"),
     ).fetchone()
     if row is None:

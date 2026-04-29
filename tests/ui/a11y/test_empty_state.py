@@ -17,6 +17,7 @@ Red 의도성:
     으로 명시됨. 본 시나리오는 axe 의 정확한 결과를 그대로 보고 — 결과를
     숨기지 않는다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -30,9 +31,7 @@ from harness.a11y import DEFAULT_RULESET
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html").as_uri()
 
 
 def test_empty_state_no_axe_violations(page: Page) -> None:
@@ -56,12 +55,9 @@ def test_empty_state_no_axe_violations(page: Page) -> None:
         },
     )
     violations = results.response.get("violations", [])
-    assert violations == [], (
-        "a11y violations found:\n"
-        + "\n".join(
-            f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
-            for v in violations
-        )
+    assert violations == [], "a11y violations found:\n" + "\n".join(
+        f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+        for v in violations
     )
 
 
@@ -88,6 +84,4 @@ def test_empty_state_decorative_icons_aria_hidden(page: Page) -> None:
     assert count == 3, f"icon 셀렉터가 3 개를 찾아야 함, 실제={count}"
     for i in range(count):
         attr = icons.nth(i).get_attribute("aria-hidden")
-        assert attr == "true", (
-            f"icon[{i}] aria-hidden='{attr}' (요구: 'true')"
-        )
+        assert attr == "true", f"icon[{i}] aria-hidden='{attr}' (요구: 'true')"

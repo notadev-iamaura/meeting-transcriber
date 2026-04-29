@@ -14,6 +14,7 @@
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.5, §4.3.1
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +48,7 @@ def _connect():
 
 # ----- ticket 서브명령 -----
 
+
 def _cmd_ticket_open(args: argparse.Namespace) -> int:
     """`harness ticket open --wave N --component X` — 신규 티켓 발급."""
     conn = _connect()
@@ -75,15 +77,21 @@ def _cmd_ticket_show(args: argparse.Namespace) -> int:
     if t is None:
         print(f"ticket not found: {args.ticket_id}", file=sys.stderr)
         return 1
-    print(json.dumps(
-        {
-            "id": t.id, "wave": t.wave, "component": t.component,
-            "status": t.status, "pr_number": t.pr_number,
-            "created_at": t.created_at, "updated_at": t.updated_at,
-        },
-        indent=2,
-        ensure_ascii=False,
-    ))
+    print(
+        json.dumps(
+            {
+                "id": t.id,
+                "wave": t.wave,
+                "component": t.component,
+                "status": t.status,
+                "pr_number": t.pr_number,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -97,6 +105,7 @@ def _cmd_ticket_close(args: argparse.Namespace) -> int:
 
 # ----- gate 서브명령 -----
 
+
 def _cmd_gate_run(args: argparse.Namespace) -> int:
     """`harness gate run T-XXX --phase red|green` — 3축 게이트 1회 실행."""
     conn = _connect()
@@ -109,6 +118,7 @@ def _cmd_gate_run(args: argparse.Namespace) -> int:
 
 
 # ----- review 서브명령 -----
+
 
 def _cmd_review_record(args: argparse.Namespace) -> int:
     """`harness review record --ticket T-XXX --agent X --kind K --status S [--note]`."""
@@ -136,6 +146,7 @@ def _cmd_review_status(args: argparse.Namespace) -> int:
 
 
 # ----- board 서브명령 -----
+
 
 def _cmd_board_rebuild(args: argparse.Namespace) -> int:
     """`harness board rebuild` — 마크다운 보드 재생성."""
@@ -187,13 +198,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     r_record = r_sub.add_parser("record", help="리뷰 이벤트 기록")
     r_record.add_argument("--ticket", required=True)
-    r_record.add_argument("--agent", required=True,
-                          help="예: designer-b, qa-a, pm-b")
-    r_record.add_argument("--kind", required=True,
-                          choices=["self-check", "peer-review",
-                                   "merge-proposal", "merge-final"])
-    r_record.add_argument("--status", required=True,
-                          choices=["approved", "changes_requested", "pending"])
+    r_record.add_argument("--agent", required=True, help="예: designer-b, qa-a, pm-b")
+    r_record.add_argument(
+        "--kind",
+        required=True,
+        choices=["self-check", "peer-review", "merge-proposal", "merge-final"],
+    )
+    r_record.add_argument(
+        "--status", required=True, choices=["approved", "changes_requested", "pending"]
+    )
     r_record.add_argument("--note", default=None)
     r_record.set_defaults(func=_cmd_review_record)
 

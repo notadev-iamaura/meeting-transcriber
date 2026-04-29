@@ -59,6 +59,14 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Playwright 브라우저 설치
+        # tests/ui/ 의 a11y/behavior/visual 테스트가 chromium 헤드리스
+        # 셸을 요구한다. 이 단계 누락 시 첫 Playwright 테스트가
+        # `BrowserType.launch: Executable doesn't exist` 로 전체 잡 실패.
+        # `pyproject.toml` 의 `addopts = "-m 'not e2e'"` 로 무거운 e2e 마커는
+        # 기본 실행에서 제외되므로, 여기서는 chromium 헤드리스 셸만 설치하면 충분.
+        run: playwright install chromium
+
       - name: 단위 테스트 실행
         run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
 

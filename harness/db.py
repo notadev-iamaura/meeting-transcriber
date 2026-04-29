@@ -5,6 +5,7 @@
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.2
 """
+
 from __future__ import annotations
 
 import sqlite3

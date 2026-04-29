@@ -7,6 +7,7 @@ Wave 별 그룹핑 + 상태 이모지 + 최근 게이트 요약 + 리뷰 상태 
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.5
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -43,8 +44,10 @@ def _latest_gate_summary(conn: sqlite3.Connection, ticket_id: str) -> str:
     ).fetchone()
     if row is None:
         return "—"
+
     def m(v: int) -> str:
         return "✓" if v else "✗"
+
     return (
         f"{row['phase']}: V{m(row['visual_pass'])} "
         f"B{m(row['behavior_pass'])} A{m(row['a11y_pass'])}"
@@ -76,8 +79,7 @@ def render_overview(conn: sqlite3.Connection) -> str:
         lines.append(f"## {WAVE_TITLES[wave]}")
         lines.append("")
         rows = conn.execute(
-            "SELECT id, component, status, pr_number FROM tickets "
-            "WHERE wave = ? ORDER BY id",
+            "SELECT id, component, status, pr_number FROM tickets WHERE wave = ? ORDER BY id",
             (wave,),
         ).fetchall()
         if not rows:

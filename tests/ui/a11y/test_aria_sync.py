@@ -9,6 +9,7 @@ Red 의도성:
         - role="option" 의 부모는 listbox/group 필수 (aria-required-parent)
         - role 별 허용 ARIA 속성 외 사용 차단 (aria-allowed-attr)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,9 +23,7 @@ from harness.a11y import DEFAULT_RULESET
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html").as_uri()
 
 
 def test_aria_sync_no_axe_violations(page: Page) -> None:
@@ -44,13 +43,9 @@ def test_aria_sync_no_axe_violations(page: Page) -> None:
         },
     )
     violations = results.response.get("violations", [])
-    assert violations == [], (
-        "a11y violations found:\n"
-        + "\n".join(
-            f"  - {v['id']} ({v['impact']}): {v['help']}\n"
-            f"    nodes: {len(v.get('nodes', []))}"
-            for v in violations
-        )
+    assert violations == [], "a11y violations found:\n" + "\n".join(
+        f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+        for v in violations
     )
 
 

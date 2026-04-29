@@ -11,6 +11,7 @@ phase='red' 는 Producer 산출물 직후 실행되므로 review 강제 안 함.
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.4, §4.5, §4.3.1
 """
+
 from __future__ import annotations
 
 import shlex
@@ -107,9 +108,7 @@ def _run_behavior_axis(ticket_id: str, component: str) -> AxisResult:
     """tests/ui/behavior/test_{component}.py 를 실행. 파일 미존재 시 GateMisconfigured."""
     test_file = Path(f"tests/ui/behavior/test_{_component_to_filename(component)}.py")
     if not test_file.exists():
-        raise GateMisconfigured(
-            f"behavior test missing for component {component!r}: {test_file}."
-        )
+        raise GateMisconfigured(f"behavior test missing for component {component!r}: {test_file}.")
     passed, log = _run_pytest(str(test_file), ticket_id)
     return AxisResult(passed=passed, detail_path=log)
 
@@ -118,9 +117,7 @@ def _run_a11y_axis(ticket_id: str, component: str) -> AxisResult:
     """tests/ui/a11y/test_{component}.py 를 실행. 파일 미존재 시 GateMisconfigured."""
     test_file = Path(f"tests/ui/a11y/test_{_component_to_filename(component)}.py")
     if not test_file.exists():
-        raise GateMisconfigured(
-            f"a11y test missing for component {component!r}: {test_file}."
-        )
+        raise GateMisconfigured(f"a11y test missing for component {component!r}: {test_file}.")
     passed, log = _run_pytest(str(test_file), ticket_id)
     return AxisResult(passed=passed, detail_path=log)
 
@@ -172,8 +169,11 @@ def run_gate(
         "    visual_diff, behavior_log, a11y_violations, created_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            ticket_id, phase,
-            int(visual.passed), int(behavior.passed), int(a11y.passed),
+            ticket_id,
+            phase,
+            int(visual.passed),
+            int(behavior.passed),
+            int(a11y.passed),
             str(visual.detail_path) if visual.detail_path else None,
             str(behavior.detail_path) if behavior.detail_path else None,
             str(a11y.detail_path) if a11y.detail_path else None,

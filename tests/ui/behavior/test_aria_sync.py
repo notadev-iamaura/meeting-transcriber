@@ -6,6 +6,7 @@
     3. aria-expanded="true" 인 버튼의 aria-controls 패널이 보임
     4. role="option" 의 부모가 role="listbox" (axe aria-required-parent 룰)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,9 +17,7 @@ from playwright.sync_api import Page, expect
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "aria-sync-preview.html").as_uri()
 
 
 def test_listbox_has_exactly_one_selected_option(page: Page) -> None:
@@ -52,9 +51,7 @@ def test_listbox_role_required_parent(page: Page) -> None:
     count = options.count()
     assert count > 0, "fixture 에 role=option 이 하나도 없음"
     for i in range(count):
-        parent_role = options.nth(i).evaluate(
-            "el => el.parentElement.getAttribute('role')"
-        )
+        parent_role = options.nth(i).evaluate("el => el.parentElement.getAttribute('role')")
         assert parent_role == "listbox", (
             f"option {i} 의 부모가 listbox 가 아님 (got: {parent_role!r})"
         )

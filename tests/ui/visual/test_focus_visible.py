@@ -25,6 +25,7 @@ Red 의도성:
     mockup §2.1 룰로 마이그레이션한 뒤, fixture 의 인라인 <style> 를
     제거해도 같은 렌더링이 나오면 시각 계약이 유지된다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,9 +40,7 @@ pytestmark = [pytest.mark.ui]
 
 # 프로젝트 루트 — tests/ui/visual/test_focus_visible.py 기준 3 단계 위.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "focus-visible-preview.html").as_uri()
 ACTUAL_DIR = PROJECT_ROOT / "tests" / "ui" / "visual" / "_actual"
 
 # Designer-A baseline 이 DPR=2 (Retina) 로 캡처되어 있어 동일 DPR 강제.

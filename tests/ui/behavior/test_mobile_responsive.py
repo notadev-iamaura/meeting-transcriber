@@ -7,6 +7,7 @@
     4. 열림 상태에서 백드롭 클릭 → drawer 닫힘
     5. drawer 닫힘 시 focus 가 햄버거 버튼으로 복귀 (mockup §6.3)
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -47,9 +48,7 @@ def test_drawer_initially_closed(browser: Browser) -> None:
     with _mobile_page(browser) as page:
         page.goto(PREVIEW_URL)
         page.wait_for_load_state("networkidle")
-        expect(page.locator("#mobile-menu-toggle")).to_have_attribute(
-            "aria-expanded", "false"
-        )
+        expect(page.locator("#mobile-menu-toggle")).to_have_attribute("aria-expanded", "false")
         # 사이드바는 ARIA 상태 속성을 갖지 않고 .is-open 클래스로 토글 (mockup §3.2)
         expect(page.locator("#sidebar")).not_to_have_class("is-open")
 
@@ -60,9 +59,7 @@ def test_hamburger_click_opens_drawer(browser: Browser) -> None:
         page.goto(PREVIEW_URL)
         page.wait_for_load_state("networkidle")
         page.locator("#mobile-menu-toggle").click()
-        expect(page.locator("#mobile-menu-toggle")).to_have_attribute(
-            "aria-expanded", "true"
-        )
+        expect(page.locator("#mobile-menu-toggle")).to_have_attribute("aria-expanded", "true")
         # 사이드바는 클래스 토글로 시각 상태 표현 (mockup §3.2 / §6.1)
         expect(page.locator("#sidebar")).to_have_class("is-open")
 
@@ -75,9 +72,7 @@ def test_escape_closes_drawer(browser: Browser) -> None:
         page.locator("#mobile-menu-toggle").click()
         page.wait_for_timeout(50)
         page.keyboard.press("Escape")
-        expect(page.locator("#mobile-menu-toggle")).to_have_attribute(
-            "aria-expanded", "false"
-        )
+        expect(page.locator("#mobile-menu-toggle")).to_have_attribute("aria-expanded", "false")
         expect(page.locator("#sidebar")).not_to_have_class("is-open")
 
 
@@ -90,9 +85,7 @@ def test_backdrop_click_closes_drawer(browser: Browser) -> None:
         page.wait_for_timeout(400)  # transition 완료 대기 (pointer-events 활성)
         # 백드롭의 사이드바 밖 영역(우측 하단) 클릭 — 사이드바 폭 280px 너머
         page.locator("#drawer-backdrop").click(position={"x": 350, "y": 600})
-        expect(page.locator("#mobile-menu-toggle")).to_have_attribute(
-            "aria-expanded", "false"
-        )
+        expect(page.locator("#mobile-menu-toggle")).to_have_attribute("aria-expanded", "false")
         expect(page.locator("#sidebar")).not_to_have_class("is-open")
 
 

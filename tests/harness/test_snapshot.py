@@ -3,6 +3,7 @@
 실제 Playwright 캡처는 통합 테스트(Task 10) 에서 검증.
 본 단위 테스트는 경로 규칙·아티팩트 등록만 검증한다.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -55,9 +56,7 @@ def test_register_baseline_creates_artifact_row(
     assert str(fake_png) in rows[0]["path"]
 
 
-def test_register_baseline_stores_sha256(
-    db_conn: sqlite3.Connection, tmp_path: Path
-) -> None:
+def test_register_baseline_stores_sha256(db_conn: sqlite3.Connection, tmp_path: Path) -> None:
     from harness import snapshot, ticket
 
     t = ticket.open_ticket(db_conn, wave=1, component="x")
@@ -66,9 +65,7 @@ def test_register_baseline_stores_sha256(
 
     snapshot.register_baseline(db_conn, ticket_id=t.id, path=fake_png, variant="dark")
 
-    row = db_conn.execute(
-        "SELECT sha256 FROM artifacts WHERE ticket_id = ?", (t.id,)
-    ).fetchone()
+    row = db_conn.execute("SELECT sha256 FROM artifacts WHERE ticket_id = ?", (t.id,)).fetchone()
     assert row["sha256"] == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
 
 
@@ -85,6 +82,7 @@ def test_register_baseline_invalid_variant_raises(
 
 
 # === pixel_diff_ratio tests ===
+
 
 def test_pixel_diff_identical_images(tmp_path: Path) -> None:
     """동일한 이미지는 diff 0.0."""
@@ -145,6 +143,7 @@ def test_pixel_diff_partial_difference(tmp_path: Path) -> None:
 
 
 # === assert_visual_match tests (페이지 캡처 동작은 모킹) ===
+
 
 def test_assert_visual_match_creates_baseline_when_missing(tmp_path: Path) -> None:
     """베이스라인 미존재 시 자동 생성하고 PASS."""

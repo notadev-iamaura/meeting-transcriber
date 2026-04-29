@@ -5,6 +5,7 @@ violations 배열을 반환한다. 본 모듈은 그 violations 를 받아 event
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §5.3
 """
+
 from __future__ import annotations
 
 import json

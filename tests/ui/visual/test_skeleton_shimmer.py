@@ -20,6 +20,7 @@ Red 의도성 (fixture-as-source-of-truth):
     때 시각 계약(가시적 형태)의 ground truth 를 본 fixture 가 제공한다.
     SPA 통합 시점에 spa.js 가 다른 마크업을 쓰면 SPA 통합 e2e 가 잡아낸다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

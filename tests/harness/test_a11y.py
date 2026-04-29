@@ -1,4 +1,5 @@
 """harness.a11y — axe-core 결과 기록 단위 테스트."""
+
 from __future__ import annotations
 
 import json

@@ -29,6 +29,7 @@ Red 의도성:
     누락하면 axe 가 잡아내도록 마크업 계약을 확립하는 것이 본 시나리오의
     진짜 목적.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -64,13 +65,9 @@ def test_command_palette_no_axe_violations(page: Page) -> None:
         },
     )
     violations = results.response.get("violations", [])
-    assert violations == [], (
-        "a11y violations found:\n"
-        + "\n".join(
-            f"  - {v['id']} ({v['impact']}): {v['help']}\n"
-            f"    nodes: {len(v.get('nodes', []))}"
-            for v in violations
-        )
+    assert violations == [], "a11y violations found:\n" + "\n".join(
+        f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+        for v in violations
     )
 
 
@@ -82,7 +79,5 @@ def test_dialog_has_aria_label(page: Page) -> None:
     page.goto(PREVIEW_URL)
     dialog = page.locator("dialog.command-palette")
     label = dialog.get_attribute("aria-label")
-    assert label, (
-        "dialog 에 aria-label 필수 (시각적 제목 없음 → SR 가 dialog 인식 못함)"
-    )
+    assert label, "dialog 에 aria-label 필수 (시각적 제목 없음 → SR 가 dialog 인식 못함)"
     assert label.strip() != "", "aria-label 이 빈 문자열이면 안 됨"

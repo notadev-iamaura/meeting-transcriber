@@ -3,6 +3,7 @@
 테스트 서버는 별도로 띄우지 않고 file:// URL 로 정적 페이지 직접 로드.
 이렇게 하면 본 데모는 FastAPI 의존성 없이 동작.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

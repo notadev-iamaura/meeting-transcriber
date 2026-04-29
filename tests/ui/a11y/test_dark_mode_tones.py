@@ -4,6 +4,7 @@
 @media (prefers-color-scheme: dark) 또는 [data-theme="dark"] 블록에서
 토큰 값 추출 후 W3C 2.x relative luminance 공식으로 직접 계산.
 """
+
 from __future__ import annotations
 
 import re
@@ -88,9 +89,7 @@ def test_light_text_secondary_meets_aa() -> None:
     fg = _read_root_token("--text-secondary")
     bg = _read_root_token("--bg-canvas")
     ratio = _contrast(fg, bg)
-    assert ratio >= 4.5, (
-        f"--text-secondary {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"
-    )
+    assert ratio >= 4.5, f"--text-secondary {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"
 
 
 def test_light_text_muted_meets_ui_3_1() -> None:
@@ -98,9 +97,7 @@ def test_light_text_muted_meets_ui_3_1() -> None:
     fg = _read_root_token("--text-muted")
     bg = _read_root_token("--bg-canvas")
     ratio = _contrast(fg, bg)
-    assert ratio >= 3.0, (
-        f"--text-muted {fg} on {bg} = {ratio:.2f}:1 (UI 3:1 미달)"
-    )
+    assert ratio >= 3.0, f"--text-muted {fg} on {bg} = {ratio:.2f}:1 (UI 3:1 미달)"
 
 
 def test_light_accent_text_meets_aa() -> None:
@@ -108,9 +105,7 @@ def test_light_accent_text_meets_aa() -> None:
     fg = _read_root_token("--accent-text")
     bg = _read_root_token("--bg-canvas")
     ratio = _contrast(fg, bg)
-    assert ratio >= 4.5, (
-        f"--accent-text {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"
-    )
+    assert ratio >= 4.5, f"--accent-text {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"
 
 
 # === 다크 모드 ===
@@ -121,9 +116,7 @@ def test_dark_text_muted_meets_ui_3_1() -> None:
     fg = _read_dark_token("--text-muted")
     bg = _read_dark_token("--bg-canvas")
     ratio = _contrast(fg, bg)
-    assert ratio >= 3.0, (
-        f"다크 --text-muted {fg} on {bg} = {ratio:.2f}:1 (UI 3:1 미달)"
-    )
+    assert ratio >= 3.0, f"다크 --text-muted {fg} on {bg} = {ratio:.2f}:1 (UI 3:1 미달)"
 
 
 def test_dark_accent_text_meets_aa() -> None:
@@ -131,6 +124,4 @@ def test_dark_accent_text_meets_aa() -> None:
     fg = _read_dark_token("--accent-text")
     bg = _read_dark_token("--bg-canvas")
     ratio = _contrast(fg, bg)
-    assert ratio >= 4.5, (
-        f"다크 --accent-text {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"
-    )
+    assert ratio >= 4.5, f"다크 --accent-text {fg} on {bg} = {ratio:.2f}:1 (AA 4.5:1 미달)"

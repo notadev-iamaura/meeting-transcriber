@@ -11,6 +11,7 @@ Red 의도성:
     본 시나리오의 진짜 의도: Frontend-A 가 SPA 구현 시 fixture 와 같은
     aria-hidden 속성을 누락하면 통합 e2e 가 잡아내도록 하는 마크업 계약.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -45,12 +46,9 @@ def test_skeleton_shimmer_no_axe_violations(page: Page) -> None:
         },
     )
     violations = results.response.get("violations", [])
-    assert violations == [], (
-        "a11y violations found:\n"
-        + "\n".join(
-            f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
-            for v in violations
-        )
+    assert violations == [], "a11y violations found:\n" + "\n".join(
+        f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+        for v in violations
     )
 
 
@@ -69,11 +67,7 @@ def test_all_skeleton_containers_aria_hidden(page: Page) -> None:
     assert card_count == 3, f"카드 카운트가 3 이어야 함, 실제={card_count}"
     for i in range(card_count):
         attr = cards.nth(i).get_attribute("aria-hidden")
-        assert attr == "true", (
-            f"skeleton-card[{i}] aria-hidden='{attr}' (요구: 'true')"
-        )
+        assert attr == "true", f"skeleton-card[{i}] aria-hidden='{attr}' (요구: 'true')"
 
     section_attr = lines_section.get_attribute("aria-hidden")
-    assert section_attr == "true", (
-        f"lines 섹션 aria-hidden='{section_attr}' (요구: 'true')"
-    )
+    assert section_attr == "true", f"lines 섹션 aria-hidden='{section_attr}' (요구: 'true')"

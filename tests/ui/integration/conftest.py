@@ -21,6 +21,7 @@ URL 매핑:
 이 방식이면 실제 SPA 코드를 그대로 검증 가능 — file:// 로는 cross-origin
 fetch 가 깨지고, FastAPI 는 너무 무겁다.
 """
+
 from __future__ import annotations
 
 import socket
