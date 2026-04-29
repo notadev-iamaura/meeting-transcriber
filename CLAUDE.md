@@ -267,9 +267,9 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 
 | 영역 | 기술 | 디바이스 | 비고 |
 |------|------|---------|------|
-| STT | mlx-whisper + 한국어 fine-tune 모델 3종(GUI 선택) | MPS(GPU) | Apple MLX 가속, 웹 설정에서 다운로드/활성화 |
+| STT | mlx-whisper — **`whisper-large-v3-turbo` 기본** (한국어 fine-tune 3종도 GUI 선택 가능) | MPS(GPU) | Apple MLX 가속. 6 회의 벤치마크 기준 komixv2 대비 CER −16%p |
 | 화자분리 | pyannote-audio 3.1 | **CPU 강제** | MPS 버그 있음 |
-| LLM | EXAONE 3.5 7.8B 또는 Gemma 4 — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
+| LLM | **Gemma 4 E4B 기본** (EXAONE 3.5 / Gemma 4 E2B 선택 가능) — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
 | 벡터DB | ChromaDB PersistentClient | — | |
 | 키워드검색 | SQLite FTS5 (unicode61) | — | |
@@ -287,8 +287,8 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 
 | 모델 | config.yaml `mlx_model_name` | 크기 | 특징 |
 |------|------------------------------|------|------|
-| **EXAONE 3.5** (기본) | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` | ~5GB | 한국어 특화, 검증됨 |
-| **Gemma 4 E4B** | `mlx-community/gemma-4-e4b-it-4bit` | ~6GB | Google, 다국어 140+, Thinking 모드 |
+| **Gemma 4 E4B** (기본) | `mlx-community/gemma-4-e4b-it-4bit` | ~6GB | Google, 다국어 140+, Thinking 모드, 벤치마크 기반 기본값 |
+| **EXAONE 3.5** | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` | ~5GB | LG, 한국어 특화. 한국어 고유명사 정확도 우선 시 권장 |
 | **Gemma 4 E2B** | `mlx-community/gemma-4-e2b-it-4bit` | ~3GB | 경량, 8GB RAM 가능 |
 
 **모델 변경 방법:**
@@ -297,7 +297,7 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 # config.yaml — mlx_model_name만 교체하면 됨
 llm:
   backend: "mlx"
-  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"  # ← 여기를 변경
+  mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # ← 여기를 변경 (기본값)
 ```
 
 ```bash
@@ -309,16 +309,25 @@ export MT_LLM_MODEL=mlx-community/gemma-4-e4b-it-4bit
 
 | 조건 | 권장 모델 | 이유 |
 |------|----------|------|
-| M3/M4 + 16GB 이상 | **EXAONE 3.5** (기본) | 한국어 특화, 한국어 고유명사/비즈니스 용어 처리 최적 |
-| M1/M2 + 16GB 이상 | **EXAONE 3.5** (기본) | 검증된 성능 |
-| 16GB + 멀티모달 필요 | Gemma 4 E4B (수동 전환) | 이미지/문서 분석이 필요한 특수 용도만 |
-| M1/M2 + 8GB | Gemma 4 E2B (수동 전환) | ~3GB로 메모리 절약 — 단, 한국어 고유명사에 영어/중국어 병기 오류 주의 |
+| M3/M4 + 16GB 이상 | **Gemma 4 E4B** (기본) | 벤치마크 우수, 멀티모달, Thinking 모드 |
+| M1/M2 + 16GB 이상 | **Gemma 4 E4B** (기본) | 동일 |
+| 한국어 고유명사 정확도 우선 | EXAONE 3.5 (수동 전환) | 한국어 특화 — 영어/중국어 병기 회피 |
+| M1/M2 + 8GB | Gemma 4 E2B (수동 전환) | ~3GB 로 메모리 절약 |
 
-> ⚠️ **Gemma 계열 주의사항**
-> Gemma 4 는 다국어 모델로 한국어 고유명사를 만나면 `배미령(Baimilong)` 같은
-> 영어/중국어 병기를 자동으로 덧붙이는 습관이 있습니다. 요약·교정 프롬프트에
-> 병기 금지 지시가 포함되어 있지만 완전 차단은 어렵습니다. 한국어 회의록이
-> 주 용도라면 EXAONE 을 권장합니다.
+> ℹ️ **Gemma 계열 한국어 특이사항**
+> Gemma 4 는 다국어 모델이라 한국어 고유명사를 만나면 `배미령(Baimilong)` 같은
+> 영어/중국어 병기를 덧붙이는 경향이 있습니다. 요약·교정 프롬프트에 병기 금지
+> 지시가 포함되어 있어 대부분 차단되지만, 회의록의 인명/조직명 정확도가 매우
+> 중요한 경우 EXAONE 3.5 로 전환을 고려하세요.
+
+**EXAONE 3.5 로 수동 전환:**
+
+```yaml
+# config.yaml
+llm:
+  mlx_model_name: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+```
+또는 환경변수: `export MT_LLM_MODEL=mlx-community/EXAONE-3.5-7.8B-Instruct-4bit`
 
 **8GB 환경에서 Gemma 4 E2B 로 수동 전환:**
 
@@ -349,18 +358,20 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 > **웹 UI에서 다운로드/활성화 가능** (`/app/settings` → "음성 인식 모델 (STT)")
 > 또는 `config.yaml`의 `stt.model_name`을 직접 수정.
 
-**지원 모델 (한국어 fine-tune, 모두 사전 양자화 HF 배포):**
+**지원 모델 (모두 사전 양자화 HF 배포):**
 
 | 모델 ID | 베이스 | CER | WER | RAM | 디스크 | HuggingFace | 추천 |
 |--------|--------|-----|-----|-----|--------|-------------|------|
-| `komixv2` ⭐ (기본) | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx) | **안정성 최고** |
-| `seastar-medium-4bit` | Medium + Zeroth (4bit) | **1.25%** | **3.21%** | **1.26GB** | **420MB** | [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx) | CER 최저 (벤치) |
-| `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 442MB | [`youngouk/ghost613-turbo-korean-4bit-mlx`](https://huggingface.co/youngouk/ghost613-turbo-korean-4bit-mlx) | 속도 우선 |
+| `whisper-large-v3-turbo` ⭐ **(기본)** | Whisper Large-v3 Turbo | — | — | ~2GB | ~1.6GB | [`mlx-community/whisper-large-v3-turbo`](https://huggingface.co/mlx-community/whisper-large-v3-turbo) | **6 회의 벤치마크 1위 — komixv2 대비 CER −16%p** |
+| `komixv2` | Whisper Medium fp16 | 11.88% | 33.26% | 1.88GB | 1.5GB | [`youngouk/whisper-medium-komixv2-mlx`](https://huggingface.co/youngouk/whisper-medium-komixv2-mlx) | 한국어 fine-tune fp16, 환각 최소 |
+| `seastar-medium-4bit` | Medium + Zeroth (4bit) | 1.25% | 3.21% | 1.26GB | 420MB | [`youngouk/seastar-medium-ko-4bit-mlx`](https://huggingface.co/youngouk/seastar-medium-ko-4bit-mlx) | Zeroth 벤치 CER 최저 (단, 회의 환각 위험) |
+| `ghost613-turbo-4bit` | Large-v3-turbo + Zeroth (4bit) | 1.60% | 4.36% | 1.31GB | 442MB | [`youngouk/ghost613-turbo-korean-4bit-mlx`](https://huggingface.co/youngouk/ghost613-turbo-korean-4bit-mlx) | 속도 우선 (단, 회의 환각 위험) |
 
 > ⚠️ **벤치마크 CER vs 실제 회의 품질**
 > CER/WER 수치는 Zeroth 벤치마크(깨끗한 읽기 음성) 기준입니다. 실제 회의
-> 오디오(잡음, 에코, 원거리 마이크, 줌 오디오)에서 A/B 테스트를 수행한 결과:
-> - **komixv2 (fp16)**: 환각 최소, 가독성 최고, 영어 용어 정확 → **실사용 권장**
+> 오디오(잡음, 에코, 원거리 마이크, 줌 오디오)에서 6 회의 A/B 테스트를 수행한 결과:
+> - **whisper-large-v3-turbo (현재 기본)**: 회의 음성에서 가장 안정적, komixv2 대비 CER −16%p (`docs/BENCHMARK.md §1`)
+> - **komixv2 (fp16)**: 환각 최소, 가독성 양호, 영어 용어 정확
 > - **seastar (4bit)**: 세그먼트 세밀하지만 무음 구간 반복 환각 ("ohn ohn", "네 네 네") 빈번
 > - **ghost613 (4bit)**: 대량 환각 ("옷 옷 옷...", 뉴스 텍스트 삽입) → **실사용 부적합**
 >
