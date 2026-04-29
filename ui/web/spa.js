@@ -128,6 +128,13 @@
 
         /**
          * 현재 경로에 맞는 네비게이션 버튼을 활성화한다.
+         *
+         * 활성 버튼에는 시각용 `.active` 클래스와 ARIA 의 `aria-current="page"` 를
+         * 동시에 부여한다 (T-301 mockup §1.1). 비활성 버튼에서는
+         * `removeAttribute("aria-current")` 로 속성 자체를 제거한다 — `"false"`
+         * 로 두면 macOS VoiceOver 가 "current page" 로 오발화하는 회귀 가능성이
+         * 있어 mockup §1.1 의 정규화 규칙을 그대로 따른다.
+         *
          * @param {string} path - URL 경로
          */
         function setActiveFromPath(path) {
@@ -136,14 +143,17 @@
             _buttons.forEach(function (btn) {
                 var route = btn.getAttribute("data-route");
                 btn.classList.remove("active");
+                btn.removeAttribute("aria-current");
 
                 // /app 라우트: /app 또는 /app/viewer/* 경로에서 활성화
                 if (route === "/app") {
                     if (pathname === "/app" || pathname === "/app/" || pathname.indexOf("/app/viewer/") === 0) {
                         btn.classList.add("active");
+                        btn.setAttribute("aria-current", "page");
                     }
                 } else if (route === pathname) {
                     btn.classList.add("active");
+                    btn.setAttribute("aria-current", "page");
                 }
             });
         }
