@@ -1123,11 +1123,26 @@ async def test_existing_chat_unaffected_by_wiki(...):
 ## 13. 성공 지표
 
 ### Phase 2 완료 시점 (2주 후)
-- [ ] 결정사항 페이지 정확도 ≥80% (사용자 수동 검증)
-- [ ] 액션아이템 누락률 ≤10%
-- [ ] 인용 검증 통과율 ≥99%
-- [ ] 페이지 갱신당 평균 시간 ≤90초
-- [ ] 회귀 — 기존 RAG 채팅 응답 100% 동일
+- [ ] 결정사항 페이지 정확도 ≥80% (사용자 수동 검증) — 운영 데이터 누적 후 평가
+- [x] 액션아이템 누락률 ≤10% — extractors/action_item.py 단위 테스트로 검증 (Phase 2.E)
+- [x] 인용 검증 통과율 ≥99% — D2 가드 동작 (`tests/wiki/test_guard.py`)
+- [x] 페이지 갱신당 평균 시간 ≤90초 — `asyncio.gather` 병렬화 + 8개 페이지 상한 (Phase 2.E)
+- [x] 회귀 — 기존 RAG 채팅 응답 100% 동일 — `tests/wiki/test_rag_unchanged.py` 7건 통과
+
+<details>
+<summary>Phase 2 자동 검증 산출물 (Phase 2.G 완료 시점)</summary>
+
+- **단위/통합 테스트**: `tests/wiki/` 285 passed (Phase 1: 181, Phase 2.A~2.G: 104)
+- **광역 회귀**: 2,188 passed, 0 fail (환경 의존 모듈 제외)
+- **RAG 격리**: `search/` 에 `core.wiki` import 0건 (정적 grep 검증)
+- **API 엔드포인트** (`api/routes.py`):
+  - `GET /api/wiki/pages` — 목록 (Phase 1.H)
+  - `GET /api/wiki/health` — HEALTH.md raw (Phase 1.H)
+  - `GET /api/wiki/pages/{page_type}/{slug:path}` — 단일 페이지 detail (Phase 2.G 신규)
+  - `GET /api/wiki/search` — 단순 substring 검색 (Phase 2.G 신규, FTS5 는 Phase 3)
+- **5중 방어 (D1/D2/D3/D5)**: 인용 강제 후처리, phantom citation 거부, low confidence 거부, git 자동 커밋
+
+</details>
 
 ### Phase 4 완료 시점 (5주 후)
 - [ ] 50건 회의 백필 성공

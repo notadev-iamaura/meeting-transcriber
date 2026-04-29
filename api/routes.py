@@ -4723,3 +4723,397 @@ async def get_wiki_health(request: Request) -> WikiHealthResponse:
     # Phase 1 — 마크다운 본문은 그대로 두고 status 는 보수적으로 ok 로 표시.
     # Phase 2 D4 도입 시 frontmatter 또는 첫 줄 메타데이터에서 status 를 파싱.
     return WikiHealthResponse(status="ok", last_lint_at=None, raw_markdown=raw)
+
+
+# === LLM Wiki Phase 2.G 엔드포인트 (PRD §7.1) ============================
+#
+# Phase 2.G 범위: 단일 페이지 raw markdown 조회 + 단순 substring 검색.
+# - WikiView (Phase 2.F) 가 트리에서 페이지 클릭 시 호출하는 엔드포인트.
+# - 검색은 Phase 2 단순 substring 매칭만 — FTS5/BM25 는 Phase 3 이후.
+# - core/wiki/* 는 wiki 활성 시에만 lazy import (RAG 경로 부담 0).
+
+# page_type 화이트리스트 — PRD §4.1 디렉토리 레이아웃과 일치.
+# spa.js 는 PageType.value (단수형) 또는 디렉토리명 (복수형) 둘 다 보낼 수 있어
+# 양쪽을 모두 수용한다. 화이트리스트 외 입력은 400 으로 차단해 path traversal
+# 의 1차 방어선 역할을 겸한다.
+_WIKI_PAGE_TYPE_TO_DIRNAME: dict[str, str] = {
+    # 복수형 (디스크 디렉토리명)
+    "decisions": "decisions",
+    "people": "people",
+    "projects": "projects",
+    "topics": "topics",
+    # 단수형 (PageType.value, /api/wiki/pages 응답의 type 필드)
+    "decision": "decisions",
+    "person": "people",
+    "project": "projects",
+    "topic": "topics",
+}
+
+# 검색 결과 limit 의 안전 상한. 기본 20, 사용자가 100 까지 요청할 수 있고
+# 그 이상은 모두 100 으로 클램프하여 응답 크기를 통제한다.
+_WIKI_SEARCH_DEFAULT_LIMIT: int = 20
+_WIKI_SEARCH_MAX_LIMIT: int = 100
+
+# 검색 snippet 의 양옆 컨텍스트 길이 (q 양쪽으로 잘라낼 글자 수).
+_WIKI_SEARCH_SNIPPET_BEFORE: int = 30
+_WIKI_SEARCH_SNIPPET_AFTER: int = 30
+
+
+class WikiCitationItem(BaseModel):
+    """단일 페이지에서 추출된 인용 마커 응답 스키마.
+
+    PRD §4.3 인용 형식 표준 `[meeting:{id}@{HH:MM:SS}]` 와 1:1 매핑된다.
+    spa.js WikiView 가 인용을 클릭 가능한 링크로 렌더링할 때 사용.
+
+    Attributes:
+        meeting_id: 8자리 hex 문자열 (예: "abc12345").
+        timestamp: 원문 그대로의 "HH:MM:SS" 문자열.
+        timestamp_seconds: HH:MM:SS 를 초 단위 정수로 변환.
+    """
+
+    meeting_id: str
+    timestamp: str
+    timestamp_seconds: int
+
+
+class WikiPageDetail(BaseModel):
+    """GET /api/wiki/pages/{page_type}/{slug} 응답 스키마.
+
+    Attributes:
+        path: wiki 루트 기준 상대 경로 (예: "decisions/foo.md").
+        type: page_type (디렉토리명, 복수형). spa.js 가 이 값으로 카테고리를
+            판정한다.
+        title: frontmatter 의 title 또는 본문 첫 H1. 없으면 None.
+        content: frontmatter 를 제외한 본문 raw markdown. spa.js 가 인용
+            마커를 클릭 가능한 링크로 변환해 렌더링한다.
+        frontmatter: YAML 헤더 파싱 결과 (단순 scalar / inline list 만).
+        citations: 본문에서 추출된 모든 인용 마커.
+    """
+
+    path: str
+    type: str
+    title: str | None = None
+    content: str
+    frontmatter: dict[str, Any] = Field(default_factory=dict)
+    citations: list[WikiCitationItem] = Field(default_factory=list)
+
+
+class WikiSearchResult(BaseModel):
+    """단일 검색 결과 항목.
+
+    Attributes:
+        path: wiki 루트 기준 상대 경로.
+        type: page_type (디렉토리명, 복수형).
+        title: 페이지 제목 (frontmatter 또는 첫 H1).
+        snippet: q 주변 컨텍스트 발췌 (앞 30 + q + 뒤 30 자 안팎).
+        score: 단순 매칭 횟수 (Phase 3 에서 BM25 로 교체 예정).
+    """
+
+    path: str
+    type: str
+    title: str | None = None
+    snippet: str
+    score: float
+
+
+class WikiSearchResponse(BaseModel):
+    """GET /api/wiki/search 응답 스키마.
+
+    Attributes:
+        results: 검색 결과 목록 (score 내림차순 정렬, limit 으로 잘림).
+        total: 반환된 results 의 길이 (limit 적용 후).
+        query: 요청된 검색어 (응답 검증용 echo).
+    """
+
+    results: list[WikiSearchResult]
+    total: int
+    query: str
+
+
+def _extract_title_from_markdown(
+    frontmatter: dict[str, Any], content: str
+) -> str | None:
+    """페이지 제목을 frontmatter → 첫 H1 → None 순으로 결정한다.
+
+    Args:
+        frontmatter: 파싱된 frontmatter dict.
+        content: frontmatter 가 제거된 본문.
+
+    Returns:
+        결정된 제목 문자열. 둘 다 없으면 None.
+    """
+    title = frontmatter.get("title")
+    if title is not None:
+        # frontmatter 의 title 이 정수/리스트일 가능성을 방어
+        return str(title) if not isinstance(title, str) else title
+
+    # 본문 첫 H1 (`# 제목`) 추출 — `## ` 는 H2 이므로 제외
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            return stripped[2:].strip()
+    return None
+
+
+def _resolve_wiki_root(request: Request) -> Path | None:
+    """wiki 활성 + 루트 디렉토리 존재 여부를 검사하고 root 경로를 반환한다.
+
+    Args:
+        request: FastAPI Request 객체.
+
+    Returns:
+        wiki 루트 경로. wiki 비활성/디렉토리 부재 시 None.
+    """
+    config = _get_config(request)
+    wiki_cfg = getattr(config, "wiki", None)
+    if wiki_cfg is None or not getattr(wiki_cfg, "enabled", False):
+        return None
+    wiki_root: Path = wiki_cfg.resolved_root
+    if not wiki_root.exists():
+        return None
+    return wiki_root
+
+
+@router.get(
+    "/wiki/pages/{page_type}/{slug:path}",
+    response_model=WikiPageDetail,
+    summary="위키 단일 페이지 상세 조회",
+    description=(
+        "LLM Wiki Phase 2.G — 단일 위키 페이지의 raw markdown + frontmatter "
+        "+ 인용 목록을 반환한다. wiki.enabled=False / 페이지 부재 시 404, "
+        "page_type 화이트리스트 위반·path traversal 시도 시 400 반환."
+    ),
+)
+async def get_wiki_page_detail(
+    request: Request, page_type: str, slug: str
+) -> WikiPageDetail:
+    """위키 단일 페이지의 상세 정보를 반환한다 (PRD §7.1).
+
+    동작:
+        1. wiki.enabled=False 또는 디렉토리 부재 → 404
+        2. page_type 화이트리스트 위반 → 400
+        3. slug 에 `..` 포함 → 400 (path traversal 차단)
+        4. 페이지 파일 부재 → 404
+        5. 정상 → frontmatter / content / citations 반환
+
+    Args:
+        request: FastAPI Request 객체.
+        page_type: "decisions" | "people" | "projects" | "topics" (또는 단수형).
+        slug: 페이지 슬러그 (확장자 .md 없이) 또는 nested path.
+
+    Returns:
+        WikiPageDetail — path / type / title / content / frontmatter / citations.
+
+    Raises:
+        HTTPException(400): page_type 화이트리스트 위반 / slug path traversal.
+        HTTPException(404): wiki 비활성 / 페이지 부재.
+    """
+    # ── 1. wiki 활성·디렉토리 검사 → 미활성이면 404 ─────────────────
+    wiki_root = _resolve_wiki_root(request)
+    if wiki_root is None:
+        raise HTTPException(
+            status_code=404, detail="위키가 활성화되어 있지 않습니다."
+        )
+
+    # ── 2. page_type 화이트리스트 검증 → 위반 시 400 ────────────────
+    dirname = _WIKI_PAGE_TYPE_TO_DIRNAME.get(page_type)
+    if dirname is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"알려지지 않은 page_type: {page_type!r}. "
+                "허용 값: decisions / people / projects / topics."
+            ),
+        )
+
+    # ── 3. slug 검증 — path traversal 시도 1차 차단 ─────────────────
+    # FastAPI 가 percent-encoded `..` 를 디코드해서 path 로 넘긴다.
+    # WikiStore._validate_relative_path 가 2차 방어를 하지만, 여기서 미리 거부해
+    # 명확한 400 메시지를 돌려준다.
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug 가 비어 있습니다.")
+    if ".." in Path(slug).parts:
+        raise HTTPException(
+            status_code=400,
+            detail="slug 에 상위 디렉토리 참조(`..`) 는 허용되지 않습니다.",
+        )
+
+    # ── 4. 페이지 read — slug 끝에 .md 가 없으면 자동 부착 ─────────
+    # core.wiki 는 wiki 활성 시에만 lazy import (RAG 경로 import 부담 0).
+    from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
+
+    rel_path_str = slug if slug.endswith(".md") else f"{slug}.md"
+    rel_path = Path(dirname) / rel_path_str
+
+    store = WikiStore(wiki_root)
+    try:
+        page = store.read_page(rel_path)
+    except WikiStoreError as exc:
+        # WikiStore 가 path_traversal / invalid_path 를 추가로 감지할 수 있다.
+        if exc.reason in {"path_traversal", "invalid_path"}:
+            raise HTTPException(
+                status_code=400,
+                detail=exc.detail or f"잘못된 경로 요청입니다: {rel_path}",
+            ) from exc
+        # page_not_found 또는 그 외 디스크 오류 → 404 통일.
+        raise HTTPException(
+            status_code=404,
+            detail=exc.detail or f"페이지를 찾을 수 없습니다: {rel_path}",
+        ) from exc
+
+    # ── 5. citations 직렬화 ────────────────────────────────────────
+    citation_items: list[WikiCitationItem] = [
+        WikiCitationItem(
+            meeting_id=c.meeting_id,
+            timestamp=c.timestamp_str,
+            timestamp_seconds=c.timestamp_seconds,
+        )
+        for c in page.citations
+    ]
+
+    # ── 6. title 결정 (frontmatter > 첫 H1) ────────────────────────
+    title = _extract_title_from_markdown(page.frontmatter, page.content)
+
+    return WikiPageDetail(
+        path=str(rel_path),
+        type=dirname,  # 응답은 항상 복수형(디렉토리명) 으로 통일
+        title=title,
+        content=page.content,
+        frontmatter=dict(page.frontmatter),
+        citations=citation_items,
+    )
+
+
+def _make_search_snippet(content: str, query_lower: str) -> str:
+    """본문에서 q 주변 컨텍스트를 발췌한 snippet 을 만든다.
+
+    Args:
+        content: 페이지 본문 (frontmatter 제거 후).
+        query_lower: 소문자로 변환된 검색어.
+
+    Returns:
+        앞 30 + q + 뒤 30자 안팎의 발췌 문자열. q 가 본문에 없으면 빈 문자열.
+    """
+    content_lower = content.lower()
+    pos = content_lower.find(query_lower)
+    if pos == -1:
+        return ""
+
+    start = max(0, pos - _WIKI_SEARCH_SNIPPET_BEFORE)
+    end = min(len(content), pos + len(query_lower) + _WIKI_SEARCH_SNIPPET_AFTER)
+    snippet = content[start:end]
+
+    # 시작/끝이 잘렸음을 표시하기 위해 ellipsis 추가 (UX 향상).
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(content) else ""
+    return f"{prefix}{snippet}{suffix}".strip()
+
+
+@router.get(
+    "/wiki/search",
+    response_model=WikiSearchResponse,
+    summary="위키 페이지 전문 검색",
+    description=(
+        "LLM Wiki Phase 2.G — 단순 substring 매칭으로 페이지 본문/제목을 검색한다. "
+        "Phase 3 에서 SQLite FTS5 또는 BM25 로 교체 예정. "
+        "wiki.enabled=False 면 빈 결과 반환."
+    ),
+)
+async def search_wiki(
+    request: Request,
+    q: str = "",
+    limit: int = _WIKI_SEARCH_DEFAULT_LIMIT,
+) -> WikiSearchResponse:
+    """위키 페이지를 단순 substring 매칭으로 검색한다 (PRD §7.1).
+
+    Phase 2 한계 (PRD §8 의 명시적 단순화):
+        - FTS5 / BM25 / 토큰화 없음 — 본문에 q 가 그대로 들어있어야 매칭.
+        - 동의어 / 형태소 분석 없음.
+        - 한국어 어미 변형 매칭 없음 ("결정한", "결정했다" 별도 매칭).
+        - score 는 단순 매칭 횟수 — 정규화 안 함.
+
+    Args:
+        request: FastAPI Request 객체.
+        q: 검색어. 빈 문자열이면 빈 결과 반환.
+        limit: 최대 반환 개수 (기본 20, 최대 100).
+
+    Returns:
+        WikiSearchResponse — results / total / query.
+    """
+    # limit 클램프 — 음수·0 은 기본값으로, 100 초과는 100 으로 강제.
+    if limit <= 0:
+        limit = _WIKI_SEARCH_DEFAULT_LIMIT
+    if limit > _WIKI_SEARCH_MAX_LIMIT:
+        limit = _WIKI_SEARCH_MAX_LIMIT
+
+    # ── 1. wiki 활성·디렉토리 검사 → 미활성이면 빈 결과 ─────────────
+    wiki_root = _resolve_wiki_root(request)
+    if wiki_root is None:
+        return WikiSearchResponse(results=[], total=0, query=q)
+
+    # ── 2. 빈 q → 빈 결과 ──────────────────────────────────────────
+    query = q.strip()
+    if not query:
+        return WikiSearchResponse(results=[], total=0, query=q)
+
+    query_lower = query.lower()
+
+    # ── 3. 모든 페이지 read 후 매칭 검사 ───────────────────────────
+    from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
+
+    store = WikiStore(wiki_root)
+    candidates: list[tuple[float, WikiSearchResult]] = []
+
+    for rel_path in store.all_pages():
+        try:
+            page = store.read_page(rel_path)
+        except WikiStoreError as exc:
+            logger.warning(
+                "wiki 검색: 페이지 read 실패: %s (%s)",
+                rel_path,
+                exc.detail or exc.reason,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — 깨진 페이지 1건이 검색을 막지 않게
+            logger.warning("wiki 검색: 페이지 처리 실패: %s (%s)", rel_path, exc)
+            continue
+
+        # 매칭 대상은 (제목 + 본문). frontmatter title 도 함께 검사.
+        fm_title_raw = page.frontmatter.get("title", "") if page.frontmatter else ""
+        fm_title = str(fm_title_raw) if fm_title_raw is not None else ""
+        haystack = f"{fm_title}\n{page.content}".lower()
+        match_count = haystack.count(query_lower)
+        if match_count == 0:
+            continue
+
+        # 디렉토리명을 type 필드로 직접 사용 (단수/복수 혼동 회피).
+        first_part = rel_path.parts[0] if rel_path.parts else ""
+        type_str = (
+            first_part
+            if first_part in _WIKI_PAGE_TYPE_TO_DIRNAME
+            else str(page.page_type.value)
+        )
+
+        title = _extract_title_from_markdown(page.frontmatter, page.content)
+        snippet = _make_search_snippet(page.content, query_lower)
+        score = float(match_count)
+
+        candidates.append(
+            (
+                score,
+                WikiSearchResult(
+                    path=str(rel_path),
+                    type=type_str,
+                    title=title,
+                    snippet=snippet,
+                    score=score,
+                ),
+            )
+        )
+
+    # ── 4. score 내림차순 정렬 + limit 적용 ────────────────────────
+    # path 를 보조 정렬키로 사용해 동점일 때 deterministic 순서를 보장.
+    candidates.sort(key=lambda item: (-item[0], item[1].path))
+    results = [item[1] for item in candidates[:limit]]
+
+    return WikiSearchResponse(results=results, total=len(results), query=q)
