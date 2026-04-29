@@ -333,6 +333,13 @@ class PersonExtractor:
         if not utterances:
             return []
 
+        # 환각 방지용 화자 집합 — action_item.py 의 _resolve_owner 와 동일 패턴
+        raw_speakers: set[str] = {getattr(u, "speaker", "") for u in utterances}
+        # speaker_name_map 의 값(한국어이름)도 허용 집합에 포함
+        allowed_names: set[str] = set(raw_speakers)
+        if speaker_name_map:
+            allowed_names.update(speaker_name_map.values())
+
         # utterances 직렬화
         lines: list[str] = []
         for utt in utterances:
@@ -393,6 +400,7 @@ class PersonExtractor:
                     meeting_id=meeting_id,
                     meeting_date=meeting_date,
                     speaker_name_map=speaker_name_map,
+                    allowed_names=allowed_names,
                 )
             except Exception as exc:  # noqa: BLE001 — 항목별 실패는 skip
                 logger.warning("PersonExtractor: 항목 변환 실패 — skip: %r", exc)
@@ -477,6 +485,12 @@ class PersonExtractor:
             role_update = llm_obj.get("role_update")
             if role_update is not None and not isinstance(role_update, str):
                 role_update = None
+            # frontmatter 인젝션 방어 — role 에 개행/콜론이 있으면 제거
+            # LLM 이 "admin: true\nrole: PM" 같은 값을 삽입하는 시도 차단
+            if isinstance(role_update, str):
+                role_update = role_update.replace("\n", " ").replace(":", "").strip()
+                if not role_update:
+                    role_update = None
             new_topics_raw = llm_obj.get("new_topics") or []
 
             # 최종 role 결정 — 기존 role 보존이 기본, role_update 가 있고 의미있으면 갱신
@@ -607,6 +621,11 @@ class PersonExtractor:
             raise ValueError(
                 f"허용되지 않는 문자가 포함된 person slug 입니다: {raw!r}"
             )
+        # 슬러그 길이 상한 — 파일시스템 안전 + ReDoS 방지
+        if len(s) > 64:
+            raise ValueError(
+                f"person slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}..."
+            )
         return s
 
     @staticmethod
@@ -708,6 +727,7 @@ class PersonExtractor:
         meeting_id: str,
         meeting_date: date,
         speaker_name_map: dict[str, str] | None,
+        allowed_names: set[str] | None = None,
     ) -> ExtractedPerson | None:
         """LLM 응답 dict 를 ExtractedPerson 으로 변환.
 
@@ -716,9 +736,11 @@ class PersonExtractor:
             meeting_id: 회의 ID (Citation 변환 시 사용).
             meeting_date: 회의 날짜.
             speaker_name_map: SPEAKER_XX → 한국어이름 매핑.
+            allowed_names: utterances 에서 추출한 허용 화자 이름 집합.
+                None 이면 환각 검증 비활성화 (하위 호환).
 
         Returns:
-            ExtractedPerson 인스턴스 또는 None (필수 필드 누락 시).
+            ExtractedPerson 인스턴스 또는 None (필수 필드 누락 또는 환각 감지 시).
         """
         raw_name = str(item.get("name", "") or "").strip()
         if not raw_name:
@@ -729,6 +751,17 @@ class PersonExtractor:
             name = speaker_name_map[raw_name]
         else:
             name = raw_name
+
+        # 환각 방지 — name 이 허용된 화자 집합에 없으면 skip (R1/R9 게이트)
+        # action_item.py 의 _resolve_owner 와 동일 정책 적용
+        if allowed_names is not None and name not in allowed_names:
+            logger.warning(
+                "PersonExtractor: 허용되지 않은 인물명 환각 감지 — skip: name=%r, "
+                "allowed=%r",
+                name,
+                allowed_names,
+            )
+            return None
 
         # name_normalized — slug 정규화 실패 시 skip
         try:

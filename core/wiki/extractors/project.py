@@ -613,6 +613,9 @@ class ProjectExtractor:
             # 후처리 — 한국어 고유명사 영문 병기 제거
             content = _strip_paren_latin(raw_response)
 
+            # 검증된 final_status 강제 주입 — LLM 이 임의 status 를 쓰는 환각 차단 (R9)
+            content = self._inject_frontmatter_field(content, "status", final_status)
+
             # 기존 created_at / started 보존 (LLM 이 누락했을 경우 강제 주입)
             if existing_state is not None and existing_state.started:
                 content = self._inject_frontmatter_field(
@@ -699,6 +702,12 @@ class ProjectExtractor:
                 raise ValueError(
                     f"허용되지 않는 문자가 포함된 slug 입니다: {raw!r}"
                 )
+
+        # 슬러그 길이 상한 — 파일시스템 안전 + ReDoS 방지
+        if len(s) > 64:
+            raise ValueError(
+                f"project slug 가 64자 초과입니다 ({len(s)}자): {s[:32]!r}..."
+            )
 
         return s
 
@@ -1037,8 +1046,13 @@ class ProjectExtractor:
                 f"@{new_entry.citation.timestamp_str}]"
             )
             new_line = f"- {new_entry.entry_date}: {new_entry.description} {cit_str}"
-            # 중복 검사 — 정확히 동일한 citation 마커가 이미 있으면 skip
-            already = any(cit_str in line for line in merged)
+            # 중복 검사 — 두 가지 기준:
+            # 1) 동일 citation 마커 (meeting_id@timestamp) 가 이미 있으면 skip (원본 기준).
+            # 2) 날짜 + 설명 접두사가 동일한 라인이 있으면 skip (citation 없이 직접 작성된 경우).
+            desc_prefix = f"- {new_entry.entry_date}: {new_entry.description}"
+            already = any(
+                cit_str in line or line.startswith(desc_prefix) for line in merged
+            )
             if not already:
                 merged.append(new_line)
         return merged
