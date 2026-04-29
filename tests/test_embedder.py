@@ -484,8 +484,13 @@ class TestEmbedderAsync:
         assert len(result.chunks[0].embedding) == 384
 
     @pytest.mark.asyncio
-    async def test_chromadb_실패_시_fts_만_저장(self) -> None:
-        """ChromaDB 저장 실패 시에도 FTS5 저장은 계속 진행된다."""
+    async def test_chromadb_실패_시_StorageError_전파(self) -> None:
+        """ChromaDB 저장 실패 시 StorageError 가 그대로 전파된다 (fail-loud).
+
+        정책: 반쪽 인덱스(벡터만 있고 키워드 없음)는 RAG 품질을 떨어뜨려
+        '회의 완료인데 검색 부정확' 상태가 되므로 명시적으로 실패 처리.
+        파이프라인 재시도 루프 또는 사용자에게 노출되어 백필이 가능해진다.
+        """
         embedder = _make_embedder()
         model = _make_fake_model()
 
@@ -503,15 +508,17 @@ class TestEmbedderAsync:
             ),
             patch("steps.embedder._ensure_fts_table"),
             patch("steps.embedder._store_chunks_fts"),
+            pytest.raises(StorageError, match="ChromaDB 연결 실패"),
         ):
-            result = await embedder.embed(chunked)
-
-        assert result.chroma_stored is False
-        assert result.fts_stored is True
+            await embedder.embed(chunked)
 
     @pytest.mark.asyncio
-    async def test_fts_실패_시_chromadb_만_저장(self) -> None:
-        """FTS5 저장 실패 시에도 ChromaDB 저장은 성공으로 표시된다."""
+    async def test_fts_실패_시_StorageError_전파(self) -> None:
+        """FTS5 저장 실패 시 StorageError 가 그대로 전파된다 (fail-loud).
+
+        정책: 키워드 검색 인덱스 없이 벡터만 있는 상태도 의미·키워드 결합 검색
+        품질을 망가뜨리므로 명시적 실패로 처리.
+        """
         embedder = _make_embedder()
         model = _make_fake_model()
 
@@ -525,12 +532,13 @@ class TestEmbedderAsync:
         with (
             patch("steps.embedder._store_chunks_chroma"),
             patch("steps.embedder._ensure_fts_table"),
-            patch("steps.embedder._store_chunks_fts", side_effect=StorageError("FTS5 오류")),
+            patch(
+                "steps.embedder._store_chunks_fts",
+                side_effect=StorageError("FTS5 오류"),
+            ),
+            pytest.raises(StorageError, match="FTS5 오류"),
         ):
-            result = await embedder.embed(chunked)
-
-        assert result.chroma_stored is True
-        assert result.fts_stored is False
+            await embedder.embed(chunked)
 
     @pytest.mark.asyncio
     async def test_model_manager_acquire_호출(self) -> None:

@@ -178,6 +178,42 @@ def _make_mock_summary() -> MagicMock:
     return result
 
 
+def _make_mock_chunked() -> MagicMock:
+    """테스트용 ChunkedResult Mock을 생성한다."""
+    result = MagicMock()
+    result.chunks = [
+        MagicMock(
+            chunk_id="test_chunk_0001",
+            text="안녕하세요",
+            speakers=["SPEAKER_00"],
+            start_time=0.0,
+            end_time=2.0,
+            chunk_index=0,
+        ),
+    ]
+    result.meeting_id = "test_meeting"
+    result.date = "2026-04-29"
+    result.total_utterances = 1
+    result.num_speakers = 1
+    result.audio_path = "/tmp/test.wav"
+    result.save_checkpoint = MagicMock()
+    return result
+
+
+def _make_mock_embedded() -> MagicMock:
+    """테스트용 EmbeddedResult Mock을 생성한다."""
+    result = MagicMock()
+    result.chunks = []
+    result.meeting_id = "test_meeting"
+    result.date = "2026-04-29"
+    result.total_chunks = 1
+    result.embedding_dimension = 384
+    result.chroma_stored = True
+    result.fts_stored = True
+    result.save_checkpoint = MagicMock()
+    return result
+
+
 # === PipelineStep 열거형 테스트 ===
 
 
@@ -192,6 +228,8 @@ class TestPipelineStep:
         assert PipelineStep.MERGE == "merge"
         assert PipelineStep.CORRECT == "correct"
         assert PipelineStep.SUMMARIZE == "summarize"
+        assert PipelineStep.CHUNK == "chunk"
+        assert PipelineStep.EMBED == "embed"
 
     def test_step_order(self) -> None:
         """PIPELINE_STEPS 순서가 올바른지 확인한다."""
@@ -202,12 +240,14 @@ class TestPipelineStep:
             PipelineStep.MERGE,
             PipelineStep.CORRECT,
             PipelineStep.SUMMARIZE,
+            PipelineStep.CHUNK,
+            PipelineStep.EMBED,
         ]
         assert expected == PIPELINE_STEPS
 
     def test_step_count(self) -> None:
-        """파이프라인 단계 수가 6개인지 확인한다."""
-        assert len(PIPELINE_STEPS) == 6
+        """파이프라인 단계 수가 8개인지 확인한다 (CHUNK + EMBED 추가됨)."""
+        assert len(PIPELINE_STEPS) == 8
 
 
 # === StepResult 테스트 ===
@@ -488,6 +528,8 @@ class TestPipelineManagerRun:
         mock_merged = _make_mock_merged()
         mock_corrected = _make_mock_corrected()
         mock_summary = _make_mock_summary()
+        mock_chunked = _make_mock_chunked()
+        mock_embedded = _make_mock_embedded()
 
         with (
             patch.object(
@@ -526,11 +568,23 @@ class TestPipelineManagerRun:
                 new_callable=AsyncMock,
                 return_value=mock_summary,
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=mock_chunked,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=mock_embedded,
+            ),
         ):
             state = await pipeline.run(audio_file, meeting_id="test_run")
 
         assert state.status == "completed"
-        assert len(state.completed_steps) == 6
+        assert len(state.completed_steps) == 8
         assert state.completed_steps == [
             "convert",
             "transcribe",
@@ -538,6 +592,8 @@ class TestPipelineManagerRun:
             "merge",
             "correct",
             "summarize",
+            "chunk",
+            "embed",
         ]
 
     @pytest.mark.asyncio
@@ -585,6 +641,8 @@ class TestPipelineManagerRun:
         mock_merged = _make_mock_merged()
         mock_corrected = _make_mock_corrected()
         mock_summary = _make_mock_summary()
+        mock_chunked = _make_mock_chunked()
+        mock_embedded = _make_mock_embedded()
 
         # transcribe: 첫 번째 실패 → 두 번째 성공
         transcribe_mock = AsyncMock(
@@ -629,6 +687,18 @@ class TestPipelineManagerRun:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=mock_summary,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=mock_chunked,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=mock_embedded,
             ),
         ):
             state = await pipeline.run(audio_file, meeting_id="test_retry")
@@ -679,6 +749,8 @@ class TestPipelineManagerRun:
         mock_merged = _make_mock_merged()
         mock_corrected = _make_mock_corrected()
         mock_summary = _make_mock_summary()
+        mock_chunked = _make_mock_chunked()
+        mock_embedded = _make_mock_embedded()
 
         with (
             patch.object(
@@ -716,6 +788,18 @@ class TestPipelineManagerRun:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=mock_summary,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=mock_chunked,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=mock_embedded,
             ),
         ):
             state = await pipeline.run(
@@ -803,6 +887,18 @@ class TestPipelineResume:
                 new_callable=AsyncMock,
                 return_value=mock_summary,
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             result = await pipeline.resume(meeting_id)
 
@@ -839,6 +935,8 @@ class TestPipelineResume:
                 "merge",
                 "correct",
                 "summarize",
+                "chunk",
+                "embed",
             ],
             wav_path=str(audio_file),
             output_dir=str(pipeline._get_output_dir(meeting_id)),
@@ -919,6 +1017,18 @@ class TestCheckpointDisabled:
                 new_callable=AsyncMock,
                 return_value=mock_summary,
             ),
+            patch.object(
+                pm,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pm,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             state = await pm.run(audio_file, meeting_id="no_cp")
 
@@ -982,6 +1092,8 @@ class TestFindResumeStep:
                 "merge",
                 "correct",
                 "summarize",
+                "chunk",
+                "embed",
             ],
         )
         assert pipeline._find_resume_step(state) is None
@@ -1254,6 +1366,18 @@ class TestStateTransitions:
                 new_callable=AsyncMock,
                 return_value=mock_summary,
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             await pipeline.run(audio_file, meeting_id="test_transition")
 
@@ -1511,11 +1635,23 @@ class TestE2EFullPipeline:
                 new_callable=AsyncMock,
                 return_value=real_summary,
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             state = await pipeline.run(audio_file, meeting_id="e2e_full")
 
         assert state.status == "completed"
-        assert len(state.completed_steps) == 6
+        assert len(state.completed_steps) == 8
         assert state.step_results[-1]["success"] is True
 
     @pytest.mark.asyncio
@@ -1626,14 +1762,26 @@ class TestE2EFullPipeline:
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             state = await pipeline.run(
                 audio_file,
                 meeting_id="e2e_results",
             )
 
-        # 6개 단계 모두 결과가 기록되어야 함
-        assert len(state.step_results) == 6
+        # 8개 단계 모두 결과가 기록되어야 함 (CHUNK + EMBED 추가됨)
+        assert len(state.step_results) == 8
         for i, step_name in enumerate(
             [
                 "convert",
@@ -1642,6 +1790,8 @@ class TestE2EFullPipeline:
                 "merge",
                 "correct",
                 "summarize",
+                "chunk",
+                "embed",
             ]
         ):
             assert state.step_results[i]["step"] == step_name
@@ -1731,6 +1881,18 @@ class TestE2ECheckpointResume:
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             result = await pipeline.resume(meeting_id)
 
@@ -1740,7 +1902,7 @@ class TestE2ECheckpointResume:
         diarize_mock.assert_not_called()
 
         assert result.status == "completed"
-        assert len(result.completed_steps) == 6
+        assert len(result.completed_steps) == 8
 
     @pytest.mark.asyncio
     async def test_e2e_failed_state_persists(
@@ -1816,6 +1978,18 @@ class TestE2ECheckpointResume:
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             result = await pipeline.resume(meeting_id)
 
@@ -1871,6 +2045,18 @@ class TestE2ECheckpointResume:
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             await pipeline.run(audio_file, meeting_id=meeting_id)
 
@@ -1883,7 +2069,7 @@ class TestE2ECheckpointResume:
 
         assert raw_data["meeting_id"] == meeting_id
         assert raw_data["status"] == "completed"
-        assert len(raw_data["completed_steps"]) == 6
+        assert len(raw_data["completed_steps"]) == 8
         assert raw_data["wav_path"] != ""
         assert raw_data["created_at"] != ""
         assert raw_data["updated_at"] != ""
@@ -2025,6 +2211,18 @@ class TestE2EKoreanTextPreservation:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=summary,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
             ),
         ):
             state = await pipeline.run(
@@ -2200,6 +2398,18 @@ class TestE2ESecurityIntegration:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
             ),
         ):
             _state = await pipeline.run(audio_file, meeting_id=meeting_id)
@@ -2488,6 +2698,18 @@ class TestE2EIdempotency:
                 new_callable=AsyncMock,
                 return_value=_make_real_summary_result(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             first = await pipeline.run(audio_file, meeting_id=meeting_id)
 
@@ -2553,6 +2775,18 @@ class TestE2EIdempotency:
                     "_run_step_summarize",
                     new_callable=AsyncMock,
                     return_value=_make_real_summary_result(),
+                ),
+                patch.object(
+                    pipeline,
+                    "_run_step_chunk",
+                    new_callable=AsyncMock,
+                    return_value=_make_mock_chunked(),
+                ),
+                patch.object(
+                    pipeline,
+                    "_run_step_embed",
+                    new_callable=AsyncMock,
+                    return_value=_make_mock_embedded(),
                 ),
             ):
                 state = await pipeline.run(
@@ -2623,12 +2857,24 @@ class TestPipelineStepCallback:
                 new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             # on_step_start 미전달 — 예외 없이 정상 실행되어야 함
             state = await pipeline.run(audio_file, meeting_id="test_cb_none")
 
         assert state.status == "completed"
-        assert len(state.completed_steps) == 6
+        assert len(state.completed_steps) == 8
 
     @pytest.mark.asyncio
     async def test_콜백_있으면_단계_시작시_호출(
@@ -2679,6 +2925,18 @@ class TestPipelineStepCallback:
                 new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             state = await pipeline.run(
                 audio_file,
@@ -2687,8 +2945,8 @@ class TestPipelineStepCallback:
             )
 
         assert state.status == "completed"
-        # 콜백이 6개 단계 모두에서 호출되었는지 확인
-        assert callback.call_count == 6
+        # 콜백이 8개 단계 모두에서 호출되었는지 확인
+        assert callback.call_count == 8
         # 호출 인자가 PipelineStep의 value(문자열)인지 확인
         called_steps = [call.args[0] for call in callback.call_args_list]
         assert called_steps == [
@@ -2698,6 +2956,8 @@ class TestPipelineStepCallback:
             "merge",
             "correct",
             "summarize",
+            "chunk",
+            "embed",
         ]
 
     @pytest.mark.asyncio
@@ -2749,6 +3009,18 @@ class TestPipelineStepCallback:
                 new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             # 콜백이 예외를 던져도 파이프라인은 정상 완료되어야 함
             state = await pipeline.run(
@@ -2758,7 +3030,7 @@ class TestPipelineStepCallback:
             )
 
         assert state.status == "completed"
-        assert len(state.completed_steps) == 6
+        assert len(state.completed_steps) == 8
 
 
 # === LLM 단계 스킵 테스트 ===
@@ -2824,6 +3096,18 @@ class TestSkipLlmSteps:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="skip_test")
@@ -2832,9 +3116,11 @@ class TestSkipLlmSteps:
             mock_correct.assert_not_called()
             mock_summarize.assert_not_called()
 
-            # 스킵된 단계 확인
+            # 스킵된 단계 확인 — chunk/embed 는 LLM 단계가 아니므로 skip 되지 않음
             assert "correct" in state.skipped_steps
             assert "summarize" in state.skipped_steps
+            assert "chunk" not in state.skipped_steps
+            assert "embed" not in state.skipped_steps
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_merged_result_패스스루(
@@ -2882,6 +3168,18 @@ class TestSkipLlmSteps:
                 PipelineManager,
                 "_run_step_summarize",
                 new_callable=AsyncMock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
             ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
@@ -2938,13 +3236,26 @@ class TestSkipLlmSteps:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="skip_completed")
 
             assert state.status == "completed"
-            # 모든 6단계가 completed_steps에 포함 (스킵된 단계도 포함)
-            assert len(state.completed_steps) == 6
+            # 모든 8단계가 completed_steps 에 포함 (스킵된 단계도 포함)
+            # CHUNK / EMBED 는 LLM 단계 아니라 skip 되지 않고 정상 실행
+            assert len(state.completed_steps) == 8
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps_false시_기존_동작(
@@ -2993,6 +3304,18 @@ class TestSkipLlmSteps:
                 new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="no_skip_test")
@@ -3003,7 +3326,7 @@ class TestSkipLlmSteps:
 
             assert state.status == "completed"
             assert state.skipped_steps == []
-            assert len(state.completed_steps) == 6
+            assert len(state.completed_steps) == 8
 
     @pytest.mark.asyncio
     async def test_run_파라미터_skip_llm_steps가_config_오버라이드(
@@ -3051,6 +3374,18 @@ class TestSkipLlmSteps:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(
@@ -3436,6 +3771,18 @@ class TestDegradedFlagLogicSeparation:
                 new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="degraded_recovery_test")
@@ -3518,6 +3865,18 @@ class TestDegradedFlagLogicSeparation:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="realtime_low_mem_test")
@@ -3598,6 +3957,18 @@ class TestDegradedFlagLogicSeparation:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
             state = await pipeline.run(audio_file, meeting_id="skip_llm_priority_test")
