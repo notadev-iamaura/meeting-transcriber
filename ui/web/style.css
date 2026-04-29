@@ -7727,3 +7727,137 @@ ul#command-palette-list li[role="option"][aria-selected="true"] .command-palette
     border-radius: 0;
   }
 }
+
+
+/* =====================================================================
+ * Reindex Settings Panel (검색 인덱스 백필)
+ * design.md 토큰만 사용 — 새 색상/spacing 도입 없음
+ * ===================================================================== */
+
+.reindex-summary {
+  margin-top: 12px;
+}
+
+.reindex-summary-loading,
+.reindex-summary-error,
+.reindex-missing-empty {
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.reindex-summary-error {
+  color: var(--text-primary);
+}
+
+.reindex-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.reindex-stat {
+  padding: 16px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.reindex-stat-warning {
+  border-color: var(--accent);
+}
+
+.reindex-stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.reindex-stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.reindex-stat-warning .reindex-stat-value {
+  color: var(--accent);
+}
+
+.reindex-batch-controls {
+  margin-top: 12px;
+}
+
+.reindex-progress {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+}
+
+.reindex-progress-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reindex-progress-bar {
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.reindex-progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.reindex-missing-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reindex-missing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  gap: 12px;
+}
+
+.reindex-missing-id {
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-all;
+  flex: 1;
+}
+
+.reindex-single-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+@media (max-width: 600px) {
+  .reindex-stats {
+    grid-template-columns: 1fr;
+  }
+  .reindex-missing-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

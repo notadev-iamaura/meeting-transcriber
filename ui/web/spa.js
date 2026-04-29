@@ -5729,6 +5729,7 @@
             '    <button type="button" class="settings-tab" data-tab="general" role="tab">일반</button>',
             '    <button type="button" class="settings-tab" data-tab="prompts" role="tab">프롬프트</button>',
             '    <button type="button" class="settings-tab" data-tab="vocabulary" role="tab">용어집</button>',
+            '    <button type="button" class="settings-tab" data-tab="reindex" role="tab">검색 인덱스</button>',
             '  </div>',
             '  <div class="settings-panel-host" id="settingsPanelHost" role="tabpanel"></div>',
             '</div>',
@@ -5788,6 +5789,8 @@
             this._currentPanel = new PromptsSettingsPanel(host);
         } else if (name === "vocabulary") {
             this._currentPanel = new VocabularySettingsPanel(host);
+        } else if (name === "reindex") {
+            this._currentPanel = new ReindexSettingsPanel(host);
         } else {
             this._currentPanel = new GeneralSettingsPanel(host);
             name = "general";
@@ -5820,6 +5823,283 @@
         var listPanel = document.getElementById("list-panel");
         if (listPanel) listPanel.classList.remove("chat-mode");
         document.title = "회의록 · Recap";
+    };
+
+
+    // =====================================================================
+    // ReindexSettingsPanel — RAG 검색 인덱스 백필 패널
+    // =====================================================================
+    //
+    // 기존 회의가 ChromaDB / FTS5 인덱스 없이 completed 처리된 경우를
+    // 사용자가 직접 백필할 수 있는 진입점.
+    //
+    // 카드 1: 현황 요약 (전체 N / 인덱싱됨 M / 누락 K)
+    // 카드 2: 일괄 백필 트리거 + WebSocket 진행 상황 progress bar
+    // 카드 3: 누락 회의 목록 + 개별 재색인 버튼
+    function ReindexSettingsPanel(host) {
+        var self = this;
+        self._host = host;
+        self._status = null;        // 마지막 GET /api/reindex/status 응답
+        self._isRunning = false;    // 일괄 백필 진행 중 여부
+        self._progress = { processed: 0, total: 0, failed: [] };
+        self._currentMeetingId = null;
+        self._wsHandler = null;
+        self._render();
+        self._loadStatus();
+        self._bindWebSocket();
+    }
+
+    ReindexSettingsPanel.prototype._render = function () {
+        this._host.innerHTML = [
+            '<div class="reindex-panel">',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">인덱싱 현황</h3>',
+            '    <p class="settings-section-desc">',
+            '      RAG 검색 (벡터 + 키워드) 인덱스에 등록된 회의 수를 표시합니다.',
+            '      누락된 회의는 채팅 검색에서 응답 컨텍스트로 사용되지 않습니다.',
+            '    </p>',
+            '    <div class="reindex-summary" id="reindexSummary" aria-live="polite">',
+            '      <div class="reindex-summary-loading">불러오는 중…</div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">일괄 백필</h3>',
+            '    <p class="settings-section-desc">',
+            '      청크가 누락된 모든 회의를 자동으로 재색인합니다. 백그라운드에서',
+            '      순차적으로 진행되며 (메모리 보호), 회의록이나 전사문은 변경되지',
+            '      않습니다. 창을 닫아도 계속 실행됩니다.',
+            '    </p>',
+            '    <div class="reindex-batch-controls">',
+            '      <button type="button" class="btn btn-primary" id="reindexAllBtn" disabled>',
+            '        전체 누락분 백필 시작',
+            '      </button>',
+            '    </div>',
+            '    <div class="reindex-progress" id="reindexProgress" hidden aria-live="polite">',
+            '      <div class="reindex-progress-text" id="reindexProgressText"></div>',
+            '      <div class="reindex-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">',
+            '        <div class="reindex-progress-bar-fill" id="reindexProgressFill"></div>',
+            '      </div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="settings-section">',
+            '    <h3 class="settings-section-title">누락 회의 목록</h3>',
+            '    <p class="settings-section-desc">',
+            '      개별 회의만 즉시 재색인하려면 옆의 "재색인" 버튼을 누르세요.',
+            '    </p>',
+            '    <div class="reindex-missing-list" id="reindexMissingList" aria-live="polite">',
+            '      <div class="reindex-missing-empty">불러오는 중…</div>',
+            '    </div>',
+            '  </section>',
+            '</div>',
+        ].join("\n");
+
+        var self = this;
+        var btn = document.getElementById("reindexAllBtn");
+        if (btn) {
+            btn.addEventListener("click", function () {
+                self._startReindexAll();
+            });
+        }
+    };
+
+    ReindexSettingsPanel.prototype._loadStatus = async function () {
+        var self = this;
+        try {
+            var data = await App.apiRequest("/reindex/status");
+            self._status = data;
+            self._renderSummary(data);
+            self._renderMissingList(data.missing_meeting_ids || []);
+            var btn = document.getElementById("reindexAllBtn");
+            if (btn) {
+                btn.disabled = self._isRunning || data.missing === 0;
+            }
+        } catch (e) {
+            var summary = document.getElementById("reindexSummary");
+            if (summary) {
+                summary.innerHTML = '<div class="reindex-summary-error">현황 조회 실패: ' + App.escapeHtml(e.message) + '</div>';
+            }
+        }
+    };
+
+    ReindexSettingsPanel.prototype._renderSummary = function (data) {
+        var summary = document.getElementById("reindexSummary");
+        if (!summary) return;
+        var missingClass = data.missing > 0 ? " reindex-stat-warning" : "";
+        summary.innerHTML = [
+            '<div class="reindex-stats">',
+            '  <div class="reindex-stat">',
+            '    <div class="reindex-stat-label">전체 회의</div>',
+            '    <div class="reindex-stat-value">' + data.total + '</div>',
+            '  </div>',
+            '  <div class="reindex-stat">',
+            '    <div class="reindex-stat-label">인덱싱됨</div>',
+            '    <div class="reindex-stat-value">' + data.indexed + '</div>',
+            '  </div>',
+            '  <div class="reindex-stat' + missingClass + '">',
+            '    <div class="reindex-stat-label">누락</div>',
+            '    <div class="reindex-stat-value">' + data.missing + '</div>',
+            '  </div>',
+            '</div>',
+        ].join("\n");
+    };
+
+    ReindexSettingsPanel.prototype._renderMissingList = function (ids) {
+        var list = document.getElementById("reindexMissingList");
+        if (!list) return;
+        if (!ids || ids.length === 0) {
+            list.innerHTML = '<div class="reindex-missing-empty">누락된 회의가 없습니다 — 모든 회의가 인덱싱되어 있어요.</div>';
+            return;
+        }
+        var self = this;
+        var rows = ids.map(function (mid) {
+            return [
+                '<div class="reindex-missing-row" data-meeting-id="' + App.escapeHtml(mid) + '">',
+                '  <div class="reindex-missing-id">' + App.escapeHtml(mid) + '</div>',
+                '  <button type="button" class="btn btn-secondary reindex-single-btn" data-meeting-id="' + App.escapeHtml(mid) + '">재색인</button>',
+                '</div>',
+            ].join("\n");
+        }).join("\n");
+        list.innerHTML = rows;
+
+        var btns = list.querySelectorAll(".reindex-single-btn");
+        Array.prototype.forEach.call(btns, function (btn) {
+            btn.addEventListener("click", function () {
+                var mid = btn.getAttribute("data-meeting-id");
+                self._reindexSingle(mid, btn);
+            });
+        });
+    };
+
+    ReindexSettingsPanel.prototype._reindexSingle = async function (meetingId, btn) {
+        if (!meetingId) return;
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = "처리 중…";
+        }
+        try {
+            await App.apiRequest("/meetings/" + encodeURIComponent(meetingId) + "/reindex", {
+                method: "POST",
+            });
+            // 성공 시 목록 갱신
+            await this._loadStatus();
+        } catch (e) {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = "재시도";
+            }
+            window.alert("재색인 실패: " + e.message);
+        }
+    };
+
+    ReindexSettingsPanel.prototype._startReindexAll = async function () {
+        var btn = document.getElementById("reindexAllBtn");
+        if (btn) btn.disabled = true;
+        try {
+            var data = await App.apiRequest("/reindex/all", { method: "POST" });
+            this._isRunning = true;
+            this._progress = { processed: 0, total: data.total || 0, failed: [] };
+            this._showProgress();
+            this._updateProgress();
+        } catch (e) {
+            if (btn) btn.disabled = false;
+            if (e.status === 409) {
+                window.alert("이미 진행 중인 일괄 백필 작업이 있습니다.");
+            } else {
+                window.alert("일괄 백필 시작 실패: " + e.message);
+            }
+        }
+    };
+
+    ReindexSettingsPanel.prototype._showProgress = function () {
+        var el = document.getElementById("reindexProgress");
+        if (el) el.hidden = false;
+    };
+
+    ReindexSettingsPanel.prototype._hideProgress = function () {
+        var el = document.getElementById("reindexProgress");
+        if (el) el.hidden = true;
+    };
+
+    ReindexSettingsPanel.prototype._updateProgress = function () {
+        var text = document.getElementById("reindexProgressText");
+        var fill = document.getElementById("reindexProgressFill");
+        if (!text || !fill) return;
+        var p = this._progress;
+        var ratio = p.total > 0 ? Math.round((p.processed / p.total) * 100) : 0;
+        var failedCount = (p.failed || []).length;
+        var failedSuffix = failedCount > 0 ? " (실패 " + failedCount + ")" : "";
+        var current = this._currentMeetingId ? " · 현재: " + this._currentMeetingId : "";
+        text.textContent = p.processed + " / " + p.total + " 완료 (" + ratio + "%)" + failedSuffix + current;
+        fill.style.width = ratio + "%";
+        var bar = fill.parentElement;
+        if (bar) bar.setAttribute("aria-valuenow", String(ratio));
+    };
+
+    ReindexSettingsPanel.prototype._bindWebSocket = function () {
+        var self = this;
+        self._wsHandler = function (event) {
+            var data = (event && event.detail) || {};
+            switch (data.phase) {
+                case "all_started":
+                    self._isRunning = true;
+                    self._progress = {
+                        processed: data.processed || 0,
+                        total: data.total || 0,
+                        failed: [],
+                    };
+                    self._currentMeetingId = null;
+                    self._showProgress();
+                    self._updateProgress();
+                    break;
+                case "start":
+                    self._currentMeetingId = data.meeting_id || null;
+                    self._updateProgress();
+                    break;
+                case "complete":
+                    if (typeof data.processed === "number") {
+                        self._progress.processed = data.processed;
+                    }
+                    if (typeof data.total === "number") {
+                        self._progress.total = data.total;
+                    }
+                    self._currentMeetingId = null;
+                    self._updateProgress();
+                    break;
+                case "failed":
+                    if (data.meeting_id) {
+                        self._progress.failed.push(data.meeting_id);
+                    }
+                    if (typeof data.processed === "number") {
+                        self._progress.processed = data.processed;
+                    }
+                    self._updateProgress();
+                    break;
+                case "all_complete":
+                    self._isRunning = false;
+                    self._currentMeetingId = null;
+                    self._updateProgress();
+                    // 짧게 보여준 뒤 숨김 + 현황 갱신
+                    setTimeout(function () {
+                        self._hideProgress();
+                        self._loadStatus();
+                    }, 1500);
+                    break;
+                default:
+                    break;
+            }
+        };
+        document.addEventListener("ws:reindex_progress", self._wsHandler);
+    };
+
+    ReindexSettingsPanel.prototype.isDirty = function () {
+        return false;
+    };
+
+    ReindexSettingsPanel.prototype.destroy = function () {
+        if (this._wsHandler) {
+            document.removeEventListener("ws:reindex_progress", this._wsHandler);
+            this._wsHandler = null;
+        }
     };
 
 
