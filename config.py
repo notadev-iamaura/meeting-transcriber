@@ -580,8 +580,10 @@ class WikiConfig(BaseModel):
         enabled: 9단계(WIKI_COMPILE) 활성화 여부. False 이면 PipelineManager 가
             wiki 단계를 호출하지 않고 곧바로 종료한다.
         root: wiki 루트 디렉토리. `~` 확장은 호출 측이 명시적으로 수행해야 한다.
-        compiler_model: 향후 Phase 2 부터 사용할 컴파일러 LLM 모델. Phase 1
-            에서는 dry_run 이므로 실제 사용되지 않는다.
+        compiler_model: Wiki 컴파일러 LLM 모델. Gemma 4 사용 (사용자 환경에
+            맞춤). EXAONE 도 가능하지만 별도 설치가 필요하다. 8단계(요약)에서
+            이미 Gemma 가 메모리에 로드되어 있으면 9단계(Wiki) 가 그대로
+            재사용한다.
         lint_interval: D4 (cross-page lint) 를 N 회의마다 실행. Phase 2 도입.
         confidence_threshold: D3 (페이지 confidence 컷오프). 0~10 정수 중 7 이상이
             기본값. Phase 2 도입.
@@ -595,7 +597,7 @@ class WikiConfig(BaseModel):
 
     enabled: bool = False
     root: Path = Path("~/.meeting-transcriber/wiki/")
-    compiler_model: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+    compiler_model: str = "mlx-community/gemma-4-e4b-it-4bit"
     lint_interval: int = Field(default=5, ge=1)
     confidence_threshold: int = Field(default=7, ge=0, le=10)
     dry_run: bool = True
@@ -729,6 +731,23 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
             env_hf = hf_token_path.read_text().strip()
     if env_hf:
         data.setdefault("diarization", {})["huggingface_token"] = env_hf
+
+    # Wiki 환경변수 (PRD §9 Phase 1.B)
+    if env_wiki_enabled := os.environ.get("MT_WIKI_ENABLED"):
+        # "true"/"True"/"1" → True, 그 외 → False
+        data.setdefault("wiki", {})["enabled"] = env_wiki_enabled.lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+    if env_wiki_root := os.environ.get("MT_WIKI_ROOT"):
+        data.setdefault("wiki", {})["root"] = env_wiki_root
+    if env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN"):
+        data.setdefault("wiki", {})["dry_run"] = env_wiki_dry.lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     return data
 

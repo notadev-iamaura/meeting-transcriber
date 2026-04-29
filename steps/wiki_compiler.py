@@ -23,7 +23,7 @@ Phase 2 부터 (dry_run=False):
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,65 @@ from core.pipeline import PipelineError
 from core.wiki.store import WikiStore, WikiStoreError
 
 logger = logging.getLogger(__name__)
+
+
+def _create_wiki_compiler_v2(
+    *,
+    config: AppConfig,
+    store: WikiStore,
+    model_manager: Any | None,
+) -> Any:
+    """Phase 2 V2 컴파일러 팩토리. 테스트 monkeypatch 진입점.
+
+    실제 의존성 (MlxWikiClient, WikiGuard, DecisionExtractor, ActionItemExtractor)
+    을 lazy import 하여 wiki 비활성 시 import 비용을 0 으로 둔다. 테스트는 이
+    함수를 monkeypatch 하여 mock V2 인스턴스를 주입할 수 있다.
+
+    Args:
+        config: AppConfig — wiki 컴파일러 설정.
+        store: 초기화된 WikiStore.
+        model_manager: ModelLoadManager (실제 LLM 호출 시 필요).
+
+    Returns:
+        WikiCompilerV2 인스턴스 (또는 mock).
+    """
+    # Lazy import — 실제 LLM 호출 경로에서만 로드
+    from core.wiki.compiler import WikiCompilerV2
+    from core.wiki.extractors.action_item import ActionItemExtractor
+    from core.wiki.extractors.decision import DecisionExtractor
+    from core.wiki.guard import WikiGuard
+    from core.wiki.llm_client import MlxWikiClient
+
+    llm = MlxWikiClient(config=config, model_manager=model_manager)
+    # Phase 2.E: CitationVerifier 는 wiki_compiler.py 가 자체 회의 단위 verifier
+    # 를 빌드해서 주입 (utterances 기반). 여기서는 placeholder.
+    from core.wiki.guard import CitationVerifier
+
+    class _NullVerifier:
+        """Phase 2.E placeholder. Phase 3 에서 RAG 기반 verifier 로 교체."""
+
+        async def verify_exists(self, meeting_id: str, timestamp_seconds: int) -> bool:
+            return True
+
+        async def fetch_utterance(
+            self, meeting_id: str, timestamp_seconds: int
+        ) -> str | None:
+            return None
+
+    guard = WikiGuard(
+        verifier=_NullVerifier(),
+        confidence_threshold=config.wiki.confidence_threshold,
+    )
+    decision_extractor = DecisionExtractor(llm)
+    action_item_extractor = ActionItemExtractor(llm)
+    return WikiCompilerV2(
+        config=config,
+        store=store,
+        llm=llm,
+        guard=guard,
+        decision_extractor=decision_extractor,
+        action_item_extractor=action_item_extractor,
+    )
 
 
 class WikiCompiler:
@@ -110,14 +169,22 @@ class WikiCompiler:
             if self._config.wiki.dry_run:
                 return await self._run_dry_run(store, meeting_id)
 
-            # ── 4. Phase 2 (실제 컴파일) ─────────────────────────────
-            # Phase 1 에서는 미구현 — dry_run=False 일 때도 안전하게 dry_run
-            # 동작으로 폴백한다. 향후 Phase 2 에서 실제 EXAONE 호출 추가.
-            logger.warning(
-                "wiki.dry_run=False 이지만 Phase 2 컴파일러가 아직 미구현. "
-                "Phase 1 dry-run 으로 폴백."
+            # ── 4. Phase 2 (실제 컴파일) — V2 호출 ───────────────────
+            # summary 가 비어있으면 안전하게 dry_run 폴백 (8단계 실패 시).
+            if not summary:
+                logger.warning(
+                    "wiki.dry_run=False 이지만 summary 가 비어있음 → "
+                    "dry_run 폴백 (meeting_id=%s)",
+                    meeting_id,
+                )
+                return await self._run_dry_run(store, meeting_id)
+
+            return await self._run_v2(
+                store=store,
+                meeting_id=meeting_id,
+                summary=summary,
+                utterances=utterances or [],
             )
-            return await self._run_dry_run(store, meeting_id)
 
         except WikiStoreError as exc:
             # Phase 1 에서 Wiki 실패는 non-fatal (PipelineManager 가 catch).
@@ -131,6 +198,74 @@ class WikiCompiler:
             raise PipelineError(
                 f"wiki 컴파일 실패 ({exc.reason}): {exc.detail or exc}"
             ) from exc
+
+    async def _run_v2(
+        self,
+        *,
+        store: WikiStore,
+        meeting_id: str,
+        summary: str,
+        utterances: list[Any],
+    ) -> dict[str, Any]:
+        """Phase 2 실제 컴파일 — WikiCompilerV2.compile_meeting 위임.
+
+        V2 가 예외를 던지면 PipelineError 로 wrap 하여 PipelineManager 의
+        non-fatal 처리에 일관되게 노출한다.
+
+        Args:
+            store: 초기화된 WikiStore.
+            meeting_id: 회의 ID.
+            summary: 8단계 요약 결과.
+            utterances: 5단계 보정 발화 리스트.
+
+        Returns:
+            {"status": "compiled", "meeting_id": ..., "pages_created": [...],
+             "pages_updated": [...], "pages_pending": [...], "pages_rejected": [...],
+             "commit_sha": "...", "duration_seconds": float}.
+
+        Raises:
+            PipelineError: V2.compile_meeting 이 예외를 던졌을 때.
+        """
+        try:
+            v2 = _create_wiki_compiler_v2(
+                config=self._config,
+                store=store,
+                model_manager=self._model_manager,
+            )
+            result = await v2.compile_meeting(
+                meeting_id=meeting_id,
+                meeting_date=date.today(),
+                summary=summary,
+                utterances=utterances,
+            )
+            logger.info(
+                "wiki V2 컴파일 완료: meeting_id=%s, created=%d, updated=%d, "
+                "pending=%d, rejected=%d",
+                meeting_id,
+                len(getattr(result, "pages_created", []) or []),
+                len(getattr(result, "pages_updated", []) or []),
+                len(getattr(result, "pages_pending", []) or []),
+                len(getattr(result, "pages_rejected", []) or []),
+            )
+            return {
+                "status": "compiled",
+                "meeting_id": meeting_id,
+                "pages_created": list(getattr(result, "pages_created", []) or []),
+                "pages_updated": list(getattr(result, "pages_updated", []) or []),
+                "pages_pending": list(getattr(result, "pages_pending", []) or []),
+                "pages_rejected": list(getattr(result, "pages_rejected", []) or []),
+                "commit_sha": getattr(result, "commit_sha", "") or "",
+                "duration_seconds": float(
+                    getattr(result, "duration_seconds", 0.0) or 0.0
+                ),
+            }
+        except Exception as exc:
+            logger.error(
+                "wiki V2 컴파일 실패 (meeting_id=%s): %s",
+                meeting_id,
+                exc,
+            )
+            raise PipelineError(f"wiki V2 컴파일 실패: {exc}") from exc
 
     async def _run_dry_run(
         self,

@@ -33,10 +33,15 @@ class TestWikiConfigDefaults:
         cfg = WikiConfig()
         assert cfg.dry_run is True
 
-    def test_기본_compiler_model이_EXAONE이다(self) -> None:
-        """기본 LLM 모델은 EXAONE 3.5 4bit."""
+    def test_기본_compiler_model이_Gemma이다(self) -> None:
+        """기본 LLM 모델은 Gemma 4 (사용자 환경에 맞춤).
+
+        Phase 2.E 정정: 사용자가 EXAONE 미설치 + Gemma 만 사용 중이라
+        compiler_model 기본값을 Gemma 로 통일했다. EXAONE 도 가능하지만
+        별도 설치 필요.
+        """
         cfg = WikiConfig()
-        assert cfg.compiler_model == "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+        assert cfg.compiler_model == "mlx-community/gemma-4-e4b-it-4bit"
 
     def test_기본_lint_interval이_5다(self) -> None:
         """N 회의마다 lint 의 N 기본값."""
