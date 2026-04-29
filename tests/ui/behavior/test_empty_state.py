@@ -13,6 +13,7 @@ Red 의도성:
     fixture 가 mockup 과 다르면 (예: 텍스트 오타) 본 시나리오가 즉시 FAIL —
     그 경우 fixture 를 수정해야 함 (mockup 이 source of truth).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,9 +24,7 @@ from playwright.sync_api import Page, expect
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PREVIEW_URL = (
-    PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html"
-).as_uri()
+PREVIEW_URL = (PROJECT_ROOT / "tests" / "ui" / "_fixtures" / "empty-state-preview.html").as_uri()
 
 
 def test_meeting_list_empty_shows_recording_cta(page: Page) -> None:
@@ -87,9 +86,5 @@ def test_all_empty_states_have_48px_icon(page: Page) -> None:
     for i in range(3):
         icon = icons.nth(i)
         # SVG 의 width/height 속성이 48 (CSS 가 어떻게 변경되든 마크업 계약)
-        assert icon.get_attribute("width") == "48", (
-            f"icon[{i}] width != 48"
-        )
-        assert icon.get_attribute("height") == "48", (
-            f"icon[{i}] height != 48"
-        )
+        assert icon.get_attribute("width") == "48", f"icon[{i}] width != 48"
+        assert icon.get_attribute("height") == "48", f"icon[{i}] height != 48"

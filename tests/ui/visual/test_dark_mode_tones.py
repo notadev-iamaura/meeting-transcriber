@@ -6,6 +6,7 @@ PASS 하는 placeholder 로 visual axis NO-OP 명시.
 
 실제 시각 영향은 T-101 의 베이스라인 재캡처 + 시각 회귀 테스트로 검증됨.
 """
+
 from __future__ import annotations
 
 import pytest

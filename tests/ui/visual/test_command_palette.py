@@ -24,6 +24,7 @@ Red 의도성:
     PASS 가 정상 (fixture-as-source-of-truth). Frontend-A 가 spa.js 모듈을
     활성화한 뒤에도 동일 마크업이 유지되면 시각 계약이 유지된다.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator

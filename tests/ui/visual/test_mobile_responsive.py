@@ -23,6 +23,7 @@ baseline 경로 직접 구성:
     dark, mobile) 만 허용하므로, 본 티켓은 `Path("tests/ui/visual/baselines")
     / f"mobile-responsive-{variant}.png"` 로 직접 구성한다 (mockup §7.2).
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator

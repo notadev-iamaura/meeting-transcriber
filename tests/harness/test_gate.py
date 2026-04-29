@@ -3,6 +3,7 @@
 실제 pytest subprocess 호출은 monkeypatch 로 차단하고
 PASS/FAIL 행 기록 + review 강제 로직만 검증한다.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -18,6 +19,7 @@ def _stub_axis(passed: bool, detail_path=None):
 
     def _fn(ticket_id: str, component: str) -> gate.AxisResult:
         return gate.AxisResult(passed=passed, detail_path=detail_path)
+
     return _fn
 
 
@@ -25,8 +27,12 @@ def _record_all_reviews_approved(db_conn: sqlite3.Connection, ticket_id: str) ->
     """green 게이트 통과를 위해 peer-review + merge-final 모두 approved 기록."""
     from harness import review
 
-    review.record(db_conn, ticket_id=ticket_id, agent="designer-b", kind="peer-review", status="approved")
-    review.record(db_conn, ticket_id=ticket_id, agent="pm-b", kind="merge-final", status="approved")
+    review.record(
+        db_conn, ticket_id=ticket_id, agent="designer-b", kind="peer-review", status="approved"
+    )
+    review.record(
+        db_conn, ticket_id=ticket_id, agent="pm-b", kind="merge-final", status="approved"
+    )
 
 
 def test_run_gate_records_three_axes(
@@ -45,8 +51,8 @@ def test_run_gate_records_three_axes(
     assert result.all_passed is True
 
     row = db_conn.execute(
-        "SELECT visual_pass, behavior_pass, a11y_pass, phase FROM gate_runs "
-        "WHERE ticket_id = ?", (t.id,),
+        "SELECT visual_pass, behavior_pass, a11y_pass, phase FROM gate_runs WHERE ticket_id = ?",
+        (t.id,),
     ).fetchone()
     assert row["visual_pass"] == 1
     assert row["behavior_pass"] == 1
@@ -76,7 +82,8 @@ def test_run_gate_records_failures_with_detail(
     row = db_conn.execute(
         "SELECT visual_pass, behavior_pass, a11y_pass, "
         "visual_diff, behavior_log, a11y_violations FROM gate_runs "
-        "WHERE ticket_id = ?", (t.id,),
+        "WHERE ticket_id = ?",
+        (t.id,),
     ).fetchone()
     assert row["visual_pass"] == 0
     assert row["behavior_pass"] == 0
@@ -136,9 +143,7 @@ def test_run_gate_raises_when_visual_test_missing(
         gate.run_gate(db_conn, ticket_id=t.id, phase="red")
 
 
-def test_run_gate_raises_when_ticket_missing(
-    db_conn: sqlite3.Connection
-) -> None:
+def test_run_gate_raises_when_ticket_missing(db_conn: sqlite3.Connection) -> None:
     """ticket lookup 실패 시 ValueError."""
     from harness import gate
 

@@ -9,6 +9,7 @@ Pillow + numpy 로 직접 수행한다.
 
 스펙 참조: docs/superpowers/specs/2026-04-28-ui-ux-overhaul-design.md §4.5, §5.3
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -37,9 +38,7 @@ def baseline_path(component: str, variant: str) -> Path:
         tests/ui/visual/baselines/{component}-{variant}.png
     """
     if variant not in SUPPORTED_VARIANTS:
-        raise ValueError(
-            f"variant must be one of {SUPPORTED_VARIANTS}, got {variant!r}"
-        )
+        raise ValueError(f"variant must be one of {SUPPORTED_VARIANTS}, got {variant!r}")
     return BASELINES_ROOT / f"{component}-{variant}.png"
 
 
@@ -66,9 +65,7 @@ def register_baseline(
     Designer 에이전트가 Playwright 로 PNG 를 저장한 뒤 이 함수를 호출한다.
     """
     if variant not in SUPPORTED_VARIANTS:
-        raise ValueError(
-            f"variant must be one of {SUPPORTED_VARIANTS}, got {variant!r}"
-        )
+        raise ValueError(f"variant must be one of {SUPPORTED_VARIANTS}, got {variant!r}")
     if not path.exists():
         raise FileNotFoundError(f"baseline image not found: {path}")
     sha = _sha256_of(path)

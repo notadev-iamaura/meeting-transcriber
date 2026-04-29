@@ -9,6 +9,7 @@ Red 의도성 (mockup §6.4):
         - aria-allowed-attr: aside 에 aria-modal/aria-expanded 모두 허용
         - color-contrast: 햄버거 텍스트 vs 배경 4.5:1 이상
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -60,13 +61,9 @@ def test_no_axe_violations_closed(browser: Browser) -> None:
         page.goto(PREVIEW_URL)
         page.wait_for_load_state("networkidle")
         violations = _run_axe(page)
-        assert violations == [], (
-            "a11y violations (closed) found:\n"
-            + "\n".join(
-                f"  - {v['id']} ({v['impact']}): {v['help']}\n"
-                f"    nodes: {len(v.get('nodes', []))}"
-                for v in violations
-            )
+        assert violations == [], "a11y violations (closed) found:\n" + "\n".join(
+            f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+            for v in violations
         )
 
 
@@ -78,11 +75,7 @@ def test_no_axe_violations_open(browser: Browser) -> None:
         page.locator("#mobile-menu-toggle").click()
         page.wait_for_timeout(400)  # transition 완료 대기
         violations = _run_axe(page)
-        assert violations == [], (
-            "a11y violations (open) found:\n"
-            + "\n".join(
-                f"  - {v['id']} ({v['impact']}): {v['help']}\n"
-                f"    nodes: {len(v.get('nodes', []))}"
-                for v in violations
-            )
+        assert violations == [], "a11y violations (open) found:\n" + "\n".join(
+            f"  - {v['id']} ({v['impact']}): {v['help']}\n    nodes: {len(v.get('nodes', []))}"
+            for v in violations
         )

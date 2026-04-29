@@ -15,6 +15,7 @@ Red 의도성:
     fixture 가 mockup 과 다르면 (예: 카드 카운트 변경) 본 시나리오가 즉시
     FAIL — 그 경우 fixture 를 수정해야 함 (mockup 이 source of truth).
 """
+
 from __future__ import annotations
 
 from pathlib import Path

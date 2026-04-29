@@ -4,6 +4,7 @@
 _run_behavior_axis 가 component 별 test_*.py 존재를 강제하므로
 PASS 하는 placeholder.
 """
+
 from __future__ import annotations
 
 import pytest
