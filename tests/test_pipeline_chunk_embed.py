@@ -209,16 +209,14 @@ class TestPipelineStepHasChunkEmbed:
     def test_chunk_step_exists(self) -> None:
         """PipelineStep.CHUNK 가 정의되어 있어야 한다."""
         assert hasattr(PipelineStep, "CHUNK"), (
-            "PipelineStep enum 에 CHUNK 가 없습니다. "
-            "RAG 검색용 청크 분할 단계를 추가해야 합니다."
+            "PipelineStep enum 에 CHUNK 가 없습니다. RAG 검색용 청크 분할 단계를 추가해야 합니다."
         )
         assert PipelineStep.CHUNK.value == "chunk"
 
     def test_embed_step_exists(self) -> None:
         """PipelineStep.EMBED 가 정의되어 있어야 한다."""
         assert hasattr(PipelineStep, "EMBED"), (
-            "PipelineStep enum 에 EMBED 가 없습니다. "
-            "RAG 검색용 임베딩 단계를 추가해야 합니다."
+            "PipelineStep enum 에 EMBED 가 없습니다. RAG 검색용 임베딩 단계를 추가해야 합니다."
         )
         assert PipelineStep.EMBED.value == "embed"
 
@@ -238,8 +236,7 @@ class TestPipelineStepsOrder:
         summarize_idx = PIPELINE_STEPS.index(PipelineStep.SUMMARIZE)
         chunk_idx = PIPELINE_STEPS.index(PipelineStep.CHUNK)
         assert chunk_idx == summarize_idx + 1, (
-            f"CHUNK 는 SUMMARIZE 다음이어야 합니다. "
-            f"summarize={summarize_idx}, chunk={chunk_idx}"
+            f"CHUNK 는 SUMMARIZE 다음이어야 합니다. summarize={summarize_idx}, chunk={chunk_idx}"
         )
 
     def test_embed_after_chunk(self) -> None:
@@ -247,8 +244,7 @@ class TestPipelineStepsOrder:
         chunk_idx = PIPELINE_STEPS.index(PipelineStep.CHUNK)
         embed_idx = PIPELINE_STEPS.index(PipelineStep.EMBED)
         assert embed_idx == chunk_idx + 1, (
-            f"EMBED 는 CHUNK 다음이어야 합니다. "
-            f"chunk={chunk_idx}, embed={embed_idx}"
+            f"EMBED 는 CHUNK 다음이어야 합니다. chunk={chunk_idx}, embed={embed_idx}"
         )
 
     def test_embed_is_last(self) -> None:
@@ -274,35 +270,51 @@ class TestFullPipelineWithChunkEmbed:
 
         with (
             patch.object(
-                pipeline, "_run_step_convert", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
                 return_value=wav_path,
             ),
             patch.object(
-                pipeline, "_run_step_transcribe", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
                 return_value=_make_mock_transcript(),
             ),
             patch.object(
-                pipeline, "_run_step_diarize", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
                 return_value=_make_mock_diarization(),
             ),
             patch.object(
-                pipeline, "_run_step_merge", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
                 return_value=_make_mock_merged(),
             ),
             patch.object(
-                pipeline, "_run_step_correct", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
                 return_value=_make_mock_corrected(),
             ),
             patch.object(
-                pipeline, "_run_step_summarize", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
                 return_value=_make_mock_summary(),
             ),
             patch.object(
-                pipeline, "_run_step_chunk", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
                 return_value=_make_mock_chunked(),
             ),
             patch.object(
-                pipeline, "_run_step_embed", new_callable=AsyncMock,
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
                 return_value=_make_mock_embedded(),
             ),
         ):
@@ -334,30 +346,53 @@ class TestFullPipelineWithChunkEmbed:
         chunk_mock = AsyncMock(return_value=_make_mock_chunked())
 
         with (
-            patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock,
-                         return_value=wav_path),
-            patch.object(pipeline, "_run_step_transcribe", new_callable=AsyncMock,
-                         return_value=_make_mock_transcript()),
-            patch.object(pipeline, "_run_step_diarize", new_callable=AsyncMock,
-                         return_value=_make_mock_diarization()),
-            patch.object(pipeline, "_run_step_merge", new_callable=AsyncMock,
-                         return_value=_make_mock_merged()),
-            patch.object(pipeline, "_run_step_correct", new_callable=AsyncMock,
-                         return_value=mock_corrected),
-            patch.object(pipeline, "_run_step_summarize", new_callable=AsyncMock,
-                         return_value=_make_mock_summary()),
+            patch.object(
+                pipeline, "_run_step_convert", new_callable=AsyncMock, return_value=wav_path
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline, "_run_step_correct", new_callable=AsyncMock, return_value=mock_corrected
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
             patch.object(pipeline, "_run_step_chunk", chunk_mock),
-            patch.object(pipeline, "_run_step_embed", new_callable=AsyncMock,
-                         return_value=_make_mock_embedded()),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
         ):
             await pipeline.run(audio_file, meeting_id="test_chunk_input")
 
         assert chunk_mock.called, "_run_step_chunk 가 호출되지 않았습니다."
         # 첫 번째 인자는 corrected_result 여야 함
         call_args = chunk_mock.call_args
-        assert call_args.args[0] is mock_corrected or call_args.kwargs.get("corrected") is mock_corrected, (
-            f"_run_step_chunk 의 첫 인자가 corrected_result 가 아닙니다. args={call_args}"
-        )
+        assert (
+            call_args.args[0] is mock_corrected
+            or call_args.kwargs.get("corrected") is mock_corrected
+        ), f"_run_step_chunk 의 첫 인자가 corrected_result 가 아닙니다. args={call_args}"
 
     @pytest.mark.asyncio
     async def test_embed_called_with_chunked_result(
@@ -373,29 +408,51 @@ class TestFullPipelineWithChunkEmbed:
         embed_mock = AsyncMock(return_value=_make_mock_embedded())
 
         with (
-            patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock,
-                         return_value=wav_path),
-            patch.object(pipeline, "_run_step_transcribe", new_callable=AsyncMock,
-                         return_value=_make_mock_transcript()),
-            patch.object(pipeline, "_run_step_diarize", new_callable=AsyncMock,
-                         return_value=_make_mock_diarization()),
-            patch.object(pipeline, "_run_step_merge", new_callable=AsyncMock,
-                         return_value=_make_mock_merged()),
-            patch.object(pipeline, "_run_step_correct", new_callable=AsyncMock,
-                         return_value=_make_mock_corrected()),
-            patch.object(pipeline, "_run_step_summarize", new_callable=AsyncMock,
-                         return_value=_make_mock_summary()),
-            patch.object(pipeline, "_run_step_chunk", new_callable=AsyncMock,
-                         return_value=mock_chunked),
+            patch.object(
+                pipeline, "_run_step_convert", new_callable=AsyncMock, return_value=wav_path
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+            patch.object(
+                pipeline, "_run_step_chunk", new_callable=AsyncMock, return_value=mock_chunked
+            ),
             patch.object(pipeline, "_run_step_embed", embed_mock),
         ):
             await pipeline.run(audio_file, meeting_id="test_embed_input")
 
         assert embed_mock.called, "_run_step_embed 가 호출되지 않았습니다."
         call_args = embed_mock.call_args
-        assert call_args.args[0] is mock_chunked or call_args.kwargs.get("chunked") is mock_chunked, (
-            f"_run_step_embed 의 첫 인자가 chunked_result 가 아닙니다. args={call_args}"
-        )
+        assert (
+            call_args.args[0] is mock_chunked or call_args.kwargs.get("chunked") is mock_chunked
+        ), f"_run_step_embed 의 첫 인자가 chunked_result 가 아닙니다. args={call_args}"
 
 
 class TestChunkEmbedFailureIsolation:
@@ -415,20 +472,45 @@ class TestChunkEmbedFailureIsolation:
         wav_path.write_bytes(b"fake wav content")
 
         with (
-            patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock,
-                         return_value=wav_path),
-            patch.object(pipeline, "_run_step_transcribe", new_callable=AsyncMock,
-                         return_value=_make_mock_transcript()),
-            patch.object(pipeline, "_run_step_diarize", new_callable=AsyncMock,
-                         return_value=_make_mock_diarization()),
-            patch.object(pipeline, "_run_step_merge", new_callable=AsyncMock,
-                         return_value=_make_mock_merged()),
-            patch.object(pipeline, "_run_step_correct", new_callable=AsyncMock,
-                         return_value=_make_mock_corrected()),
-            patch.object(pipeline, "_run_step_summarize", new_callable=AsyncMock,
-                         return_value=_make_mock_summary()),
-            patch.object(pipeline, "_run_step_chunk", new_callable=AsyncMock,
-                         side_effect=RuntimeError("청크 분할 실패")),
+            patch.object(
+                pipeline, "_run_step_convert", new_callable=AsyncMock, return_value=wav_path
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+                return_value=_make_mock_transcript(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_diarization(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("청크 분할 실패"),
+            ),
         ):
             with pytest.raises(PipelineStepError) as exc_info:
                 await pipeline.run(audio_file, meeting_id="test_chunk_fail")
@@ -437,12 +519,11 @@ class TestChunkEmbedFailureIsolation:
 
         # SUMMARIZE 까지는 완료 체크포인트가 남아있어야 함 → 재개 가능
         # (state 는 raise 직전까지 저장되므로 summarize 가 completed_steps 에 포함)
-        state_path = (
-            pipeline._checkpoints_dir / "test_chunk_fail" / "pipeline_state.json"
-        )
+        state_path = pipeline._checkpoints_dir / "test_chunk_fail" / "pipeline_state.json"
         assert state_path.exists(), "파이프라인 상태 파일이 저장되지 않았습니다."
 
         from core.pipeline import PipelineState
+
         state = PipelineState.from_file(state_path)
         assert "summarize" in state.completed_steps, (
             "CHUNK 실패 시에도 SUMMARIZE 는 완료되어 있어야 합니다."

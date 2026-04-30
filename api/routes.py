@@ -6289,6 +6289,7 @@ async def _reindex_meeting(
         merged = MergedResult.from_checkpoint(merge_cp)
         # MergedResult → CorrectedResult 변환 (was_corrected=False 로 패스스루)
         from steps.corrector import CorrectedUtterance
+
         utterances = [
             CorrectedUtterance(
                 text=u.text,
@@ -6308,9 +6309,7 @@ async def _reindex_meeting(
             total_corrected=0,
         )
     else:
-        raise FileNotFoundError(
-            f"correct.json / merge.json 체크포인트가 없습니다: {meeting_id}"
-        )
+        raise FileNotFoundError(f"correct.json / merge.json 체크포인트가 없습니다: {meeting_id}")
 
     # 회의 날짜 도출 (meeting_id 패턴 → mtime → 오늘)
     import re
@@ -6528,9 +6527,7 @@ async def _start_reindex_all(app: Any, missing_ids: list[str]) -> None:
         )
     finally:
         app.state.reindex_lock_busy = False
-        logger.info(
-            f"reindex-all 종료: 전체 {total}, 성공 {processed}, 실패 {len(failed)}"
-        )
+        logger.info(f"reindex-all 종료: 전체 {total}, 성공 {processed}, 실패 {len(failed)}")
 
 
 @router.post("/reindex/all", response_model=ReindexAllResponse, status_code=202)

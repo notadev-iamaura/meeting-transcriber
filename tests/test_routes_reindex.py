@@ -225,8 +225,11 @@ class TestReindexSingleEndpoint:
                 return_value=_MockJob(id=1, meeting_id=meeting_id),
             )
             with (
-                patch("api.routes._reindex_meeting", new_callable=AsyncMock,
-                      return_value={"chunks": 1, "chroma_stored": True, "fts_stored": True}),
+                patch(
+                    "api.routes._reindex_meeting",
+                    new_callable=AsyncMock,
+                    return_value={"chunks": 1, "chroma_stored": True, "fts_stored": True},
+                ),
             ):
                 response = client.post(f"/api/meetings/{meeting_id}/reindex")
 
