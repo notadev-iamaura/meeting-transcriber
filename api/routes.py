@@ -408,7 +408,9 @@ class DashboardStatsResponse(BaseModel):
     Attributes:
         total_meetings: 전체 회의 수 (queue 의 모든 작업)
         this_week_meetings: 최근 7 일 내 등록된 회의 수
-        queue_pending: 전사 대기열 (queued + recorded) 합계
+        queue_pending: 전사 처리 대기열 (queued) 합계 — 워커가 자동으로 처리할 항목
+        untranscribed_recordings: 미전사 녹음 (recorded) 합계 — 사용자가 수동으로
+            "전사 시작" 을 눌러야 진행되는 항목. 자동 처리되지 않는다.
         active_processing: 현재 진행 중 (recording, transcribing, diarizing,
             merging, embedding) 합계
         completed: 완료 상태 작업 수
@@ -419,6 +421,7 @@ class DashboardStatsResponse(BaseModel):
     total_meetings: int = 0
     this_week_meetings: int = 0
     queue_pending: int = 0
+    untranscribed_recordings: int = 0
     active_processing: int = 0
     completed: int = 0
     failed: int = 0
@@ -2485,9 +2488,11 @@ async def get_system_resources(request: Request) -> SystemResourcesResponse:
 _ACTIVE_JOB_STATUSES: frozenset[str] = frozenset(
     {"recording", "transcribing", "diarizing", "merging", "embedding"}
 )
-# 대기열 상태 집합 — 사용자가 "남은 큐" 로 인지하는 항목.
-# recorded 는 "녹음 완료, 전사 대기" 상태이므로 포함한다.
-_PENDING_JOB_STATUSES: frozenset[str] = frozenset({"queued", "recorded"})
+# 처리 대기 상태 — 워커가 자동으로 잡아갈 항목.
+# recorded 는 사용자가 수동으로 전사를 시작해야 하므로 분리해서 집계한다
+# (홈 카드에서 "처리 대기" vs "미전사 녹음" 으로 구분 표시).
+_PENDING_JOB_STATUSES: frozenset[str] = frozenset({"queued"})
+_UNTRANSCRIBED_JOB_STATUSES: frozenset[str] = frozenset({"recorded"})
 
 
 @router.get("/dashboard/stats", response_model=DashboardStatsResponse)
@@ -2523,6 +2528,7 @@ async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
     total = len(all_jobs)
     this_week = 0
     pending = 0
+    untranscribed = 0
     active = 0
     completed = 0
     failed = 0
@@ -2533,6 +2539,8 @@ async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
             active += 1
         elif status in _PENDING_JOB_STATUSES:
             pending += 1
+        elif status in _UNTRANSCRIBED_JOB_STATUSES:
+            untranscribed += 1
         elif status == "completed":
             completed += 1
         elif status == "failed":
@@ -2552,6 +2560,7 @@ async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
         total_meetings=total,
         this_week_meetings=this_week,
         queue_pending=pending,
+        untranscribed_recordings=untranscribed,
         active_processing=active,
         completed=completed,
         failed=failed,
