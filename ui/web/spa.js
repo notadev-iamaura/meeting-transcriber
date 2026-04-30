@@ -1106,13 +1106,23 @@
             var query = _searchEl ? _searchEl.value.trim() : "";
             var filtered = _meetings;
 
-            // 검색 필터
+            // 검색 필터 — meeting_id 의 날짜를 YYYY-MM-DD 형식으로 정규화한 idNorm
+            // 도 함께 매칭해 사용자가 "2026-04-30" 같은 하이픈 포함 날짜를 입력해도
+            // meeting_20260430_xxx 같은 raw ID 와 일치하도록 한다. title 필드도 누락
+            // 되어 있어 추가 (사용자가 회의 제목으로도 검색 가능하게).
             if (query) {
                 var lower = query.toLowerCase();
                 filtered = _meetings.filter(function (m) {
-                    var idMatch = (m.meeting_id || "").toLowerCase().indexOf(lower) >= 0;
+                    var rawId = (m.meeting_id || "").toLowerCase();
+                    var idMatch = rawId.indexOf(lower) >= 0;
+                    var idNorm = rawId.replace(
+                        /^meeting_(\d{4})(\d{2})(\d{2})_.*$/,
+                        "$1-$2-$3"
+                    );
+                    var idNormMatch = idNorm.indexOf(lower) >= 0;
+                    var titleMatch = (m.title || "").toLowerCase().indexOf(lower) >= 0;
                     var summaryMatch = (m.summary_preview || "").toLowerCase().indexOf(lower) >= 0;
-                    return idMatch || summaryMatch;
+                    return idMatch || idNormMatch || titleMatch || summaryMatch;
                 });
             }
 
