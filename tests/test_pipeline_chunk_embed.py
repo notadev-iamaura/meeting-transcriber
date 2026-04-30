@@ -37,7 +37,6 @@ from core.pipeline import (
     PipelineStepError,
 )
 
-
 # === 픽스처 — test_pipeline.py 의 패턴 따름 ===
 
 

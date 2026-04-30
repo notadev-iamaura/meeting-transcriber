@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig

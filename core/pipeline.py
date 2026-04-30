@@ -1365,7 +1365,6 @@ class PipelineManager:
         corrected_result: Any = None
         _summary_result: Any = None
         chunked_result: Any = None
-        embedded_result: Any = None  # noqa: F841 — EMBED 단계 결과, 직접 참조 없음
 
         # 이전에 완료된 단계의 결과 복원
         if resume_idx > 0:
@@ -1540,8 +1539,9 @@ class PipelineManager:
                         # EMBED 는 e5-small 임베딩 모델 로드 + ChromaDB/FTS5 저장
                         # ModelLoadManager 가 모델 라이프사이클 관리 (acquire/release)
                         # chunked_result 는 CHUNK 단계 또는 _restore_intermediate_results 에서 복원됨
+                        # 반환값은 체크포인트로 저장되며 직접 참조 없음 (마지막 단계).
                         assert chunked_result is not None
-                        embedded_result = await self._run_step_embed(
+                        await self._run_step_embed(
                             chunked_result,
                             checkpoint_path,
                         )
