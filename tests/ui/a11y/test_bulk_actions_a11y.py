@@ -194,9 +194,7 @@ def test_AA4_드롭다운은_role_menu와_menuitemradio_를_사용한다(ui_page
     """
     trigger = ui_page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']")
     # 트리거 자체 ARIA
-    assert trigger.get_attribute("aria-haspopup") == "menu", (
-        "트리거에 aria-haspopup='menu' 필수"
-    )
+    assert trigger.get_attribute("aria-haspopup") == "menu", "트리거에 aria-haspopup='menu' 필수"
     trigger.click()
     ui_page.wait_for_timeout(200)
     menu = ui_page.locator(".home-action-dropdown[role='menu']")
@@ -312,8 +310,8 @@ def test_AA5b_2개_선택_상태_bulk_actions_axe_위반_0(ui_page: Page) -> Non
     assert matched_nodes > 0, (
         "bulk-actions 컴포넌트가 DOM 에 존재해야 함 — 2 개 선택 후 `.bulk-action-bar` 미존재"
     )
-    assert violations == [], (
-        "2 개 선택 상태 bulk-actions a11y 위반:\n" + _format_violations(violations)
+    assert violations == [], "2 개 선택 상태 bulk-actions a11y 위반:\n" + _format_violations(
+        violations
     )
 
 
@@ -340,8 +338,8 @@ def test_AA5c_드롭다운_열린_상태_axe_위반_0(ui_page: Page) -> None:
     assert matched_nodes > 0, (
         "home-action-dropdown 컴포넌트가 DOM 에 존재해야 함 (메뉴 열림 후 미발견)"
     )
-    assert violations == [], (
-        "메뉴 열린 상태 bulk-actions a11y 위반:\n" + _format_violations(violations)
+    assert violations == [], "메뉴 열린 상태 bulk-actions a11y 위반:\n" + _format_violations(
+        violations
     )
 
 

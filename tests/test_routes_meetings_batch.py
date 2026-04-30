@@ -23,11 +23,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
-
 
 # === 헬퍼 ===
 
@@ -527,13 +525,9 @@ class TestBatchResponseShape:
 
         # 5개 회의: 2개는 요약 대상, 3개는 이미 완료
         for i in range(2):
-            _make_meeting_dirs(
-                tmp_path, f"m_pending_{i}", has_merge=True, has_summary=False
-            )
+            _make_meeting_dirs(tmp_path, f"m_pending_{i}", has_merge=True, has_summary=False)
         for i in range(3):
-            _make_meeting_dirs(
-                tmp_path, f"m_done_{i}", has_merge=True, has_summary=True
-            )
+            _make_meeting_dirs(tmp_path, f"m_done_{i}", has_merge=True, has_summary=True)
 
         with TestClient(app) as client:
             _setup_pipeline_mock(app)
@@ -720,9 +714,7 @@ class TestBatchIntegration:
         # 백그라운드 태스크 자체가 만들어지지 않으므로 pipeline.run 미호출
         assert not mock_pipeline.run.called
 
-    def test_batch_selected_dedupes_duplicate_meeting_ids(
-        self, tmp_path: Path
-    ) -> None:
+    def test_batch_selected_dedupes_duplicate_meeting_ids(self, tmp_path: Path) -> None:
         """selected scope: 동일 meeting_id 가 중복 전송되면 한 번만 큐잉된다.
 
         Phase 3 리뷰의 Major #1 수정: LLM 토큰 낭비·summary.md 덮어쓰기를 방지.
@@ -754,9 +746,7 @@ class TestBatchIntegration:
         assert mock_pipeline.run_llm_steps.call_count == 1
         mock_pipeline.run_llm_steps.assert_called_once_with("m_dup")
 
-    def test_batch_full_action_audio_missing_counted_as_skipped(
-        self, tmp_path: Path
-    ) -> None:
+    def test_batch_full_action_audio_missing_counted_as_skipped(self, tmp_path: Path) -> None:
         """full 액션: audio 없는 transcribe 후보는 skipped 로 카운트된다.
 
         Phase 3 리뷰의 Major #2 보완: full 액션도 transcribe 분류 항목에
@@ -769,7 +759,7 @@ class TestBatchIntegration:
         _make_meeting_dirs(tmp_path, "m_need_summary", has_merge=True, has_summary=False)
 
         with TestClient(app) as client:
-            mock_pipeline = _setup_pipeline_mock(app)
+            _setup_pipeline_mock(app)
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(return_value=None)
 
             response = client.post(
@@ -785,9 +775,7 @@ class TestBatchIntegration:
         assert data["skipped"] == 1
         assert data["meeting_ids"] == ["m_need_summary"]
 
-    def test_batch_summarize_propagates_continues_after_failure(
-        self, tmp_path: Path
-    ) -> None:
+    def test_batch_summarize_propagates_continues_after_failure(self, tmp_path: Path) -> None:
         """한 회의 실패가 다음 회의 처리를 막지 않아야 한다."""
         app = _make_test_app(tmp_path)
 
@@ -813,14 +801,10 @@ class TestBatchIntegration:
         assert response.status_code == 200
         # 두 회의 모두 호출되어야 함 — 첫 실패가 두 번째 호출을 막지 않는다
         assert mock_pipeline.run_llm_steps.call_count == 2
-        called_ids = sorted(
-            call.args[0] for call in mock_pipeline.run_llm_steps.call_args_list
-        )
+        called_ids = sorted(call.args[0] for call in mock_pipeline.run_llm_steps.call_args_list)
         assert called_ids == ["m_will_fail", "m_will_pass"]
 
-    def test_batch_audio_path_outside_base_dir_rejected(
-        self, tmp_path: Path
-    ) -> None:
+    def test_batch_audio_path_outside_base_dir_rejected(self, tmp_path: Path) -> None:
         """audio_path 가 base_dir 외부를 가리키면 사전 제외된다.
 
         Phase 6 보안 감사 Medium-02 수정: SQLite 직접 편집/심링크 공격으로

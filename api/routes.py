@@ -3235,9 +3235,7 @@ async def _resolve_audio_path(
         # strict=True 로 실재하지 않는 경로는 즉시 차단
         candidate = Path(job.audio_path).resolve(strict=True)
     except (FileNotFoundError, OSError, RuntimeError) as exc:
-        logger.warning(
-            f"일괄 처리: audio_path resolve 실패 ({meeting_id}): {exc}"
-        )
+        logger.warning(f"일괄 처리: audio_path resolve 실패 ({meeting_id}): {exc}")
         return None
 
     # 보안 Medium-02: base_dir 외부 경로 차단
@@ -3302,10 +3300,7 @@ def _collect_candidate_ids_sync(
                 created_dt = datetime.fromisoformat(str(created_at))
             except (ValueError, TypeError):
                 # 파싱 실패는 명시적으로 로깅하고 건너뛴다
-                logger.warning(
-                    f"일괄 처리: created_at 파싱 실패 — 건너뜀 "
-                    f"({mid}: {created_at!r})"
-                )
+                logger.warning(f"일괄 처리: created_at 파싱 실패 — 건너뜀 ({mid}: {created_at!r})")
                 continue
             if created_dt >= cutoff:
                 candidate_ids.append(mid)
@@ -3351,9 +3346,7 @@ def _classify_eligibility_sync(
         # selected 가 아닌 경우 (recent / all) 는 디스크 자료라 재검증 후 skip.
         if scope != "selected":
             if not _MEETING_ID_PATTERN.match(mid):
-                logger.warning(
-                    f"일괄 처리: 디스크에서 발견된 비정상 meeting_id 건너뜀: {mid!r}"
-                )
+                logger.warning(f"일괄 처리: 디스크에서 발견된 비정상 meeting_id 건너뜀: {mid!r}")
                 continue
 
         classification = _classify_meeting_for_batch(checkpoints_dir, outputs_dir, mid)
@@ -3493,13 +3486,10 @@ async def batch_action(
                         # 사전 검증을 통과했으므로 이 경로는 정상적으로 도달
                         # 불가능. 안전망으로 logger.warning 후 건너뜀.
                         logger.warning(
-                            f"일괄 처리: transcribe 단계인데 audio_path 가 "
-                            f"None — 건너뜀 ({mid})"
+                            f"일괄 처리: transcribe 단계인데 audio_path 가 None — 건너뜀 ({mid})"
                         )
                         continue
-                    logger.info(
-                        f"일괄 처리[{action}] 전사 시작: {mid} ({audio_path})"
-                    )
+                    logger.info(f"일괄 처리[{action}] 전사 시작: {mid} ({audio_path})")
                     await pipeline.run(
                         audio_path,
                         meeting_id=mid,
@@ -3511,9 +3501,7 @@ async def batch_action(
                     await pipeline.run_llm_steps(mid)
                     logger.info(f"일괄 처리[{action}] 요약 완료: {mid}")
                 else:
-                    logger.warning(
-                        f"일괄 처리: 알 수 없는 분류 '{classification}' 건너뜀 ({mid})"
-                    )
+                    logger.warning(f"일괄 처리: 알 수 없는 분류 '{classification}' 건너뜀 ({mid})")
             except Exception:
                 # 한 건 실패가 나머지 회의를 막지 않는다
                 logger.exception(f"일괄 처리[{action}] 회의 실패: {mid}")

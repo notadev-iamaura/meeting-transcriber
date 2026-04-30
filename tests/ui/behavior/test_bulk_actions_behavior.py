@@ -183,9 +183,7 @@ class TestSidebarMultiSelect:
         ui_page.wait_for_timeout(150)
         # 두 번째 토글 후 selected 클래스 제거.
         cls = first_item.get_attribute("class") or ""
-        assert "selected" not in cls.split(), (
-            f"Cmd 클릭 두 번이면 해제되어야 함 (class={cls!r})"
-        )
+        assert "selected" not in cls.split(), f"Cmd 클릭 두 번이면 해제되어야 함 (class={cls!r})"
         assert ui_page.url == original_url, "Cmd+클릭은 URL 변경 금지"
 
     def test_B5_Shift_클릭은_범위를_선택한다(self, ui_page: Page) -> None:
@@ -205,16 +203,14 @@ class TestSidebarMultiSelect:
         # 1~4 가 모두 selected
         for i in range(4):
             cls = items.nth(i).get_attribute("class") or ""
-            assert "selected" in cls.split(), (
-                f"index={i} 가 selected 이어야 하는데 class={cls!r}"
-            )
+            assert "selected" in cls.split(), f"index={i} 가 selected 이어야 하는데 class={cls!r}"
         # 5번째는 selected 가 아니어야 함
         cls5 = items.nth(4).get_attribute("class") or ""
-        assert "selected" not in cls5.split(), f"index=4 (5번째) 는 범위 밖이어야 함 (class={cls5!r})"
+        assert "selected" not in cls5.split(), (
+            f"index=4 (5번째) 는 범위 밖이어야 함 (class={cls5!r})"
+        )
 
-    def test_B6_selection_mode_진입_시_모든_체크박스_상시_표시(
-        self, ui_page: Page
-    ) -> None:
+    def test_B6_selection_mode_진입_시_모든_체크박스_상시_표시(self, ui_page: Page) -> None:
         """Given: 1 개 선택됨 → selection mode ON
         When:  비-hover 상태의 다른 항목의 체크박스 opacity 조회
         Then:  모든 항목 체크박스 opacity == 1.
@@ -337,9 +333,7 @@ class TestSidebarMultiSelect:
         # 회의 5 건 시드 페이지의 DOM 을 강제로 비움 (0 건 시뮬레이션).
         empty_meetings_dom(ui_page)
         # 비움 후 사이드바에 .meeting-item 이 없어야 함
-        n_items = ui_page.evaluate(
-            "() => document.querySelectorAll('.meeting-item').length"
-        )
+        n_items = ui_page.evaluate("() => document.querySelectorAll('.meeting-item').length")
         assert n_items == 0, f"DOM 비움 후 회의 0 건 보장 필요 (got {n_items})"
 
         # 사이드바 컨테이너에 포커스 부여 — Cmd+A 가로채기 조건 충족
@@ -400,9 +394,7 @@ class TestSidebarMultiSelect:
         n_checkboxes = ui_page.evaluate(
             "() => document.querySelectorAll('.meeting-item-checkbox').length"
         )
-        assert n_checkboxes == 0, (
-            f"0 건 사이드바에 체크박스가 있으면 안 됨 (got {n_checkboxes})"
-        )
+        assert n_checkboxes == 0, f"0 건 사이드바에 체크박스가 있으면 안 됨 (got {n_checkboxes})"
 
         # 액션 바 미노출 / selection 0 / selection mode 클래스 부재
         bar = _bulk_bar(ui_page)
@@ -418,9 +410,7 @@ class TestSidebarMultiSelect:
             f"0 건 사이드바에서 selection mode 클래스 부재 보장 (class={cls!r})"
         )
 
-    def test_B12_selection_중_새_회의_추가_시_기존_선택_보존(
-        self, ui_page: Page
-    ) -> None:
+    def test_B12_selection_중_새_회의_추가_시_기존_선택_보존(self, ui_page: Page) -> None:
         """Given: 2 개 선택됨 (selection mode ON)
         When:  watchdog 등이 새 회의 1 건을 사이드바 상단에 prepend (DOM 직접 시뮬레이션)
         Then:  기존 선택 2 개 보존 + 새 항목은 미선택 상태 + selection mode 유지.
@@ -556,9 +546,7 @@ class TestBulkActionBar:
         ids = body.get("meeting_ids") or []
         assert isinstance(ids, list) and len(ids) == 2, f"meeting_ids 길이 2 기대: {body!r}"
 
-    def test_A5_요약_버튼은_action_summarize_로_batch_API_호출(
-        self, ui_page: Page
-    ) -> None:
+    def test_A5_요약_버튼은_action_summarize_로_batch_API_호출(self, ui_page: Page) -> None:
         """Given: 2 개 선택 + route mock
         When:  `.bulk-action-btn[data-action="summarize"]` 클릭
         Then:  POST /api/meetings/batch with action="summarize", scope="selected".
@@ -578,9 +566,7 @@ class TestBulkActionBar:
         assert body.get("action") == "summarize"
         assert body.get("scope") == "selected"
 
-    def test_A6_전사_요약_버튼은_action_full_로_batch_API_호출(
-        self, ui_page: Page
-    ) -> None:
+    def test_A6_전사_요약_버튼은_action_full_로_batch_API_호출(self, ui_page: Page) -> None:
         """Given: 2 개 선택 + route mock
         When:  `.bulk-action-btn[data-action="both"]` 클릭
         Then:  POST /api/meetings/batch with action="full".
@@ -599,12 +585,12 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
         body = captured["calls"][0]["body"]
-        assert body.get("action") == "full", f"action='full' 기대 (selector data-action='both'): {body!r}"
+        assert body.get("action") == "full", (
+            f"action='full' 기대 (selector data-action='both'): {body!r}"
+        )
         assert body.get("scope") == "selected"
 
-    def test_A7_해제_버튼은_선택을_해제하고_액션_바를_숨긴다(
-        self, ui_page: Page
-    ) -> None:
+    def test_A7_해제_버튼은_선택을_해제하고_액션_바를_숨긴다(self, ui_page: Page) -> None:
         """Given: 3 개 선택됨 + 액션 바 표시
         When:  `.bulk-action-bar__dismiss` 클릭
         Then:  모든 선택 해제 + 액션 바 hidden.
@@ -824,9 +810,9 @@ class TestHomeBulkDropdowns:
         expect(items).to_have_count(3)
         # 데이터 식별자 검증
         for opt in ("both", "transcribe", "summarize"):
-            assert (
-                menu.locator(f"[role='menuitemradio'][data-option='{opt}']").count() == 1
-            ), f"메뉴에 data-option='{opt}' 항목 필요"
+            assert menu.locator(f"[role='menuitemradio'][data-option='{opt}']").count() == 1, (
+                f"메뉴에 data-option='{opt}' 항목 필요"
+            )
 
     def test_H3_전체_일괄_메뉴_항목_클릭은_scope_all_로_batch_API_호출(
         self, ui_page: Page
@@ -840,18 +826,14 @@ class TestHomeBulkDropdowns:
         captured = _install_batch_route_mock(ui_page)
         ui_page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator(
-            ".home-action-dropdown [role='menuitemradio'][data-option='both']"
-        ).click()
+        ui_page.locator(".home-action-dropdown [role='menuitemradio'][data-option='both']").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, f"batch API 1회 호출 기대 (got {captured['calls']})"
         body = captured["calls"][0]["body"]
         assert body.get("scope") == "all", f"scope='all' 기대: {body!r}"
         assert body.get("action") == "full", f"action='full' 기대: {body!r}"
 
-    def test_H4_최근_24시간_드롭다운은_scope_recent_hours_24_로_호출(
-        self, ui_page: Page
-    ) -> None:
+    def test_H4_최근_24시간_드롭다운은_scope_recent_hours_24_로_호출(self, ui_page: Page) -> None:
         """Given: [최근 24시간] 메뉴 열림 + route mock
         When:  "전사만" (data-option="transcribe") 항목 클릭
         Then:  POST /api/meetings/batch with scope="recent", hours=24, action="transcribe".

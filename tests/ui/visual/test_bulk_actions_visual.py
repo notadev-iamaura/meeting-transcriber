@@ -106,9 +106,7 @@ def _select_n(page: Page, n: int) -> None:
         expect(page.locator(".bulk-action-bar")).to_be_visible(timeout=2000)
 
 
-def _capture_and_compare(
-    page: Page, variant: str, *, max_diff_pixel_ratio: float = 0.001
-) -> None:
+def _capture_and_compare(page: Page, variant: str, *, max_diff_pixel_ratio: float = 0.001) -> None:
     """fixture 페이지를 캡처해 baseline 과 픽셀 비교 (기본 max diff 0.1%).
 
     Args:
@@ -158,9 +156,7 @@ def test_V2_one_selected_light_desktop(browser: Browser, ui_bulk_base_url: str) 
         _select_n(page, 1)
         # 카운트 라벨에 1 표시 (사전 검증 — 미구현 시 FAIL)
         count_text = page.locator(".bulk-action-bar__count").text_content() or ""
-        count_aria = (
-            page.locator(".bulk-action-bar__count").get_attribute("aria-label") or ""
-        )
+        count_aria = page.locator(".bulk-action-bar__count").get_attribute("aria-label") or ""
         assert "1" in count_text or "1" in count_aria, (
             f"카운트 라벨에 '1' 표시 필요 (text={count_text!r}, aria={count_aria!r})"
         )
@@ -180,10 +176,7 @@ def test_V3_three_selected_light_desktop(browser: Browser, ui_bulk_base_url: str
     with _make_page(browser, width=1280, height=800, color_scheme="light") as page:
         _open_app(page, ui_bulk_base_url)
         _select_n(page, 3)
-        items = page.locator(".meeting-item")
-        # 정확히 3 개의 .selected 가 사이드바에 있어야 함 (사전 검증)
-        selected = items.filter(has_text="").locator("xpath=.[contains(@class, 'selected')]")
-        # 위 selector 가 까다로우므로 evaluate 로 카운트
+        # 정확히 3 개의 .selected 가 사이드바에 있어야 함 (사전 검증) — evaluate 로 카운트
         n_selected = page.evaluate(
             "() => document.querySelectorAll('.meeting-item.selected').length"
         )
@@ -229,9 +222,7 @@ def test_V5_three_selected_light_mobile(browser: Browser, ui_bulk_base_url: str)
         _select_n(page, 3)
         # `.label-text` 가 모바일에서 display:none — 액션 버튼 라벨 숨겨야 함
         # (handoff §2.4 모바일 미디어 쿼리)
-        first_label = page.locator(
-            ".bulk-action-btn[data-action='transcribe'] .label-text"
-        ).first
+        first_label = page.locator(".bulk-action-btn[data-action='transcribe'] .label-text").first
         # 사전 검증 — 미구현 시 FAIL
         if first_label.count() > 0:
             display = first_label.evaluate("el => getComputedStyle(el).display")
@@ -264,9 +255,7 @@ def test_V5_three_selected_light_mobile(browser: Browser, ui_bulk_base_url: str)
 # ============================================================================
 
 
-def test_V6_home_dropdown_open_light_desktop(
-    browser: Browser, ui_bulk_base_url: str
-) -> None:
+def test_V6_home_dropdown_open_light_desktop(browser: Browser, ui_bulk_base_url: str) -> None:
     """[전체 일괄 ▾] 메뉴 열림 — accent hover 채움, ✓ 글리프, 8/10px radius.
 
     근거: mockup §1.4 "홈 드롭다운 펼침 ([전체 일괄 ▾] 클릭)".
