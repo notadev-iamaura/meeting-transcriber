@@ -134,7 +134,7 @@ def _make_mock_step_results() -> dict[str, MagicMock]:
 
 
 def _patched_pipeline(pipeline: PipelineManager, wav_path: Path) -> Any:
-    """6단계 모두 mock 하는 contextmanager 셋업."""
+    """8단계 모두 mock 하는 contextmanager 셋업 (CHUNK/EMBED 포함)."""
     mocks = _make_mock_step_results()
     return [
         patch.object(
@@ -172,6 +172,18 @@ def _patched_pipeline(pipeline: PipelineManager, wav_path: Path) -> Any:
             "_run_step_summarize",
             new_callable=AsyncMock,
             return_value=mocks["summary"],
+        ),
+        patch.object(
+            pipeline,
+            "_run_step_chunk",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            pipeline,
+            "_run_step_embed",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
         ),
     ]
 

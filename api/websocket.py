@@ -64,6 +64,10 @@ class EventType(StrEnum):
     # data: { job_id, meeting_id, step, phase("start"|"complete"),
     #         input_size, eta_seconds, elapsed_seconds, anomaly("normal"|"warning"|"danger") }
     STEP_PROGRESS = "step_progress"
+    # RAG 검색 인덱스 백필 진행 (reindex_progress)
+    # data: { meeting_id, phase("start"|"complete"|"failed"|"all_started"|"all_complete"),
+    #         processed, total, error_message? }
+    REINDEX_PROGRESS = "reindex_progress"
 
 
 @dataclass

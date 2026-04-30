@@ -409,7 +409,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 ### 핵심 규칙
 
 1. **한 번에 하나의 대형 모델만 메모리 적재** — `ModelLoadManager` 뮤텍스
-2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 청크 → 임베딩 → 저장
+2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 회의록 → 청크 → 임베딩 (회의록 생성이 검색 인덱싱 실패에 의해 차단되지 않도록 순서 결정)
 3. **피크 RAM 9.5GB 이하** 유지 (16GB 중 나머지는 OS + 앱)
 4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
 5. **MLX는 in-process** (기본), Ollama 사용 시 localhost만 (`http://127.0.0.1:11434`)
@@ -418,6 +418,9 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
 
 ### 파이프라인 흐름
+
+PIPELINE_STEPS 순서:
+`CONVERT → TRANSCRIBE → DIARIZE → MERGE → CORRECT → SUMMARIZE → CHUNK → EMBED`
 
 ```
 오디오 파일 (WAV/MP3/M4A)
@@ -438,14 +441,20 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 [5] Corrector       ──→  CorrectedResult (EXAONE via Ollama 또는 MLX)
     │                     백엔드 로드 → 배치 교정 → 백엔드 언로드
     ▼
-[6] Chunker         ──→  ChunkedResult (화자+시간 기반 분할)
-    │
+[6] Summarizer      ──→  요약 텍스트 (EXAONE via Ollama 또는 MLX)
+    │                     회의록은 핵심 산출물 — 검색 인덱싱 실패에 차단 안 됨
     ▼
-[7] Embedder        ──→  EmbeddedResult (e5-small, MPS)
-    │                     모델 로드 → 벡터화 → ChromaDB+FTS5 저장 → 모델 언로드
+[7] Chunker         ──→  ChunkedResult (화자+시간 기반 분할)
+    │                     RAG 검색용 청크. 외부 모델 로드 없음.
     ▼
-[8] Summarizer      ──→  요약 텍스트 (EXAONE via Ollama 또는 MLX)
+[8] Embedder        ──→  EmbeddedResult (e5-small, MPS)
+    │                     모델 로드 → 벡터화 → ChromaDB+FTS5 저장 (fail-loud)
+    │                     ChromaDB 또는 FTS5 어느 쪽이라도 실패 시 StorageError 전파
 ```
+
+> **기존 회의 백필**: PR 머지 이전에 완료된 회의는 ChromaDB / FTS5 인덱스가 없을 수
+> 있다. 설정 → 검색 인덱스 탭에서 "전체 누락분 백필 시작" 버튼으로 일괄 복구 가능.
+> 또는 API 직접 호출: `POST /api/reindex/all` / `POST /api/meetings/{id}/reindex`.
 
 ### 디렉토리 구조
 
@@ -687,3 +696,5 @@ python -m py_compile main.py
 | ChromaDB ValueError | datetime 메타데이터 | `str()` 변환 확인 |
 | 네이티브 창 미열림 | pywebview 미설치 | `pip install pywebview` (브라우저 폴백 자동 작동) |
 | SPA 라우팅 404 | 서버에 `/app` 라우트 미등록 | `_setup_spa_routes(app)` 호출 확인 (server.py) |
+| `/api/chat` 이 "회의 전사문이 제공되지 않았습니다" 답변 | RAG 인덱스 누락 (chunk/embed 미실행) | 설정 → 검색 인덱스 → 전체 백필 시작. 또는 `POST /api/reindex/all`. 신규 회의는 자동 인덱싱됨. |
+| /api/reindex/all 이 409 반환 | 이미 백필 진행 중 (글로벌 lock busy) | 진행 완료 대기. WebSocket `reindex_progress` 이벤트로 추적. |

@@ -802,6 +802,45 @@ ruff format .
 mypy core/ steps/ --ignore-missing-imports
 ```
 
+## 기존 회의 검색 인덱스 백필
+
+> RAG 검색 인덱스(ChromaDB + SQLite FTS5) 가 누락된 회의가 있는 경우 사용.
+
+### 언제 필요한가
+
+다음 상황 중 하나라도 해당되면 일부 또는 전체 회의가 채팅에서 "회의 전사문이
+제공되지 않았습니다" 와 같이 응답할 수 있다.
+
+- 2026-04 이전 (chunk/embed 단계가 메인 파이프라인에 추가되기 전) 에 완료된 회의
+- 임베딩 단계 실행 중 ChromaDB / FTS5 저장이 실패한 적이 있는 회의
+- `~/.meeting-transcriber/chroma_db/` 또는 `meetings.db` 를 수동으로 삭제한 경우
+
+신규 회의는 자동으로 인덱싱되므로 별도 조치 불필요.
+
+### 1) 설정 화면에서 GUI 로 백필 (권장)
+
+1. 메뉴바 → 웹 UI 열기 → 설정 → "검색 인덱스" 탭
+2. "전체 누락분 백필 시작" 버튼 클릭
+3. 진행 상황은 progress bar 로 표시 (백그라운드 실행, 창을 닫아도 계속됨)
+4. 누락 회의 목록에서 개별 회의만 재색인할 수도 있음
+
+### 2) API 직접 호출
+
+```bash
+# 누락 회의 현황 확인
+curl -s http://127.0.0.1:8765/api/reindex/status | jq
+
+# 단일 회의 재색인 (correct.json 또는 merge.json 체크포인트 필요)
+curl -X POST http://127.0.0.1:8765/api/meetings/<meeting_id>/reindex
+
+# 일괄 백필 시작 (백그라운드)
+curl -X POST http://127.0.0.1:8765/api/reindex/all
+```
+
+진행 상황은 WebSocket `reindex_progress` 이벤트로 실시간 broadcast 된다.
+일괄 백필은 글로벌 lock 으로 단일 동시 실행만 허용하며 (메모리 / DB 충돌 방지),
+오디오 재처리 없이 LLM/STT 결과를 재사용하므로 빠르게 복구 가능.
+
 ## 기여하기
 
 [CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요.

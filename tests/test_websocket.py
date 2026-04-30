@@ -494,6 +494,7 @@ class TestEventType:
             "recording_error",
             "recording_duration",
             "step_progress",
+            "reindex_progress",
         }
         actual_types = {e.value for e in EventType}
         assert expected_types == actual_types

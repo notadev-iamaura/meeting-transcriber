@@ -290,12 +290,22 @@ class PipelineStep(StrEnum):
     MERGE = "merge"  # STT + 화자분리 → 병합 발화
     CORRECT = "correct"  # 병합 발화 → LLM 보정
     SUMMARIZE = "summarize"  # 보정 발화 → 마크다운 회의록
+    CHUNK = "chunk"  # 보정 발화 → RAG 청크 (검색 인덱스용)
+    EMBED = "embed"  # RAG 청크 → ChromaDB + SQLite FTS5 (검색 인덱스 영구화)
     # Phase 1 (LLM Wiki) — non-fatal 9단계. PIPELINE_STEPS 메인 루프에는 포함되지
     # 않으며 run() 끝에서 별도로 호출된다 (실패해도 RAG 결과는 정상 반환).
     WIKI_COMPILE = "wiki_compile"  # 요약/발화 → 영구 wiki 페이지 (Phase 1 dry-run)
 
 
 # 실행 순서를 보장하는 단계 목록
+#
+# 순서 정책:
+#   ... → CORRECT → SUMMARIZE → CHUNK → EMBED
+#
+# CHUNK / EMBED 가 SUMMARIZE 이후에 위치하는 이유:
+#   1) 회의록(SUMMARIZE) 은 핵심 출력물 — 검색 인덱싱 실패가 회의록 생성을 차단하면 안 된다
+#   2) chunk/embed 단계가 실패해도 사용자는 회의록·전사문은 받을 수 있다
+#   3) 백필 API 는 correct.json 체크포인트만 있으면 chunk/embed 만 재실행해 인덱스 복구 가능
 PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep.CONVERT,
     PipelineStep.TRANSCRIBE,
@@ -303,6 +313,8 @@ PIPELINE_STEPS: list[PipelineStep] = [
     PipelineStep.MERGE,
     PipelineStep.CORRECT,
     PipelineStep.SUMMARIZE,
+    PipelineStep.CHUNK,
+    PipelineStep.EMBED,
 ]
 
 
@@ -1055,6 +1067,112 @@ class PipelineManager:
 
         return result
 
+    def _derive_meeting_date(self, meeting_id: str, audio_path: Path) -> str:
+        """meeting_id 또는 오디오 파일에서 회의 날짜를 도출한다.
+
+        우선순위:
+          1) meeting_id 가 "meeting_YYYYMMDD_HHMMSS" 또는 "YYYYMMDD_HHMMSS_*" 패턴이면
+             해당 날짜 사용
+          2) 오디오 파일 mtime 사용
+          3) 현재 시각
+
+        Args:
+            meeting_id: 회의 식별자
+            audio_path: 오디오 파일 경로
+
+        Returns:
+            "YYYY-MM-DD" 형식의 날짜 문자열
+        """
+        import re
+        from datetime import datetime
+
+        # 1) meeting_id 패턴 — meeting_YYYYMMDD_... 또는 YYYYMMDD_HHMMSS_...
+        match = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", meeting_id)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+        # 2) 오디오 파일 mtime
+        try:
+            if audio_path.exists():
+                mtime = datetime.fromtimestamp(audio_path.stat().st_mtime)
+                return mtime.strftime("%Y-%m-%d")
+        except OSError:
+            pass
+
+        # 3) 현재 날짜 폴백
+        return datetime.now().strftime("%Y-%m-%d")
+
+    async def _run_step_chunk(
+        self,
+        corrected_result: Any,
+        checkpoint_path: Path,
+        meeting_id: str,
+        date: str,
+    ) -> Any:
+        """청크 분할 단계: 보정된 전사문을 RAG 검색용 청크로 분할한다.
+
+        외부 모델 로드가 필요 없는 순수 텍스트 처리 단계.
+        실패해도 회의록은 이미 생성된 상태이므로 검색 기능만 영향을 받는다.
+
+        Args:
+            corrected_result: 보정 결과
+            checkpoint_path: 체크포인트 저장 경로
+            meeting_id: 회의 식별자
+            date: 회의 날짜 (YYYY-MM-DD)
+
+        Returns:
+            ChunkedResult 인스턴스
+        """
+        from steps.chunker import ChunkedResult, Chunker
+
+        # 체크포인트 복원 시도
+        if self._checkpoint_enabled and checkpoint_path.exists():
+            logger.info(f"청크 체크포인트 복원: {checkpoint_path}")
+            return ChunkedResult.from_checkpoint(checkpoint_path)
+
+        chunker = Chunker(self._config)
+        result = await chunker.chunk(corrected_result, meeting_id, date)
+
+        # 체크포인트 저장
+        if self._checkpoint_enabled:
+            result.save_checkpoint(checkpoint_path)
+
+        return result
+
+    async def _run_step_embed(
+        self,
+        chunked_result: Any,
+        checkpoint_path: Path,
+    ) -> Any:
+        """임베딩 단계: 청크를 벡터화하고 ChromaDB + SQLite FTS5 에 저장한다.
+
+        e5-small (~500MB) 임베딩 모델을 ModelLoadManager 로 로드한다.
+        ChromaDB 또는 SQLite FTS5 저장 중 하나라도 실패하면 StorageError 가
+        전파되어 재시도 루프가 받는다 (fail-loud).
+
+        Args:
+            chunked_result: 청크 분할 결과
+            checkpoint_path: 체크포인트 저장 경로
+
+        Returns:
+            EmbeddedResult 인스턴스
+        """
+        from steps.embedder import EmbeddedResult, Embedder
+
+        # 체크포인트 복원 시도
+        if self._checkpoint_enabled and checkpoint_path.exists():
+            logger.info(f"임베딩 체크포인트 복원: {checkpoint_path}")
+            return EmbeddedResult.from_checkpoint(checkpoint_path)
+
+        embedder = Embedder(self._config, self._model_manager)
+        result = await embedder.embed(chunked_result)
+
+        # 체크포인트 저장
+        if self._checkpoint_enabled:
+            result.save_checkpoint(checkpoint_path)
+
+        return result
+
     async def _run_step_wiki_compile(
         self,
         *,
@@ -1246,6 +1364,7 @@ class PipelineManager:
         merged_result: Any = None
         corrected_result: Any = None
         _summary_result: Any = None
+        chunked_result: Any = None
 
         # 이전에 완료된 단계의 결과 복원
         if resume_idx > 0:
@@ -1255,6 +1374,7 @@ class PipelineManager:
                 diarization_result,
                 merged_result,
                 corrected_result,
+                chunked_result,
             ) = await self._restore_intermediate_results(
                 meeting_id,
                 resume_idx,
@@ -1403,6 +1523,29 @@ class PipelineManager:
                             self._config.pipeline.summarize_timeout_seconds,
                         )
 
+                    elif step == PipelineStep.CHUNK:
+                        # CHUNK 는 외부 모델 로드 불필요한 순수 텍스트 처리 단계
+                        # corrected_result 는 CORRECT 단계 또는 _restore_intermediate_results 에서 복원됨
+                        assert corrected_result is not None
+                        meeting_date = self._derive_meeting_date(meeting_id, audio_path)
+                        chunked_result = await self._run_step_chunk(
+                            corrected_result,
+                            checkpoint_path,
+                            meeting_id,
+                            meeting_date,
+                        )
+
+                    elif step == PipelineStep.EMBED:
+                        # EMBED 는 e5-small 임베딩 모델 로드 + ChromaDB/FTS5 저장
+                        # ModelLoadManager 가 모델 라이프사이클 관리 (acquire/release)
+                        # chunked_result 는 CHUNK 단계 또는 _restore_intermediate_results 에서 복원됨
+                        # 반환값은 체크포인트로 저장되며 직접 참조 없음 (마지막 단계).
+                        assert chunked_result is not None
+                        await self._run_step_embed(
+                            chunked_result,
+                            checkpoint_path,
+                        )
+
                     success = True
                     last_error = None
                     break  # 성공 시 재시도 루프 탈출
@@ -1525,10 +1668,12 @@ class PipelineManager:
         resume_idx: int,
         audio_path: Path,
         state: PipelineState,
-    ) -> tuple[Path | None, Any, Any, Any, Any]:
+    ) -> tuple[Path | None, Any, Any, Any, Any, Any]:
         """이전에 완료된 단계의 중간 결과를 체크포인트에서 복원한다.
 
         재개 시 이전 단계의 출력이 필요하므로 체크포인트에서 복원한다.
+        EMBED 단계 재개를 위해 chunked_result 도 복원한다 (EMBED 가 마지막
+        단계이므로 embedded_result 는 복원 대상이 아님).
 
         Args:
             meeting_id: 회의 ID
@@ -1538,7 +1683,7 @@ class PipelineManager:
 
         Returns:
             (wav_path, transcript_result, diarization_result,
-             merged_result, corrected_result) 튜플
+             merged_result, corrected_result, chunked_result) 튜플
         """
         wav_path: Path | None = None
         transcript_result: Any = None
@@ -1599,12 +1744,26 @@ class PipelineManager:
                 corrected_result = CorrectedResult.from_checkpoint(cp)
                 logger.info("보정 결과 체크포인트에서 복원")
 
+        # chunk 완료 시 복원 (EMBED 단계 재개에 필요)
+        chunked_result: Any = None
+        if PipelineStep.CHUNK.value in state.completed_steps:
+            cp = self._get_checkpoint_path(
+                meeting_id,
+                PipelineStep.CHUNK,
+            )
+            if cp.exists():
+                from steps.chunker import ChunkedResult
+
+                chunked_result = ChunkedResult.from_checkpoint(cp)
+                logger.info("청크 결과 체크포인트에서 복원")
+
         return (
             wav_path,
             transcript_result,
             diarization_result,
             merged_result,
             corrected_result,
+            chunked_result,
         )
 
     async def resume(self, meeting_id: str) -> PipelineState:

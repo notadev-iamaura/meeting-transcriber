@@ -645,30 +645,28 @@ class Embedder:
             embedding_dimension=self._dimension,
         )
 
-        # 3. ChromaDB 저장
-        try:
-            await asyncio.to_thread(
-                _store_chunks_chroma,
-                embedded_chunks,
-                self._chroma_dir,
-                meeting_id,
-            )
-            result.chroma_stored = True
-        except StorageError:
-            logger.exception(f"ChromaDB 저장 실패: meeting_id={meeting_id}")
+        # 3. ChromaDB 저장 (fail-loud: StorageError 가 발생하면 그대로 raise)
+        # 정책: ChromaDB 또는 FTS5 어느 한 쪽이라도 저장 실패 시 단계 자체를 실패로 처리.
+        # 반쪽짜리 인덱스(벡터만 있고 키워드 없음, 또는 그 반대)는 RAG 품질을 심하게
+        # 떨어뜨려 사용자에게 "회의가 완료됐는데 검색 결과가 부정확함" 으로 나타난다.
+        # 차라리 명시적으로 실패시켜 재시도 또는 사용자 알림으로 이어지게 한다.
+        await asyncio.to_thread(
+            _store_chunks_chroma,
+            embedded_chunks,
+            self._chroma_dir,
+            meeting_id,
+        )
+        result.chroma_stored = True
 
-        # 4. FTS5 저장
-        try:
-            await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
-            await asyncio.to_thread(
-                _store_chunks_fts,
-                embedded_chunks,
-                self._meetings_db,
-                meeting_id,
-            )
-            result.fts_stored = True
-        except StorageError:
-            logger.exception(f"FTS5 저장 실패: meeting_id={meeting_id}")
+        # 4. FTS5 저장 (fail-loud)
+        await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
+        await asyncio.to_thread(
+            _store_chunks_fts,
+            embedded_chunks,
+            self._meetings_db,
+            meeting_id,
+        )
+        result.fts_stored = True
 
         # 5. 결과 로깅
         logger.info(

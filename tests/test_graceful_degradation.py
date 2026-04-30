@@ -639,6 +639,18 @@ class TestPipelineManagerMemoryInsufficient:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
         ):
             pipeline = PipelineManager(
                 config=mock_config,
@@ -655,6 +667,9 @@ class TestPipelineManagerMemoryInsufficient:
             assert state.degraded is True
             assert "correct" in state.skipped_steps
             assert "summarize" in state.skipped_steps
+            # chunk/embed 는 LLM 단계가 아니라 메모리 부족과 무관하게 실행
+            assert "chunk" not in state.skipped_steps
+            assert "embed" not in state.skipped_steps
             assert len(state.warnings) > 0
 
     @patch("core.pipeline.psutil.virtual_memory")
@@ -707,6 +722,18 @@ class TestPipelineManagerMemoryInsufficient:
                 "_run_step_summarize",
                 new_callable=AsyncMock,
             ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
         ):
             pipeline = PipelineManager(
                 config=mock_config,
@@ -720,8 +747,8 @@ class TestPipelineManagerMemoryInsufficient:
             mock_diarize.assert_called_once()
             mock_merge.assert_called_once()
 
-            # 모든 6단계가 completed_steps에 포함
-            assert len(state.completed_steps) == 6
+            # 모든 8단계가 completed_steps에 포함 (CHUNK + EMBED 추가)
+            assert len(state.completed_steps) == 8
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
@@ -774,6 +801,18 @@ class TestPipelineManagerMemoryInsufficient:
                 PipelineManager,
                 "_run_step_summarize",
                 new_callable=AsyncMock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
             ),
         ):
             pipeline = PipelineManager(
@@ -840,6 +879,18 @@ class TestPipelineManagerMemoryInsufficient:
                 PipelineManager,
                 "_run_step_summarize",
                 new_callable=AsyncMock,
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
             ),
         ):
             pipeline = PipelineManager(
@@ -909,6 +960,18 @@ class TestPipelineManagerNormalResources:
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ) as mock_summarize,
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ) as mock_chunk,
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ) as mock_embed,
         ):
             pipeline = PipelineManager(
                 config=mock_config,
@@ -923,12 +986,14 @@ class TestPipelineManagerNormalResources:
             mock_merge.assert_called_once()
             mock_correct.assert_called_once()
             mock_summarize.assert_called_once()
+            mock_chunk.assert_called_once()
+            mock_embed.assert_called_once()
 
             # 정상 완료 상태
             assert state.status == "completed"
             assert state.degraded is False
             assert state.skipped_steps == []
-            assert len(state.completed_steps) == 6
+            assert len(state.completed_steps) == 8
 
     @patch("core.pipeline.psutil.virtual_memory")
     @patch("core.pipeline.shutil.disk_usage")
@@ -980,6 +1045,18 @@ class TestPipelineManagerNormalResources:
             patch.object(
                 PipelineManager,
                 "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                PipelineManager,
+                "_run_step_embed",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
             ),
