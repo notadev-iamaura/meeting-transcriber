@@ -88,10 +88,16 @@ def _open_app(page: Page, base_url: str) -> None:
 
 
 def _select_n(page: Page, n: int) -> None:
-    """앞에서부터 n 개의 회의 항목 체크박스를 토글한다."""
+    """앞에서부터 n 개의 회의 항목 체크박스를 토글한다.
+
+    모바일 viewport (≤640px) 에서 사이드바 stack 레이아웃 + 짧은 height
+    조합으로 항목이 viewport 밖에 있을 수 있으므로 actionability 검사를
+    우회하는 `dispatch_event("click")` 으로 토글한다 (시각 결과는 동일).
+    """
     items = page.locator(".meeting-item")
     for i in range(n):
-        items.nth(i).locator(".meeting-item-checkbox").click()
+        cb = items.nth(i).locator(".meeting-item-checkbox")
+        cb.dispatch_event("click")
         page.wait_for_timeout(80)
     # selection mode 진입 + 액션 바 슬라이드 다운 250ms 완료 대기
     page.wait_for_timeout(350)

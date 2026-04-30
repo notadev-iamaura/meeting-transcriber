@@ -4046,10 +4046,12 @@ button {
   text-overflow: ellipsis;
 }
 
-/* 요약 프리뷰 */
+/* 요약 프리뷰 — 사이드바 listbox 안 axe color-contrast (4.5:1) 통과를 위해
+   `--text-secondary` (#6E6E73 on #F5F5F7 ≈ 5.9:1) 사용. 기존 `--text-muted` 는 2.99:1 미달.
+   이 변경은 `.meeting-item-preview` 가 사이드바에서만 사용되므로 다른 컴포넌트에 영향 없음. */
 .meeting-item-preview {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7859,5 +7861,483 @@ ul#command-palette-list li[role="option"][aria-selected="true"] .command-palette
   .reindex-missing-row {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+/* ──────────────────────────────────────────────
+   11. 일괄 작업 (bulk actions) — 사이드바 다중 선택
+       + 컨텍스트 액션 바 + 홈 드롭다운
+   ──────────────────────────────────────────────
+   인용:
+   - docs/design.md §1.6 macOS Easing
+   - docs/design-decisions/bulk-actions.md
+   - docs/design-decisions/bulk-actions-handoff.md
+   신규 토큰 도입 0건. 기존 :root 토큰만 조합.
+   ────────────────────────────────────────────── */
+
+/* 콘텐츠 wrapper — sticky 스크롤 컨테이너.
+   bulk-action-bar 가 wrapper 의 top:0 에 붙고 그 아래에 #content 가 배치된다.
+   기존 layout (3-column flex) 에서 wrapper 는 nav+sidebar 우측의 flex:1 영역을 차지. */
+.content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+  height: 100vh;
+}
+.content-wrapper > #content {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── 11.1 사이드바 체크박스 (.meeting-item-checkbox, 옵션 B) ──
+   span 요소 (input 금지). aria-hidden 으로 SR 비노출, 시각 마크만 담당. */
+.meeting-item-checkbox {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;  /* 상태 도트(meeting-item-dot)와 정렬 */
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-canvas);
+  box-sizing: border-box;
+  position: relative;
+  opacity: 0;  /* 기본 비표시 (hover/selection-mode 시 1로 페이드 인) */
+  transition:
+    opacity var(--duration-base) var(--ease-macos),
+    background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos),
+    transform var(--duration-fast) var(--ease-macos);
+  cursor: pointer;
+  /* hit-area 확대 — 24x24 클릭 영역 (시각 16px + 4px 좌우 패딩 효과) */
+  padding: 4px;
+  margin-left: -4px;
+  margin-right: 0;
+  background-clip: content-box;
+}
+
+/* hover (item) 시 opacity 1 — 250ms ease-out 페이드 (hover-reveal UX) */
+.meeting-item:hover .meeting-item-checkbox {
+  opacity: 1;
+}
+
+/* selection mode 활성 시 모든 항목 체크박스 즉시 표시.
+   transition 을 짧게(0ms) 설정해 비-hover 상태에서도 시나리오 검증 시점에
+   opacity == 1 보장 (bulk-actions.md §1.1 — selection mode ON 일 때 영구 표시). */
+.list-content.selection-mode-active .meeting-item-checkbox,
+.list-content.meetings-list--selecting .meeting-item-checkbox {
+  opacity: 1;
+  transition:
+    background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos),
+    transform var(--duration-fast) var(--ease-macos);
+}
+
+/* 체크 시각 — 부모 .meeting-item[aria-checked="true"] 에서 동기화.
+   accent 채움 + 흰 ✓ 글리프 (inline SVG mask 방식 대신 ::before 로 단순화) */
+.meeting-item[aria-checked="true"] .meeting-item-checkbox {
+  background: var(--accent);
+  border-color: var(--accent);
+  background-clip: content-box;
+  opacity: 1;
+}
+
+.meeting-item[aria-checked="true"] .meeting-item-checkbox::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 5px;
+  border-left: 1.5px solid #FFFFFF;
+  border-bottom: 1.5px solid #FFFFFF;
+  transform: translate(-50%, -65%) rotate(-45deg);
+  box-sizing: border-box;
+}
+
+/* :active — 50ms scale-down (디자인 합의 §체크박스 :active) */
+.meeting-item-checkbox:active {
+  transform: scale(0.96);
+}
+
+/* 사이드바 selected 항목 — 옅은 accent 배경 (라우팅 active 와 별도 차원) */
+.meeting-item.selected {
+  background: var(--bg-active);
+  transition: background var(--duration-fast) var(--ease-macos);
+}
+
+.meeting-item.selected:hover {
+  background: var(--bg-active);
+}
+
+/* selected 항목의 프리뷰 텍스트 — `--bg-active` (rgba(0,122,255,0.12) on light)
+   배경에서 axe color-contrast (4.5:1) 통과를 위해 `--text-primary` 사용.
+   `--text-secondary` 는 4:1 미달. */
+.meeting-item.selected .meeting-item-preview {
+  color: var(--text-primary);
+}
+
+/* selected + 라우팅 active 동시 — 좌측 3px accent 보더로 두 개념 시각 분리 */
+.meeting-item.selected.active {
+  border-left: 3px solid var(--accent);
+  padding-left: 9px;  /* 기존 12px - 3px */
+}
+
+/* hover (hover-supported) 환경에서는 selection-mode-active 일 때만 항상 표시.
+   touch 환경에서는 hover 가 없어도 항상 표시 — Pointer Events 보강.
+   이 미디어 쿼리는 부모 .meeting-item:hover 가 동작하지 않는 경우 대비. */
+@media (hover: none) and (pointer: coarse) {
+  .meeting-item-checkbox {
+    opacity: 1;
+  }
+}
+
+/* ── 11.2 컨텍스트 액션 바 (.bulk-action-bar) ──
+   sticky top:0, height 48px, vibrancy 패턴 (rgba + blur). */
+.bulk-action-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 48px;
+  /* 우측 padding 70px — fixed 위치의 .theme-toggle (right:16px width:36px → 영역 16~52px)
+     아래에 dismiss 버튼이 가려지지 않도록 안쪽으로 배치. */
+  padding: 0 70px 0 16px;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 0.5px solid var(--border);
+  /* 슬라이드 다운/업 — translateY 기준, prefers-reduced-motion 시 transform 제거 */
+  transform: translateY(0);
+  opacity: 1;
+  transition:
+    transform var(--duration-base) var(--ease-macos),
+    opacity var(--duration-base) var(--ease-macos);
+}
+
+[data-theme="dark"] .bulk-action-bar {
+  background: rgba(28, 28, 30, 0.72);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .bulk-action-bar {
+    background: rgba(28, 28, 30, 0.72);
+  }
+}
+
+/* hidden 상태 — 브라우저 기본 display:none 으로 스크린리더/포커스 모두 비활성 */
+.bulk-action-bar[hidden] {
+  display: none;
+}
+
+/* 기본 (클래스 미부여) 상태 — translateY(0) + opacity 1 (visible).
+   슬라이드 효과는 transition 으로 처리 — is-leaving 추가 시 -100% 로 transition,
+   클래스 제거 시 다시 0 으로 transition. 시나리오 즉시 클릭 안전성을 위해 default
+   상태가 visible 이어야 함 (keyframe `from` opacity:0 진입 시점 회피). */
+
+/* is-leaving: 슬라이드 업 — transition 이 transform/opacity 변화를 보간 */
+.bulk-action-bar.is-leaving {
+  transform: translateY(-100%);
+  opacity: 0;
+}
+
+/* A10 in-flight 가드 — 응답 도착 전까지 visible 강제 보장.
+   is-leaving 도 무력화 (응답 대기 중 hide 시도 차단). */
+.bulk-action-bar[data-inflight="true"],
+.bulk-action-bar[data-inflight="true"].is-leaving {
+  transform: translateY(0) !important;
+  opacity: 1 !important;
+  transition: none !important;
+  animation: none !important;
+}
+
+/* prefers-reduced-motion — translateY 제거, opacity 페이드만 */
+@media (prefers-reduced-motion: reduce) {
+  .bulk-action-bar {
+    transform: none !important;
+    transition: opacity var(--duration-fast) linear !important;
+    animation: none !important;
+  }
+  .bulk-action-bar.is-leaving {
+    transform: none !important;
+    animation: none !important;
+  }
+}
+
+/* 카운트 라벨 — "N개 선택됨" / 숫자만 accent-text */
+.bulk-action-bar__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.bulk-action-bar__count-num {
+  color: var(--accent-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+/* 액션 버튼 그룹 (중앙) */
+.bulk-action-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* .bulk-action-btn — Secondary 톤. 기존 토큰 조합. */
+.bulk-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos),
+    transform var(--duration-fast) var(--ease-macos);
+  white-space: nowrap;
+}
+
+.bulk-action-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.bulk-action-btn:active:not(:disabled) {
+  background: var(--bg-active);
+  transform: scale(0.97);
+}
+
+.bulk-action-btn:focus,
+.bulk-action-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.bulk-action-btn:disabled,
+.bulk-action-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 우측 dismiss (✕) — ghost 스타일 */
+.bulk-action-bar__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-macos),
+    color var(--duration-fast) var(--ease-macos);
+}
+
+.bulk-action-bar__dismiss:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.bulk-action-bar__dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.bulk-action-bar__dismiss:disabled,
+.bulk-action-bar__dismiss[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── 11.3 홈 드롭다운 (.home-action-dropdown / .home-action-btn--dropdown) ── */
+.home-action-dropdown-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.home-action-btn--dropdown {
+  /* .home-action-btn 베이스 상속 + chevron 간격 */
+  gap: 6px;
+}
+
+.home-action-btn--dropdown[aria-expanded="true"] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+
+.home-action-btn__chevron {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: transform var(--duration-fast) var(--ease-macos);
+}
+
+.home-action-btn--dropdown[aria-expanded="true"] .home-action-btn__chevron {
+  transform: rotate(180deg);
+}
+
+/* 메뉴 컨테이너 — macOS NSMenu 스타일 */
+.home-action-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+  padding: 4px 0;
+  margin: 0;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition:
+    opacity var(--duration-fast) var(--ease-macos),
+    transform var(--duration-fast) var(--ease-macos);
+}
+
+.home-action-dropdown[hidden] {
+  display: none;
+}
+
+.home-action-dropdown.is-open {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-action-dropdown {
+    transition: opacity var(--duration-fast) linear !important;
+    transform: none !important;
+  }
+}
+
+/* 메뉴 항목 — accent 채움 hover (NSMenu 표준) */
+.home-action-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-macos),
+    color var(--duration-fast) var(--ease-macos);
+}
+
+.home-action-dropdown-item:hover,
+.home-action-dropdown-item:focus-visible {
+  background: var(--accent);
+  color: #FFFFFF;
+  outline: none;
+}
+
+.home-action-dropdown-item:disabled {
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 선택된 옵션 (aria-checked="true") 좌측 ✓ — 12px accent */
+.home-action-dropdown-item[aria-checked="true"]::before {
+  content: "✓";
+  flex-shrink: 0;
+  width: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  text-align: center;
+}
+
+/* hover 시 ✓ 색 반전 (배경이 accent 채움이라 흰색) */
+.home-action-dropdown-item:hover[aria-checked="true"]::before,
+.home-action-dropdown-item:focus-visible[aria-checked="true"]::before {
+  color: #FFFFFF;
+}
+
+/* 선택 안 된 옵션의 ✓ 자리 확보 (시각 정렬) */
+.home-action-dropdown-item:not([aria-checked="true"])::before {
+  content: "";
+  flex-shrink: 0;
+  width: 12px;
+}
+
+/* ── 11.4 동적 토스트 폴백 (homeStatusMessage 가 없는 라우트용) ── */
+.bulk-toast {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  color: var(--text-primary);
+  max-width: 90vw;
+}
+
+.bulk-toast--error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* ── 11.5 모바일 적응 (≤640px) — bulk-actions §2.5.2 ──
+   #app 스코프 한정 — 기존 mobile-responsive 회귀 방지.
+   라벨 숨김 + 카운트 축약 + 액션 균등 분할. */
+@media (max-width: 640px) {
+  #app .bulk-action-bar {
+    /* 좌·중·우 고정 배분 + 패딩 축소 */
+    padding: 0 12px;
+    gap: 8px;
+  }
+  #app .bulk-action-bar__count .label-text {
+    display: none;
+  }
+  #app .bulk-action-btn .label-text {
+    display: none;
+  }
+  #app .bulk-action-bar__dismiss .label-text,
+  #app .bulk-action-bar__dismiss kbd {
+    display: none;
+  }
+  /* 액션 버튼이 라벨 없이도 hit-area 확보 — 32x32 최소 */
+  #app .bulk-action-btn {
+    min-width: 36px;
+    padding: 6px 8px;
+  }
+  /* 메뉴는 화면 가장자리에서 잘리지 않도록 폭 보장 */
+  #app .home-action-dropdown {
+    min-width: calc(100vw - 32px);
+    max-width: 320px;
   }
 }

@@ -715,10 +715,13 @@ class TestBulkActionBar:
         ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
         # 응답 도착 전 재클릭 (200ms 후)
         ui_page.wait_for_timeout(200)
-        # 동일 [전사] 재클릭 시도 (force=True 로 disabled 라도 클릭 시도)
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").click(force=True)
-        # 다른 액션 [요약] 도 클릭 시도
-        ui_page.locator(".bulk-action-btn[data-action='summarize']").click(force=True)
+        # 두 번째/세 번째 클릭은 dispatch_event 로 actionability 검사 우회.
+        # route handler 의 sync time.sleep(1.5) 가 event loop 를 잠가 Playwright
+        # 의 visibility check 가 timeout 되는 환경 이슈가 있어, 핸들러의 in-flight
+        # 가드 자체를 검증하기 위해 click 이벤트를 직접 dispatch (force=True 보다
+        # 더 강한 우회 — visibility/scroll/actionability 모두 skip).
+        ui_page.locator(".bulk-action-btn[data-action='transcribe']").dispatch_event("click")
+        ui_page.locator(".bulk-action-btn[data-action='summarize']").dispatch_event("click")
 
         # 첫 응답 도착 + 추가 요청 가능성 모두 흡수 위해 충분히 대기
         ui_page.wait_for_timeout(2000)
