@@ -116,15 +116,57 @@
           <option value="status">상태별</option>
         </select>
       </div>
-      <div class="list-content" id="listContent" role="listbox" aria-label="회의 목록">
+      <div
+        class="list-content"
+        id="listContent"
+        role="listbox"
+        aria-label="회의 목록"
+        aria-multiselectable="true"
+        data-component="bulk-actions"
+        tabindex="-1"
+      >
         <!-- spa.js가 회의 목록 렌더링 -->
       </div>
     </aside>
 
-    <!-- 3. 콘텐츠 영역 (나머지 공간 flex:1) -->
-    <main id="content">
-      <!-- spa.js가 동적으로 렌더링 -->
-    </main>
+    <!-- 3. 콘텐츠 영역 (나머지 공간 flex:1)
+         #content-wrapper 가 sticky 의 스크롤 컨테이너 역할.
+         컨텍스트 액션 바(.bulk-action-bar)는 wrapper 의 top:0 에 sticky 로 붙고,
+         그 아래에 기존 #content 가 배치된다. -->
+    <div id="content-wrapper" class="content-wrapper">
+      <!-- 컨텍스트 액션 바 — 0개 선택 시 hidden, 1개+ 선택 시 슬라이드 다운.
+           data-component="bulk-actions" 마커 = a11y axe 한정 스캔 컨텍스트. -->
+      <div
+        class="bulk-action-bar"
+        id="bulkActionBar"
+        role="toolbar"
+        aria-label="선택된 회의 일괄 작업"
+        data-component="bulk-actions"
+        hidden
+      >
+        <span class="bulk-action-bar__count" aria-live="polite">
+          <span class="bulk-action-bar__count-num">0</span><span class="label-text"> 개 선택됨</span>
+        </span>
+        <div class="bulk-action-bar__actions">
+          <button class="bulk-action-btn" data-action="transcribe" type="button" aria-label="전사">
+            <span class="label-text">전사</span>
+          </button>
+          <button class="bulk-action-btn" data-action="summarize" type="button" aria-label="요약">
+            <span class="label-text">요약</span>
+          </button>
+          <button class="bulk-action-btn" data-action="both" type="button" aria-label="전사+요약">
+            <span class="label-text">전사+요약</span>
+          </button>
+        </div>
+        <button class="bulk-action-bar__dismiss" data-action="dismiss" type="button" aria-label="선택 해제">
+          <span aria-hidden="true">&#x2715;</span>
+        </button>
+      </div>
+
+      <main id="content">
+        <!-- spa.js가 동적으로 렌더링 -->
+      </main>
+    </div>
   </div>
 
   <!-- 테마 토글 (우측 상단 고정) -->

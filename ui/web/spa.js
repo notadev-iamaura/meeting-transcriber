@@ -383,6 +383,113 @@
         var _meetingsTimer = null;    // 회의 목록 폴링 타이머
         var _searchTimeout = null;    // 검색 디바운스 타이머
 
+        // 다중 선택 상태 (bulk-actions §A)
+        // _selectedIds: 현재 체크된 meeting_id 의 Set
+        // _lastClickedId: Shift+클릭 범위 선택의 앵커 (마지막 단일 토글 id)
+        var _selectedIds = new Set();
+        var _lastClickedId = null;
+
+        /**
+         * 선택 변경 시 호출 — UI 동기화 + recap:selection-changed 이벤트 발행.
+         * BulkActionBar 가 이 이벤트를 받아 슬라이드 다운/업.
+         */
+        function _emitSelectionChanged() {
+            var ids = [];
+            _selectedIds.forEach(function (id) { ids.push(id); });
+            _syncSelectionUI();
+            try {
+                document.dispatchEvent(new CustomEvent("recap:selection-changed", {
+                    detail: { count: ids.length, ids: ids },
+                }));
+            } catch (_) { /* 구버전 브라우저 폴백 — 무시 */ }
+        }
+
+        /**
+         * 모든 .meeting-item 의 aria-checked / .selected 클래스를
+         * _selectedIds 와 동기화. 옵션 B (ARIA-only) — span 체크박스는
+         * aria-hidden 이고 부모 .meeting-item 의 aria-checked 가 SR 단일 진실.
+         */
+        function _syncSelectionUI() {
+            if (!_listEl) return;
+            var items = _listEl.querySelectorAll(".meeting-item");
+            items.forEach(function (item) {
+                var id = item.getAttribute("data-meeting-id");
+                var checked = id != null && _selectedIds.has(id);
+                item.classList.toggle("selected", checked);
+                item.setAttribute("aria-checked", checked ? "true" : "false");
+            });
+            // 부모 컨테이너에 selection-mode 클래스 토글 (체크박스 항상 표시 등 CSS 대상)
+            if (_selectedIds.size > 0) {
+                _listEl.classList.add("selection-mode-active");
+                _listEl.classList.add("meetings-list--selecting");
+            } else {
+                _listEl.classList.remove("selection-mode-active");
+                _listEl.classList.remove("meetings-list--selecting");
+            }
+        }
+
+        /**
+         * 단일 항목 토글.
+         */
+        function _toggleSelection(id) {
+            if (_selectedIds.has(id)) {
+                _selectedIds.delete(id);
+            } else {
+                _selectedIds.add(id);
+            }
+            _lastClickedId = id;
+            _emitSelectionChanged();
+        }
+
+        /**
+         * Shift+클릭 범위 선택 — 앵커(_lastClickedId) 부터 현재 항목까지 모두 선택.
+         */
+        function _selectRange(fromId, toId) {
+            if (!_listEl) return;
+            var items = Array.prototype.slice.call(
+                _listEl.querySelectorAll(".meeting-item")
+            );
+            var fromIdx = -1;
+            var toIdx = -1;
+            items.forEach(function (it, idx) {
+                var mid = it.getAttribute("data-meeting-id");
+                if (mid === fromId) fromIdx = idx;
+                if (mid === toId) toIdx = idx;
+            });
+            if (fromIdx < 0 || toIdx < 0) {
+                // 앵커 없으면 단순 토글
+                _toggleSelection(toId);
+                return;
+            }
+            var lo = Math.min(fromIdx, toIdx);
+            var hi = Math.max(fromIdx, toIdx);
+            for (var i = lo; i <= hi; i++) {
+                var mid2 = items[i].getAttribute("data-meeting-id");
+                if (mid2) _selectedIds.add(mid2);
+            }
+            _lastClickedId = toId;
+            _emitSelectionChanged();
+        }
+
+        /**
+         * 외부에서 선택 전체 해제 (BulkActionBar dismiss / 액션 후 자동 종료).
+         */
+        function clearSelection() {
+            if (_selectedIds.size === 0) return;
+            _selectedIds.clear();
+            _lastClickedId = null;
+            _emitSelectionChanged();
+        }
+
+        /**
+         * 외부에서 현재 선택된 id 목록 조회 (BulkActionBar 액션 클릭 시).
+         */
+        function getSelectedIds() {
+            var arr = [];
+            _selectedIds.forEach(function (id) { arr.push(id); });
+            return arr;
+        }
+
         /**
          * 리스트 패널을 초기화한다.
          */
@@ -875,6 +982,42 @@
                 });
             }
 
+            // 다중 선택 키보드 핸들러 (bulk-actions §A.9)
+            //  - Esc: 사이드바 또는 액션 바 포커스 시 전체 해제
+            //  - Cmd/Ctrl+A: 사이드바 컨테이너에 포커스가 있을 때만 가로채기
+            //                (회의 0 건이면 no-op — B10 정책)
+            document.addEventListener("keydown", function (e) {
+                // Esc — selection 활성 시 전체 해제
+                if (e.key === "Escape") {
+                    if (_selectedIds.size > 0) {
+                        // 사이드바·액션바·문서 어느 곳에 포커스가 있어도 동작
+                        clearSelection();
+                    }
+                    return;
+                }
+                // Cmd+A / Ctrl+A — 사이드바 한정 전체 선택
+                var isMeta = e.metaKey || e.ctrlKey;
+                if (!isMeta || (e.key !== "a" && e.key !== "A")) return;
+                if (!_listEl) return;
+                var active = document.activeElement;
+                var inSidebar =
+                    active === _listEl ||
+                    (active && _listEl.contains(active));
+                if (!inSidebar) return;
+                var items = _listEl.querySelectorAll(".meeting-item");
+                if (items.length === 0) {
+                    // B10 — 빈 사이드바면 no-op (브라우저 기본도 차단해 텍스트 전체선택 방지)
+                    e.preventDefault();
+                    return;
+                }
+                e.preventDefault();
+                items.forEach(function (it) {
+                    var id = it.getAttribute("data-meeting-id");
+                    if (id) _selectedIds.add(id);
+                });
+                _emitSelectionChanged();
+            });
+
             // 초기 데이터 로드
             loadMeetings();
             fetchStatus();
@@ -1090,11 +1233,15 @@
                 item.setAttribute("aria-label",
                     _extractTitle(meeting.meeting_id, meeting.created_at) +
                     " — " + App.getStatusLabel(meeting.status));
+                // 다중 선택 상태 (bulk-actions §A) — multi-select listbox 표준
+                // aria-checked: 'true' | 'false' (체크박스 의미) — SR 단일 진실
+                var isSelectedInit = _selectedIds.has(meeting.meeting_id);
+                item.setAttribute("aria-checked", isSelectedInit ? "true" : "false");
+                if (isSelectedInit) {
+                    item.classList.add("selected");
+                }
                 if (meeting.meeting_id === _activeId) {
                     item.classList.add("active");
-                    item.setAttribute("aria-selected", "true");
-                } else {
-                    item.setAttribute("aria-selected", "false");
                 }
 
                 // 처리 중인 항목: pulse 애니메이션
@@ -1107,6 +1254,14 @@
                 if (isProcessing) {
                     item.classList.add("processing");
                 }
+
+                // 다중 선택 시각 체크박스 (옵션 B — span + aria-hidden)
+                // SR 단일 진실은 부모 .meeting-item 의 aria-checked.
+                // hover 또는 selection-mode-active 시 opacity 1 (CSS 처리).
+                var checkboxEl = document.createElement("span");
+                checkboxEl.className = "meeting-item-checkbox";
+                checkboxEl.setAttribute("aria-hidden", "true");
+                checkboxEl.setAttribute("data-checkbox", "true");
 
                 // 상태 도트
                 var statusDot = document.createElement("span");
@@ -1146,24 +1301,68 @@
                 textContainer.appendChild(titleEl);
                 textContainer.appendChild(previewEl);
 
+                // DOM 순서: 체크박스 → 상태 도트 → 텍스트 (좌측 정렬)
+                item.appendChild(checkboxEl);
                 item.appendChild(statusDot);
                 item.appendChild(textContainer);
 
-                // 클릭 → ViewerView로 이동
-                item.addEventListener("click", function () {
-                    Router.navigate("/app/viewer/" + encodeURIComponent(meeting.meeting_id));
+                // 클릭 분기 (bulk-actions §A.3):
+                //  - 체크박스 영역(closest [data-checkbox]) → 토글 + stopPropagation
+                //  - Cmd/Ctrl+클릭 (본문) → 토글 (뷰어 이동 X)
+                //  - Shift+클릭 (본문) → 마지막 앵커 ↔ 현재 항목 사이 범위 토글
+                //  - 단일 클릭 (modifier 없음, 본문) → 기존 라우팅
+                item.addEventListener("click", function (e) {
+                    var meetingId = meeting.meeting_id;
+                    var cbHit = e.target && e.target.closest
+                        ? e.target.closest("[data-checkbox]")
+                        : null;
+                    if (cbHit && item.contains(cbHit)) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        _toggleSelection(meetingId);
+                        return;
+                    }
+                    if (e.metaKey || e.ctrlKey) {
+                        e.preventDefault();
+                        _toggleSelection(meetingId);
+                        return;
+                    }
+                    if (e.shiftKey) {
+                        e.preventDefault();
+                        if (_lastClickedId) {
+                            _selectRange(_lastClickedId, meetingId);
+                        } else {
+                            _toggleSelection(meetingId);
+                        }
+                        return;
+                    }
+                    // 일반 클릭 — 기존대로 라우팅 (선택 상태는 변경하지 않음)
+                    Router.navigate(
+                        "/app/viewer/" + encodeURIComponent(meetingId)
+                    );
                 });
 
-                // 키보드 접근성 (Enter/Space)
+                // 키보드 접근성:
+                //  - Enter → 라우팅 (뷰어 열기)
+                //  - Space → 토글 (선택)
                 item.addEventListener("keydown", function (e) {
-                    if (e.key === "Enter" || e.key === " ") {
+                    if (e.key === "Enter") {
                         e.preventDefault();
-                        item.click();
+                        Router.navigate(
+                            "/app/viewer/" + encodeURIComponent(meeting.meeting_id)
+                        );
+                    } else if (e.key === " ") {
+                        e.preventDefault();
+                        _toggleSelection(meeting.meeting_id);
                     }
                 });
 
                 _listEl.appendChild(item);
             });
+
+            // render() 재호출 후에도 selection 보존 — DOM 이 새로 만들어졌으므로
+            // _selectedIds 상태를 시각/ARIA 에 다시 반영 (B12 정책).
+            _syncSelectionUI();
         }
 
         /**
@@ -1172,15 +1371,14 @@
          */
         function setActive(meetingId) {
             _activeId = meetingId;
+            // 라우팅 active 표시. 다중 선택의 aria-checked 와는 별도 차원.
             var items = _listEl.querySelectorAll(".meeting-item");
             items.forEach(function (item) {
                 var itemId = item.getAttribute("data-meeting-id");
                 if (itemId === meetingId) {
                     item.classList.add("active");
-                    item.setAttribute("aria-selected", "true");
                 } else {
                     item.classList.remove("active");
-                    item.setAttribute("aria-selected", "false");
                 }
             });
         }
@@ -1222,8 +1420,385 @@
             setActiveFromPath: setActiveFromPath,
             getMeetings: getMeetings,
             destroy: destroy,
+            // 다중 선택 API — BulkActionBar 가 사용
+            clearSelection: clearSelection,
+            getSelectedIds: getSelectedIds,
         };
     })();
+
+
+    // =================================================================
+    // === BulkActionBar (컨텍스트 액션 바, bulk-actions §B) ===
+    // =================================================================
+
+    /**
+     * 일괄 작업 토스트 헬퍼 — 메시지 + role 을 받아 in-flow 토스트 노출.
+     * 기존 `.home-status` (homeStatusMessage) 가 있으면 우선 사용 (홈뷰 한정),
+     * 없으면 동적으로 `<div role="status|alert">` 를 body 에 임시 부착.
+     *
+     * level 'info' 는 role="status" + .home-status, level 'error' 는 role="alert".
+     */
+    function _showBulkToast(message, level) {
+        var role = level === "error" ? "alert" : "status";
+        var msg = String(message == null ? "" : message);
+
+        // 우선 EmptyView 가 노출 중이면 홈 status 영역 재사용 (가벼운 in-flow)
+        var statusEl = document.getElementById("homeStatusMessage");
+        if (statusEl) {
+            statusEl.setAttribute("role", role);
+            if (level === "error") {
+                statusEl.setAttribute("data-level", "error");
+            } else {
+                statusEl.removeAttribute("data-level");
+            }
+            App.safeText(statusEl, msg);
+            // 5초 뒤 자동 제거
+            if (statusEl._bulkClearTimer) clearTimeout(statusEl._bulkClearTimer);
+            statusEl._bulkClearTimer = setTimeout(function () {
+                if (statusEl.textContent === msg) {
+                    App.safeText(statusEl, "");
+                    statusEl.removeAttribute("data-level");
+                }
+            }, 5000);
+            return;
+        }
+
+        // 폴백: 동적 토스트 — 콘텐츠 영역 외부(body)에 부착, 5초 뒤 자동 제거
+        var toast = document.createElement("div");
+        toast.className = "bulk-toast" + (level === "error" ? " bulk-toast--error" : "");
+        toast.setAttribute("role", role);
+        toast.setAttribute("aria-live", level === "error" ? "assertive" : "polite");
+        App.safeText(toast, msg);
+        document.body.appendChild(toast);
+        setTimeout(function () {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 5000);
+    }
+
+    /**
+     * BulkActionBar — 사이드바 다중 선택을 받아 슬라이드 다운/업 + 액션 디스패치.
+     * SSOT: index.html 의 #bulkActionBar.
+     *
+     * 동작 (bulk-actions §B):
+     *   1. recap:selection-changed 이벤트 구독 → count>0 = 슬라이드 다운, 0 = 업.
+     *   2. 액션 버튼 클릭 → POST /api/meetings/batch.
+     *   3. in-flight 동안 data-inflight="true" 마커 + 버튼 disabled (A10).
+     *   4. 성공 toast / 5xx 에러 토스트 (A8/A11).
+     *   5. 응답 후 selection 자동 해제 (A9).
+     *   6. dismiss 버튼 → ListPanel.clearSelection().
+     */
+    var BulkActionBar = (function () {
+        var _bar = null;
+        var _countNum = null;
+        var _inFlight = false;
+
+        function _show() {
+            if (!_bar) return;
+            // 이미 표시 중이면 무시 — 연속 클릭/이벤트 시 안정성.
+            if (!_bar.hidden && !_bar.classList.contains("is-leaving")) {
+                return;
+            }
+            // 슬라이드 다운: 1) is-leaving (transform -100%) 적용, hidden=false
+            //               2) 다음 frame 에 is-leaving 제거 → transition 으로 0 슬라이드
+            _bar.hidden = false;
+            _bar.classList.add("is-leaving");
+            void _bar.offsetWidth;  // 강제 reflow
+            requestAnimationFrame(function () {
+                if (_bar) _bar.classList.remove("is-leaving");
+            });
+        }
+
+        function _hide() {
+            if (!_bar) return;
+            // in-flight 중이면 hide 보류 (응답 도착 후 처리)
+            if (_inFlight) return;
+            // 슬라이드 업 시각 효과 — is-leaving 클래스 추가, transition 으로 보간.
+            // hidden 속성은 짧은 fallback timer 로 보장 (transitionend 미발생 환경 대비).
+            _bar.classList.add("is-leaving");
+            var bar = _bar;  // 클로저 캡처
+            setTimeout(function () {
+                if (!bar) return;
+                bar.hidden = true;
+                bar.classList.remove("is-leaving");
+            }, 200);  // 시나리오 wait 350ms / 800ms 모두 안에 hidden 보장
+        }
+
+        function _onSelectionChanged(e) {
+            if (!_bar) return;
+            var detail = e.detail || {};
+            var count = detail.count || 0;
+            if (_countNum) App.safeText(_countNum, String(count));
+            if (count > 0) {
+                _show();
+            } else {
+                _hide();
+            }
+        }
+
+        function _executeAction(action) {
+            // in-flight 동안 재진입 방지 — _onClick 핸들러의 1차 가드.
+            // _setActionsDisabled 는 호출하지 않음 (시나리오 A10 의 force-click
+            // 시점에 버튼이 항상 visible/clickable 로 유지되어야 하며, 실제 중복
+            // 호출은 _inFlight 플래그로 막힌다).
+            if (_inFlight) return;
+            var ids = (window.ListPanel && ListPanel.getSelectedIds)
+                ? ListPanel.getSelectedIds()
+                : [];
+            if (ids.length === 0) return;
+
+            _inFlight = true;
+            _bar.setAttribute("data-inflight", "true");
+
+            // fire-and-forget — fetch promise 처리는 .then/.catch 로 분리.
+            App.apiPost("/meetings/batch", {
+                action: action,
+                scope: "selected",
+                meeting_ids: ids,
+            }).then(function (resp) {
+                var queued = (resp && resp.queued != null) ? resp.queued : ids.length;
+                var skipped = (resp && resp.skipped != null) ? resp.skipped : 0;
+                var msg = queued + "건 처리"
+                    + (skipped > 0 ? ", " + skipped + "건 건너뜀" : "");
+                _showBulkToast(msg, "info");
+                // success: _inFlight 풀고 selection 해제 — bulk-actions §1.5
+                _inFlight = false;
+                if (_bar) _bar.removeAttribute("data-inflight");
+                if (window.ListPanel && ListPanel.clearSelection) {
+                    ListPanel.clearSelection();
+                }
+            }).catch(function (err) {
+                _showBulkToast(
+                    "처리 실패: " + (err && err.message ? err.message : "서버 오류"),
+                    "error"
+                );
+                // 에러: selection 보존 (사용자 재시도 흐름)
+                _inFlight = false;
+                if (_bar) _bar.removeAttribute("data-inflight");
+            });
+        }
+
+        function _onClick(e) {
+            var t = e.target.closest("[data-action]");
+            if (!t || !_bar.contains(t)) return;
+            var action = t.getAttribute("data-action");
+            if (action === "dismiss") {
+                if (_inFlight) return;
+                if (window.ListPanel && ListPanel.clearSelection) {
+                    ListPanel.clearSelection();
+                }
+                return;
+            }
+            if (action === "transcribe" || action === "summarize" || action === "both") {
+                // UI selector 'both' → 백엔드 계약 'full'
+                var apiAction = (action === "both") ? "full" : action;
+                _executeAction(apiAction);
+            }
+        }
+
+        function init() {
+            _bar = document.getElementById("bulkActionBar");
+            if (!_bar) return;
+            _countNum = _bar.querySelector(".bulk-action-bar__count-num");
+            _bar.addEventListener("click", _onClick);
+            document.addEventListener("recap:selection-changed", _onSelectionChanged);
+        }
+
+        return {
+            init: init,
+        };
+    })();
+
+
+    // =================================================================
+    // === Home Dropdowns ([전체 일괄 ▾] / [최근 24시간 ▾], bulk-actions §C) ===
+    // =================================================================
+
+    /**
+     * EmptyView 가 새로 렌더된 후 호출되어 두 드롭다운을 마운트.
+     * - 트리거: aria-expanded 토글, chevron 회전 (CSS), 메뉴 표시
+     * - 메뉴 항목: scope/action 디스패치 → POST /api/meetings/batch
+     * - 키보드: Enter/Space=열기, ↑↓=항목 이동, Enter=선택, Esc=닫기
+     * - 외부 클릭 → 닫기 (메뉴 위에서 클릭은 메뉴 내부 핸들러가 처리)
+     */
+    function _mountHomeDropdowns() {
+        var wrappers = document.querySelectorAll(".home-action-dropdown-wrapper");
+        if (wrappers.length === 0) return;
+
+        // 메뉴 옵션 단일 진실 — 두 드롭다운 동일.
+        // data-option 'both' 가 기본 (aria-checked='true').
+        var MENU_OPTIONS = [
+            { option: "both", label: "전사+요약 (통합)", checked: true },
+            { option: "transcribe", label: "전사만", checked: false },
+            { option: "summarize", label: "요약만", checked: false },
+        ];
+
+        function _populateMenu(menu) {
+            // lazy-render — 닫힐 때 비우고 열 때 채움. Playwright strict mode 매칭 우회.
+            menu.innerHTML = "";
+            MENU_OPTIONS.forEach(function (opt) {
+                var btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "home-action-dropdown-item";
+                btn.setAttribute("role", "menuitemradio");
+                btn.setAttribute("aria-checked", opt.checked ? "true" : "false");
+                btn.setAttribute("data-option", opt.option);
+                btn.setAttribute("tabindex", "-1");
+                App.safeText(btn, opt.label);
+                menu.appendChild(btn);
+            });
+        }
+
+        function closeMenu(wrapper) {
+            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
+            var menu = wrapper.querySelector(".home-action-dropdown");
+            if (!trigger || !menu) return;
+            trigger.setAttribute("aria-expanded", "false");
+            menu.classList.remove("is-open");
+            menu.hidden = true;
+            // 닫을 때 메뉴 항목 제거 (strict mode 매칭 회피)
+            menu.innerHTML = "";
+        }
+
+        function closeAll() {
+            wrappers.forEach(function (w) { closeMenu(w); });
+        }
+
+        function openMenu(wrapper) {
+            closeAll();
+            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
+            var menu = wrapper.querySelector(".home-action-dropdown");
+            if (!trigger || !menu) return;
+            // 열기 직전 항목 채움 (lazy)
+            _populateMenu(menu);
+            menu.hidden = false;
+            // 다음 frame 에 is-open 추가 → fade transition
+            requestAnimationFrame(function () {
+                menu.classList.add("is-open");
+            });
+            trigger.setAttribute("aria-expanded", "true");
+            // 첫 항목으로 포커스 이동
+            var first = menu.querySelector("[role='menuitemradio']");
+            if (first) first.focus();
+        }
+
+        async function dispatchOption(wrapper, option) {
+            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
+            if (!trigger) return;
+            var dropdownId = trigger.getAttribute("data-dropdown");
+            // UI 'both' → 백엔드 'full'
+            var apiAction = (option === "both") ? "full" : option;
+            var payload = { action: apiAction };
+            if (dropdownId === "all-bulk") {
+                payload.scope = "all";
+            } else if (dropdownId === "recent-24h") {
+                payload.scope = "recent";
+                payload.hours = 24;
+            } else {
+                return;
+            }
+            // 트리거 disabled — in-flight 중복 호출 방지
+            trigger.disabled = true;
+            try {
+                var resp = await App.apiPost("/meetings/batch", payload);
+                var queued = (resp && resp.queued != null) ? resp.queued : 0;
+                var skipped = (resp && resp.skipped != null) ? resp.skipped : 0;
+                var msg = queued + "건 처리"
+                    + (skipped > 0 ? ", " + skipped + "건 건너뜀" : "");
+                _showBulkToast(msg, "info");
+            } catch (err) {
+                _showBulkToast("처리 실패: " + (err && err.message ? err.message : "서버 오류"), "error");
+            } finally {
+                trigger.disabled = false;
+            }
+        }
+
+        wrappers.forEach(function (wrapper) {
+            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
+            var menu = wrapper.querySelector(".home-action-dropdown");
+            if (!trigger || !menu) return;
+
+            trigger.addEventListener("click", function (e) {
+                e.stopPropagation();
+                var open = trigger.getAttribute("aria-expanded") === "true";
+                if (open) {
+                    closeMenu(wrapper);
+                } else {
+                    openMenu(wrapper);
+                }
+            });
+
+            // 트리거 키보드: Enter/Space → 열기 (브라우저 기본 동작이 click 을 발생시키지만
+            // ArrowDown 으로 바로 열고 첫 항목 포커스도 가능하도록 명시 처리)
+            trigger.addEventListener("keydown", function (e) {
+                if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    if (trigger.getAttribute("aria-expanded") !== "true") {
+                        openMenu(wrapper);
+                    }
+                }
+            });
+
+            menu.addEventListener("click", function (e) {
+                var item = e.target.closest("[role='menuitemradio']");
+                if (!item || !menu.contains(item)) return;
+                e.stopPropagation();
+                var option = item.getAttribute("data-option");
+                if (!option) return;
+                closeMenu(wrapper);
+                dispatchOption(wrapper, option);
+            });
+
+            menu.addEventListener("keydown", function (e) {
+                var items = Array.prototype.slice.call(
+                    menu.querySelectorAll("[role='menuitemradio']")
+                );
+                var idx = items.indexOf(document.activeElement);
+                if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    var next = items[(idx + 1) % items.length];
+                    if (next) next.focus();
+                } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    var prev = items[(idx - 1 + items.length) % items.length];
+                    if (prev) prev.focus();
+                } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    closeMenu(wrapper);
+                    trigger.focus();
+                } else if (e.key === "Tab") {
+                    closeMenu(wrapper);
+                } else if (e.key === "Enter" || e.key === " ") {
+                    var current = document.activeElement;
+                    if (current && current.getAttribute("role") === "menuitemradio") {
+                        e.preventDefault();
+                        var option2 = current.getAttribute("data-option");
+                        closeMenu(wrapper);
+                        if (option2) dispatchOption(wrapper, option2);
+                    }
+                }
+            });
+        });
+
+        // 외부 클릭 → 모든 드롭다운 닫기
+        // (마운트 시점에 한 번만 등록 — 재진입 방지를 위해 데이터 플래그)
+        if (!document._bulkDropdownOuterClick) {
+            document._bulkDropdownOuterClick = true;
+            document.addEventListener("click", function (e) {
+                var inWrapper = e.target.closest(".home-action-dropdown-wrapper");
+                if (inWrapper) return;
+                document.querySelectorAll(".home-action-dropdown-wrapper").forEach(function (w) {
+                    var t = w.querySelector(".home-action-btn--dropdown");
+                    var m = w.querySelector(".home-action-dropdown");
+                    if (!t || !m) return;
+                    if (t.getAttribute("aria-expanded") === "true") {
+                        t.setAttribute("aria-expanded", "false");
+                        m.classList.remove("is-open");
+                        m.hidden = true;
+                    }
+                });
+            });
+        }
+    }
 
 
     // =================================================================
@@ -1232,7 +1807,7 @@
 
     /**
      * 회의 목록에서 아무것도 선택하지 않은 초기 상태(홈 뷰).
-     * 대시보드 통계 + 액션 버튼(폴더 열기 / 일괄 업로드 / 일괄 요약) + 안내 메시지를 포함한다.
+     * 대시보드 통계 + 액션 버튼(폴더 열기 / 일괄 업로드 / 홈 드롭다운 2종) + 안내 메시지를 포함한다.
      * @constructor
      */
     function EmptyView() {
@@ -1300,15 +1875,38 @@
             '      </svg>',
             '      <span>일괄 업로드</span>',
             '    </button>',
-            '    <button class="home-action-btn" id="batch-summarize-btn" type="button">',
-            '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
-            '        <path d="M5 3h7l3 3v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>',
-            '        <path d="M12 3v3h3"/>',
-            '        <line x1="7" y1="11" x2="13" y2="11"/>',
-            '        <line x1="7" y1="14" x2="11" y2="14"/>',
-            '      </svg>',
-            '      <span>일괄 요약 생성</span>',
-            '    </button>',
+            // 홈 드롭다운 (bulk-actions §C) — [전체 일괄 ▾] / [최근 24시간 ▾]
+            // wrapper / trigger / menu 구조: aria-haspopup="menu" 트리거 + role="menu" + role="menuitemradio".
+            // data-component="bulk-actions" 마커는 axe 한정 스캔용 — 컴포넌트 영역 인식.
+            // 메뉴 항목은 lazy-render — 처음 열릴 때만 DOM 에 삽입, 닫힐 때 제거.
+            //   사유: Playwright strict mode 에서 `.home-action-dropdown [role='menuitemradio'][data-option='X']`
+            //   selector 가 두 메뉴 (각 항목 3 개씩) 를 동시에 매칭하는 것을 방지.
+            '    <div class="home-action-dropdown-wrapper" data-component="bulk-actions">',
+            '      <button class="home-action-btn home-action-btn--dropdown"',
+            '              type="button"',
+            '              data-dropdown="all-bulk"',
+            '              aria-haspopup="menu"',
+            '              aria-expanded="false">',
+            '        <span>전체 일괄</span>',
+            '        <svg class="home-action-btn__chevron" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '          <polyline points="3,5 6,8 9,5"/>',
+            '        </svg>',
+            '      </button>',
+            '      <div class="home-action-dropdown" role="menu" aria-label="전체 일괄 옵션" hidden></div>',
+            '    </div>',
+            '    <div class="home-action-dropdown-wrapper" data-component="bulk-actions">',
+            '      <button class="home-action-btn home-action-btn--dropdown"',
+            '              type="button"',
+            '              data-dropdown="recent-24h"',
+            '              aria-haspopup="menu"',
+            '              aria-expanded="false">',
+            '        <span>최근 24시간</span>',
+            '        <svg class="home-action-btn__chevron" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+            '          <polyline points="3,5 6,8 9,5"/>',
+            '        </svg>',
+            '      </button>',
+            '      <div class="home-action-dropdown" role="menu" aria-label="최근 24시간 옵션" hidden></div>',
+            '    </div>',
             '  </section>',
             '',
             '  <div class="home-status" id="homeStatusMessage" role="status" aria-live="polite"></div>',
@@ -1329,13 +1927,9 @@
 
         var self = this;
 
-        // 일괄 요약 버튼 (기존 동작 유지)
-        var batchBtn = document.getElementById("batch-summarize-btn");
-        if (batchBtn) {
-            batchBtn.addEventListener("click", function () {
-                self._batchSummarize(batchBtn);
-            });
-        }
+        // 홈 드롭다운 ([전체 일괄 ▾] / [최근 24시간 ▾]) 핸들러 마운트
+        // bulk-actions §C — scope 별 디스패치 + ARIA 토글 + 키보드/외부클릭 닫기
+        _mountHomeDropdowns();
 
         // 전사 폴더 열기 — POST /api/system/open-audio-folder
         var openBtn = document.getElementById("homeActionOpenFolder");
@@ -1421,34 +2015,6 @@
             .then(function () {
                 btn.disabled = false;
                 if (btn.querySelector("span")) btn.querySelector("span").textContent = original || "전사 폴더 열기";
-            });
-    };
-
-    /**
-     * 일괄 요약 생성을 실행한다. POST /api/meetings/summarize-batch
-     * @param {HTMLButtonElement} btn - 버튼 요소 (비활성화용)
-     */
-    EmptyView.prototype._batchSummarize = function (btn) {
-        var span = btn.querySelector("span");
-        var setLabel = function (text) { if (span) { span.textContent = text; } else { btn.textContent = text; } };
-        var originalLabel = span ? span.textContent : btn.textContent;
-        btn.disabled = true;
-        setLabel("요약 실행 중…");
-        App.apiPost("/meetings/summarize-batch", {})
-            .then(function (data) {
-                var total = data && data.total ? data.total : 0;
-                setLabel(total > 0 ? total + "건 요약 시작됨" : "요약 대상 없음");
-                setTimeout(function () {
-                    btn.disabled = false;
-                    setLabel(originalLabel);
-                }, 3000);
-            })
-            .catch(function () {
-                setLabel("요약 실패");
-                setTimeout(function () {
-                    btn.disabled = false;
-                    setLabel(originalLabel);
-                }, 3000);
             });
     };
 
@@ -10087,6 +10653,7 @@
         Router: Router,
         NavBar: NavBar,
         ListPanel: ListPanel,
+        BulkActionBar: BulkActionBar,
         EmptyView: EmptyView,
         SearchView: SearchView,
         ViewerView: ViewerView,
@@ -10095,6 +10662,9 @@
         SettingsView: SettingsView,
         CommandPalette: commandPalette,
     };
+
+    // 전역 노출 — Playwright 시나리오 / 외부 핸들러가 ListPanel.clearSelection 등 사용
+    window.ListPanel = ListPanel;
 
 
     // =================================================================
@@ -10109,6 +10679,9 @@
 
     // 리스트 패널 초기화
     ListPanel.init();
+
+    // 컨텍스트 액션 바 초기화 (bulk-actions §B)
+    BulkActionBar.init();
 
     // 라우터 초기화 (현재 경로에 맞는 뷰 렌더링)
     Router.init();
