@@ -1273,10 +1273,10 @@
             '      <div class="home-stat-value" id="homeStatTotal">—</div>',
             '      <div class="home-stat-sub">누적 등록 수</div>',
             '    </div>',
-            '    <div class="home-stat-card">',
+            '    <div class="home-stat-card" aria-label="처리 대기 및 미전사 녹음">',
             '      <div class="home-stat-label">대기열</div>',
             '      <div class="home-stat-value" id="homeStatQueue">—</div>',
-            '      <div class="home-stat-sub">전사 대기 중</div>',
+            '      <div class="home-stat-sub" id="homeStatQueueSub">전사 대기 중</div>',
             '    </div>',
             '    <div class="home-stat-card">',
             '      <div class="home-stat-label">진행 중</div>',
@@ -1369,7 +1369,26 @@
                 if (!data) return;
                 _setStatCard("homeStatThisWeek", data.this_week_meetings);
                 _setStatCard("homeStatTotal", data.total_meetings);
+                // 대기열 카드: 메인 값은 자동 처리 대기(queued), sub 라인은 미전사 녹음(recorded).
+                // 미전사가 0 이면 기본 안내 문구로 폴백 — 시각 노이즈 최소화.
                 _setStatCard("homeStatQueue", data.queue_pending);
+                var subEl = document.getElementById("homeStatQueueSub");
+                var card = subEl ? subEl.parentElement : null;
+                var pending = Number(data.queue_pending) || 0;
+                var untranscribed = Number(data.untranscribed_recordings) || 0;
+                if (subEl) {
+                    if (untranscribed > 0) {
+                        subEl.textContent = "미전사 " + untranscribed;
+                    } else {
+                        subEl.textContent = "전사 대기 중";
+                    }
+                }
+                if (card) {
+                    card.setAttribute(
+                        "aria-label",
+                        "처리 대기 " + pending + "개, 미전사 녹음 " + untranscribed + "개"
+                    );
+                }
                 _setStatCard("homeStatActive", data.active_processing);
             })
             .catch(function () {
@@ -3377,6 +3396,8 @@
             await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/transcribe", {});
             this._loadMeetingInfo();
             ListPanel.loadMeetings();
+            // 홈 대시보드 카드(미전사/처리 대기 카운트) 즉시 갱신.
+            document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
         } catch (e) {
             errorBanner.show("전사 시작 실패: " + e.message);
             btn.disabled = false;
@@ -3393,6 +3414,8 @@
             await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/retry", {});
             this._loadMeetingInfo();
             ListPanel.loadMeetings();
+            // failed → queued 전이로 처리 대기 카운트가 변하므로 카드도 즉시 갱신.
+            document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
         } catch (e) {
             errorBanner.show("재시도 실패: " + e.message);
         }
@@ -3424,10 +3447,13 @@
             // 즉시 한 번 갱신하고, 백그라운드 폴링이 처리되도록 약간의 딜레이 후 한 번 더
             this._loadMeetingInfo();
             ListPanel.loadMeetings();
+            // queued/처리중 → recorded 전이로 미전사 카운트가 변하므로 카드도 즉시 갱신.
+            document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
             setTimeout(function () {
                 if (typeof ListPanel !== "undefined" && ListPanel.loadMeetings) {
                     ListPanel.loadMeetings();
                 }
+                document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
             }, 3000);
         } catch (e) {
             errorBanner.show("취소 실패: " + e.message);

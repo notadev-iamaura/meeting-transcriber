@@ -81,6 +81,7 @@ class TestDashboardStatsEndpoint:
         assert data["total_meetings"] == 0
         assert data["this_week_meetings"] == 0
         assert data["queue_pending"] == 0
+        assert data["untranscribed_recordings"] == 0
         assert data["active_processing"] == 0
         assert data["completed"] == 0
         assert data["failed"] == 0
@@ -89,7 +90,11 @@ class TestDashboardStatsEndpoint:
         assert str(tmp_path) in data["audio_input_dir"]
 
     def test_stats_상태별_집계(self, tmp_path: Path) -> None:
-        """recording/transcribing/queued/recorded/completed/failed 가 각 카테고리에 매핑된다."""
+        """recording/transcribing/queued/recorded/completed/failed 가 각 카테고리에 매핑된다.
+
+        queue_pending 은 자동 처리 대기(queued) 만, untranscribed_recordings 는
+        사용자 액션 대기(recorded) 만 집계한다 — 두 카운터는 독립적이다.
+        """
         app = _make_test_app(tmp_path)
 
         now = datetime.now()
@@ -118,7 +123,8 @@ class TestDashboardStatsEndpoint:
         assert (
             data["active_processing"] == 5
         )  # recording, transcribing, diarizing, merging, embedding
-        assert data["queue_pending"] == 2  # queued + recorded
+        assert data["queue_pending"] == 1  # queued (자동 처리 대기)
+        assert data["untranscribed_recordings"] == 1  # recorded (사용자 액션 대기)
         assert data["completed"] == 2
         assert data["failed"] == 1
 
