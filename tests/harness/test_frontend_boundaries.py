@@ -15,6 +15,7 @@ def test_frontend_modules_load_in_dependency_order() -> None:
     api_client = html.index("/static/api-client.js")
     app = html.index("/static/app.js")
     list_panel = html.index("/static/list-panel.js")
+    bulk_action_bar = html.index("/static/bulk-action-bar.js")
     command_palette = html.index("/static/command-palette.js")
     settings_view = html.index("/static/settings-view.js")
     viewer_view = html.index("/static/viewer-view.js")
@@ -30,6 +31,7 @@ def test_frontend_modules_load_in_dependency_order() -> None:
         api_client
         < app
         < list_panel
+        < bulk_action_bar
         < command_palette
         < settings_view
         < viewer_view
@@ -211,7 +213,7 @@ def test_empty_view_exposes_factory_boundary() -> None:
     assert "create: create" in empty_view
     assert "return EmptyView;" in empty_view
     assert "EmptyViewModule.create({" in spa_js
-    assert "showBulkToast: _showBulkToast" in spa_js
+    assert "showBulkToast: BulkActionBar.showBulkToast" in spa_js
     assert "EmptyView: EmptyView" in spa_js
     assert "function EmptyView()" not in spa_js
     assert "function _mountHomeDropdowns()" not in spa_js
@@ -243,6 +245,35 @@ def test_global_resource_bar_exposes_factory_boundary() -> None:
     assert "GlobalResourceBarModule.create({" in spa_js
     assert "intervalMs: 5000" in spa_js
     assert "var GlobalResourceBar = (function ()" not in spa_js
+
+
+def test_bulk_action_bar_exposes_factory_boundary() -> None:
+    bulk_action_bar = Path("ui/web/bulk-action-bar.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingBulkActionBar" in bulk_action_bar
+    assert "create: create" in bulk_action_bar
+    assert "showBulkToast: showBulkToast" in bulk_action_bar
+    assert "BulkActionBarModule.create({" in spa_js
+    assert "ListPanel: ListPanel" in spa_js
+    assert "BulkActionBar: BulkActionBar" in spa_js
+    assert "var BulkActionBar = (function ()" not in spa_js
+    assert "function _showBulkToast(" not in spa_js
+
+
+def test_bulk_action_bar_preserves_behavior_guards() -> None:
+    bulk_action_bar = Path("ui/web/bulk-action-bar.js").read_text(encoding="utf-8")
+
+    assert "var _inFlight = false" in bulk_action_bar
+    assert "if (_inFlight) return;" in bulk_action_bar
+    assert 'App.apiPost("/meetings/batch"' in bulk_action_bar
+    assert 'scope: "selected"' in bulk_action_bar
+    assert "meeting_ids: ids" in bulk_action_bar
+    assert '(action === "both") ? "full" : action' in bulk_action_bar
+    assert "ListPanel.getSelectedIds()" in bulk_action_bar
+    assert "ListPanel.clearSelection()" in bulk_action_bar
+    assert 'doc.addEventListener("recap:selection-changed"' in bulk_action_bar
+    assert 'setAttribute("role", role)' in bulk_action_bar
 
 
 def test_global_resource_bar_preserves_lifecycle_guards() -> None:

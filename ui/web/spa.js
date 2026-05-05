@@ -398,182 +398,20 @@
     // === BulkActionBar (컨텍스트 액션 바, bulk-actions §B) ===
     // =================================================================
 
-    /**
-     * 일괄 작업 토스트 헬퍼 — 메시지 + role 을 받아 in-flow 토스트 노출.
-     * 기존 `.home-status` (homeStatusMessage) 가 있으면 우선 사용 (홈뷰 한정),
-     * 없으면 동적으로 `<div role="status|alert">` 를 body 에 임시 부착.
-     *
-     * level 'info' 는 role="status" + .home-status, level 'error' 는 role="alert".
-     */
-    function _showBulkToast(message, level) {
-        var role = level === "error" ? "alert" : "status";
-        var msg = String(message == null ? "" : message);
-
-        // 우선 EmptyView 가 노출 중이면 홈 status 영역 재사용 (가벼운 in-flow)
-        var statusEl = document.getElementById("homeStatusMessage");
-        if (statusEl) {
-            statusEl.setAttribute("role", role);
-            if (level === "error") {
-                statusEl.setAttribute("data-level", "error");
-            } else {
-                statusEl.removeAttribute("data-level");
-            }
-            App.safeText(statusEl, msg);
-            // 5초 뒤 자동 제거
-            if (statusEl._bulkClearTimer) clearTimeout(statusEl._bulkClearTimer);
-            statusEl._bulkClearTimer = setTimeout(function () {
-                if (statusEl.textContent === msg) {
-                    App.safeText(statusEl, "");
-                    statusEl.removeAttribute("data-level");
-                }
-            }, 5000);
-            return;
-        }
-
-        // 폴백: 동적 토스트 — 콘텐츠 영역 외부(body)에 부착, 5초 뒤 자동 제거
-        var toast = document.createElement("div");
-        toast.className = "bulk-toast" + (level === "error" ? " bulk-toast--error" : "");
-        toast.setAttribute("role", role);
-        toast.setAttribute("aria-live", level === "error" ? "assertive" : "polite");
-        App.safeText(toast, msg);
-        document.body.appendChild(toast);
-        setTimeout(function () {
-            if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, 5000);
-    }
-
-    /**
-     * BulkActionBar — 사이드바 다중 선택을 받아 슬라이드 다운/업 + 액션 디스패치.
-     * SSOT: index.html 의 #bulkActionBar.
-     *
-     * 동작 (bulk-actions §B):
-     *   1. recap:selection-changed 이벤트 구독 → count>0 = 슬라이드 다운, 0 = 업.
-     *   2. 액션 버튼 클릭 → POST /api/meetings/batch.
-     *   3. in-flight 동안 data-inflight="true" 마커 + 버튼 disabled (A10).
-     *   4. 성공 toast / 5xx 에러 토스트 (A8/A11).
-     *   5. 응답 후 selection 자동 해제 (A9).
-     *   6. dismiss 버튼 → ListPanel.clearSelection().
-     */
-    var BulkActionBar = (function () {
-        var _bar = null;
-        var _countNum = null;
-        var _inFlight = false;
-
-        function _show() {
-            if (!_bar) return;
-            // 이미 표시 중이면 무시 — 연속 클릭/이벤트 시 안정성.
-            if (!_bar.hidden && !_bar.classList.contains("is-leaving")) {
-                return;
-            }
-            // 슬라이드 다운: 1) is-leaving (transform -100%) 적용, hidden=false
-            //               2) 다음 frame 에 is-leaving 제거 → transition 으로 0 슬라이드
-            _bar.hidden = false;
-            _bar.classList.add("is-leaving");
-            void _bar.offsetWidth;  // 강제 reflow
-            requestAnimationFrame(function () {
-                if (_bar) _bar.classList.remove("is-leaving");
-            });
-        }
-
-        function _hide() {
-            if (!_bar) return;
-            // in-flight 중이면 hide 보류 (응답 도착 후 처리)
-            if (_inFlight) return;
-            // 슬라이드 업 시각 효과 — is-leaving 클래스 추가, transition 으로 보간.
-            // hidden 속성은 짧은 fallback timer 로 보장 (transitionend 미발생 환경 대비).
-            _bar.classList.add("is-leaving");
-            var bar = _bar;  // 클로저 캡처
-            setTimeout(function () {
-                if (!bar) return;
-                bar.hidden = true;
-                bar.classList.remove("is-leaving");
-            }, 200);  // 시나리오 wait 350ms / 800ms 모두 안에 hidden 보장
-        }
-
-        function _onSelectionChanged(e) {
-            if (!_bar) return;
-            var detail = e.detail || {};
-            var count = detail.count || 0;
-            if (_countNum) App.safeText(_countNum, String(count));
-            if (count > 0) {
-                _show();
-            } else {
-                _hide();
-            }
-        }
-
-        function _executeAction(action) {
-            // in-flight 동안 재진입 방지 — _onClick 핸들러의 1차 가드.
-            // _setActionsDisabled 는 호출하지 않음 (시나리오 A10 의 force-click
-            // 시점에 버튼이 항상 visible/clickable 로 유지되어야 하며, 실제 중복
-            // 호출은 _inFlight 플래그로 막힌다).
-            if (_inFlight) return;
-            var ids = (window.ListPanel && ListPanel.getSelectedIds)
-                ? ListPanel.getSelectedIds()
-                : [];
-            if (ids.length === 0) return;
-
-            _inFlight = true;
-            _bar.setAttribute("data-inflight", "true");
-
-            // fire-and-forget — fetch promise 처리는 .then/.catch 로 분리.
-            App.apiPost("/meetings/batch", {
-                action: action,
-                scope: "selected",
-                meeting_ids: ids,
-            }).then(function (resp) {
-                var queued = (resp && resp.queued != null) ? resp.queued : ids.length;
-                var skipped = (resp && resp.skipped != null) ? resp.skipped : 0;
-                var msg = queued + "건 처리"
-                    + (skipped > 0 ? ", " + skipped + "건 건너뜀" : "");
-                _showBulkToast(msg, "info");
-                // success: _inFlight 풀고 selection 해제 — bulk-actions §1.5
-                _inFlight = false;
-                if (_bar) _bar.removeAttribute("data-inflight");
-                if (window.ListPanel && ListPanel.clearSelection) {
-                    ListPanel.clearSelection();
-                }
-            }).catch(function (err) {
-                _showBulkToast(
-                    "처리 실패: " + (err && err.message ? err.message : "서버 오류"),
-                    "error"
-                );
-                // 에러: selection 보존 (사용자 재시도 흐름)
-                _inFlight = false;
-                if (_bar) _bar.removeAttribute("data-inflight");
-            });
-        }
-
-        function _onClick(e) {
-            var t = e.target.closest("[data-action]");
-            if (!t || !_bar.contains(t)) return;
-            var action = t.getAttribute("data-action");
-            if (action === "dismiss") {
-                if (_inFlight) return;
-                if (window.ListPanel && ListPanel.clearSelection) {
-                    ListPanel.clearSelection();
-                }
-                return;
-            }
-            if (action === "transcribe" || action === "summarize" || action === "both") {
-                // UI selector 'both' → 백엔드 계약 'full'
-                var apiAction = (action === "both") ? "full" : action;
-                _executeAction(apiAction);
-            }
-        }
-
-        function init() {
-            _bar = document.getElementById("bulkActionBar");
-            if (!_bar) return;
-            _countNum = _bar.querySelector(".bulk-action-bar__count-num");
-            _bar.addEventListener("click", _onClick);
-            document.addEventListener("recap:selection-changed", _onSelectionChanged);
-        }
-
-        return {
-            init: init,
+    var BulkActionBarModule = window.MeetingBulkActionBar;
+    var BulkActionBar = (
+        BulkActionBarModule && typeof BulkActionBarModule.create === "function"
+    )
+        ? BulkActionBarModule.create({
+            App: App,
+            ListPanel: ListPanel,
+        })
+        : {
+            init: function BulkActionBarUnavailable() {
+                throw new Error("MeetingBulkActionBar module is not loaded");
+            },
+            showBulkToast: function () {},
         };
-    })();
 
 
     var EmptyViewModule = window.MeetingEmptyView;
@@ -584,7 +422,7 @@
             App: App,
             Router: Router,
             Icons: Icons,
-            showBulkToast: _showBulkToast,
+            showBulkToast: BulkActionBar.showBulkToast,
         })
         : function EmptyViewUnavailable() {
             throw new Error("MeetingEmptyView module is not loaded");
