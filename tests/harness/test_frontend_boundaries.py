@@ -25,6 +25,9 @@ def test_frontend_modules_load_in_dependency_order() -> None:
     search_view = html.index("/static/search-view.js")
     empty_view = html.index("/static/empty-view.js")
     global_resource_bar = html.index("/static/global-resource-bar.js")
+    theme_controller = html.index("/static/theme-controller.js")
+    mobile_drawer = html.index("/static/mobile-drawer.js")
+    shortcut_controller = html.index("/static/shortcut-controller.js")
     spa = html.index("/static/spa.js")
 
     assert (
@@ -41,6 +44,9 @@ def test_frontend_modules_load_in_dependency_order() -> None:
         < search_view
         < empty_view
         < global_resource_bar
+        < theme_controller
+        < mobile_drawer
+        < shortcut_controller
         < spa
     )
 
@@ -86,7 +92,10 @@ def test_command_palette_exposes_factory_boundary() -> None:
     assert "window.MeetingCommandPalette" in command_palette
     assert "create: create" in command_palette
     assert "isEditingContext: isEditingContext" in command_palette
-    assert "CommandPaletteModule.create({ App: App, Router: Router })" in spa_js
+    assert "CommandPaletteModule.create(commandPaletteDeps)" in spa_js
+    assert "commandPaletteDeps.toggleTheme = ThemeController.toggle" in spa_js
+    assert 'typeof ThemeControllerModule.create === "function"' in spa_js
+    assert 'if (typeof toggleTheme === "function")' in command_palette
 
 
 def test_list_panel_exposes_factory_boundary() -> None:
@@ -258,6 +267,34 @@ def test_bulk_action_bar_exposes_factory_boundary() -> None:
     assert "ListPanel: ListPanel" in spa_js
     assert "BulkActionBar: BulkActionBar" in spa_js
     assert "var BulkActionBar = (function ()" not in spa_js
+
+
+def test_global_shell_controllers_expose_factory_boundaries() -> None:
+    theme_controller = Path("ui/web/theme-controller.js").read_text(encoding="utf-8")
+    mobile_drawer = Path("ui/web/mobile-drawer.js").read_text(encoding="utf-8")
+    shortcut_controller = Path("ui/web/shortcut-controller.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingThemeController" in theme_controller
+    assert "create: create" in theme_controller
+    assert "toggle: toggle" in theme_controller
+    assert "ThemeControllerModule.create({" in spa_js
+    assert "ThemeController: ThemeController" in spa_js
+    assert "function initThemeToggle()" not in spa_js
+
+    assert "window.MeetingMobileDrawer" in mobile_drawer
+    assert "create: create" in mobile_drawer
+    assert "isOpen: isOpen" in mobile_drawer
+    assert "MobileDrawerModule.create({" in spa_js
+    assert "MobileDrawer: MobileDrawer" in spa_js
+    assert "function initMobileDrawer()" not in spa_js
+
+    assert "window.MeetingShortcutController" in shortcut_controller
+    assert "create: create" in shortcut_controller
+    assert "start: start" in shortcut_controller
+    assert "ShortcutControllerModule.create({" in spa_js
+    assert "ShortcutController: ShortcutController" in spa_js
+    assert 'document.addEventListener("keydown", function (e)' not in spa_js
     assert "function _showBulkToast(" not in spa_js
 
 

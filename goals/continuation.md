@@ -102,7 +102,33 @@ Completion decision for this workstream: reached.
 
 ## Next Workstream Candidates
 
-Pause for the next decision unless the user explicitly continues. Remaining
-global shell candidates are mobile drawer, theme toggle, shortcut controller,
-or broader API/domain router cleanup. Each candidate has a different
-verification surface and should receive a fresh paired review before edits.
+User explicitly continued into the next phase on 2026-05-06.
+
+## Current Phase: Global Shell Controls
+
+Goal: extract the remaining global shell controls from `ui/web/spa.js` into
+focused factory modules while preserving public behavior:
+
+- `ui/web/theme-controller.js` owns saved-theme restore and theme toggle.
+- `ui/web/mobile-drawer.js` owns `#mobile-menu-toggle`, `#list-panel.is-open`,
+  `#drawer-backdrop.visible`, body scroll lock, Escape close, backdrop close,
+  and focus return.
+- `ui/web/shortcut-controller.js` owns global `Meta/Ctrl` accelerators:
+  `K`, `,`, `1`, `2`, and `3`.
+- `ui/web/spa.js` remains the shell composer and exposes compatible objects on
+  `window.SPA`.
+- `ui/web/command-palette.js` delegates the `theme.toggle` command to the shared
+  theme controller when injected, with fallback behavior retained.
+
+Consensus gate: reached. Auditor A and Auditor B both identified the same
+remaining ownership cluster in `ui/web/spa.js`, the same public contracts, and
+the same verification surface. The lead chose focused modules instead of one
+combined global-shell file to match existing module boundary patterns.
+
+Completion criteria:
+
+- New controller scripts load before `spa.js`.
+- Harness boundary tests prove factory namespaces and `spa.js` delegation.
+- T-202 command palette tests still pass.
+- T-302 mobile drawer integration, behavior, a11y, and visual tests still pass.
+- JavaScript syntax checks pass for touched browser modules.

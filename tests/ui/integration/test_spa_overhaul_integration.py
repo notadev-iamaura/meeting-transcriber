@@ -1540,6 +1540,53 @@ def test_t102_dark_text_secondary_token(browser: Browser, spa_static_server: str
         )
 
 
+def test_t102_theme_toggle_uses_shared_controller(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """theme button → ThemeController public boundary + localStorage 동기화."""
+    with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
+        page.evaluate(
+            "() => {"
+            "  localStorage.setItem('theme', 'light');"
+            "  document.documentElement.setAttribute('data-theme', 'light');"
+            "}"
+        )
+        page.locator("#themeToggle").click()
+        result = page.evaluate(
+            "() => ({"
+            "  theme: document.documentElement.getAttribute('data-theme'),"
+            "  stored: localStorage.getItem('theme'),"
+            "  hasController: Boolean(window.SPA && window.SPA.ThemeController)"
+            "})"
+        )
+        assert result == {"theme": "dark", "stored": "dark", "hasController": True}
+
+
+def test_t102_command_palette_theme_action_delegates_to_controller(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """Command Palette 의 theme.toggle 이 동일한 ThemeController 를 사용."""
+    with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
+        page.evaluate(
+            "() => {"
+            "  localStorage.setItem('theme', 'light');"
+            "  document.documentElement.setAttribute('data-theme', 'light');"
+            "}"
+        )
+        page.keyboard.press("Meta+k")
+        page.wait_for_selector("[data-command-id='theme.toggle']")
+        page.locator("[data-command-id='theme.toggle']").click()
+        result = page.evaluate(
+            "() => ({"
+            "  theme: document.documentElement.getAttribute('data-theme'),"
+            "  stored: localStorage.getItem('theme')"
+            "})"
+        )
+        assert result == {"theme": "dark", "stored": "dark"}
+
+
 # ============================================================
 # T-103 skeleton-shimmer
 # ============================================================
