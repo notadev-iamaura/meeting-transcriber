@@ -10,11 +10,12 @@ Wave 별 그룹핑 + 상태 이모지 + 최근 게이트 요약 + 리뷰 상태 
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from harness import review
+from harness import consensus, review
 
 # Wave 별 표시명 (스펙 §3 와 일치).
 WAVE_TITLES: dict[int, str] = {
@@ -37,20 +38,31 @@ STATUS_EMOJI: dict[str, str] = {
 
 def _latest_gate_summary(conn: sqlite3.Connection, ticket_id: str) -> str:
     """가장 최근 게이트 결과를 'V✓ B✗ A✓' 형태로 표시."""
-    row = conn.execute(
-        "SELECT visual_pass, behavior_pass, a11y_pass, phase "
+    gate_row = conn.execute(
+        "SELECT visual_pass, behavior_pass, a11y_pass, phase, created_at "
         "FROM gate_runs WHERE ticket_id = ? ORDER BY id DESC LIMIT 1",
         (ticket_id,),
     ).fetchone()
-    if row is None:
+    profile_row = conn.execute(
+        "SELECT payload, created_at FROM events "
+        "WHERE ticket_id = ? AND type = 'gate.profile' ORDER BY id DESC LIMIT 1",
+        (ticket_id,),
+    ).fetchone()
+    if profile_row is not None and (
+        gate_row is None or profile_row["created_at"] >= gate_row["created_at"]
+    ):
+        payload = json.loads(profile_row["payload"] or "{}")
+        state = "✓" if payload.get("passed") else "✗"
+        return f"{payload.get('phase', '?')}:{payload.get('profile', 'profile')} {state}"
+    if gate_row is None:
         return "—"
 
     def m(v: int) -> str:
         return "✓" if v else "✗"
 
     return (
-        f"{row['phase']}: V{m(row['visual_pass'])} "
-        f"B{m(row['behavior_pass'])} A{m(row['a11y_pass'])}"
+        f"{gate_row['phase']}: V{m(gate_row['visual_pass'])} "
+        f"B{m(gate_row['behavior_pass'])} A{m(gate_row['a11y_pass'])}"
     )
 
 
@@ -63,6 +75,14 @@ def _review_glyph(status: str | None) -> str:
         "changes_requested": "✗",
         "pending": "…",
     }.get(status, "?")
+
+
+def _consensus_glyph(conn: sqlite3.Connection, *, ticket_id: str, target: str) -> str:
+    """consensus 상태를 보드용 한 글자로 표시."""
+    result = consensus.status(conn, ticket_id=ticket_id, target=target)
+    if result.reason:
+        return "—"
+    return "✓" if result.passed else "✗"
 
 
 def render_overview(conn: sqlite3.Connection) -> str:
@@ -86,8 +106,8 @@ def render_overview(conn: sqlite3.Connection) -> str:
             lines.append("_티켓 없음_")
             lines.append("")
             continue
-        lines.append("| 티켓 | 컴포넌트 | 상태 | 최근 게이트 | 리뷰 | PR |")
-        lines.append("|------|----------|------|-------------|------|----|")
+        lines.append("| 티켓 | 컴포넌트 | 상태 | 최근 게이트 | 합의 | 리뷰 | PR |")
+        lines.append("|------|----------|------|-------------|------|------|----|")
         for r in rows:
             emoji = STATUS_EMOJI.get(r["status"], "")
             gate = _latest_gate_summary(conn, r["id"])
@@ -96,10 +116,14 @@ def render_overview(conn: sqlite3.Connection) -> str:
             peer = review.latest_status(conn, ticket_id=r["id"], kind="peer-review")
             merge = review.latest_status(conn, ticket_id=r["id"], kind="merge-final")
             review_cell = f"P:{_review_glyph(peer)} M:{_review_glyph(merge)}"
+            consensus_cell = (
+                f"E:{_consensus_glyph(conn, ticket_id=r['id'], target='execute')} "
+                f"M:{_consensus_glyph(conn, ticket_id=r['id'], target='merge')}"
+            )
 
             lines.append(
                 f"| {r['id']} | `{r['component']}` | {emoji} {r['status']} | "
-                f"{gate} | {review_cell} | {pr} |"
+                f"{gate} | {consensus_cell} | {review_cell} | {pr} |"
             )
         lines.append("")
 

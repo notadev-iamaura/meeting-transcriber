@@ -75,6 +75,7 @@ progress.md
 .superpowers/
 
 # UI/UX Harness — 영속 DB 와 시각 회귀 임시 산출물
+harness.db
 state/harness.db
 state/harness.db-journal
 tests/ui/visual/diffs/
