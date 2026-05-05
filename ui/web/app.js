@@ -10,7 +10,8 @@
     "use strict";
 
     // === 상수 ===
-    var API_BASE = "/api";
+    var ApiClient = window.MeetingApi || null;
+    var API_BASE = ApiClient && ApiClient.API_BASE ? ApiClient.API_BASE : "/api";
 
     // 상태별 한국어 레이블 (회의 상태 표시에 사용)
     var STATUS_LABELS = {
@@ -131,7 +132,7 @@
     // =================================================================
 
     // HTTP 상태 코드별 한국어 에러 메시지 매핑
-    var HTTP_ERROR_MESSAGES = {
+    var HTTP_ERROR_MESSAGES = (ApiClient && ApiClient.HTTP_ERROR_MESSAGES) || {
         400: "잘못된 요청입니다. 입력 내용을 확인해 주세요.",
         401: "인증이 필요합니다.",
         403: "접근 권한이 없습니다.",
@@ -151,6 +152,9 @@
      * @returns {string} 한국어 에러 메시지
      */
     function getHttpErrorMessage(status, fallback) {
+        if (ApiClient && typeof ApiClient.getHttpErrorMessage === "function") {
+            return ApiClient.getHttpErrorMessage(status, fallback);
+        }
         return HTTP_ERROR_MESSAGES[status] || fallback || "알 수 없는 오류가 발생했습니다.";
     }
 
@@ -162,6 +166,9 @@
      * @throws {Error} API 에러 (status 속성 포함)
      */
     async function apiRequest(endpoint, options) {
+        if (ApiClient && typeof ApiClient.request === "function") {
+            return ApiClient.request(endpoint, options);
+        }
         var url = API_BASE + endpoint;
         var response;
         try {
@@ -198,6 +205,9 @@
      * @returns {Promise<Object>} 응답 JSON
      */
     async function apiPost(endpoint, body) {
+        if (ApiClient && typeof ApiClient.post === "function") {
+            return ApiClient.post(endpoint, body);
+        }
         return apiRequest(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -546,6 +556,9 @@
      * @returns {Promise<Object>} 응답 JSON
      */
     async function apiDelete(endpoint) {
+        if (ApiClient && typeof ApiClient.delete === "function") {
+            return ApiClient.delete(endpoint);
+        }
         return apiRequest(endpoint, {
             method: "DELETE",
         });

@@ -1,0 +1,244 @@
+/* =================================================================
+ * Recap — design tokens (colors, type, spacing, motion)
+ *
+ * style.css imports this file as a compatibility fallback for tests
+ * and standalone fixtures. index.html loads it first in production.
+ * ================================================================= */
+
+/* ──���───────────────────────────────────────
+   1. CSS 변수 — 라이트 모드 (기본)
+   ─────────���──────────────────────────���───── */
+:root {
+  /* 배경색 — macOS Ventura/Sonoma 시스템 컬러 기반 */
+  --bg-canvas: #FFFFFF;
+  --bg-nav: #F0F0F2;
+  --bg-sidebar: #F5F5F7;
+  --bg-list: #FFFFFF;
+  --bg-content: #FFFFFF;
+  --bg-input: #EFEFF1;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 122, 255, 0.12);
+  --bg-secondary: #F5F5F7;
+  --bg-card: #FFFFFF;
+
+  /* 텍스트색 — Apple HIG 기준 (T-102 색대비 보강) */
+  --text-primary: #1D1D1F;
+  --text-secondary: #6E6E73;
+  --text-muted: #8E8E93;
+
+  /* 강조색 — macOS System Blue */
+  --accent: #007AFF;
+  --accent-text: #0066CC;     /* 신규: 본문 텍스트용 5.57:1 (T-102) */
+  --accent-hover: #0063D1;
+  --accent-light: rgba(0, 122, 255, 0.1);
+
+  /* 상태색 — SF Symbols 시스템 컬러 */
+  --success: #34C759;
+  --warning: #FF9500;
+  --error: #FF3B30;
+  --info: #5AC8FA;
+  --recording: #FF3B30;
+  --processing: #FF9500;
+  --completed: #34C759;
+
+  /* 테두리 — macOS separator (#D1D1D6) / 그림자 */
+  --border: #D1D1D6;
+  --border-light: #E5E5EA;
+  --border-focus: #007AFF;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+  /* 포커스 링 토큰 (T-201 / docs/design.md §1.4 Keyboard-First)
+     2-stop ring: 1px 캔버스 색으로 안쪽 spacer + 3px accent ring.
+     입력 필드는 --focus-ring-soft (3px tinted) 사용. */
+  --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+  --focus-ring-soft: 0 0 0 3px rgba(0, 122, 255, 0.15);
+
+  /* 레이아웃 토큰 */
+  --radius: 6px;
+  --radius-lg: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+
+  /* macOS 네이티브 이징 곡선 (docs/design.md §1.6) */
+  --ease-macos: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  /* 인터랙션 duration 토큰 */
+  --duration-fast: 150ms;   /* hover/focus/색상 변경 */
+  --duration-base: 250ms;   /* 기본값: 배경/보더/opacity/transform */
+  --duration-slow: 400ms;   /* 레이아웃 변화, 진행 바 */
+
+  /* 화자별 컬러 도트 — 구분 최적화 */
+  --speaker-0: #007AFF;
+  --speaker-1: #FF3B30;
+  --speaker-2: #34C759;
+  --speaker-3: #AF52DE;
+  --speaker-4: #FF9500;
+
+  /* 검색어 하이라이트 — macOS Find 노란 계열 */
+  --highlight-bg: rgba(255, 204, 0, 0.2);
+  --highlight-border: #FFCC00;
+
+  /* 채팅 메시지 */
+  --msg-user-bg: #007AFF;
+  --msg-user-color: #FFFFFF;
+  --msg-assistant-bg: #F0F0F2;
+
+  /* 참조 카드 */
+  --ref-bg: rgba(0, 122, 255, 0.04);
+  --ref-border: rgba(0, 122, 255, 0.15);
+
+  /* ---------------------------------------------------------------
+     1-B. 타이포·스페이싱 토큰 (colors_and_type.css 확장, 2026-04-20)
+     ---------------------------------------------------------------
+     모든 값은 기존 프로덕션 스타일시트에서 이미 사용하던 수치를 토큰화한
+     것이며, 새로운 시각적 의미를 만들지 않는다. 신규 컴포넌트는 이 토큰을
+     참조하고 기존 코드는 점진적으로 마이그레이션한다.
+     --------------------------------------------------------------- */
+
+  /* 폰트 패밀리 (모노는 기존 인라인 선언을 토큰화) */
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* 타입 스케일 — macOS 네이티브 */
+  --fs-10: 10px;   /* kbd, nav kbd */
+  --fs-11: 11px;   /* meta, count badges, captions, overline */
+  --fs-12: 12px;   /* secondary body, filter labels */
+  --fs-13: 13px;   /* body (default html font-size) */
+  --fs-14: 14px;   /* meeting id, card title */
+  --fs-15: 15px;   /* list title */
+  --fs-16: 16px;   /* empty state */
+  --fs-20: 20px;   /* section title */
+  --fs-22: 22px;   /* view title */
+
+  /* 폰트 웨이트 */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* 라인 하이트 */
+  --lh-tight: 1.2;
+  --lh-snug: 1.4;
+  --lh-base: 1.5;
+  --lh-relaxed: 1.6;
+  --lh-loose: 1.8;
+
+  /* 레터 스페이싱 (macOS SF Pro 권장) */
+  --ls-tight: -0.02em;
+  --ls-snug: -0.01em;
+  --ls-wide: 0.04em;
+
+  /* 스페이싱 스케일 (현재 사용 중인 수치를 토큰화) */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-8: 16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-16: 32px;
+  --space-20: 40px;
+
+  /* Pill/캡슐 radius */
+  --radius-pill: 10px;
+}
+
+
+/* ──────────────────────��───────────────────
+   2. CSS 변수 — 다크 모드
+   ────────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    /* 배경색 — macOS Dark Mode 시스템 컬러 */
+    --bg-canvas: #1C1C1E;
+    --bg-nav: #1C1C1E;
+    --bg-sidebar: #2C2C2E;
+    --bg-list: #1C1C1E;
+    --bg-content: #1C1C1E;
+    --bg-input: #3A3A3C;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-active: rgba(10, 132, 255, 0.18);
+    --bg-secondary: #2C2C2E;
+    --bg-card: #2C2C2E;
+
+    --text-primary: #F5F5F7;
+    --text-secondary: #98989D;
+    --text-muted: #8E8E93;        /* T-102: 5.22:1 on #1C1C1E (UI 3:1 + AA 4.5:1) */
+
+    --accent: #0A84FF;
+    --accent-text: #4DA1FF;       /* T-102 신규: 본문 텍스트용 6.37:1 */
+    --accent-hover: #409CFF;
+    --accent-light: rgba(10, 132, 255, 0.15);
+
+    --border: #38383A;
+    --border-light: #48484A;
+    --border-focus: #0A84FF;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+    /* 포커스 링 토큰 (T-201) — 다크 모드는 alpha 약간 키움 */
+    --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+    --focus-ring-soft: 0 0 0 3px rgba(10, 132, 255, 0.20);
+
+    --highlight-bg: rgba(255, 214, 10, 0.15);
+    --highlight-border: #FFD60A;
+
+    --msg-user-bg: #0A84FF;
+    --msg-user-color: #FFFFFF;
+    --msg-assistant-bg: #2C2C2E;
+
+    --ref-bg: rgba(10, 132, 255, 0.08);
+    --ref-border: rgba(10, 132, 255, 0.2);
+  }
+}
+
+/* 수동 다크 모드 (data-theme="dark" 속성으로 강제 전환) */
+:root[data-theme="dark"] {
+  --bg-canvas: #1C1C1E;
+  --bg-nav: #1C1C1E;
+  --bg-sidebar: #2C2C2E;
+  --bg-list: #1C1C1E;
+  --bg-content: #1C1C1E;
+  --bg-input: #3A3A3C;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(10, 132, 255, 0.18);
+  --bg-secondary: #2C2C2E;
+  --bg-card: #2C2C2E;
+
+  --text-primary: #F5F5F7;
+  --text-secondary: #98989D;
+  --text-muted: #8E8E93;        /* T-102: 5.22:1 on #1C1C1E (UI 3:1 + AA 4.5:1) */
+
+  --accent: #0A84FF;
+  --accent-text: #4DA1FF;       /* T-102 신규: 본문 텍스트용 6.37:1 */
+  --accent-hover: #409CFF;
+  --accent-light: rgba(10, 132, 255, 0.15);
+
+  --border: #38383A;
+  --border-light: #48484A;
+  --border-focus: #0A84FF;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* 포커스 링 토큰 (T-201) — 다크 모드는 alpha 약간 키움 */
+  --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px var(--accent);
+  --focus-ring-soft: 0 0 0 3px rgba(10, 132, 255, 0.20);
+
+  --highlight-bg: rgba(255, 214, 10, 0.15);
+  --highlight-border: #FFD60A;
+
+  --msg-user-bg: #0A84FF;
+  --msg-user-color: #FFFFFF;
+  --msg-assistant-bg: #2C2C2E;
+
+  --ref-bg: rgba(10, 132, 255, 0.08);
+  --ref-border: rgba(10, 132, 255, 0.2);
+}
+
+/* 수동 라이트 모드 (시스템이 다크여도 강제 라이트) */
+:root[data-theme="light"] {
+  /* :root 기본값이 라이트이므로 별도 정의 불필요 — 다크 미디어쿼리만 차단 */
+}

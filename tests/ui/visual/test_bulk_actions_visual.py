@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from PIL import Image, ImageDraw
 from playwright.sync_api import Browser, Page, expect
 
 from harness import snapshot
@@ -106,6 +107,40 @@ def _select_n(page: Page, n: int) -> None:
         expect(page.locator(".bulk-action-bar")).to_be_visible(timeout=2000)
 
 
+def _mask_dynamic_regions(page: Page, source: Path, variant: str, label: str) -> Path:
+    """동적 시스템 리소스 바를 마스킹한 비교용 PNG를 만든다.
+
+    bulk-actions visual gate의 관심사는 선택 상태/액션 바/드롭다운이다.
+    우측 상단 RAM/CPU 바는 실제 시스템 부하에 따라 매번 숫자와 막대 폭이
+    달라지므로, 해당 영역은 baseline 비교에서 제외한다.
+    """
+    img = Image.open(source).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    viewport = page.viewport_size or {"width": 1, "height": 1}
+    scale_x = img.width / max(float(viewport["width"]), 1.0)
+    scale_y = img.height / max(float(viewport["height"]), 1.0)
+
+    resource_bar = page.locator(".global-resource-bar").first
+    if resource_bar.count() > 0:
+        box = resource_bar.bounding_box()
+        if box is not None:
+            pad_x = 4 * scale_x
+            pad_y = 4 * scale_y
+            draw.rectangle(
+                (
+                    int((box["x"] * scale_x) - pad_x),
+                    int((box["y"] * scale_y) - pad_y),
+                    int(((box["x"] + box["width"]) * scale_x) + pad_x),
+                    int(((box["y"] + box["height"]) * scale_y) + pad_y),
+                ),
+                fill=(0, 0, 0),
+            )
+
+    masked = ACTUAL_DIR / f"bulk-actions-{variant}-{label}-masked.png"
+    img.save(masked)
+    return masked
+
+
 def _capture_and_compare(page: Page, variant: str, *, max_diff_pixel_ratio: float = 0.001) -> None:
     """fixture 페이지를 캡처해 baseline 과 픽셀 비교 (기본 max diff 0.1%).
 
@@ -117,7 +152,18 @@ def _capture_and_compare(page: Page, variant: str, *, max_diff_pixel_ratio: floa
     actual = ACTUAL_DIR / f"bulk-actions-{variant}.png"
     page.screenshot(path=str(actual))
     baseline = BASELINES_DIR / f"bulk-actions-{variant}.png"
-    snapshot.assert_visual_match(actual, baseline, max_diff_pixel_ratio=max_diff_pixel_ratio)
+    if not baseline.exists():
+        snapshot.assert_visual_match(actual, baseline, max_diff_pixel_ratio=max_diff_pixel_ratio)
+        return
+
+    actual_for_compare = _mask_dynamic_regions(page, actual, variant, "actual")
+    baseline_for_compare = _mask_dynamic_regions(page, baseline, variant, "baseline")
+    ratio = snapshot.pixel_diff_ratio(actual_for_compare, baseline_for_compare)
+    if ratio > max_diff_pixel_ratio:
+        raise AssertionError(
+            f"visual diff {ratio:.4%} exceeds threshold {max_diff_pixel_ratio:.4%} "
+            f"(actual={actual}, baseline={baseline})"
+        )
 
 
 # ============================================================================
