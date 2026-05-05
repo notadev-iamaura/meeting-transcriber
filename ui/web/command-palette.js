@@ -22,6 +22,7 @@
         deps = deps || {};
         var App = deps.App || window.MeetingApp;
         var Router = deps.Router || (window.SPA && window.SPA.Router);
+        var toggleTheme = deps.toggleTheme || null;
         if (!App || !Router) {
             throw new Error("MeetingCommandPalette requires App and Router");
         }
@@ -410,6 +411,10 @@
                 title: "다크 모드 전환",
                 subtitle: "라이트 ↔ 다크 테마 토글",
                 run: function () {
+                    if (typeof toggleTheme === "function") {
+                        toggleTheme();
+                        return;
+                    }
                     var root = document.documentElement;
                     var current = root.getAttribute("data-theme");
                     var next;

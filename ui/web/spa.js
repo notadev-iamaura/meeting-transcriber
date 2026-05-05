@@ -545,52 +545,64 @@
     // === 키보드 단축키 (글로벌) ===
     // =================================================================
 
+    var ThemeControllerModule = window.MeetingThemeController;
+    var ThemeController = (
+        ThemeControllerModule && typeof ThemeControllerModule.create === "function"
+    )
+        ? ThemeControllerModule.create({})
+        : {
+            init: function () {},
+            restore: function () {},
+            toggle: function () {},
+        };
+
     var CommandPaletteModule = window.MeetingCommandPalette;
+    var commandPaletteDeps = {
+        App: App,
+        Router: Router,
+    };
+    if (
+        ThemeControllerModule &&
+        typeof ThemeControllerModule.create === "function"
+    ) {
+        commandPaletteDeps.toggleTheme = ThemeController.toggle;
+    }
     var commandPalette = (
         CommandPaletteModule && typeof CommandPaletteModule.create === "function"
     )
-        ? CommandPaletteModule.create({ App: App, Router: Router })
+        ? CommandPaletteModule.create(commandPaletteDeps)
         : { open: function () {} };
 
-    function isEditingContext(target) {
-        if (
-            CommandPaletteModule &&
-            typeof CommandPaletteModule.isEditingContext === "function"
-        ) {
-            return CommandPaletteModule.isEditingContext(target);
-        }
-        if (!target) return false;
-        var tag = (target.tagName || "").toUpperCase();
-        return (
-            tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable
-        );
-    }
+    var MobileDrawerModule = window.MeetingMobileDrawer;
+    var MobileDrawer = (
+        MobileDrawerModule && typeof MobileDrawerModule.create === "function"
+    )
+        ? MobileDrawerModule.create({})
+        : {
+            init: function () {},
+            open: function () {},
+            close: function () {},
+            isOpen: function () { return false; },
+        };
 
-    document.addEventListener("keydown", function (e) {
-        if (!(e.metaKey || e.ctrlKey)) return;
-
-        if (e.key === "k") {
-            if (isEditingContext(e.target)) return;
-            e.preventDefault();
-            commandPalette.open();
-            return;
-        }
-
-        if (e.key === ",") {
-            e.preventDefault();
-            Router.navigate("/app/settings");
-            return;
-        }
-
-        if (e.key === "1" || e.key === "2" || e.key === "3") {
-            if (isEditingContext(e.target)) return;
-            e.preventDefault();
-            if (e.key === "1") Router.navigate("/app");
-            else if (e.key === "2") Router.navigate("/app/search");
-            else Router.navigate("/app/chat");
-            return;
-        }
-    });
+    var ShortcutControllerModule = window.MeetingShortcutController;
+    var ShortcutController = (
+        ShortcutControllerModule &&
+        typeof ShortcutControllerModule.create === "function"
+    )
+        ? ShortcutControllerModule.create({
+            Router: Router,
+            CommandPalette: commandPalette,
+            isEditingContext:
+                CommandPaletteModule &&
+                typeof CommandPaletteModule.isEditingContext === "function"
+                    ? CommandPaletteModule.isEditingContext
+                    : null,
+        })
+        : {
+            start: function () {},
+            stop: function () {},
+        };
 
 
     // =================================================================
@@ -609,6 +621,9 @@
         WikiView: WikiView,
         SettingsView: SettingsView,
         CommandPalette: commandPalette,
+        MobileDrawer: MobileDrawer,
+        ThemeController: ThemeController,
+        ShortcutController: ShortcutController,
     };
 
     // 전역 노출 — Playwright 시나리오 / 외부 핸들러가 ListPanel.clearSelection 등 사용
@@ -637,100 +652,9 @@
     // 글로벌 리소스 모니터 시작 (모든 탭 공통 상단 표시)
     GlobalResourceBar.start();
 
-    // 모바일 drawer 토글 초기화 (T-302)
-    // - 768px 이하에서 햄버거 클릭 → 사이드바 drawer 열림/닫힘
-    // - SSOT: 햄버거 버튼의 aria-expanded (사이드바에는 ARIA 상태 부여 금지)
-    // - 시각 토글: 사이드바의 .is-open 클래스
-    // - ESC 키 + 백드롭 클릭으로 닫힘 (WCAG 2.1.2 No Keyboard Trap)
-    // - 닫힘 시 햄버거 버튼으로 focus 복귀 (mockup §6.3)
-    (function initMobileDrawer() {
-        var toggleBtn = document.getElementById("mobile-menu-toggle");
-        var panel = document.getElementById("list-panel");
-        var backdrop = document.getElementById("drawer-backdrop");
-        if (!toggleBtn || !panel || !backdrop) {
-            return;
-        }
-
-        // drawer 안 첫 focusable 요소 — focus trap 시작점
-        function firstFocusable() {
-            return panel.querySelector(
-                'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-            );
-        }
-
-        function openDrawer() {
-            toggleBtn.setAttribute("aria-expanded", "true");
-            toggleBtn.setAttribute("aria-label", "메뉴 닫기");
-            panel.classList.add("is-open");
-            backdrop.classList.add("visible");
-            document.body.style.overflow = "hidden";
-            // focus 이동 — drawer 안 첫 focusable 항목으로
-            var first = firstFocusable();
-            if (first) {
-                first.focus();
-            }
-        }
-
-        function closeDrawer() {
-            toggleBtn.setAttribute("aria-expanded", "false");
-            toggleBtn.setAttribute("aria-label", "메뉴 열기");
-            panel.classList.remove("is-open");
-            backdrop.classList.remove("visible");
-            document.body.style.overflow = "";
-            // focus 복귀 — 햄버거 버튼으로
-            toggleBtn.focus();
-        }
-
-        toggleBtn.addEventListener("click", function () {
-            if (toggleBtn.getAttribute("aria-expanded") === "true") {
-                closeDrawer();
-            } else {
-                openDrawer();
-            }
-        });
-
-        backdrop.addEventListener("click", closeDrawer);
-
-        document.addEventListener("keydown", function (e) {
-            if (e.key === "Escape" && toggleBtn.getAttribute("aria-expanded") === "true") {
-                closeDrawer();
-            }
-        });
-    })();
-
-    // 테마 토글 초기화
-    (function initThemeToggle() {
-        var btn = document.getElementById("themeToggle");
-        if (!btn) return;
-
-        // 저장된 테마 복원
-        var saved = localStorage.getItem("theme");
-        if (saved === "dark" || saved === "light") {
-            document.documentElement.setAttribute("data-theme", saved);
-        }
-
-        btn.addEventListener("click", function () {
-            var current = document.documentElement.getAttribute("data-theme");
-            var isDark;
-
-            if (current === "dark") {
-                // 다크 → 라이트
-                document.documentElement.setAttribute("data-theme", "light");
-                localStorage.setItem("theme", "light");
-                isDark = false;
-            } else if (current === "light") {
-                // 라이트 → 다크
-                document.documentElement.setAttribute("data-theme", "dark");
-                localStorage.setItem("theme", "dark");
-                isDark = true;
-            } else {
-                // 시스템 기본 → 반대로 전환
-                isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-                var newTheme = isDark ? "light" : "dark";
-                document.documentElement.setAttribute("data-theme", newTheme);
-                localStorage.setItem("theme", newTheme);
-            }
-        });
-    })();
+    // 글로벌 셸 컨트롤러 초기화
+    ThemeController.init();
+    MobileDrawer.init();
+    ShortcutController.start();
 
 })();
