@@ -1,6 +1,6 @@
 """dark-mode-tones — design.md §2.2 토큰의 WCAG 색대비 자동 검증.
 
-마크업 변경 없는 순수 토큰 단위 테스트. ui/web/style.css 의 :root 와
+마크업 변경 없는 순수 토큰 단위 테스트. ui/web/tokens.css 의 :root 와
 @media (prefers-color-scheme: dark) 또는 [data-theme="dark"] 블록에서
 토큰 값 추출 후 W3C 2.x relative luminance 공식으로 직접 계산.
 """
@@ -15,7 +15,7 @@ import pytest
 pytestmark = [pytest.mark.ui]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-STYLE_CSS = PROJECT_ROOT / "ui" / "web" / "style.css"
+TOKENS_CSS = PROJECT_ROOT / "ui" / "web" / "tokens.css"
 
 
 def _relative_luminance(hex_color: str) -> float:
@@ -39,11 +39,11 @@ def _contrast(c1: str, c2: str) -> float:
 
 
 def _read_root_token(token_name: str) -> str:
-    """style.css 의 :root 블록에서 토큰 값을 추출."""
-    text = STYLE_CSS.read_text()
+    """tokens.css 의 :root 블록에서 토큰 값을 추출."""
+    text = TOKENS_CSS.read_text()
     root_pattern = re.compile(r":root\s*\{([^}]*)\}", re.DOTALL)
     match = root_pattern.search(text)
-    assert match, ":root block not found in style.css"
+    assert match, ":root block not found in tokens.css"
     block = match.group(1)
     token_pattern = re.compile(re.escape(token_name) + r":\s*([^;]+);")
     token_match = token_pattern.search(block)
@@ -52,12 +52,12 @@ def _read_root_token(token_name: str) -> str:
 
 
 def _read_dark_token(token_name: str) -> str:
-    """style.css 의 다크 모드 블록에서 토큰 값을 추출.
+    """tokens.css 의 다크 모드 블록에서 토큰 값을 추출.
 
     @media (prefers-color-scheme: dark) 또는 [data-theme="dark"] 또는
     [data-theme='dark'] 블록 모두 시도.
     """
-    text = STYLE_CSS.read_text()
+    text = TOKENS_CSS.read_text()
     # 다크 블록 candidates — 안쪽 :root 또는 직접 selector
     patterns = [
         # @media (prefers-color-scheme: dark) { :root { ... } }

@@ -1,0 +1,258 @@
+"""프론트엔드 모듈 경계 스모크 테스트."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.harness
+
+
+def test_frontend_modules_load_in_dependency_order() -> None:
+    html = Path("ui/web/index.html").read_text(encoding="utf-8")
+
+    api_client = html.index("/static/api-client.js")
+    app = html.index("/static/app.js")
+    list_panel = html.index("/static/list-panel.js")
+    command_palette = html.index("/static/command-palette.js")
+    settings_view = html.index("/static/settings-view.js")
+    viewer_view = html.index("/static/viewer-view.js")
+    chat_view = html.index("/static/chat-view.js")
+    wiki_view = html.index("/static/wiki-view.js")
+    ab_test_view = html.index("/static/ab-test-view.js")
+    search_view = html.index("/static/search-view.js")
+    empty_view = html.index("/static/empty-view.js")
+    global_resource_bar = html.index("/static/global-resource-bar.js")
+    spa = html.index("/static/spa.js")
+
+    assert (
+        api_client
+        < app
+        < list_panel
+        < command_palette
+        < settings_view
+        < viewer_view
+        < chat_view
+        < wiki_view
+        < ab_test_view
+        < search_view
+        < empty_view
+        < global_resource_bar
+        < spa
+    )
+
+
+def test_app_delegates_api_requests_to_meeting_api() -> None:
+    app_js = Path("ui/web/app.js").read_text(encoding="utf-8")
+
+    assert "var ApiClient = window.MeetingApi || null;" in app_js
+    assert "return ApiClient.request(endpoint, options);" in app_js
+    assert "return ApiClient.post(endpoint, body);" in app_js
+    assert "return ApiClient.delete(endpoint);" in app_js
+
+
+def test_api_client_exposes_stable_namespace() -> None:
+    api_client = Path("ui/web/api-client.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingApi" in api_client
+    assert "buildApiUrl: buildApiUrl" in api_client
+    assert "request: request" in api_client
+    assert "post: post" in api_client
+    assert "delete: deleteRequest" in api_client
+
+
+def test_api_client_preserves_abort_error_contract() -> None:
+    api_client = Path("ui/web/api-client.js").read_text(encoding="utf-8")
+
+    assert 'networkError.name === "AbortError"' in api_client
+    assert "throw networkError;" in api_client
+
+
+def test_api_client_supports_non_json_success_payloads() -> None:
+    api_client = Path("ui/web/api-client.js").read_text(encoding="utf-8")
+
+    assert 'response.headers.get("content-type")' in api_client
+    assert 'contentType.indexOf("application/json")' in api_client
+    assert "return response.text();" in api_client
+
+
+def test_command_palette_exposes_factory_boundary() -> None:
+    command_palette = Path("ui/web/command-palette.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingCommandPalette" in command_palette
+    assert "create: create" in command_palette
+    assert "isEditingContext: isEditingContext" in command_palette
+    assert "CommandPaletteModule.create({ App: App, Router: Router })" in spa_js
+
+
+def test_list_panel_exposes_factory_boundary() -> None:
+    list_panel = Path("ui/web/list-panel.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingListPanel" in list_panel
+    assert "create: create" in list_panel
+    assert "ListPanelModule.create({" in spa_js
+    assert "window.ListPanel = ListPanel;" in spa_js
+
+
+def test_settings_view_exposes_factory_boundary() -> None:
+    settings_view = Path("ui/web/settings-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingSettingsView" in settings_view
+    assert "create: create" in settings_view
+    assert "return SettingsView;" in settings_view
+    assert "SettingsViewModule.create({" in spa_js
+
+
+def test_viewer_view_exposes_factory_boundary() -> None:
+    viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingViewerView" in viewer_view
+    assert "create: create" in viewer_view
+    assert "return ViewerView;" in viewer_view
+    assert "ViewerViewModule.create({" in spa_js
+
+
+def test_chat_view_exposes_factory_boundary() -> None:
+    chat_view = Path("ui/web/chat-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingChatView" in chat_view
+    assert "create: create" in chat_view
+    assert "return ChatView;" in chat_view
+    assert "ChatViewModule.create({" in spa_js
+    assert "ChatView: ChatView" in spa_js
+
+
+def test_wiki_view_exposes_factory_boundary() -> None:
+    wiki_view = Path("ui/web/wiki-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingWikiView" in wiki_view
+    assert "create: create" in wiki_view
+    assert "return WikiView;" in wiki_view
+    assert "WikiViewModule.create({" in spa_js
+    assert "WikiView: WikiView" in spa_js
+    assert "function WikiView()" not in spa_js
+
+
+def test_wiki_view_preserves_lifecycle_and_compatibility_guards() -> None:
+    wiki_view = Path("ui/web/wiki-view.js").read_text(encoding="utf-8")
+
+    assert "self._destroyed = false" in wiki_view
+    assert "this._destroyed = true" in wiki_view
+    assert "if (self._destroyed) return;" in wiki_view
+    assert 'err && err.name === "AbortError"' in wiki_view
+    assert "function _wikiEscapeCssIdent(value)" in wiki_view
+    assert "CSS.escape(catId)" not in wiki_view
+    assert 'slug.split("/").map(encodeURIComponent).join("/")' in wiki_view
+
+
+def test_ab_test_view_exposes_factory_boundary() -> None:
+    ab_test_view = Path("ui/web/ab-test-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingAbTestView" in ab_test_view
+    assert "create: create" in ab_test_view
+    assert "ListView: AbTestListView" in ab_test_view
+    assert "NewView: AbTestNewView" in ab_test_view
+    assert "ResultView: AbTestResultView" in ab_test_view
+    assert "AbTestViewModule.create({" in spa_js
+    assert "var AbTestListView = AbTestViews.ListView;" in spa_js
+    assert "function AbTestListView()" not in spa_js
+    assert "function AbTestNewView()" not in spa_js
+    assert "function AbTestResultView(" not in spa_js
+
+
+def test_ab_test_view_preserves_lifecycle_guards() -> None:
+    ab_test_view = Path("ui/web/ab-test-view.js").read_text(encoding="utf-8")
+
+    assert ab_test_view.count("self._destroyed = false") >= 3
+    assert ab_test_view.count("this._destroyed = true") >= 3
+    assert "if (self._destroyed) return;" in ab_test_view
+    assert "if (this._destroyed) return;" in ab_test_view
+    assert "removeEventListener(l.type, l.fn)" in ab_test_view
+    assert "clearInterval(this._timers[i])" in ab_test_view
+
+
+def test_search_view_exposes_factory_boundary() -> None:
+    search_view = Path("ui/web/search-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingSearchView" in search_view
+    assert "create: create" in search_view
+    assert "return SearchView;" in search_view
+    assert "SearchViewModule.create({" in spa_js
+    assert "SearchView: SearchView" in spa_js
+    assert "function SearchView()" not in spa_js
+
+
+def test_search_view_preserves_lifecycle_guards() -> None:
+    search_view = Path("ui/web/search-view.js").read_text(encoding="utf-8")
+
+    assert "self._destroyed = false" in search_view
+    assert "self._searchSeq = 0" in search_view
+    assert "seq !== self._searchSeq" in search_view
+    assert "if (self._destroyed || seq !== self._searchSeq) return;" in search_view
+    assert "this._destroyed = true" in search_view
+    assert "this._searchSeq += 1" in search_view
+    assert "entry.el.removeEventListener(entry.type, entry.fn)" in search_view
+
+
+def test_empty_view_exposes_factory_boundary() -> None:
+    empty_view = Path("ui/web/empty-view.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingEmptyView" in empty_view
+    assert "create: create" in empty_view
+    assert "return EmptyView;" in empty_view
+    assert "EmptyViewModule.create({" in spa_js
+    assert "showBulkToast: _showBulkToast" in spa_js
+    assert "EmptyView: EmptyView" in spa_js
+    assert "function EmptyView()" not in spa_js
+    assert "function _mountHomeDropdowns()" not in spa_js
+
+
+def test_empty_view_preserves_lifecycle_guards() -> None:
+    empty_view = Path("ui/web/empty-view.js").read_text(encoding="utf-8")
+
+    assert "self._destroyed = false" in empty_view
+    assert "self._statsSeq = 0" in empty_view
+    assert "self._folderSeq = 0" in empty_view
+    assert "self._statusTimeouts = []" in empty_view
+    assert "seq !== self._statsSeq" in empty_view
+    assert "seq !== self._folderSeq" in empty_view
+    assert "this._destroyed = true" in empty_view
+    assert "this._statsSeq += 1" in empty_view
+    assert "this._folderSeq += 1" in empty_view
+    assert "clearTimeout(timeoutId)" in empty_view
+    assert 'removeEventListener("recap:dashboard-refresh"' in empty_view
+
+
+def test_global_resource_bar_exposes_factory_boundary() -> None:
+    resource_bar = Path("ui/web/global-resource-bar.js").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+
+    assert "window.MeetingGlobalResourceBar" in resource_bar
+    assert "create: create" in resource_bar
+    assert "return { start: start, stop: stop, refresh: _refresh }" in resource_bar
+    assert "GlobalResourceBarModule.create({" in spa_js
+    assert "intervalMs: 5000" in spa_js
+    assert "var GlobalResourceBar = (function ()" not in spa_js
+
+
+def test_global_resource_bar_preserves_lifecycle_guards() -> None:
+    resource_bar = Path("ui/web/global-resource-bar.js").read_text(encoding="utf-8")
+
+    assert "var _refreshSeq = 0" in resource_bar
+    assert "var _stopped = true" in resource_bar
+    assert "if (_stopped) return;" in resource_bar
+    assert "seq !== _refreshSeq" in resource_bar
+    assert "_refreshSeq += 1" in resource_bar
+    assert 'setAttribute("role", "status")' in resource_bar
+    assert 'setAttribute("aria-live", "polite")' in resource_bar
+    assert 'App.apiRequest("/system/resources")' in resource_bar
