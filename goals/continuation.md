@@ -11,10 +11,9 @@ Continue reducing `ui/web/spa.js` global shell ownership by extracting
 behavior, public browser globals, accessibility contracts, and existing
 bulk-action tests.
 
-Status: route-specific view extraction and `GlobalResourceBar` extraction are
-reached. `spa.js` now keeps the SPA shell, router, global bulk action bar,
-shortcuts, mobile drawer, and theme toggle. The active next workstream is the
-bulk action bar.
+Status: route-specific view extraction, `GlobalResourceBar` extraction, and
+`BulkActionBar` extraction are reached. `spa.js` now keeps the SPA shell,
+router, shortcuts, mobile drawer, and theme toggle.
 
 ## Continue When
 
@@ -84,17 +83,12 @@ Started after user confirmation. First accepted workstream:
 
 Completion decision for this workstream: reached.
 
-## Active Workstream Gate: BulkActionBar
-
-Proceed with this workstream only after a fresh paired review agrees on the
-same fix shape or the lead records an evidence-backed tie-break.
-
-Required extraction criteria:
+## Completed Workstream Gate: BulkActionBar
 
 - `BulkActionBar` moves from `ui/web/spa.js` to a focused module such as
   `ui/web/bulk-action-bar.js`.
 - The module exposes a factory boundary, for example
-  `window.MeetingBulkActionBar.create({ App, ListPanel, Icons, showBulkToast })`.
+  `window.MeetingBulkActionBar.create({ App, ListPanel })`.
 - `ui/web/spa.js` keeps `window.SPA.BulkActionBar` compatibility and calls
   `BulkActionBar.init()` exactly as before.
 - Selection count, action button enablement, dropdown behavior, clear selection,
@@ -103,3 +97,12 @@ Required extraction criteria:
 - Existing bulk action behavior/a11y/visual tests pass. Because some UI tests
   share fixed ports, run fixed-port suites sequentially unless their fixtures
   are made port-isolated first.
+
+Completion decision for this workstream: reached.
+
+## Next Workstream Candidates
+
+Pause for the next decision unless the user explicitly continues. Remaining
+global shell candidates are mobile drawer, theme toggle, shortcut controller,
+or broader API/domain router cleanup. Each candidate has a different
+verification surface and should receive a fresh paired review before edits.

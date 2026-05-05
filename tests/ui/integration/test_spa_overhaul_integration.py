@@ -359,6 +359,77 @@ def test_home_stale_async_does_not_mutate_after_destroy(
         assert "/tmp/late-audio" not in page.locator("body").inner_text()
 
 
+def test_bulk_action_bar_module_wiring_posts_once(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """BulkActionBar 모듈 분리 후 SPA wiring 과 selected batch payload 를 검증."""
+    batch_payloads: list[dict] = []
+
+    def bulk_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/meetings/batch" in url:
+            batch_payloads.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"queued": 1, "skipped": 0}',
+            )
+            return
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meetings": [
+                            {
+                                "meeting_id": "meeting_20260505_090000",
+                                "status": "completed",
+                                "created_at": "2026-05-05T09:00:00",
+                                "title": "Bulk wiring A",
+                                "summary_preview": "요약 A",
+                            },
+                            {
+                                "meeting_id": "meeting_20260505_100000",
+                                "status": "completed",
+                                "created_at": "2026-05-05T10:00:00",
+                                "title": "Bulk wiring B",
+                                "summary_preview": "요약 B",
+                            },
+                        ]
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app",
+        api_handler=bulk_api,
+    ) as page:
+        page.wait_for_selector(".meeting-item", state="attached")
+
+        assert page.evaluate("() => Boolean(window.MeetingBulkActionBar)")
+        assert page.evaluate("() => Boolean(window.SPA && window.SPA.BulkActionBar)")
+
+        page.locator(".meeting-item").nth(0).locator(".meeting-item-checkbox").click()
+        page.wait_for_selector(".bulk-action-bar:not([hidden])", state="attached")
+        page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        page.wait_for_function("() => document.body.textContent.includes('1건 처리')")
+
+    assert batch_payloads == [
+        {
+            "action": "transcribe",
+            "scope": "selected",
+            "meeting_ids": ["meeting_20260505_100000"],
+        }
+    ]
+
+
 def test_global_resource_bar_renders_resources_and_ignores_failures(
     browser: Browser,
     spa_static_server: str,
