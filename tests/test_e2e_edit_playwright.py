@@ -616,7 +616,11 @@ class TestSTTModelActivation:
         expect(seastar_card.locator("button.stt-action-btn.activate")).to_have_count(0)
 
         # 다른 모델은 여전히 활성화 버튼 (ready 상태일 때)
-        komixv2_card = page.locator(".stt-model-card").filter(has_text="komixv2")
+        komixv2_card = page.locator(".stt-model-card").filter(
+            has=page.locator(".stt-model-name").get_by_text(
+                "komixv2 (medium 한국어 fine-tune)", exact=True
+            )
+        )
         expect(komixv2_card).not_to_have_class(__import__("re").compile(r".*\bactive\b.*"))
 
 

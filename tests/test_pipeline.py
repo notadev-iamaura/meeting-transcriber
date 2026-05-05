@@ -356,6 +356,20 @@ class TestPipelineState:
         assert loaded.meeting_id == "회의_테스트"
         assert loaded.error_message == "한국어 에러 메시지"
 
+    def test_save_supports_compact_json(self, tmp_path: Path) -> None:
+        """indent=None 이면 공백을 줄인 compact JSON 으로 저장한다."""
+        state = PipelineState(
+            meeting_id="compact_test",
+            audio_path="/tmp/test.m4a",
+        )
+        state_path = tmp_path / "state.json"
+        state.save(state_path, indent=None)
+
+        content = state_path.read_text(encoding="utf-8")
+        assert "\n" not in content
+        assert '"meeting_id":"compact_test"' in content
+        assert PipelineState.from_file(state_path).meeting_id == "compact_test"
+
     def test_atomic_save_no_tmp_file_remains(self, tmp_path: Path) -> None:
         """원자적 저장 후 임시 파일(.tmp)이 남아있지 않은지 확인한다."""
         state = PipelineState(

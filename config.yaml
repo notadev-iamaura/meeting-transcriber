@@ -98,6 +98,7 @@ audio_quality:
 pipeline:
   peak_ram_limit_gb: 9.5                     # 최대 RAM 사용량 (GB)
   checkpoint_enabled: true                   # 체크포인트 활성화
+  checkpoint_json_indent: 2                  # pipeline_state.json 들여쓰기 (null이면 compact JSON)
   retry_max_count: 1                         # Phase 1: 3 → 1 (타임아웃 재시도 금지)
   dynamic_timeout_enabled: true              # Phase 1: 오디오 길이 기반 동적 타임아웃
   dynamic_timeout_multiplier: 3.0            # Phase 1: 타임아웃 = max(min, duration × multiplier)

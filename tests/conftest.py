@@ -24,6 +24,16 @@ def _clear_ollama_cache() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _disable_native_gpu_cleanup_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """기본 테스트 세션에서 MLX/Metal cleanup import를 차단한다.
+
+    native cleanup은 테스트 대상이 명시적으로 환경변수를 지우거나
+    `gpu_cache_cleanup_enabled=True`를 주입한 경우에만 실행한다.
+    """
+    monkeypatch.setenv("MT_DISABLE_GPU_CACHE_CLEANUP", "1")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_stt_manual_import_dir(tmp_path_factory, monkeypatch):
     """STT 수동 임포트 디렉토리를 tmp 경로로 격리한다.
 

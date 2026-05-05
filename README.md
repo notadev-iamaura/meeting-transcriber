@@ -771,11 +771,26 @@ python scripts/validate_settings.py
 ### 테스트 실행
 
 ```bash
-# 전체 테스트
-pytest tests/ -v
+# 기본 안정 게이트: e2e/ui/native 마커는 pyproject.toml 정책에 따라 제외
+pytest tests/ -v --tb=short
 
 # 빠른 실행
 pytest tests/ -q
+
+# 핵심 unit/search/queue 스모크
+pytest tests/test_config.py tests/test_job_queue.py tests/test_hybrid_search.py -q
+
+# 주요 route 스모크
+pytest tests/test_routes_home_dashboard.py tests/test_routes.py tests/test_routes_meetings_batch.py -q
+
+# UI 하네스와 bulk actions 품질 게이트는 명시 실행
+pytest -m harness -q
+pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
+pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
+pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
+
+# MLX/Metal 등 native 런타임 테스트는 기본 게이트에서 제외하고 필요 시 명시 실행
+pytest -m native tests/ -v
 
 # 특정 모듈 테스트
 pytest tests/test_transcriber.py -v

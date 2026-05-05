@@ -17,6 +17,7 @@ from __future__ import annotations
 import runpy
 import subprocess
 import sys
+import warnings
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock, patch
 
@@ -418,7 +419,16 @@ class TestMainBlock:
             "600",
         ]
 
-        with patch("sys.argv", test_argv), patch.dict("sys.modules", {"webview": mock_webview}):
+        with (
+            patch("sys.argv", test_argv),
+            patch.dict("sys.modules", {"webview": mock_webview}),
+            warnings.catch_warnings(),
+        ):
+            warnings.filterwarnings(
+                "ignore",
+                message="'ui.native_window' found in sys.modules",
+                category=RuntimeWarning,
+            )
             # runpy로 __main__ 블록 실행 (새 네임스페이스에서 실행됨)
             runpy.run_module("ui.native_window", run_name="__main__")
 

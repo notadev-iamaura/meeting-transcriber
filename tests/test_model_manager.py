@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -44,27 +45,6 @@ def _reset_singletons(tmp_path: Any) -> Any:
     reset_config()
 
 
-@pytest.fixture(autouse=True)
-def _mock_metal_cache() -> Any:
-    """테스트 환경에서 Metal GPU 캐시 정리를 mock하여 SIGABRT를 방지한다.
-
-    mlx.core가 설치된 환경에서 Metal 컨텍스트 없이
-    mx.metal.clear_cache()를 호출하면 프로세스가 크래시하므로,
-    테스트에서는 해당 import를 차단한다.
-    """
-    import builtins
-
-    original_import = builtins.__import__
-
-    def _mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "mlx.core":
-            raise ImportError("테스트 환경에서 mlx.core mock 처리")
-        return original_import(name, *args, **kwargs)
-
-    with patch.object(builtins, "__import__", side_effect=_mock_import):
-        yield
-
-
 @pytest.fixture
 def config_file(tmp_path: Any) -> Any:
     """임시 config.yaml 파일을 생성한다."""
@@ -82,8 +62,7 @@ pipeline:
     return config_path
 
 
-@pytest.fixture
-def manager(config_file: Any) -> Any:
+def _make_manager(config_file: Any, **kwargs: Any) -> Any:
     """테스트용 ModelLoadManager 인스턴스를 생성한다."""
     from config import load_config, reset_config
 
@@ -95,7 +74,13 @@ def manager(config_file: Any) -> Any:
 
     from core.model_manager import ModelLoadManager
 
-    return ModelLoadManager()
+    return ModelLoadManager(**kwargs)
+
+
+@pytest.fixture
+def manager(config_file: Any) -> Any:
+    """GPU 캐시 정리를 비활성화한 테스트용 ModelLoadManager를 생성한다."""
+    return _make_manager(config_file, gpu_cache_cleanup_enabled=False)
 
 
 class FakeModel:
@@ -336,15 +321,106 @@ async def test_metal_cache_clear_called(manager: Any) -> None:
         mock_clear.assert_called_once()
 
 
-async def test_metal_cache_clear_graceful_without_mlx(manager: Any) -> None:
+async def test_metal_cache_clear_graceful_without_mlx(config_file: Any) -> None:
     """mlx가 미설치된 환경에서도 _clear_gpu_cache가 에러 없이 동작하는지 확인한다."""
+    mx_importer = MagicMock(side_effect=ImportError("No module named 'mlx'"))
+    preflight_runner = MagicMock(return_value=SimpleNamespace(can_use_mlx=True))
+    manager = _make_manager(
+        config_file,
+        gpu_cache_cleanup_enabled=True,
+        mlx_core_importer=mx_importer,
+        preflight_runner=preflight_runner,
+    )
+
     fake = FakeModel("whisper")
     await manager.load_model("whisper", lambda: fake)
-
-    # _clear_gpu_cache는 ImportError를 catch하므로 정상 동작해야 함
     await manager.unload_model()
 
     assert manager.is_model_loaded is False
+    preflight_runner.assert_called_once()
+    mx_importer.assert_called_once()
+
+
+async def test_gpu_cache_cleanup_disabled_skips_preflight_and_mlx_import(
+    config_file: Any,
+) -> None:
+    """GPU 캐시 정리 비활성화 시 preflight와 mlx.core import를 모두 건너뛴다."""
+    preflight_runner = MagicMock(side_effect=AssertionError("preflight should not run"))
+    mx_importer = MagicMock(side_effect=AssertionError("mlx.core should not be imported"))
+    manager = _make_manager(
+        config_file,
+        gpu_cache_cleanup_enabled=False,
+        mlx_core_importer=mx_importer,
+        preflight_runner=preflight_runner,
+    )
+
+    manager._clear_gpu_cache()
+
+    preflight_runner.assert_not_called()
+    mx_importer.assert_not_called()
+
+
+async def test_gpu_cache_cleanup_env_flag_disables_without_mlx_import(
+    config_file: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """환경변수 플래그로도 단위 테스트에서 native cleanup을 격리할 수 있다."""
+    monkeypatch.setenv("MT_DISABLE_GPU_CACHE_CLEANUP", "1")
+    preflight_runner = MagicMock(side_effect=AssertionError("preflight should not run"))
+    mx_importer = MagicMock(side_effect=AssertionError("mlx.core should not be imported"))
+    manager = _make_manager(
+        config_file,
+        mlx_core_importer=mx_importer,
+        preflight_runner=preflight_runner,
+    )
+
+    manager._clear_gpu_cache()
+
+    preflight_runner.assert_not_called()
+    mx_importer.assert_not_called()
+
+
+async def test_gpu_cache_cleanup_enabled_by_default(
+    config_file: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """비활성화 플래그가 없으면 기본적으로 Metal 캐시 정리를 수행한다."""
+    monkeypatch.delenv("MT_DISABLE_GPU_CACHE_CLEANUP", raising=False)
+    clear_cache = MagicMock()
+    mx_module = SimpleNamespace(metal=SimpleNamespace(clear_cache=clear_cache))
+    preflight_runner = MagicMock(return_value=SimpleNamespace(can_use_mlx=True))
+    mx_importer = MagicMock(return_value=mx_module)
+    manager = _make_manager(
+        config_file,
+        mlx_core_importer=mx_importer,
+        preflight_runner=preflight_runner,
+    )
+
+    manager._clear_gpu_cache()
+
+    preflight_runner.assert_called_once()
+    mx_importer.assert_called_once()
+    clear_cache.assert_called_once()
+
+
+async def test_gpu_cache_cleanup_import_boundary_is_mockable(config_file: Any) -> None:
+    """MLX import 경계를 주입해 Metal 캐시 정리만 단위 테스트할 수 있다."""
+    clear_cache = MagicMock()
+    mx_module = SimpleNamespace(metal=SimpleNamespace(clear_cache=clear_cache))
+    preflight_runner = MagicMock(return_value=SimpleNamespace(can_use_mlx=True))
+    mx_importer = MagicMock(return_value=mx_module)
+    manager = _make_manager(
+        config_file,
+        gpu_cache_cleanup_enabled=True,
+        mlx_core_importer=mx_importer,
+        preflight_runner=preflight_runner,
+    )
+
+    manager._clear_gpu_cache()
+
+    preflight_runner.assert_called_once()
+    mx_importer.assert_called_once()
+    clear_cache.assert_called_once()
 
 
 # === 메모리 제한 경고 테스트 ===
@@ -376,7 +452,7 @@ async def test_memory_limit_warning(manager: Any) -> None:
 # === 싱글턴 패턴 테스트 ===
 
 
-def test_get_model_manager_singleton(config_file: Any) -> None:
+async def test_get_model_manager_singleton(config_file: Any) -> None:
     """get_model_manager()가 싱글턴 인스턴스를 반환하는지 확인한다."""
     from core.model_manager import get_model_manager, reset_model_manager
 
@@ -393,7 +469,7 @@ def test_get_model_manager_singleton(config_file: Any) -> None:
     assert manager1 is manager2
 
 
-def test_reset_model_manager() -> None:
+async def test_reset_model_manager() -> None:
     """reset_model_manager()가 싱글턴을 초기화하는지 확인한다."""
     from core.model_manager import reset_model_manager
 
