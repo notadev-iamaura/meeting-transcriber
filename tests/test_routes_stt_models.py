@@ -1,7 +1,7 @@
 """
 STT 모델 선택기 API 테스트 모듈
 
-목적: api/routes.py에 추가된 4개의 STT 모델 관련 엔드포인트를 검증한다.
+목적: STT 모델 선택기 라우터의 엔드포인트를 검증한다.
 주요 테스트:
     - GET /api/stt-models: 3개 모델 + 동적 상태 + 활성 모델 표시
     - POST /api/stt-models/{id}/download: 202 + job_id / 404 / 409
@@ -251,12 +251,12 @@ class TestActivateSTTModel:
             '  language: "ko"\n',
             encoding="utf-8",
         )
-        monkeypatch.setattr("api.routes._get_config_path", lambda: tmp_config)
+        monkeypatch.setattr("api.routers.stt_models._get_config_path", lambda: tmp_config)
 
         with TestClient(app) as client:
             _install_fake_downloader(app)
             # seastar 모델이 READY 상태라고 모킹
-            with patch("api.routes.get_model_status", return_value=ModelStatus.READY):
+            with patch("api.routers.stt_models.get_model_status", return_value=ModelStatus.READY):
                 resp = client.post("/api/stt-models/seastar-medium-4bit/activate")
 
         assert resp.status_code == 200
@@ -285,7 +285,7 @@ class TestActivateSTTModel:
         with TestClient(app) as client:
             _install_fake_downloader(app)
             with patch(
-                "api.routes.get_model_status",
+                "api.routers.stt_models.get_model_status",
                 return_value=ModelStatus.NOT_DOWNLOADED,
             ):
                 resp = client.post("/api/stt-models/ghost613-turbo-4bit/activate")
