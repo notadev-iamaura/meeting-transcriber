@@ -1385,11 +1385,17 @@
                 actionsEl.appendChild(transcribeBtn);
             }
 
-            // 실패 시 재시도 버튼
+            // 실패 시 이어서 재시도 버튼
             if (data.status === "failed") {
                 var retryBtn = document.createElement("button");
                 retryBtn.className = "viewer-action-btn retry";
-                retryBtn.textContent = "\u21BB 재시도";
+                retryBtn.textContent = "\u21BB 실패한 단계부터 다시 시도";
+                retryBtn.title =
+                    "기존 결과와 진행 기록을 유지하고, 실패한 지점부터 다시 처리합니다.";
+                retryBtn.setAttribute(
+                    "aria-label",
+                    "기존 결과를 유지하고 실패한 단계부터 다시 시도"
+                );
                 retryBtn.addEventListener("click", function () {
                     self._retryMeeting(data.meeting_id);
                 });
@@ -1399,9 +1405,14 @@
             // 재전사 버튼 (완료/실패 회의를 처음부터 다시 전사)
             if (data.status === "completed" || data.status === "failed") {
                 var reBtn = document.createElement("button");
-                reBtn.className = "viewer-action-btn retry";
-                reBtn.innerHTML = "↻ 재전사";
-                reBtn.title = "기존 전사 결과를 폐기하고 처음부터 다시 전사합니다";
+                reBtn.className = "viewer-action-btn retranscribe";
+                reBtn.innerHTML = "↻ 처음부터 다시 전사";
+                reBtn.title =
+                    "기존 전사문, 요약, 진행 기록을 삭제하고 오디오부터 새로 처리합니다.";
+                reBtn.setAttribute(
+                    "aria-label",
+                    "기존 전사문과 요약을 삭제하고 처음부터 다시 전사"
+                );
                 reBtn.addEventListener("click", function () {
                     self._reTranscribeMeeting(data.meeting_id, reBtn);
                 });
@@ -1606,7 +1617,7 @@
         };
 
         /**
-         * 실패한 회의를 재시도한다.
+         * 실패한 회의를 기존 진행 기록을 유지한 채 다시 큐에 넣는다.
          * @param {string} meetingId - 재시도할 회의 ID
          */
         ViewerView.prototype._retryMeeting = async function (meetingId) {
@@ -1617,7 +1628,7 @@
                 // failed → queued 전이로 처리 대기 카운트가 변하므로 카드도 즉시 갱신.
                 document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
             } catch (e) {
-                errorBanner.show("재시도 실패: " + e.message);
+                errorBanner.show("실패한 단계부터 다시 시도 실패: " + e.message);
             }
         };
 
@@ -1670,14 +1681,16 @@
          */
         ViewerView.prototype._reTranscribeMeeting = async function (meetingId, btn) {
             if (!confirm(
-                "기존 전사 결과(전사문/요약/체크포인트)를 모두 폐기하고\n" +
-                "처음부터 다시 전사합니다. 계속하시겠습니까?"
+                "기존 전사문, 요약, 진행 기록을 삭제하고\n" +
+                "오디오부터 처음부터 다시 처리합니다.\n\n" +
+                "일시적인 오류라면 '실패한 단계부터 다시 시도'를 먼저 선택하세요.\n" +
+                "계속하시겠습니까?"
             )) {
                 return;
             }
             var originalText = btn.innerHTML;
             btn.disabled = true;
-            btn.innerHTML = "재전사 요청 중...";
+            btn.innerHTML = "처음부터 다시 전사 요청 중...";
             try {
                 await App.apiPost(
                     "/meetings/" + encodeURIComponent(meetingId) + "/re-transcribe",
@@ -1686,7 +1699,7 @@
                 this._loadMeetingInfo();
                 ListPanel.loadMeetings();
             } catch (e) {
-                errorBanner.show("재전사 실패: " + e.message);
+                errorBanner.show("처음부터 다시 전사 실패: " + e.message);
                 btn.disabled = false;
                 btn.innerHTML = originalText;
             }

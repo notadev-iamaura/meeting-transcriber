@@ -324,3 +324,21 @@ def test_global_resource_bar_preserves_lifecycle_guards() -> None:
     assert 'setAttribute("role", "status")' in resource_bar
     assert 'setAttribute("aria-live", "polite")' in resource_bar
     assert 'App.apiRequest("/system/resources")' in resource_bar
+
+
+def test_viewer_recovery_actions_distinguish_retry_from_restart() -> None:
+    viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
+    style_css = Path("ui/web/style.css").read_text(encoding="utf-8")
+
+    assert "실패한 단계부터 다시 시도" in viewer_view
+    assert "기존 결과와 진행 기록을 유지" in viewer_view
+    assert "/retry" in viewer_view
+    assert "실패한 단계부터 다시 시도 실패" in viewer_view
+
+    assert "viewer-action-btn retranscribe" in viewer_view
+    assert "처음부터 다시 전사" in viewer_view
+    assert "기존 전사문, 요약, 진행 기록을 삭제" in viewer_view
+    assert "/re-transcribe" in viewer_view
+    assert "일시적인 오류라면 '실패한 단계부터 다시 시도'" in viewer_view
+    assert "처음부터 다시 전사 요청 중" in viewer_view
+    assert ".viewer-action-btn.retranscribe" in style_css

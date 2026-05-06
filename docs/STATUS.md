@@ -1,199 +1,109 @@
 # 프로젝트 상태
 
-- 기준일: 2026-04-30
+- 기준일: 2026-05-06
 - 기준 브랜치: `main`
-- 기준 커밋: `4d7908353a34204c74042acbc65021c1742b15dc`
-- 상세 평가: [`docs/PROJECT_EVALUATION_MAIN_2026-04-30.md`](PROJECT_EVALUATION_MAIN_2026-04-30.md)
+- 기준 커밋: `8243dbfaafaf60620c271ba42094005def710276`
+- 최근 정리 wave: #41 → #38 → #39 → #40 모두 main 반영
 
 ## 현재 판단
 
-현재 작업트리는 평가 문서에서 가장 큰 리스크였던 전체 pytest abort를 제거한 상태입니다. 기본 테스트 프로파일은 native MLX/Metal cleanup을 비활성화하고, native 런타임 검증은 명시 marker로 분리합니다. `api-test`/`unit-test` 런타임 프로파일도 추가되어 API 테스트가 recorder, watcher, pipeline processor 같은 데스크톱 부작용 없이 실행될 수 있습니다.
+이번 정리 wave 이후 프로젝트는 이전 평가에서 지적된 가장 큰 구조적 리스크를
+상당 부분 해소한 상태입니다.
 
-2026-05-03 추가 개선으로 실제 제품 코드에도 Wave 1 경계 정리 작업을 반영했습니다. API 라우트의 `app.state` 의존성 접근은 `api/dependencies.py`로 모았고, 웹 UI의 fetch/error 처리 경계는 `ui/web/api-client.js`로 분리했습니다. 파이프라인 상태 저장은 기본 동작을 유지하면서 `pipeline.checkpoint_json_indent: null` 설정 시 compact JSON으로 저장할 수 있게 했습니다.
+- 기본 테스트 프로파일은 native/MLX/Metal 의존 테스트를 명시 marker로 분리합니다.
+- API 테스트는 `api-test`/`unit-test` 런타임 프로파일로 데스크톱 부작용을 줄입니다.
+- `api/routes.py`는 app-state dependency helper와 meetings batch router 분리를 완료했습니다.
+- `ui/web/spa.js`는 route view와 global shell controller 대부분을 feature module로 위임합니다.
+- CI는 lint, Python 3.11/3.12 테스트, Swift compile gate를 통과한 PR만 main에 반영했습니다.
+- consensus harness 문서와 CLI/test support가 main에 포함되어 다음 phase를 같은 방식으로 반복할 수 있습니다.
 
-Wave 2 첫 단계로 `spa.js`의 명령 팔레트 모듈을 `ui/web/command-palette.js`로 분리했습니다. `spa.js`는 라우터와 전역 단축키 연결만 유지하고, 팔레트 DOM 생성·검색·최근 액션 저장·동적 항목 로딩은 새 모듈의 `window.MeetingCommandPalette` factory가 담당합니다.
+## 완료된 주요 작업
 
-이어서 `spa.js`의 회의 목록 패널을 `ui/web/list-panel.js`로 분리했습니다. `ListPanel`의 공개 API(`init`, `loadMeetings`, `setActiveFromPath`, `clearSelection`, `getSelectedIds` 등)는 유지하고, `spa.js`는 `window.MeetingListPanel` factory를 통해 라우터와 전역 상태만 주입합니다. 회의 선택과 bulk actions 동작은 Playwright behavior 테스트로 재검증했습니다.
+### Frontend Architecture
 
-다음으로 설정 화면을 `ui/web/settings-view.js`로 분리했습니다. 설정 셸, 검색 인덱스 백필 패널, 일반 설정, 프롬프트 편집, 용어집 CRUD 패널을 새 factory(`window.MeetingSettingsView`)로 옮기고, A/B 테스트 뷰는 기존 `spa.js`에 남겨 라우트 영향 범위를 줄였습니다. `/app/settings/prompts` 라우트 렌더링 통합 테스트를 추가해 모듈 로드와 탭 활성화를 검증합니다.
+`ui/web/spa.js`에서 다음 모듈을 분리했습니다.
 
-회의록 뷰어도 `ui/web/viewer-view.js`로 분리했습니다. `ViewerView`의 기존 생성자 계약(`new ViewerView(meetingId)`)은 유지하고, `spa.js`는 `window.MeetingViewerView` factory에 `App`, `Router`, `ListPanel`, `Icons`, `PIPELINE_STEPS`, `errorBanner`를 주입합니다. `/app/viewer/{id}` 라우트의 스켈레톤/탭 마크업은 SPA 통합 테스트로 재검증했습니다.
+- `api-client.js`
+- `list-panel.js`
+- `command-palette.js`
+- `settings-view.js`
+- `viewer-view.js`
+- `chat-view.js`
+- `wiki-view.js`
+- `ab-test-view.js`
+- `search-view.js`
+- `empty-view.js`
+- `global-resource-bar.js`
+- `bulk-action-bar.js`
+- `theme-controller.js`
+- `mobile-drawer.js`
+- `shortcut-controller.js`
 
-채팅 화면도 `ui/web/chat-view.js`로 분리했습니다. `ChatView`의 기존 생성자 계약(`new ChatView()`)과 `window.SPA.ChatView` 공개 API는 유지하고, `spa.js`는 `window.MeetingChatView` factory에 `App`, `Router`, `Icons`, `errorBanner`를 주입합니다. 위원회식 교차 검토에서 지적된 `/api/chat` payload, 세션 유지/초기화, 회의 필터, 모듈 로드 순서 계약은 SPA 통합 테스트로 고정했습니다. 또한 `api-client.js`가 `AbortError`를 네트워크 오류로 감싸지 않도록 보존해 채팅 취소 흐름의 기존 의도를 실제 동작과 맞췄습니다.
+각 모듈은 `window.Meeting*` factory boundary를 통해 `spa.js`에 주입되며,
+기존 `window.SPA.*` 공개 계약은 유지합니다.
 
-위키 화면도 `ui/web/wiki-view.js`로 분리했습니다. `WikiView`의 기존 생성자 계약(`new WikiView()`)과 `window.SPA.WikiView` 공개 API는 유지하고, `spa.js`는 `window.MeetingWikiView` factory에 `App`, `Router`를 주입합니다. 위원회 검토에서 P1로 지적된 destroy 이후 async DOM write, `CSS.escape` 직접 의존, 한국어 nested slug 인코딩, health modal cleanup은 구현과 테스트에 함께 반영했습니다. 또한 루프 지속 판단 기준을 `goals/continuation.md`로 추가했습니다.
+### Backend/API
 
-A/B 테스트 화면도 `ui/web/ab-test-view.js`로 분리했습니다. 목록/생성/결과 세 뷰는 하나의 feature module factory(`window.MeetingAbTestView`)로 묶고, `spa.js`는 route-local 생성자만 주입받습니다. 위원회 검토에서 지적된 markdown summary 응답 처리, result polling/WebSocket cleanup, submit payload, stale async guard는 구현과 SPA 통합 테스트에 함께 반영했습니다.
+- `api/dependencies.py`로 FastAPI `app.state` 접근을 모았습니다.
+- `api/routers/meetings_batch.py`로 batch action router를 분리했습니다.
+- `api/server.py`는 router 등록과 dependency wiring을 더 명확히 갖습니다.
+- 관련 테스트는 `tests/test_api_dependencies.py`, `tests/test_server.py`,
+  `tests/test_routes_meetings_batch.py`에 반영되어 있습니다.
 
-검색 화면도 `ui/web/search-view.js`로 분리했습니다. `SearchView`의 기존 생성자 계약(`new SearchView()`)과 `window.SPA.SearchView` 공개 API는 유지하고, `spa.js`는 `window.MeetingSearchView` factory에 `App`, `Router`, `Icons`, `errorBanner`를 주입합니다. 검색 제출 payload, 503 배너, 결과 딥링크, XSS-safe 렌더링, 최신 요청만 렌더링하는 `_searchSeq` guard를 테스트로 고정했습니다. 이 단계 후 `ui/web/spa.js`는 1401줄입니다.
+### Runtime, CI, Docs
 
-홈/빈 화면도 `ui/web/empty-view.js`로 분리했습니다. `EmptyView`의 기존 생성자 계약(`new EmptyView()`)과 `window.SPA.EmptyView` 공개 API는 유지하고, `spa.js`는 `window.MeetingEmptyView` factory에 `App`, `Router`, `Icons`, bulk toast helper를 주입합니다. 홈 통계, 폴더 열기, import modal, 전체/최근 24시간 드롭다운 payload, dashboard refresh cleanup, destroy 이후 stale async guard를 테스트로 고정했습니다. 이 단계 후 `ui/web/spa.js`는 977줄이며, 큰 route-specific view 생성자는 별도 모듈로 분리된 상태입니다.
+- model/pipeline runtime gate와 테스트 프로파일을 정리했습니다.
+- CI는 기본 안정 gate와 UI bulk actions gate를 구분합니다.
+- README, PR template, AGENTS.md, 평가 문서를 최신 정책에 맞췄습니다.
+- `harness/*`와 `docs/agentic-ops/*`가 main에 포함되어 consensus 기반 작업 흐름을 지원합니다.
 
-다음 Phase 첫 단계로 전역 리소스 바를 `ui/web/global-resource-bar.js`로 분리했습니다. `spa.js`는 `window.MeetingGlobalResourceBar` factory bridge와 `GlobalResourceBar.start()` 호출만 유지합니다. 중복 start 시 DOM/interval singleton을 유지하고, `stop()` 이후 늦게 도착한 `/system/resources` 응답이 DOM을 갱신하지 않도록 `_refreshSeq`/`_stopped` guard를 추가했습니다.
+## 현재 Phase A
 
-`BulkActionBar`도 `ui/web/bulk-action-bar.js`로 분리했습니다. `spa.js`는 `window.MeetingBulkActionBar.create({ App, ListPanel })` bridge와 `BulkActionBar.init()` 호출만 유지하고, `EmptyView` 홈 드롭다운은 새 모듈이 반환하는 `showBulkToast` helper를 계속 주입받습니다. 기존 `window.SPA.BulkActionBar`, 선택 카운트, clear selection, batch payload, dropdown, toast/status, a11y 계약은 유지했습니다. 이 단계 후 `ui/web/spa.js`는 736줄입니다.
+Phase A의 목적은 최신 main 상태와 문서/goal의 드리프트를 제거하고, 작은 UX 개선을
+별도 검증 가능한 단위로 고정하는 것입니다.
+
+이번 Phase A에서 다루는 UX 개선:
+
+- 실패한 회의의 `재시도`는 기존 결과와 진행 기록을 유지하고 실패 지점부터 다시 처리한다는 의미로 노출합니다.
+- `재전사`는 기존 전사문, 요약, 진행 기록을 삭제하고 오디오부터 새로 처리한다는 의미로 노출합니다.
+- 두 액션은 버튼 class, title, aria-label, confirm copy로 구분합니다.
 
 ## 권장 검증 게이트
+
+일반 변경:
 
 ```bash
 ruff check .
 ruff format --check .
 pytest tests/ -v --tb=short
 pytest -m harness -q
-pytest tests/test_routes_home_dashboard.py tests/test_routes.py tests/test_routes_meetings_batch.py -q
-pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
-pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
-pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 ```
 
-## 최근 검증 결과
+API/router 변경:
 
 ```bash
-ruff check .                         # All checks passed
-ruff format --check .                # 247 files already formatted
-pytest -q                            # 2624 passed, 140 deselected, 4 warnings
-pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py \
-  tests/ui/a11y/test_bulk_actions_a11y.py \
-  tests/ui/visual/test_bulk_actions_visual.py -q
-                                      # 45 passed
-
-ruff check api ui core config.py tests/test_api_dependencies.py \
-  tests/harness/test_frontend_boundaries.py tests/test_pipeline.py
-                                      # All checks passed
-ruff format --check api ui core config.py tests/test_api_dependencies.py \
-  tests/harness/test_frontend_boundaries.py tests/test_pipeline.py
-                                      # 58 files already formatted
-pytest tests/test_api_dependencies.py tests/test_routes.py \
-  tests/test_routes_meetings_batch.py tests/test_server.py \
-  tests/harness/test_frontend_boundaries.py tests/test_pipeline.py \
-  tests/test_config.py -q
-                                      # 332 passed
-node --check ui/web/command-palette.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 17 passed
-node --check ui/web/list-panel.js
-                                      # passed
-pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
-                                      # 29 passed
-node --check ui/web/settings-view.js
-                                      # passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 18 passed
-node --check ui/web/viewer-view.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 7 passed
-pytest -m harness -q
-                                      # 125 passed
-node --check ui/web/chat-view.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 9 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 20 passed
-pytest -m ui tests/ui/behavior/test_command_palette.py \
-  tests/ui/a11y/test_command_palette.py -q
-                                      # 8 passed
-node --check ui/web/wiki-view.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 11 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 23 passed
-pytest tests/wiki/test_routes_phase2.py -q
-                                      # 15 passed
-pytest -m harness -q
-                                      # 129 passed
-pytest -m ui tests/ui/behavior/test_command_palette.py \
-  tests/ui/a11y/test_command_palette.py -q
-                                      # 8 passed
-node --check ui/web/ab-test-view.js
-                                      # passed
-node --check ui/web/api-client.js
-                                      # passed
-pytest tests/test_ab_test_api.py tests/test_ab_test_runner.py -q
-                                      # 57 passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 14 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 27 passed
-pytest -m harness -q
-                                      # 132 passed
-node --check ui/web/search-view.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 16 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 31 passed
-pytest tests/test_routes.py::TestSearchEndpoint \
-  tests/test_chat.py::TestPhase3APISearchIntegration -q
-                                      # 8 passed
-pytest -m harness -q
-                                      # 134 passed
-ruff check .
-                                      # All checks passed
-ruff format --check .
-                                      # 258 files already formatted
-node --check ui/web/empty-view.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 18 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 33 passed
-pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
-                                      # 29 passed
-pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
-                                      # 10 passed
-pytest tests/test_routes_home_dashboard.py tests/test_routes_meetings_batch.py -q
-                                      # 40 passed
-pytest -m harness -q
-                                      # 136 passed
-node --check ui/web/global-resource-bar.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 20 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 35 passed
-pytest tests/test_routes.py::TestSystemResourcesEndpoint -q
-                                      # 3 passed
-pytest -m harness -q
-                                      # 138 passed
-ruff check .
-                                      # All checks passed
-ruff format --check .
-                                      # 258 files already formatted
-node --check ui/web/bulk-action-bar.js
-                                      # passed
-node --check ui/web/spa.js
-                                      # passed
-pytest tests/harness/test_frontend_boundaries.py -q
-                                      # 22 passed
-pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
-                                      # 36 passed
-pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
-                                      # 29 passed
-pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
-                                      # 10 passed
-pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
-                                      # 6 passed
+pytest tests/test_api_dependencies.py tests/test_server.py tests/test_routes_meetings_batch.py -q
+pytest tests/test_routes.py -q
 ```
 
-## 기본 실행에서 제외하는 게이트
+Frontend shell/view 변경:
 
-다음 게이트는 환경 의존성이 크므로 명시적으로 실행합니다.
+```bash
+node --check ui/web/spa.js
+node --check ui/web/viewer-view.js
+pytest tests/harness/test_frontend_boundaries.py -q
+pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
+```
+
+Fixed-port bulk actions UI tests는 순차 실행합니다.
+
+```bash
+pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
+pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
+pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
+```
+
+환경 의존 gate는 명시적으로 실행합니다.
 
 ```bash
 pytest -m e2e tests/test_e2e_edit_playwright.py -v
@@ -203,10 +113,11 @@ pytest -m native tests/ -v
 
 ## 알려진 우선 과제
 
-1. `api/routes.py`는 batch router와 dependency helper 분리를 시작점으로 domain router 분리를 계속합니다.
-2. `ui/web/style.css`는 `tokens.css`/`bulk-actions.css` 이후 나머지 컴포넌트를 점진 분리합니다.
-3. `ui/web/spa.js`는 `command-palette.js`, `list-panel.js`, `settings-view.js`, `viewer-view.js`, `chat-view.js`, `wiki-view.js`, `ab-test-view.js`, `search-view.js`, `empty-view.js` 분리를 완료했습니다.
-4. 전역 shell 코드 중 `GlobalResourceBar`와 `BulkActionBar` 분리는 완료했습니다. 다음 후보는 mobile drawer, theme toggle, shortcut controller이며, 서로 검증 표면이 달라 별도 위원회 합의가 필요합니다.
-5. `ui/web/app.js`는 `api-client.js` 위임을 시작점으로 비즈니스 로직과 뷰 로직을 더 분리합니다.
-6. native marker 대상 테스트를 별도 CI job으로 분리할지 검토합니다.
-7. 문서의 테스트 명령은 이 파일을 기준으로 최신 상태를 유지합니다.
+1. `api/routes.py` domain router 분리를 계속합니다. 다음 후보는 STT models,
+   settings, search/chat, wiki, meeting detail routes입니다.
+2. `ui/web/style.css`를 component CSS로 나눕니다. 다음 후보는 viewer, settings,
+   command palette, recording, layout shell입니다.
+3. native marker 대상 테스트를 CI에서 required/manual/scheduled 중 어떤 방식으로
+   운용할지 결정합니다.
+4. `docs/plans/issue-b-transcription-coverage.md`의 STT 누락/환각 개선 계획을
+   실험 harness와 메트릭 기반 phase로 전환합니다.

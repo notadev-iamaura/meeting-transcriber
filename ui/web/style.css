@@ -1388,6 +1388,9 @@ button {
   font-size: 13px;
   color: var(--text-secondary);
   text-align: center;
+  line-height: 1.45;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .pipeline-status-text.error {
@@ -2437,9 +2440,13 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   padding: 6px 12px;
   font-size: 12px;
   font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
   border: 0.5px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-card);
@@ -2454,6 +2461,7 @@ button {
 
 .viewer-action-btn.transcribe { color: var(--accent); border-color: var(--accent); }
 .viewer-action-btn.retry { color: var(--warning); border-color: var(--warning); }
+.viewer-action-btn.retranscribe { color: var(--error); border-color: var(--error); }
 .viewer-action-btn.delete { color: var(--error); border-color: var(--error); }
 .viewer-action-btn.summarize { color: var(--success, #34C759); border-color: var(--success, #34C759); }
 .viewer-action-btn.copy { color: var(--text-secondary); }
