@@ -1,134 +1,79 @@
 # Continuation Goal
 
 This prompt keeps the agentic harness moving until the current quality phase is
-done. At each turn, inspect the current repository state and decide whether to
-continue, pause, or escalate.
+done. At each turn, inspect the repository state and decide whether to continue,
+pause, or escalate.
 
-## Current Phase
+## Baseline
 
-Continue reducing `ui/web/spa.js` global shell ownership by extracting
-`BulkActionBar` behind a factory boundary while preserving selected-meeting
-behavior, public browser globals, accessibility contracts, and existing
-bulk-action tests.
+- Date: 2026-05-06
+- Branch: `main`
+- Baseline commit before Phase A: `8243dbfaafaf60620c271ba42094005def710276`
+- Open PR count after the cleanup wave: 0
+- Completed merge wave: #41, #38, #39, #40
 
-Status: route-specific view extraction, `GlobalResourceBar` extraction, and
-`BulkActionBar` extraction are reached. `spa.js` now keeps the SPA shell,
-router, shortcuts, mobile drawer, and theme toggle.
+## Completed Workstreams
 
-## Continue When
+- Route-specific SPA views were extracted from `ui/web/spa.js`:
+  `settings-view.js`, `viewer-view.js`, `chat-view.js`, `wiki-view.js`,
+  `ab-test-view.js`, `search-view.js`, and `empty-view.js`.
+- Shared frontend boundaries were extracted:
+  `api-client.js`, `list-panel.js`, `global-resource-bar.js`,
+  `bulk-action-bar.js`, `theme-controller.js`, `mobile-drawer.js`, and
+  `shortcut-controller.js`.
+- API runtime cleanup reached the first domain-router milestone:
+  app-state dependency helpers and the meetings batch router are split from
+  `api/routes.py`.
+- Runtime gates, docs, model/pipeline safety settings, and CI checks were
+  hardened.
+- Consensus harness workflow, scope, artifact, assignment, gate, ticket, and
+  board support were merged.
 
-- `ui/web/spa.js` still owns global shell modules that can be extracted behind a
-  `window.Meeting* create(deps)` factory without changing public behavior.
-- A proposed workstream has agreement from at least two independent auditors for
-  the same role, or the lead records an evidence-backed tie-break.
-- The change can be kept narrow, with implementation and regression tests in
-  the same loop.
-- P1 lifecycle or compatibility risks found by reviewers do not yet have tests
-  and implementation criteria.
+## Current Phase: Phase A, Status And Retry UX Alignment
 
-## Stop Or Pause When
+Goal: align project status documents with the merged main branch and preserve the
+small viewer UX improvement that distinguishes two materially different recovery
+actions:
 
-- The next candidate requires a broad redesign rather than a narrow extraction.
-- Required tests cannot run because of missing local dependencies or environment
-  constraints that need user action.
-- Public contracts would change without an explicit migration plan.
-- The current workstream is complete and the next step requires a new product or
-  architecture decision from the user.
-
-## Completed Workstream Gates
-
-Completed extraction gates:
-
-- `WikiView`, wiki constants, and wiki helper functions live in
-  `ui/web/wiki-view.js`.
-- A/B list/new/result views live in `ui/web/ab-test-view.js`.
-- `SearchView` lives in `ui/web/search-view.js`.
-- Extracted views preserve their `window.SPA.*View` public constructors.
-- Extracted async views guard stale or destroyed continuations.
-- Harness boundary tests and targeted SPA integration tests pass.
-
-Final route-view extraction gate:
-
-- `EmptyView` and home-only action dropdown helpers live in
-  `ui/web/empty-view.js`.
-- `ui/web/spa.js` consumes `window.MeetingEmptyView.create({ ... })` and keeps
-  `window.SPA.EmptyView` compatible.
-- Home dashboard stats, audio-folder action, recording/start dropdowns, and
-  status/toast behavior remain compatible.
-- Any async stats or folder-open callbacks are guarded against stale DOM writes
-  after `destroy()`.
-- Harness boundary tests and SPA home/empty-state integration tests pass.
-
-## Completion Decision
-
-Stop the current loop unless the user explicitly starts a new phase. The next
-possible extraction work is not a route-specific view; it would be global shell
-architecture (`GlobalResourceBar`, mobile drawer, theme toggle, or shortcut
-controllers), which needs a fresh workstream decision and risk review.
-
-## Next Phase: Global Shell
-
-Started after user confirmation. First accepted workstream:
-
-- `GlobalResourceBar` lives in `ui/web/global-resource-bar.js`.
-- `ui/web/spa.js` consumes `window.MeetingGlobalResourceBar.create({ ... })`.
-- `#globalResourceBar` remains a singleton with `role="status"` and
-  `aria-live="polite"`.
-- `/api/system/resources` updates RAM/CPU/model display and preserves
-  warning/danger thresholds.
-- `start()` is idempotent and `stop()` prevents stale in-flight resource
-  responses from mutating DOM.
-- Harness boundary tests, SPA integration tests, system resource route tests,
-  lint, and format checks pass.
-
-Completion decision for this workstream: reached.
-
-## Completed Workstream Gate: BulkActionBar
-
-- `BulkActionBar` moves from `ui/web/spa.js` to a focused module such as
-  `ui/web/bulk-action-bar.js`.
-- The module exposes a factory boundary, for example
-  `window.MeetingBulkActionBar.create({ App, ListPanel })`.
-- `ui/web/spa.js` keeps `window.SPA.BulkActionBar` compatibility and calls
-  `BulkActionBar.init()` exactly as before.
-- Selection count, action button enablement, dropdown behavior, clear selection,
-  batch API payloads, toast/status feedback, and keyboard/a11y semantics remain
-  unchanged.
-- Existing bulk action behavior/a11y/visual tests pass. Because some UI tests
-  share fixed ports, run fixed-port suites sequentially unless their fixtures
-  are made port-isolated first.
-
-Completion decision for this workstream: reached.
-
-## Next Workstream Candidates
-
-User explicitly continued into the next phase on 2026-05-06.
-
-## Current Phase: Global Shell Controls
-
-Goal: extract the remaining global shell controls from `ui/web/spa.js` into
-focused factory modules while preserving public behavior:
-
-- `ui/web/theme-controller.js` owns saved-theme restore and theme toggle.
-- `ui/web/mobile-drawer.js` owns `#mobile-menu-toggle`, `#list-panel.is-open`,
-  `#drawer-backdrop.visible`, body scroll lock, Escape close, backdrop close,
-  and focus return.
-- `ui/web/shortcut-controller.js` owns global `Meta/Ctrl` accelerators:
-  `K`, `,`, `1`, `2`, and `3`.
-- `ui/web/spa.js` remains the shell composer and exposes compatible objects on
-  `window.SPA`.
-- `ui/web/command-palette.js` delegates the `theme.toggle` command to the shared
-  theme controller when injected, with fallback behavior retained.
-
-Consensus gate: reached. Auditor A and Auditor B both identified the same
-remaining ownership cluster in `ui/web/spa.js`, the same public contracts, and
-the same verification surface. The lead chose focused modules instead of one
-combined global-shell file to match existing module boundary patterns.
+- `실패한 단계부터 다시 시도`: keeps existing results/progress and requeues from the
+  failed point.
+- `처음부터 다시 전사`: deletes existing transcript/summary/progress and restarts
+  from audio conversion.
 
 Completion criteria:
 
-- New controller scripts load before `spa.js`.
-- Harness boundary tests prove factory namespaces and `spa.js` delegation.
-- T-202 command palette tests still pass.
-- T-302 mobile drawer integration, behavior, a11y, and visual tests still pass.
-- JavaScript syntax checks pass for touched browser modules.
+- `docs/STATUS.md` reflects the #38-#41 merged state and no longer presents
+  completed global shell work as a future candidate.
+- `goals/continuation.md` names the current phase and next decision points.
+- Viewer retry/re-transcribe microcopy has regression coverage.
+- Touched frontend JavaScript passes syntax checks.
+- Targeted harness/UI checks pass.
+
+## Continue When
+
+- A change can be scoped to docs drift, small UX copy/state clarification, or a
+  focused follow-up with direct regression coverage.
+- A proposed workstream has agreement from at least two independent auditors, or
+  the lead records an evidence-backed tie-break for a low-risk change.
+- The verification surface is clear and can run locally without native model
+  downloads or user secrets.
+
+## Stop Or Pause When
+
+- The next task requires a broad redesign, product policy decision, or model
+  quality experiment.
+- Required tests need unavailable local dependencies or gated external assets.
+- Public API contracts would change without a migration plan.
+
+## Next Workstream Candidates
+
+Recommended order after Phase A:
+
+1. Continue `api/routes.py` domain router separation by low-coupling domains
+   such as STT models, settings, search/chat, wiki, and meeting detail routes.
+2. Split `ui/web/style.css` into component-level CSS files with visual/a11y
+   gates.
+3. Decide how native marker tests should run in CI: required, manual, or
+   scheduled.
+4. Convert the STT coverage and hallucination plans into an experiment harness
+   with reproducible fixtures and metrics.
