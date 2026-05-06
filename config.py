@@ -392,6 +392,11 @@ class PipelineConfig(BaseModel):
 
     peak_ram_limit_gb: float = Field(default=9.5, ge=1.0, le=16.0)
     checkpoint_enabled: bool = True
+    checkpoint_json_indent: int | None = Field(
+        default=2,
+        ge=0,
+        description="pipeline_state.json 들여쓰기. null 이면 compact JSON 으로 저장",
+    )
     retry_max_count: int = Field(
         default=1,  # Phase 1: 3 → 1 (타임아웃 재시도가 MLX Metal 크래시 유발)
         ge=1,

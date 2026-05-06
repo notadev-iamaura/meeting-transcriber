@@ -379,6 +379,14 @@ class TestMain:
     소스 모듈 경로로 패칭한다.
     """
 
+    @pytest.fixture(autouse=True)
+    def _mock_single_instance_lock(self) -> None:
+        """main() 테스트가 실제 사용자 락 파일에 의존하지 않도록 격리한다."""
+        with patch("core.single_instance.SingleInstanceLock") as mock_lock_cls:
+            mock_lock = MagicMock()
+            mock_lock_cls.return_value = mock_lock
+            yield
+
     @patch("ui.menubar.run_menubar")
     @patch("main.start_server_thread")
     @patch("main._setup_signal_handlers")

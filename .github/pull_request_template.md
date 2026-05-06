@@ -26,15 +26,17 @@
 
 ```bash
 # 예시
-pytest tests/test_pipeline.py -v
+pytest tests/ -v --tb=short
+pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
 ```
 
 ## 체크리스트
 
 PR을 제출하기 전에 아래 항목을 모두 확인해 주세요:
 
-- [ ] 모든 테스트가 통과합니다 (`pytest tests/ -v`)
-- [ ] 린트 검사를 통과합니다 (`python -m py_compile <변경된 파일>`)
+- [ ] 기본 안정 게이트가 통과합니다 (`pytest tests/ -v --tb=short`)
+- [ ] 변경 영역의 명시 게이트가 통과합니다 (`pytest -m ui ...`, `pytest -m native ...` 등)
+- [ ] 린트/포맷 검사를 통과합니다 (`ruff check .`, `ruff format --check .`)
 - [ ] 새로운 코드와 수정된 코드에 한국어 주석이 작성되어 있습니다
 - [ ] 기존 기능에 영향을 주지 않습니다
 - [ ] 설정값은 `config.yaml`에서 관리하며 하드코딩하지 않았습니다

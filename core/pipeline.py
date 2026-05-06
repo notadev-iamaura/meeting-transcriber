@@ -400,7 +400,7 @@ class PipelineState:
         """딕셔너리로 변환한다 (JSON 직렬화용)."""
         return asdict(self)
 
-    def save(self, output_path: Path) -> None:
+    def save(self, output_path: Path, *, indent: int | None = 2) -> None:
         """파이프라인 상태를 JSON 파일로 원자적으로 저장한다.
 
         임시 파일에 먼저 기록한 뒤 os.replace()로 원자적 교체를 수행한다.
@@ -408,15 +408,19 @@ class PipelineState:
 
         Args:
             output_path: 저장할 JSON 파일 경로
+            indent: JSON 들여쓰기. None 이면 compact JSON 으로 저장한다.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         self.updated_at = datetime.now().isoformat()
+        dump_kwargs: dict[str, Any] = {"ensure_ascii": False, "indent": indent}
+        if indent is None:
+            dump_kwargs["separators"] = (",", ":")
 
         # 임시 파일에 먼저 쓴 후 원자적으로 교체 (크래시 시 데이터 손상 방지)
         tmp_path = output_path.with_suffix(".tmp")
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+                json.dump(self.to_dict(), f, **dump_kwargs)
                 f.flush()
                 os.fsync(f.fileno())
             # POSIX에서 os.replace()는 원자적 연산
@@ -469,6 +473,17 @@ class InvalidInputError(PipelineError):
     """파이프라인 입력이 유효하지 않을 때 발생한다."""
 
 
+def _normalize_checkpoint_json_indent(value: object) -> int | None:
+    """체크포인트 JSON 들여쓰기 설정을 안전하게 정규화한다."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 2
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 2
+
+
 # === 메인 클래스 ===
 
 
@@ -514,6 +529,9 @@ class PipelineManager:
 
         # 파이프라인 설정 캐시
         self._checkpoint_enabled = self._config.pipeline.checkpoint_enabled
+        self._checkpoint_json_indent = _normalize_checkpoint_json_indent(
+            getattr(self._config.pipeline, "checkpoint_json_indent", 2),
+        )
         self._retry_max = self._config.pipeline.retry_max_count
 
         # 경로 설정
@@ -585,6 +603,13 @@ class PipelineManager:
             상태 JSON 파일 경로
         """
         return self._checkpoints_dir / meeting_id / "pipeline_state.json"
+
+    def _save_state(self, state: PipelineState, state_path: Path) -> None:
+        """파이프라인 상태를 설정된 JSON 형식으로 저장한다."""
+        if self._checkpoint_json_indent == 2:
+            state.save(state_path)
+            return
+        state.save(state_path, indent=self._checkpoint_json_indent)
 
     async def _acquire_llm_lock_with_timeout(self) -> None:
         """_llm_lock 을 타임아웃과 함께 획득한다.
@@ -677,7 +702,7 @@ class PipelineManager:
                 state.completed_steps.append(step.value)
 
         # merge 체크포인트가 있으면 최소한 전사까지는 완료된 것으로 간주
-        state.save(state_path)
+        self._save_state(state, state_path)
         logger.info(
             f"상태 파일 재구성 완료: meeting_id={meeting_id}, 완료 단계={state.completed_steps}"
         )
@@ -1234,7 +1259,7 @@ class PipelineManager:
             )
         finally:
             # 9단계 결과 반영 — state 는 항상 저장 (성공/실패 무관)
-            state.save(state_path)
+            self._save_state(state, state_path)
 
     async def run(
         self,
@@ -1303,7 +1328,7 @@ class PipelineManager:
                 f"디스크 여유 공간 부족으로 파이프라인 중단: {resource_status.disk_free_gb:.1f}GB"
             )
             state.warnings.append(state.error_message)
-            state.save(state_path)
+            self._save_state(state, state_path)
             raise PipelineError(state.error_message)
 
         # skip_llm_steps 결정: 명시적 파라미터 > config 설정
@@ -1325,7 +1350,7 @@ class PipelineManager:
             logger.warning(warn_msg)
 
         state.status = "running"
-        state.save(state_path)
+        self._save_state(state, state_path)
 
         # 오디오 길이 선 획득 (ETA 예측용). 실패해도 치명적이지 않음.
         if state.audio_duration_seconds <= 0:
@@ -1336,7 +1361,7 @@ class PipelineManager:
                 _info = _converter_probe.probe(audio_path)
                 if _info is not None and _info.duration > 0:
                     state.audio_duration_seconds = float(_info.duration)
-                    state.save(state_path)
+                    self._save_state(state, state_path)
             except Exception as e:
                 logger.debug(f"오디오 길이 사전 조회 실패(무시): {e}")
 
@@ -1351,7 +1376,7 @@ class PipelineManager:
         if resume_idx is None:
             logger.info("모든 단계가 이미 완료되었습니다.")
             state.status = "completed"
-            state.save(state_path)
+            self._save_state(state, state_path)
             return state
 
         if resume_idx > 0:
@@ -1430,7 +1455,7 @@ class PipelineManager:
                     )
                     state.step_results.append(step_result.to_dict())
                     state.completed_steps.append(step.value)
-                    state.save(state_path)
+                    self._save_state(state, state_path)
                     continue
 
             # 단계 시작 콜백 호출 (예외 발생 시 무시)
@@ -1459,7 +1484,7 @@ class PipelineManager:
                     logger.warning(f"on_step_progress 콜백 예외 (start, 무시): {e}")
 
             state.current_step = step.value
-            state.save(state_path)
+            self._save_state(state, state_path)
 
             step_start = time.monotonic()
             last_error: Exception | None = None
@@ -1593,7 +1618,7 @@ class PipelineManager:
 
             if success:
                 state.completed_steps.append(step.value)
-                state.save(state_path)
+                self._save_state(state, state_path)
                 logger.info(f"단계 완료: {step.value} ({step_elapsed:.1f}초)")
 
                 # 단계 완료 진행 이벤트 (EMA 업데이트 + 브로드캐스트는 상위 콜백)
@@ -1613,7 +1638,7 @@ class PipelineManager:
                 # 실패 시 파이프라인 중단
                 state.status = "failed"
                 state.error_message = str(last_error)
-                state.save(state_path)
+                self._save_state(state, state_path)
 
                 logger.error(
                     f"파이프라인 실패: 단계 {step.value}에서 {self._retry_max}회 재시도 모두 실패"
@@ -1627,7 +1652,7 @@ class PipelineManager:
         pipeline_elapsed = time.monotonic() - pipeline_start
         state.status = "completed"
         state.current_step = ""
-        state.save(state_path)
+        self._save_state(state, state_path)
 
         # ── Step 9 (Phase 1): Wiki Compile (dry-run) ─────────────────────
         # PRD §5.1 호출 위치 + §9 Phase 1: 요약 단계 직후 영구 위키 컴파일 트리거.
@@ -1867,7 +1892,7 @@ class PipelineManager:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         state.status = "running"
-        state.save(state_path)
+        self._save_state(state, state_path)
 
         # 4. correct 단계 실행
         correct_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CORRECT)
@@ -1885,7 +1910,7 @@ class PipelineManager:
                     logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
 
             state.current_step = PipelineStep.CORRECT.value
-            state.save(state_path)
+            self._save_state(state, state_path)
 
             # 안정성: 단계 자체에도 하드 타임아웃 (모델 환각 폭주/hang 차단).
             # 락은 상위에서 이미 보유 중이므로 재획득하지 않는다.
@@ -1909,7 +1934,7 @@ class PipelineManager:
                     logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
 
             state.current_step = PipelineStep.SUMMARIZE.value
-            state.save(state_path)
+            self._save_state(state, state_path)
 
             try:
                 await asyncio.wait_for(
@@ -1936,7 +1961,7 @@ class PipelineManager:
 
         state.status = "completed"
         state.current_step = ""
-        state.save(state_path)
+        self._save_state(state, state_path)
 
         logger.info(f"온디맨드 LLM 단계 완료: meeting_id={meeting_id}")
         return state

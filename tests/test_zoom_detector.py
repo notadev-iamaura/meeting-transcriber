@@ -161,8 +161,9 @@ class TestProcessCheck:
         """pgrep 타임아웃 시 이전 상태를 유지하는지 검증."""
         detector._is_meeting_active = True
 
-        mock_proc = AsyncMock()
+        mock_proc = MagicMock()
         mock_proc.wait = AsyncMock(side_effect=TimeoutError())
+        mock_proc.kill = MagicMock()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await detector._check_zoom_process()
@@ -175,8 +176,9 @@ class TestProcessCheck:
         """이전 상태가 False일 때 타임아웃 시 False를 유지하는지 검증."""
         detector._is_meeting_active = False
 
-        mock_proc = AsyncMock()
+        mock_proc = MagicMock()
         mock_proc.wait = AsyncMock(side_effect=TimeoutError())
+        mock_proc.kill = MagicMock()
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
             result = await detector._check_zoom_process()

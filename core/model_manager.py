@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
@@ -32,6 +33,28 @@ T = TypeVar("T")
 
 # 모델 로더 타입: 동기 또는 비동기 함수
 ModelLoader = Union[Callable[[], T], Callable[[], Coroutine[Any, Any, T]]]
+MlxCoreImporter = Callable[[], Any]
+PreflightRunner = Callable[[], Any]
+
+_DISABLE_GPU_CACHE_CLEANUP_ENV = "MT_DISABLE_GPU_CACHE_CLEANUP"
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """환경변수 플래그가 활성화 값인지 확인한다."""
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _import_mlx_core() -> Any:
+    """MLX core 모듈을 지연 import한다.
+
+    native import 경계를 한 곳으로 모아 단위 테스트에서 쉽게 mock할 수 있게 한다.
+    """
+    import mlx.core as mx  # type: ignore[import-untyped]
+
+    return mx
 
 
 @dataclass
@@ -82,11 +105,32 @@ class ModelLoadManager:
         await manager.unload_model()
     """
 
-    def __init__(self) -> None:
-        """ModelLoadManager 초기화."""
+    def __init__(
+        self,
+        *,
+        gpu_cache_cleanup_enabled: bool | None = None,
+        mlx_core_importer: MlxCoreImporter | None = None,
+        preflight_runner: PreflightRunner | None = None,
+    ) -> None:
+        """ModelLoadManager 초기화.
+
+        Args:
+            gpu_cache_cleanup_enabled: Metal GPU 캐시 정리 활성화 여부.
+                None이면 기본 활성화이며, MT_DISABLE_GPU_CACHE_CLEANUP 환경변수로
+                테스트 환경에서만 비활성화할 수 있다.
+            mlx_core_importer: mlx.core 지연 import 함수. 테스트에서 mock 주입용.
+            preflight_runner: MLX 사용 가능성 검사 함수. 테스트에서 mock 주입용.
+        """
         self._lock = asyncio.Lock()
         self._current: ModelInfo | None = None
         self._config = get_config()
+        self._gpu_cache_cleanup_enabled = (
+            not _env_flag_enabled(_DISABLE_GPU_CACHE_CLEANUP_ENV)
+            if gpu_cache_cleanup_enabled is None
+            else gpu_cache_cleanup_enabled
+        )
+        self._mlx_core_importer = mlx_core_importer or _import_mlx_core
+        self._preflight_runner = preflight_runner or run_preflight
         logger.info("ModelLoadManager 초기화 완료")
 
     @property
@@ -142,15 +186,18 @@ class ModelLoadManager:
         사전 검증(preflight)에서 Metal 불가로 판정된 경우
         import 자체를 시도하지 않아 SIGABRT를 방지한다.
         """
+        if not self._gpu_cache_cleanup_enabled:
+            logger.debug("Metal GPU 캐시 정리 비활성화 — 건너뜀")
+            return
+
         # SIGABRT 방지: preflight에서 Metal 사용 불가 판정 시 스킵
-        preflight = run_preflight()
+        preflight = self._preflight_runner()
         if not preflight.can_use_mlx:
             logger.debug("MLX 사용 불가 — Metal 캐시 정리 건너뜀")
             return
 
         try:
-            import mlx.core as mx  # type: ignore[import-untyped]
-
+            mx = self._mlx_core_importer()
             mx.metal.clear_cache()
             logger.debug("Metal GPU 캐시 정리 완료")
         except ImportError:

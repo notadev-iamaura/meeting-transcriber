@@ -2,7 +2,7 @@
 #
 # 목적: 코드 품질(린트) + 테스트 자동 검증
 # 린트: ubuntu (빠름) — ruff check + ruff format --check
-# 테스트: macOS (실제 타깃 플랫폼) — pytest 전체 실행
+# 테스트: macOS (실제 타깃 플랫폼) — 기본 안정 게이트 + 명시 UI 게이트
 #
 # 참고: macOS 전용 앱이므로 테스트는 macos runner에서 실행한다.
 #       public repo에서 macOS runner는 무료.
@@ -83,12 +83,25 @@ jobs:
         # tests/ui/ 의 a11y/behavior/visual 테스트가 chromium 헤드리스
         # 셸을 요구한다. 이 단계 누락 시 첫 Playwright 테스트가
         # `BrowserType.launch: Executable doesn't exist` 로 전체 잡 실패.
-        # `pyproject.toml` 의 `addopts = "-m 'not e2e'"` 로 무거운 e2e 마커는
-        # 기본 실행에서 제외되므로, 여기서는 chromium 헤드리스 셸만 설치하면 충분.
+        # `pyproject.toml` 의 addopts 로 e2e/ui/native 마커는 기본 실행에서
+        # 제외되므로, 여기서는 chromium 헤드리스 셸만 설치하면 충분하다.
         run: playwright install chromium
 
-      - name: 단위 테스트 실행
-        run: pytest tests/ -v --tb=short -x --ignore=tests/test_main.py
+      - name: 기본 안정 게이트 실행
+        timeout-minutes: 20
+        run: pytest tests/ -v --tb=short -x
+
+      - name: UI bulk actions behavior 게이트 실행
+        timeout-minutes: 12
+        run: pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
+
+      - name: UI bulk actions a11y 게이트 실행
+        timeout-minutes: 8
+        run: pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
+
+      - name: UI bulk actions visual 게이트 실행
+        timeout-minutes: 8
+        run: pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 
   swift-build:
     name: Swift 컴파일 검증 (Aggregate Device)

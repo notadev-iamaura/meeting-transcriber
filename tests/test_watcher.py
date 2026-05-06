@@ -206,10 +206,22 @@ class TestAudioFileHandler:
         event = MagicMock()
         event.is_directory = False
         event.src_path = "/tmp/meeting.wav"
-        handler.on_created(event)
 
-        # run_coroutine_threadsafe가 호출되어야 함
-        assert mock_loop is handler._loop
+        scheduled: list[tuple[object, object]] = []
+
+        def _fake_schedule(coro: object, loop: object) -> MagicMock:
+            """생성된 coroutine을 닫아 unawaited 경고 없이 스케줄링만 검증한다."""
+            scheduled.append((coro, loop))
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_fake_schedule) as mock_run:
+            handler.on_created(event)
+
+        mock_run.assert_called_once()
+        assert scheduled[0][1] is mock_loop
 
 
 # === meeting_id 생성 테스트 ===

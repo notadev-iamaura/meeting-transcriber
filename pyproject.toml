@@ -104,14 +104,19 @@ include = ["core*", "steps*", "search*", "api*", "ui*", "security*", "harness*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# e2e/ui 마커가 달린 Playwright 테스트는 기본 실행에서 제외한다.
+# e2e/ui/native 마커가 달린 테스트는 기본 실행에서 제외한다.
 # pytest-playwright 가 pytest-asyncio 의 auto 모드와 충돌하여
 # 함께 실행하면 async 테스트가 깨지는 문제가 있기 때문이다 (event loop 누수).
-# 브라우저 테스트는 별도로 실행:
+# 브라우저/native 테스트는 별도로 실행:
 #   `pytest -m e2e tests/test_e2e_edit_playwright.py`
 #   `pytest -m ui tests/ui/`
-addopts = "-m 'not e2e and not ui'"
+#   `pytest -m native tests/`
+addopts = "-m 'not e2e and not ui and not native'"
 markers = [
+    "unit: native 런타임 없이 실행되는 빠른 단위 테스트",
+    "api: FastAPI route/service 계층 테스트",
+    "integration: 여러 컴포넌트를 함께 검증하는 통합 테스트",
+    "native: MLX/Metal/CoreAudio 등 native 런타임을 실제로 사용하는 테스트 (기본 실행 제외)",
     "e2e: Playwright 기반 브라우저 E2E 테스트 (기본 실행에서 제외, `-m e2e` 로 명시 실행)",
     "harness: 하네스 자체 단위 테스트",
     "ui: UI/UX overhaul 테스트 (Wave 1/2/3 산출물)",
