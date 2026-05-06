@@ -17,9 +17,15 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from harness import consensus
+
 
 class InvalidStatusTransition(Exception):
     """closed 또는 비허용 상태에서의 변경 시도."""
+
+
+class ConsensusIncomplete(Exception):
+    """티켓 종료 전 merge consensus 가 통과하지 않은 경우."""
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,15 @@ def _emit_event(
     )
 
 
-def open_ticket(conn: sqlite3.Connection, *, wave: int, component: str) -> Ticket:
+def open_ticket(
+    conn: sqlite3.Connection,
+    *,
+    wave: int,
+    component: str,
+    domain: str | None = None,
+    risk: str | None = None,
+    write_scope: str | None = None,
+) -> Ticket:
     """새 티켓을 발급하고 events 에 ticket.opened 를 기록한다."""
     if wave not in (1, 2, 3):
         raise ValueError(f"wave must be 1/2/3, got {wave!r}")
@@ -92,7 +106,14 @@ def open_ticket(conn: sqlite3.Connection, *, wave: int, component: str) -> Ticke
         "VALUES (?, ?, ?, 'pending', ?, ?)",
         (ticket_id, wave, component, now, now),
     )
-    _emit_event(conn, ticket_id, "ticket.opened", {"wave": wave, "component": component})
+    payload: dict[str, object] = {"wave": wave, "component": component}
+    if domain:
+        payload["domain"] = domain
+    if risk:
+        payload["risk"] = risk
+    if write_scope:
+        payload["write_scope"] = write_scope
+    _emit_event(conn, ticket_id, "ticket.opened", payload)
     conn.commit()
     return Ticket(
         id=ticket_id,
@@ -168,17 +189,31 @@ def update_status(conn: sqlite3.Connection, ticket_id: str, new_status: str) -> 
     conn.commit()
 
 
-def close_ticket(conn: sqlite3.Connection, ticket_id: str, *, pr_number: int) -> None:
+def close_ticket(
+    conn: sqlite3.Connection,
+    ticket_id: str,
+    *,
+    pr_number: int,
+    scope_hash: str | None = None,
+) -> None:
     """티켓을 closed 상태로 옮기고 PR 번호를 기록한다."""
     current = get_ticket(conn, ticket_id)
     if current is None:
         raise ValueError(f"ticket not found: {ticket_id}")
     if current.status == "closed":
         raise InvalidStatusTransition(f"ticket {ticket_id} already closed")
+    if not consensus.can_merge(conn, ticket_id=ticket_id, scope_hash=scope_hash):
+        raise ConsensusIncomplete(
+            f"ticket {ticket_id}: close requires target=merge consensus. "
+            f"Run `python -m harness consensus status --ticket {ticket_id} --target merge`."
+        )
     now = _now()
     conn.execute(
         "UPDATE tickets SET status = 'closed', pr_number = ?, updated_at = ? WHERE id = ?",
         (pr_number, now, ticket_id),
     )
-    _emit_event(conn, ticket_id, "ticket.closed", {"pr_number": pr_number})
+    payload: dict[str, object] = {"pr_number": pr_number}
+    if scope_hash:
+        payload["scope_hash"] = scope_hash
+    _emit_event(conn, ticket_id, "ticket.closed", payload)
     conn.commit()

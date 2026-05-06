@@ -15,21 +15,25 @@ python -m harness ticket open --wave 1 --component empty-state
 # 게이트 실행 (Red — 구현 전)
 python -m harness gate run T-101 --phase red
 
-# 리뷰 기록 (8 에이전트 페어 워크플로우)
-python -m harness review record --ticket T-101 --agent designer-b --kind peer-review --status approved
-python -m harness review record --ticket T-101 --agent qa-b --kind peer-review --status approved
-python -m harness review record --ticket T-101 --agent frontend-b --kind peer-review --status approved
-python -m harness review record --ticket T-101 --agent pm-b --kind merge-final --status approved
+# 실행 합의 기록 (역할별 최소 2명)
+python -m harness consensus require --ticket T-101 --target execute --role qa
+python -m harness review submit --ticket T-101 --target execute --role qa --agent-id qa-a --status approved --scope-hash H1
+python -m harness review submit --ticket T-101 --target execute --role qa --agent-id qa-b --status approved --scope-hash H1
 
-# 게이트 실행 (Green — 구현 후, review 통과 강제)
-python -m harness gate run T-101 --phase green
+# 게이트 실행 (Green — 구현 후, execute consensus 통과 강제)
+python -m harness gate run T-101 --phase green --scope-hash H1
+
+# 머지 합의 기록 (티켓 종료 전)
+python -m harness consensus require --ticket T-101 --target merge --role qa
+python -m harness review submit --ticket T-101 --target merge --role qa --agent-id qa-a --status approved --scope-hash H2
+python -m harness review submit --ticket T-101 --target merge --role qa --agent-id qa-b --status approved --scope-hash H2
 
 # 보드 재생성
 python -m harness board rebuild
 cat docs/superpowers/ui-ux-overhaul/00-overview.md
 
 # 티켓 종료
-python -m harness ticket close T-101 --pr 42
+python -m harness ticket close T-101 --pr 42 --scope-hash H2
 ```
 
 ## 8 서브에이전트 (역할당 Producer + Reviewer)
@@ -43,7 +47,9 @@ python -m harness ticket close T-101 --pr 42
 | **Frontend** | `ui/web/*` 최소 변경 구현 | 코드 리뷰 (DRY·SPA 라우터 영향·회귀 위험) |
 | **QA** | Playwright 행동 시나리오 + axe-core 룰셋 | 시나리오 완전성·Red 의도성·축 분리 검토 |
 
-크로스체크 게이트: Reviewer 가 `review.peer-review` 와 PM-B 가 `review.merge-final` 모두 `approved` 일 때만 `phase=green` 통과.
+크로스체크 게이트: `target=execute` consensus 가 통과해야 `phase=green` 이 실행되고,
+`target=merge` consensus 가 통과해야 티켓을 닫을 수 있다. 기존
+`review record/status` 명령은 historical compatibility 용으로만 유지한다.
 
 ## 환경변수
 

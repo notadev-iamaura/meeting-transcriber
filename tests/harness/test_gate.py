@@ -7,6 +7,7 @@ PASS/FAIL 행 기록 + review 강제 로직만 검증한다.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -23,16 +24,23 @@ def _stub_axis(passed: bool, detail_path=None):
     return _fn
 
 
-def _record_all_reviews_approved(db_conn: sqlite3.Connection, ticket_id: str) -> None:
-    """green 게이트 통과를 위해 peer-review + merge-final 모두 approved 기록."""
-    from harness import review
+def _record_execute_consensus(
+    db_conn: sqlite3.Connection, ticket_id: str, scope_hash: str = "H1"
+) -> None:
+    """green 게이트 실행을 위해 execute consensus 승인 기록."""
+    from harness import consensus
 
-    review.record(
-        db_conn, ticket_id=ticket_id, agent="designer-b", kind="peer-review", status="approved"
-    )
-    review.record(
-        db_conn, ticket_id=ticket_id, agent="pm-b", kind="merge-final", status="approved"
-    )
+    consensus.require_role(db_conn, ticket_id=ticket_id, target="execute", role="qa")
+    for agent_id in ("qa-a", "qa-b"):
+        consensus.submit_review(
+            db_conn,
+            ticket_id=ticket_id,
+            target="execute",
+            role="qa",
+            agent_id=agent_id,
+            status="approved",
+            scope_hash=scope_hash,
+        )
 
 
 def test_run_gate_records_three_axes(
@@ -41,13 +49,13 @@ def test_run_gate_records_three_axes(
     from harness import gate, ticket
 
     t = ticket.open_ticket(db_conn, wave=1, component="x")
-    _record_all_reviews_approved(db_conn, t.id)
+    _record_execute_consensus(db_conn, t.id)
 
     monkeypatch.setattr(gate, "_run_visual_axis", _stub_axis(True))
     monkeypatch.setattr(gate, "_run_behavior_axis", _stub_axis(True))
     monkeypatch.setattr(gate, "_run_a11y_axis", _stub_axis(True))
 
-    result = gate.run_gate(db_conn, ticket_id=t.id, phase="green")
+    result = gate.run_gate(db_conn, ticket_id=t.id, phase="green", scope_hash="H1")
     assert result.all_passed is True
 
     row = db_conn.execute(
@@ -104,7 +112,7 @@ def test_run_gate_invalid_phase_raises(db_conn: sqlite3.Connection) -> None:
 def test_green_gate_blocked_when_reviews_pending(
     db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """리뷰 미완료 상태에서 green 게이트 시도하면 ReviewIncomplete."""
+    """execute consensus 미완료 상태에서 green 게이트 시도하면 ReviewIncomplete."""
     from harness import gate, ticket
 
     t = ticket.open_ticket(db_conn, wave=1, component="x")
@@ -113,6 +121,211 @@ def test_green_gate_blocked_when_reviews_pending(
     monkeypatch.setattr(gate, "_run_a11y_axis", _stub_axis(True))
     with pytest.raises(gate.ReviewIncomplete):
         gate.run_gate(db_conn, ticket_id=t.id, phase="green")
+
+
+def test_green_gate_rejects_legacy_review_all_passed(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import gate, review, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    review.record(
+        db_conn, ticket_id=t.id, agent="designer-b", kind="peer-review", status="approved"
+    )
+    review.record(db_conn, ticket_id=t.id, agent="pm-b", kind="merge-final", status="approved")
+
+    called = False
+
+    def _should_not_run(ticket_id: str, component: str) -> gate.AxisResult:
+        nonlocal called
+        called = True
+        return gate.AxisResult(passed=True, detail_path=None)
+
+    monkeypatch.setattr(gate, "_run_visual_axis", _should_not_run)
+    monkeypatch.setattr(gate, "_run_behavior_axis", _should_not_run)
+    monkeypatch.setattr(gate, "_run_a11y_axis", _should_not_run)
+
+    with pytest.raises(gate.ReviewIncomplete, match="target=execute consensus"):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="green")
+    assert called is False
+
+
+def test_green_gate_uses_execute_consensus_not_merge_consensus(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import consensus, gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    consensus.require_role(db_conn, ticket_id=t.id, target="merge", role="qa")
+    for agent_id in ("qa-a", "qa-b"):
+        consensus.submit_review(
+            db_conn,
+            ticket_id=t.id,
+            target="merge",
+            role="qa",
+            agent_id=agent_id,
+            status="approved",
+            scope_hash="H1",
+        )
+    monkeypatch.setattr(gate, "_run_visual_axis", _stub_axis(True))
+    monkeypatch.setattr(gate, "_run_behavior_axis", _stub_axis(True))
+    monkeypatch.setattr(gate, "_run_a11y_axis", _stub_axis(True))
+
+    with pytest.raises(gate.ReviewIncomplete):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="green", scope_hash="H1")
+
+
+def test_green_gate_uses_explicit_scope_hash(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import consensus, gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    _record_execute_consensus(db_conn, t.id, scope_hash="H1")
+    consensus.submit_review(
+        db_conn,
+        ticket_id=t.id,
+        target="execute",
+        role="qa",
+        agent_id="qa-a",
+        status="approved",
+        scope_hash="H2",
+    )
+    monkeypatch.setattr(gate, "_run_visual_axis", _stub_axis(True))
+    monkeypatch.setattr(gate, "_run_behavior_axis", _stub_axis(True))
+    monkeypatch.setattr(gate, "_run_a11y_axis", _stub_axis(True))
+
+    assert gate.run_gate(db_conn, ticket_id=t.id, phase="green", scope_hash="H1").all_passed
+    with pytest.raises(gate.ReviewIncomplete):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="green")
+
+
+def _stub_command_results(returncodes: dict[str, int] | None = None):
+    from harness import gate
+
+    codes = returncodes or {}
+
+    def _fn(spec: gate.CommandSpec, *, ticket_id: str, profile: str) -> gate.CommandResult:
+        returncode = codes.get(spec.name, 0)
+        return gate.CommandResult(
+            name=spec.name,
+            argv=spec.argv,
+            passed=returncode == 0,
+            returncode=returncode,
+            detail_path=Path(f"state/gate-logs/{ticket_id}-{profile}-{spec.name}.log"),
+        )
+
+    return _fn
+
+
+@pytest.mark.parametrize("profile", ["backend", "frontend", "pipeline", "docs", "release"])
+def test_non_ui_profiles_run_command_specs_and_record_event(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    import json
+
+    from harness import gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    monkeypatch.setattr(gate, "_run_command", _stub_command_results())
+
+    result = gate.run_gate(db_conn, ticket_id=t.id, phase="red", profile=profile)
+
+    assert result.all_passed is True
+    assert result.profile == profile
+    assert result.commands
+    row = db_conn.execute(
+        "SELECT payload FROM events WHERE ticket_id = ? AND type = 'gate.profile'",
+        (t.id,),
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row["payload"])
+    assert payload["phase"] == "red"
+    assert payload["profile"] == profile
+    assert payload["passed"] is True
+    assert payload["commands"][0]["name"] == result.commands[0].name
+    assert payload["commands"][0]["argv"] == list(result.commands[0].argv)
+
+
+def test_non_ui_profile_failure_records_event_and_failed_result(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from harness import gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    monkeypatch.setattr(gate, "_run_command", _stub_command_results({"api-tests": 1}))
+
+    result = gate.run_gate(db_conn, ticket_id=t.id, phase="red", profile="backend")
+
+    assert result.all_passed is False
+    row = db_conn.execute(
+        "SELECT payload FROM events WHERE ticket_id = ? AND type = 'gate.profile'",
+        (t.id,),
+    ).fetchone()
+    payload = json.loads(row["payload"])
+    assert payload["passed"] is False
+    assert any(command["returncode"] == 1 for command in payload["commands"])
+
+
+def test_green_non_ui_profile_checks_execute_consensus_before_commands(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    called = False
+
+    def _should_not_run(
+        spec: gate.CommandSpec, *, ticket_id: str, profile: str
+    ) -> gate.CommandResult:
+        nonlocal called
+        called = True
+        return gate.CommandResult(spec.name, spec.argv, True, 0, Path("unused.log"))
+
+    monkeypatch.setattr(gate, "_run_command", _should_not_run)
+
+    with pytest.raises(gate.ReviewIncomplete):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="green", profile="backend")
+    assert called is False
+    row = db_conn.execute(
+        "SELECT 1 FROM events WHERE ticket_id = ? AND type = 'gate.profile'",
+        (t.id,),
+    ).fetchone()
+    assert row is None
+
+
+def test_gate_rejects_unknown_profile_without_running_commands(
+    db_conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import gate, ticket
+
+    t = ticket.open_ticket(db_conn, wave=1, component="x")
+    called = False
+
+    def _should_not_run(
+        spec: gate.CommandSpec, *, ticket_id: str, profile: str
+    ) -> gate.CommandResult:
+        nonlocal called
+        called = True
+        return gate.CommandResult(spec.name, spec.argv, True, 0, Path("unused.log"))
+
+    monkeypatch.setattr(gate, "_run_command", _should_not_run)
+
+    with pytest.raises(gate.GateMisconfigured, match="profile"):
+        gate.run_gate(db_conn, ticket_id=t.id, phase="red", profile="unknown")
+    assert called is False
+
+
+def test_profile_commands_are_interpreter_safe() -> None:
+    import sys
+
+    from harness import gate
+
+    for profile in ("backend", "frontend", "pipeline", "docs", "release"):
+        for spec in gate._profile_commands(profile):
+            assert spec.argv[0] == sys.executable
 
 
 def test_red_gate_does_not_check_reviews(
