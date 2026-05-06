@@ -24,6 +24,7 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal, TypeAlias, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +40,40 @@ logger = logging.getLogger(__name__)
 # 프로젝트 루트에서 ui/web/ 경로 계산
 _PROJECT_ROOT = Path(__file__).parent.parent
 _STATIC_DIR = _PROJECT_ROOT / "ui" / "web"
+
+RuntimeProfile: TypeAlias = Literal["desktop", "api-test", "unit-test"]
+DEFAULT_RUNTIME_PROFILE: RuntimeProfile = "desktop"
+_VALID_RUNTIME_PROFILES: frozenset[str] = frozenset(
+    {
+        "desktop",
+        "api-test",
+        "unit-test",
+    }
+)
+_LIGHTWEIGHT_RUNTIME_PROFILES: frozenset[str] = frozenset(
+    {
+        "api-test",
+        "unit-test",
+    }
+)
+
+
+def _normalize_runtime_profile(runtime_profile: RuntimeProfile | str) -> RuntimeProfile:
+    """런타임 프로필 문자열을 검증하고 표준 타입으로 반환한다.
+
+    Args:
+        runtime_profile: create_app 호출 시 전달된 런타임 프로필.
+
+    Returns:
+        검증된 런타임 프로필.
+
+    Raises:
+        ValueError: 지원하지 않는 런타임 프로필일 때.
+    """
+    if runtime_profile not in _VALID_RUNTIME_PROFILES:
+        valid = ", ".join(sorted(_VALID_RUNTIME_PROFILES))
+        raise ValueError(f"지원하지 않는 runtime_profile입니다: {runtime_profile} (허용: {valid})")
+    return cast(RuntimeProfile, runtime_profile)
 
 
 # === lifespan 컨텍스트 매니저 ===
@@ -65,7 +100,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # --- Startup ---
     config: AppConfig = app.state.config
-    logger.info("FastAPI 서버 시작 — 리소스 초기화 중...")
+    runtime_profile = _normalize_runtime_profile(
+        getattr(app.state, "runtime_profile", DEFAULT_RUNTIME_PROFILE)
+    )
+    lightweight_runtime = runtime_profile in _LIGHTWEIGHT_RUNTIME_PROFILES
+    app.state.runtime_profile = runtime_profile
+    logger.info(f"FastAPI 서버 시작 — 리소스 초기화 중... profile={runtime_profile}")
 
     # 작업 큐 초기화
     db_path = config.paths.resolved_pipeline_db
@@ -106,7 +146,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # AudioRecorder 초기화
     recorder = None
-    if config.recording.enabled:
+    if lightweight_runtime:
+        app.state.recorder = None
+        logger.info(f"AudioRecorder 비활성화 (runtime_profile={runtime_profile})")
+    elif config.recording.enabled:
         try:
             from steps.recorder import AudioRecorder
 
@@ -122,7 +165,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ZoomDetector 초기화 + AudioRecorder 연동
     zoom_detector = None
-    if config.recording.enabled and config.recording.auto_record_on_zoom:
+    if lightweight_runtime:
+        app.state.zoom_detector = None
+        logger.info(f"ZoomDetector 비활성화 (runtime_profile={runtime_profile})")
+    elif config.recording.enabled and config.recording.auto_record_on_zoom:
         try:
             from steps.zoom_detector import ZoomDetector
 
@@ -159,67 +205,76 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 실행 중인 파이프라인 태스크 추적용 세트
     app.state.running_tasks: set[asyncio.Task] = set()
 
-    # 7. ThermalManager 초기화 (lazy)
     thermal_manager = None
-    try:
-        from core.thermal_manager import ThermalManager
-
-        thermal_manager = ThermalManager(config)
-        app.state.thermal_manager = thermal_manager
-        logger.info("ThermalManager 초기화 완료")
-    except Exception as e:
-        app.state.thermal_manager = None
-        logger.warning(f"ThermalManager 초기화 실패: {e}")
-
-    # 8. PipelineManager 초기화 (lazy)
     pipeline_manager = None
-    try:
-        from core.pipeline import PipelineManager
-
-        pipeline_manager = PipelineManager(config=config)
-        app.state.pipeline_manager = pipeline_manager
-        logger.info("PipelineManager 초기화 완료")
-    except Exception as e:
-        app.state.pipeline_manager = None
-        logger.warning(f"PipelineManager 초기화 실패: {e}")
-
-    # 9. FolderWatcher 초기화 + start (lazy)
     folder_watcher = None
-    try:
-        from core.watcher import FolderWatcher
-
-        folder_watcher = FolderWatcher(async_job_queue=async_queue, config=config)
-        await folder_watcher.start()
-        await folder_watcher.scan_existing()
-        app.state.folder_watcher = folder_watcher
-        logger.info("FolderWatcher 시작 완료")
-    except Exception as e:
-        app.state.folder_watcher = None
-        logger.warning(f"FolderWatcher 초기화 실패: {e}")
-
-    # 10. JobProcessor 초기화 + start (lazy, pipeline과 thermal 필요)
     job_processor = None
-    if pipeline_manager is not None and thermal_manager is not None:
-        try:
-            from core.orchestrator import JobProcessor
-
-            job_processor = JobProcessor(
-                job_queue=async_queue,
-                pipeline=pipeline_manager,
-                thermal_manager=thermal_manager,
-                ws_manager=ws_manager,
-                poll_interval=5.0,
-            )
-            await job_processor.start()
-            app.state.job_processor = job_processor
-            logger.info("JobProcessor 시작 완료")
-        except Exception as e:
-            app.state.job_processor = None
-            logger.warning(f"JobProcessor 초기화 실패: {e}")
-    else:
+    if lightweight_runtime:
+        app.state.thermal_manager = None
+        app.state.pipeline_manager = None
+        app.state.folder_watcher = None
         app.state.job_processor = None
-        if pipeline_manager is None or thermal_manager is None:
-            logger.warning("PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화")
+        logger.info(f"백그라운드 런타임 컴포넌트 비활성화 (runtime_profile={runtime_profile})")
+    else:
+        # 7. ThermalManager 초기화 (lazy)
+        try:
+            from core.thermal_manager import ThermalManager
+
+            thermal_manager = ThermalManager(config)
+            app.state.thermal_manager = thermal_manager
+            logger.info("ThermalManager 초기화 완료")
+        except Exception as e:
+            app.state.thermal_manager = None
+            logger.warning(f"ThermalManager 초기화 실패: {e}")
+
+        # 8. PipelineManager 초기화 (lazy)
+        try:
+            from core.pipeline import PipelineManager
+
+            pipeline_manager = PipelineManager(config=config)
+            app.state.pipeline_manager = pipeline_manager
+            logger.info("PipelineManager 초기화 완료")
+        except Exception as e:
+            app.state.pipeline_manager = None
+            logger.warning(f"PipelineManager 초기화 실패: {e}")
+
+        # 9. FolderWatcher 초기화 + start (lazy)
+        try:
+            from core.watcher import FolderWatcher
+
+            folder_watcher = FolderWatcher(async_job_queue=async_queue, config=config)
+            await folder_watcher.start()
+            await folder_watcher.scan_existing()
+            app.state.folder_watcher = folder_watcher
+            logger.info("FolderWatcher 시작 완료")
+        except Exception as e:
+            app.state.folder_watcher = None
+            logger.warning(f"FolderWatcher 초기화 실패: {e}")
+
+        # 10. JobProcessor 초기화 + start (lazy, pipeline과 thermal 필요)
+        if pipeline_manager is not None and thermal_manager is not None:
+            try:
+                from core.orchestrator import JobProcessor
+
+                job_processor = JobProcessor(
+                    job_queue=async_queue,
+                    pipeline=pipeline_manager,
+                    thermal_manager=thermal_manager,
+                    ws_manager=ws_manager,
+                    poll_interval=5.0,
+                )
+                await job_processor.start()
+                app.state.job_processor = job_processor
+                logger.info("JobProcessor 시작 완료")
+            except Exception as e:
+                app.state.job_processor = None
+                logger.warning(f"JobProcessor 초기화 실패: {e}")
+        else:
+            app.state.job_processor = None
+            if pipeline_manager is None or thermal_manager is None:
+                logger.warning(
+                    "PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화"
+                )
 
     # 11. STTModelDownloader 초기화 (STT 모델 선택기 지원)
     try:
@@ -291,19 +346,25 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # === 앱 팩토리 ===
 
 
-def create_app(config: AppConfig | None = None) -> FastAPI:
+def create_app(
+    config: AppConfig | None = None,
+    runtime_profile: RuntimeProfile = DEFAULT_RUNTIME_PROFILE,
+) -> FastAPI:
     """FastAPI 애플리케이션을 생성하고 설정한다.
 
     팩토리 패턴으로 테스트와 프로덕션 환경 모두 지원.
 
     Args:
         config: 앱 설정. None이면 config.yaml에서 로드.
+        runtime_profile: 실행 프로필. desktop은 전체 런타임, api-test/unit-test는
+            API 테스트용 경량 런타임.
 
     Returns:
         설정 완료된 FastAPI 인스턴스
     """
     if config is None:
         config = get_config()
+    runtime_profile = _normalize_runtime_profile(runtime_profile)
 
     app = FastAPI(
         title="Recap API",
@@ -317,6 +378,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     # config를 app.state에 저장 (lifespan에서 접근)
     app.state.config = config
+    app.state.runtime_profile = runtime_profile
 
     # CORS 미들웨어 — localhost만 허용
     _setup_cors(app, config)
@@ -339,7 +401,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # SPA 라우팅 (/app 및 /app/{path} → index.html)
     _setup_spa_routes(app)
 
-    logger.info(f"FastAPI 앱 생성 완료 — host={config.server.host}, port={config.server.port}")
+    logger.info(
+        f"FastAPI 앱 생성 완료 — host={config.server.host}, "
+        f"port={config.server.port}, profile={runtime_profile}"
+    )
 
     return app
 
@@ -531,7 +596,7 @@ def _setup_spa_routes(app: FastAPI) -> None:
     index_path = _STATIC_DIR / "index.html"
 
     def _build_index_html() -> str:
-        """index.html 을 읽어 spa.js / app.js / style.css 의 src/href 에
+        """index.html 을 읽어 JS/CSS 정적 자산의 src/href 에
         파일 mtime 기반 버전 쿼리를 자동 주입한다.
 
         브라우저가 강력하게 캐싱해서 코드 변경 후에도 구버전을 사용하는
@@ -548,9 +613,9 @@ def _setup_spa_routes(app: FastAPI) -> None:
             except OSError:
                 return "0"
 
-        # /static/spa.js, /static/app.js, /static/style.css 에 ?v=mtime 추가
+        # /static/*.js, /static/*.css 에 ?v=mtime 추가
         # 람다는 기본 인자(v=v)로 현재 루프 반복의 버전 값을 바인딩해 B023 오보 회피 + 의도 명시
-        for fname in ("spa.js", "app.js", "style.css"):
+        for fname in ("spa.js", "app.js", "tokens.css", "style.css", "bulk-actions.css"):
             v = _ver(fname)
             pattern = re.compile(r"(/static/" + re.escape(fname) + r')(\?[^"\'>\s]*)?')
             html = pattern.sub(lambda m, v=v: f"{m.group(1)}?v={v}", html)
@@ -561,7 +626,7 @@ def _setup_spa_routes(app: FastAPI) -> None:
     async def spa_handler(path: str = "") -> HTMLResponse:
         """SPA 엔트리포인트. 모든 /app 하위 경로에 index.html을 반환한다.
 
-        spa.js/app.js/style.css 는 mtime 기반 버전 쿼리로 캐시 무효화된다.
+        JS/CSS 자산은 mtime 기반 버전 쿼리로 캐시 무효화된다.
         """
         if not index_path.is_file():
             raise HTTPException(

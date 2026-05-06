@@ -80,6 +80,198 @@ class TestAppCreation:
         assert app.openapi_url == "/api/openapi.json"
 
 
+# === TestRuntimeProfile ===
+
+
+class TestRuntimeProfile:
+    """create_app 런타임 프로필 테스트."""
+
+    def _get_runtime_patches(self) -> dict[str, MagicMock]:
+        """런타임 컴포넌트 mock 딕셔너리를 생성한다.
+
+        Returns:
+            patch에 사용할 mock 딕셔너리.
+        """
+        mock_search_cls = MagicMock()
+        mock_search = MagicMock()
+        mock_search_cls.return_value = mock_search
+
+        mock_chat_cls = MagicMock()
+        mock_chat = MagicMock()
+        mock_chat_cls.return_value = mock_chat
+
+        mock_recorder_cls = MagicMock()
+        mock_recorder = MagicMock()
+        mock_recorder.cleanup = AsyncMock()
+        mock_recorder_cls.return_value = mock_recorder
+
+        mock_zoom_cls = MagicMock()
+        mock_zoom = MagicMock()
+        mock_zoom.start = AsyncMock()
+        mock_zoom.stop = AsyncMock()
+        mock_zoom.on_meeting_change = MagicMock()
+        mock_zoom_cls.return_value = mock_zoom
+
+        mock_thermal_cls = MagicMock()
+        mock_thermal = MagicMock()
+        mock_thermal_cls.return_value = mock_thermal
+
+        mock_pipeline_cls = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline_cls.return_value = mock_pipeline
+
+        mock_watcher_cls = MagicMock()
+        mock_watcher = MagicMock()
+        mock_watcher.start = AsyncMock()
+        mock_watcher.stop = AsyncMock()
+        mock_watcher.scan_existing = AsyncMock(return_value=[])
+        mock_watcher_cls.return_value = mock_watcher
+
+        mock_processor_cls = MagicMock()
+        mock_processor = MagicMock()
+        mock_processor.start = AsyncMock()
+        mock_processor.stop = AsyncMock()
+        mock_processor_cls.return_value = mock_processor
+
+        mock_stt_downloader_cls = MagicMock()
+        mock_stt_downloader = MagicMock()
+        mock_stt_downloader_cls.return_value = mock_stt_downloader
+
+        return {
+            "search_cls": mock_search_cls,
+            "search": mock_search,
+            "chat_cls": mock_chat_cls,
+            "chat": mock_chat,
+            "recorder_cls": mock_recorder_cls,
+            "recorder": mock_recorder,
+            "zoom_cls": mock_zoom_cls,
+            "zoom": mock_zoom,
+            "thermal_cls": mock_thermal_cls,
+            "thermal": mock_thermal,
+            "pipeline_cls": mock_pipeline_cls,
+            "pipeline": mock_pipeline,
+            "watcher_cls": mock_watcher_cls,
+            "watcher": mock_watcher,
+            "processor_cls": mock_processor_cls,
+            "processor": mock_processor,
+            "stt_downloader_cls": mock_stt_downloader_cls,
+            "stt_downloader": mock_stt_downloader,
+        }
+
+    def test_create_app_runtime_profile_기본값_desktop(self, tmp_path: Path) -> None:
+        """runtime_profile 기본값이 desktop이고 기존 호출 방식이 유지되는지 확인한다."""
+        from inspect import signature
+
+        from api.server import create_app
+
+        param = signature(create_app).parameters["runtime_profile"]
+        assert param.default == "desktop"
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+
+        assert app.state.runtime_profile == "desktop"
+
+    def test_desktop_기본값은_런타임_컴포넌트를_시작(self, tmp_path: Path) -> None:
+        """기본 desktop 프로필이 기존 런타임 시작 동작을 유지하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config)
+        mocks = self._get_runtime_patches()
+
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", mocks["search_cls"]),
+            patch("search.chat.ChatEngine", mocks["chat_cls"]),
+            patch("steps.recorder.AudioRecorder", mocks["recorder_cls"]),
+            patch("steps.zoom_detector.ZoomDetector", mocks["zoom_cls"]),
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            patch("core.stt_model_downloader.STTModelDownloader", mocks["stt_downloader_cls"]),
+            TestClient(app),
+        ):
+            assert app.state.runtime_profile == "desktop"
+            assert app.state.recorder is mocks["recorder"]
+            assert app.state.zoom_detector is mocks["zoom"]
+            assert app.state.folder_watcher is mocks["watcher"]
+            assert app.state.job_processor is mocks["processor"]
+
+        mocks["recorder_cls"].assert_called_once()
+        mocks["zoom_cls"].assert_called_once()
+        mocks["watcher"].start.assert_awaited_once()
+        mocks["processor"].start.assert_awaited_once()
+
+    def test_api_test_프로필은_무거운_런타임을_시작하지_않음(self, tmp_path: Path) -> None:
+        """api-test 프로필이 API 공유 리소스만 유지하고 런타임 워커를 건너뛰는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config, runtime_profile="api-test")
+        mocks = self._get_runtime_patches()
+
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", mocks["search_cls"]),
+            patch("search.chat.ChatEngine", mocks["chat_cls"]),
+            patch("steps.recorder.AudioRecorder", mocks["recorder_cls"]),
+            patch("steps.zoom_detector.ZoomDetector", mocks["zoom_cls"]),
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            patch("core.stt_model_downloader.STTModelDownloader", mocks["stt_downloader_cls"]),
+            TestClient(app) as client,
+        ):
+            response = client.get("/api/health")
+
+            assert response.status_code == 200
+            assert hasattr(app.state, "job_queue")
+            assert app.state.job_queue is not None
+            assert hasattr(app.state, "ws_manager")
+            assert app.state.ws_manager is not None
+            assert app.state.recorder is None
+            assert app.state.zoom_detector is None
+            assert app.state.thermal_manager is None
+            assert app.state.pipeline_manager is None
+            assert app.state.folder_watcher is None
+            assert app.state.job_processor is None
+
+        mocks["recorder_cls"].assert_not_called()
+        mocks["zoom_cls"].assert_not_called()
+        mocks["thermal_cls"].assert_not_called()
+        mocks["pipeline_cls"].assert_not_called()
+        mocks["watcher_cls"].assert_not_called()
+        mocks["processor_cls"].assert_not_called()
+
+    def test_unit_test_프로필은_api_test와_동일하게_경량화(self, tmp_path: Path) -> None:
+        """unit-test 프로필도 테스트용 경량 런타임으로 동작하는지 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config, runtime_profile="unit-test")
+        mocks = self._get_runtime_patches()
+
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", mocks["search_cls"]),
+            patch("search.chat.ChatEngine", mocks["chat_cls"]),
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            patch("core.stt_model_downloader.STTModelDownloader", mocks["stt_downloader_cls"]),
+            TestClient(app),
+        ):
+            assert app.state.runtime_profile == "unit-test"
+            assert app.state.folder_watcher is None
+            assert app.state.job_processor is None
+
+        mocks["thermal_cls"].assert_not_called()
+        mocks["pipeline_cls"].assert_not_called()
+        mocks["watcher_cls"].assert_not_called()
+        mocks["processor_cls"].assert_not_called()
+
+
 # === TestHealthEndpoint ===
 
 
