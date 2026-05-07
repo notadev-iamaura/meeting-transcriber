@@ -159,14 +159,14 @@ pipeline:
     app.state.config = cfg
 
     # _get_config_path 를 monkeypatch
-    import api.routes as routes_mod
+    import api.routers.settings as settings_router
 
-    original = routes_mod._get_config_path
-    routes_mod._get_config_path = lambda: fake_config
+    original = settings_router._get_config_path
+    settings_router._get_config_path = lambda: fake_config
     try:
         yield TestClient(app)
     finally:
-        routes_mod._get_config_path = original
+        settings_router._get_config_path = original
 
 
 class TestSTTLanguageInjection:

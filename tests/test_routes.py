@@ -1372,6 +1372,39 @@ class TestRetryMeetingEndpoint:
 
         assert response.status_code == 409
 
+    def test_재시도는_체크포인트와_결과파일을_보존한다(self, tmp_path: Path) -> None:
+        """실패한 단계부터 재시도는 기존 진행 기록을 지우지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retry_keep"
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        out_dir = tmp_path / "outputs" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state_path = ckpt_dir / "pipeline_state.json"
+        transcript_path = out_dir / "corrected.json"
+        summary_path = out_dir / "summary.md"
+        state_path.write_text("{}", encoding="utf-8")
+        transcript_path.write_text("{}", encoding="utf-8")
+        summary_path.write_text("# summary", encoding="utf-8")
+
+        mock_job = MockJob(1, meeting_id, "/audio/retry.m4a", "failed", retry_count=1)
+        mock_retried = MockJob(1, meeting_id, "/audio/retry.m4a", "queued", retry_count=2)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            queue.retry_job = MagicMock(return_value=mock_retried)
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "queued"
+        assert data["retry_count"] == 2
+        assert state_path.exists()
+        assert transcript_path.exists()
+        assert summary_path.exists()
+
 
 # === TestDeleteMeetingEndpoint ===
 
@@ -1815,6 +1848,49 @@ class TestTranscribeMeetingEndpoint:
         assert response.status_code == 409
         # force=true 라도 failed 가 아니므로 force_set_status 는 호출되지 않음
         queue.force_set_status.assert_not_called()
+
+
+class TestReTranscribeMeetingEndpoint:
+    """POST /api/meetings/{meeting_id}/re-transcribe 엔드포인트 테스트."""
+
+    def test_재전사는_체크포인트와_결과파일을_삭제하고_queued로_초기화한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """처음부터 다시 전사는 기존 결과를 버리고 retry_count를 0으로 리셋한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_reset"
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        out_dir = tmp_path / "outputs" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state_path = ckpt_dir / "pipeline_state.json"
+        transcript_path = out_dir / "corrected.json"
+        summary_path = out_dir / "summary.md"
+        audio_path = out_dir / "input.wav"
+        state_path.write_text("{}", encoding="utf-8")
+        transcript_path.write_text("{}", encoding="utf-8")
+        summary_path.write_text("# summary", encoding="utf-8")
+        audio_path.write_bytes(b"audio")
+
+        mock_job = MockJob(1, meeting_id, str(audio_path), "failed", retry_count=2)
+        mock_reset = MockJob(1, meeting_id, str(audio_path), "queued", retry_count=0)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            queue.reset_for_retranscribe = MagicMock(return_value=mock_reset)
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "queued"
+        assert data["retry_count"] == 0
+        assert not ckpt_dir.exists()
+        assert not transcript_path.exists()
+        assert not summary_path.exists()
+        assert audio_path.exists()
 
 
 class TestGetMeetingAudio:
