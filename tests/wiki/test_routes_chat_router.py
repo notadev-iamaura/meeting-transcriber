@@ -394,12 +394,12 @@ class TestRouterAmbiguousQueryFallback:
         )
 
         # _build_hybrid_chat_service 를 mock LLM 사용 버전으로 교체
-        from api import routes as routes_module
+        from api.routers import search_chat as search_chat_router
 
-        original_builder = routes_module._build_hybrid_chat_service
+        original_builder = search_chat_router._build_hybrid_chat_service
 
         def _patched_builder(req: Any, chat_engine: Any) -> Any:
-            chat_adapter = routes_module._ChatEngineAdapter(chat_engine)
+            chat_adapter = search_chat_router._ChatEngineAdapter(chat_engine)
             router_obj = QueryRouter(
                 llm=mock_llm,
                 enable_llm_fallback=True,
@@ -423,7 +423,7 @@ class TestRouterAmbiguousQueryFallback:
         # Act — 휴리스틱 매칭이 안 되는 모호한 질의
         ambiguous_query = "그거 어떻게 됐어"
         with patch.object(
-            routes_module,
+            search_chat_router,
             "_build_hybrid_chat_service",
             side_effect=_patched_builder,
         ):
@@ -434,7 +434,7 @@ class TestRouterAmbiguousQueryFallback:
             )
 
         # 후처리 — original 복원 (안전성)
-        routes_module._build_hybrid_chat_service = original_builder
+        search_chat_router._build_hybrid_chat_service = original_builder
 
         # Assert
         assert response.status_code == 200
