@@ -18,10 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import shutil
-import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,9 +28,6 @@ from api.dependencies import (
 )
 from api.dependencies import (
     get_pipeline_manager as _get_pipeline_manager,
-)
-from api.dependencies import (
-    get_recorder as _get_recorder,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,40 +61,55 @@ router = APIRouter(prefix="/api", tags=["api"])
 # === 요청/응답 Pydantic 스키마 ===
 
 
-class SystemResourcesResponse(BaseModel):
-    """시스템 리소스 상태 응답 스키마.
+# 시스템/대시보드 API 는 api.routers.system 으로 분리한다.
+# 아래 re-export 는 기존 `api.routes.StatusResponse` 같은 접근을 보존한다.
+from api.routers import system as _system_router  # noqa: E402
 
-    Attributes:
-        ram_used_gb: 사용 중인 RAM (GB)
-        ram_total_gb: 전체 RAM (GB)
-        ram_percent: RAM 사용률 (%)
-        cpu_percent: CPU 사용률 (%)
-        loaded_model: 현재 로드된 모델명 (없으면 None)
-    """
+DashboardStatsResponse = _system_router.DashboardStatsResponse
+OpenFolderResponse = _system_router.OpenFolderResponse
+StatusResponse = _system_router.StatusResponse
+SystemResourcesResponse = _system_router.SystemResourcesResponse
+_ACTIVE_JOB_STATUSES = _system_router._ACTIVE_JOB_STATUSES
+_PENDING_JOB_STATUSES = _system_router._PENDING_JOB_STATUSES
+_UNTRANSCRIBED_JOB_STATUSES = _system_router._UNTRANSCRIBED_JOB_STATUSES
+shutil = _system_router.shutil
+subprocess = _system_router.subprocess
+sys = _system_router.sys
+get_dashboard_stats = _system_router.get_dashboard_stats
+get_status = _system_router.get_status
+get_system_resources = _system_router.get_system_resources
+open_audio_folder = _system_router.open_audio_folder
 
-    ram_used_gb: float
-    ram_total_gb: float
-    ram_percent: float
-    cpu_percent: float
-    loaded_model: str | None = None
+router.include_router(_system_router.router)
 
 
-class StatusResponse(BaseModel):
-    """시스템 상태 응답 스키마.
+# 업로드 API 는 api.routers.uploads 로 분리한다.
+# 아래 re-export 는 기존 업로드 helper import/patch 경로를 보존한다.
+from api.routers import uploads as _uploads_router  # noqa: E402
 
-    Attributes:
-        status: 서버 동작 상태 ("ok")
-        queue_summary: 상태별 작업 수 집계
-        active_jobs: 현재 진행 중인 작업 수
-        total_jobs: 전체 작업 수
-    """
+UploadResponse = _uploads_router.UploadResponse
+_FILENAME_FORBIDDEN_PATTERN = _uploads_router._FILENAME_FORBIDDEN_PATTERN
+_UPLOAD_MAX_BYTES = _uploads_router._UPLOAD_MAX_BYTES
+_resolve_unique_upload_path = _uploads_router._resolve_unique_upload_path
+_sanitize_upload_filename = _uploads_router._sanitize_upload_filename
+upload_audio = _uploads_router.upload_audio
 
-    status: str = "ok"
-    queue_summary: dict[str, int] = Field(default_factory=dict)
-    active_jobs: int = 0
-    total_jobs: int = 0
-    is_recording: bool = False
-    recording_duration: float = 0.0
+router.include_router(_uploads_router.router)
+
+
+# 녹음 API 는 api.routers.recording 으로 분리한다.
+# 아래 re-export 는 기존 `api.routes.RecordingStatusResponse` 같은 접근을 보존한다.
+from api.routers import recording as _recording_router  # noqa: E402
+
+AudioDeviceItem = _recording_router.AudioDeviceItem
+RecordingStartRequest = _recording_router.RecordingStartRequest
+RecordingStatusResponse = _recording_router.RecordingStatusResponse
+get_recording_devices = _recording_router.get_recording_devices
+get_recording_status = _recording_router.get_recording_status
+start_recording = _recording_router.start_recording
+stop_recording = _recording_router.stop_recording
+
+router.include_router(_recording_router.router)
 
 
 # 회의 상세 API 는 api.routers.meeting_detail 로 분리한다.
@@ -156,58 +164,6 @@ class MeetingsResponse(BaseModel):
     total: int = 0
 
 
-class DashboardStatsResponse(BaseModel):
-    """홈 화면 대시보드 통계 응답 스키마.
-
-    Attributes:
-        total_meetings: 전체 회의 수 (queue 의 모든 작업)
-        this_week_meetings: 최근 7 일 내 등록된 회의 수
-        queue_pending: 전사 처리 대기열 (queued) 합계 — 워커가 자동으로 처리할 항목
-        untranscribed_recordings: 미전사 녹음 (recorded) 합계 — 사용자가 수동으로
-            "전사 시작" 을 눌러야 진행되는 항목. 자동 처리되지 않는다.
-        active_processing: 현재 진행 중 (recording, transcribing, diarizing,
-            merging, embedding) 합계
-        completed: 완료 상태 작업 수
-        failed: 실패 상태 작업 수
-        audio_input_dir: 오디오 입력 폴더 절대 경로 (UI 가 폴더 위치 안내에 사용)
-    """
-
-    total_meetings: int = 0
-    this_week_meetings: int = 0
-    queue_pending: int = 0
-    untranscribed_recordings: int = 0
-    active_processing: int = 0
-    completed: int = 0
-    failed: int = 0
-    audio_input_dir: str = ""
-
-
-class OpenFolderResponse(BaseModel):
-    """폴더 열기 결과 응답 스키마.
-
-    Attributes:
-        opened: 성공 여부 (Finder 등 외부 프로그램 호출 성공 시 True)
-        path: 실제로 열린 폴더 절대 경로
-    """
-
-    opened: bool = False
-    path: str = ""
-
-
-class UploadResponse(BaseModel):
-    """오디오 업로드 결과 응답 스키마.
-
-    Attributes:
-        filename: 저장된 파일명 (충돌 방지로 변경된 경우 변경된 이름)
-        path: 저장 후 절대 경로 (audio_input_dir 하위)
-        size: 저장된 파일 크기 (바이트)
-    """
-
-    filename: str
-    path: str
-    size: int
-
-
 # === 헬퍼 함수 ===
 
 
@@ -232,58 +188,6 @@ def _validate_meeting_id(meeting_id: str) -> None:
 
 
 # === 엔드포인트 ===
-
-
-@router.get("/status", response_model=StatusResponse)
-async def get_status(request: Request) -> StatusResponse:
-    """시스템 상태를 반환한다.
-
-    작업 큐의 상태별 집계와 활성 작업 수를 포함한다.
-
-    Args:
-        request: FastAPI Request 객체
-
-    Returns:
-        StatusResponse: 시스템 상태 정보
-    """
-    queue = _get_job_queue(request)
-
-    try:
-        summary = await queue.count_by_status()
-        all_jobs = await queue.get_all_jobs()
-
-        # 진행 중인 상태 목록 (queued, completed, failed 제외)
-        active_statuses = {
-            "recording",
-            "transcribing",
-            "diarizing",
-            "merging",
-            "embedding",
-        }
-        active_count = sum(count for status, count in summary.items() if status in active_statuses)
-
-        # 녹음 상태 확인
-        recorder = getattr(request.app.state, "recorder", None)
-        is_recording = False
-        recording_duration = 0.0
-        if recorder is not None:
-            is_recording = recorder.is_recording
-            recording_duration = round(recorder.current_duration, 1)
-
-        return StatusResponse(
-            status="ok",
-            queue_summary=summary,
-            active_jobs=active_count,
-            total_jobs=len(all_jobs),
-            is_recording=is_recording,
-            recording_duration=recording_duration,
-        )
-    except Exception as e:
-        logger.exception(f"상태 조회 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"상태 조회 중 오류가 발생했습니다: {e}",
-        ) from e
 
 
 @router.get("/meetings", response_model=MeetingsResponse)
@@ -364,383 +268,6 @@ chat = _search_chat_router.chat
 search = _search_chat_router.search
 
 router.include_router(_search_chat_router.router)
-
-
-# === 시스템 리소스 엔드포인트 ===
-
-
-@router.get("/system/resources", response_model=SystemResourcesResponse)
-async def get_system_resources(request: Request) -> SystemResourcesResponse:
-    """시스템 리소스 사용량을 반환한다.
-
-    psutil로 RAM/CPU 사용량을 측정하고,
-    ModelLoadManager에서 현재 로드된 모델명을 조회한다.
-
-    Args:
-        request: FastAPI Request 객체
-
-    Returns:
-        SystemResourcesResponse: 시스템 리소스 정보
-    """
-    import psutil
-
-    mem = psutil.virtual_memory()
-    cpu = psutil.cpu_percent(interval=None)
-
-    # model_manager에서 현재 로드된 모델명 조회
-    model_manager = getattr(request.app.state, "model_manager", None)
-    loaded_model = None
-    if model_manager is not None:
-        loaded_model = getattr(model_manager, "current_model_name", None)
-
-    return SystemResourcesResponse(
-        ram_used_gb=round(mem.used / (1024**3), 2),
-        ram_total_gb=round(mem.total / (1024**3), 2),
-        ram_percent=round(mem.percent, 1),
-        cpu_percent=round(cpu, 1),
-        loaded_model=loaded_model,
-    )
-
-
-# === 홈 화면 대시보드 / 시스템 액션 / 업로드 엔드포인트 ===
-
-
-# 활성 (진행 중) 작업 상태 집합 — DashboardStats 와 status 엔드포인트가 공유.
-_ACTIVE_JOB_STATUSES: frozenset[str] = frozenset(
-    {"recording", "transcribing", "diarizing", "merging", "embedding"}
-)
-# 처리 대기 상태 — 워커가 자동으로 잡아갈 항목.
-# recorded 는 사용자가 수동으로 전사를 시작해야 하므로 분리해서 집계한다
-# (홈 카드에서 "처리 대기" vs "미전사 녹음" 으로 구분 표시).
-_PENDING_JOB_STATUSES: frozenset[str] = frozenset({"queued"})
-_UNTRANSCRIBED_JOB_STATUSES: frozenset[str] = frozenset({"recorded"})
-
-
-@router.get("/dashboard/stats", response_model=DashboardStatsResponse)
-async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
-    """홈 화면 상단 대시보드용 통계를 반환한다.
-
-    회의 큐를 한 번 조회한 뒤 메모리에서 상태별 집계와 이번 주 카운트를
-    동시에 계산한다. 외부 I/O(메타 파일 등) 는 사용하지 않으므로 응답이
-    빠르고 대시보드 폴링에 안전하다.
-
-    Args:
-        request: FastAPI Request
-
-    Returns:
-        DashboardStatsResponse: 대시보드 통계
-    """
-    from datetime import datetime, timedelta
-
-    queue = _get_job_queue(request)
-    config = _get_config(request)
-
-    try:
-        all_jobs = await queue.get_all_jobs()
-    except Exception as e:
-        logger.exception(f"대시보드 통계 조회 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"대시보드 통계 조회 중 오류가 발생했습니다: {e}",
-        ) from e
-
-    week_ago = datetime.now() - timedelta(days=7)
-
-    total = len(all_jobs)
-    this_week = 0
-    pending = 0
-    untranscribed = 0
-    active = 0
-    completed = 0
-    failed = 0
-
-    for job in all_jobs:
-        status = getattr(job, "status", "")
-        if status in _ACTIVE_JOB_STATUSES:
-            active += 1
-        elif status in _PENDING_JOB_STATUSES:
-            pending += 1
-        elif status in _UNTRANSCRIBED_JOB_STATUSES:
-            untranscribed += 1
-        elif status == "completed":
-            completed += 1
-        elif status == "failed":
-            failed += 1
-
-        # this_week 계산 — created_at 파싱 실패 시 무시 (안전한 기본값)
-        created_at = getattr(job, "created_at", "")
-        if created_at:
-            try:
-                created_dt = datetime.fromisoformat(created_at)
-                if created_dt >= week_ago:
-                    this_week += 1
-            except (ValueError, TypeError):
-                pass
-
-    return DashboardStatsResponse(
-        total_meetings=total,
-        this_week_meetings=this_week,
-        queue_pending=pending,
-        untranscribed_recordings=untranscribed,
-        active_processing=active,
-        completed=completed,
-        failed=failed,
-        audio_input_dir=str(config.paths.resolved_audio_input_dir),
-    )
-
-
-@router.post("/system/open-audio-folder", response_model=OpenFolderResponse)
-async def open_audio_folder(request: Request) -> OpenFolderResponse:
-    """오디오 입력 폴더를 macOS Finder 로 연다.
-
-    `~/.meeting-transcriber/audio_input` 폴더(설정에 따라 다를 수 있음)를
-    Finder 의 `open` 명령으로 띄운다. 폴더가 없으면 자동 생성한다.
-    macOS 가 아닌 환경에서는 500 을 반환한다 (이 앱 자체가 macOS 전용).
-
-    Returns:
-        OpenFolderResponse: 성공 여부와 실제 폴더 경로
-
-    Raises:
-        HTTPException 500: 폴더 생성 실패 또는 외부 명령 실행 실패
-    """
-    config = _get_config(request)
-    folder = config.paths.resolved_audio_input_dir
-
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.error(f"오디오 입력 폴더 생성 실패: {folder} — {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"폴더 생성 실패: {e}",
-        ) from e
-
-    if sys.platform != "darwin":
-        # macOS 전용 앱이지만 비-macOS 에서 실행되어도 경로는 반환해 UI 가
-        # "수동으로 이 경로를 열어 주세요" 안내를 표시할 수 있게 한다.
-        return OpenFolderResponse(opened=False, path=str(folder))
-
-    open_cmd = shutil.which("open")
-    if not open_cmd:
-        logger.error("`open` 명령을 찾을 수 없습니다 (PATH 설정을 확인하세요)")
-        raise HTTPException(
-            status_code=500,
-            detail="`open` 명령을 찾을 수 없습니다.",
-        )
-
-    try:
-        # asyncio.to_thread 로 블로킹 호출을 이벤트 루프에서 분리.
-        # check=True 로 실패 시 CalledProcessError 가 raise.
-        await asyncio.to_thread(
-            subprocess.run,
-            [open_cmd, str(folder)],
-            check=True,
-            capture_output=True,
-            timeout=5.0,
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error(f"폴더 열기 실패: returncode={e.returncode}, stderr={e.stderr!r}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"폴더 열기 실패: {e}",
-        ) from e
-    except subprocess.TimeoutExpired as e:
-        logger.error(f"폴더 열기 타임아웃: {folder}")
-        raise HTTPException(status_code=500, detail="폴더 열기가 응답하지 않습니다.") from e
-
-    logger.info(f"오디오 입력 폴더 열기 성공: {folder}")
-    return OpenFolderResponse(opened=True, path=str(folder))
-
-
-# 업로드 제한 — 사용자가 한 회의를 통째로 업로드하는 시나리오를 고려해 2 GB.
-# audio_input 폴더 자체가 회의 전용이라 더 큰 파일은 watcher 가 거부할 가능성이 높다.
-_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
-
-# 파일명에서 안전한 문자만 허용 (path traversal · 제어문자 차단).
-# 한글/공백/대시/언더스코어/괄호/점은 허용하되 슬래시·백슬래시·NUL 은 거부.
-_FILENAME_FORBIDDEN_PATTERN = re.compile(r"[\x00-\x1f/\\]")
-
-
-def _sanitize_upload_filename(raw: str, supported_exts: set[str]) -> str:
-    """업로드 파일명을 정제·검증한다.
-
-    Args:
-        raw: X-Filename 헤더로 전달된 원본 파일명 (URL 디코딩 이후).
-        supported_exts: 허용 확장자 집합 (점 제외, 소문자, 예: {"wav", "mp3"}).
-
-    Returns:
-        정제된 파일명 (앞뒤 공백·점 제거).
-
-    Raises:
-        HTTPException 400: 빈 문자열, 금지 문자, 미지원 확장자.
-    """
-    cleaned = (raw or "").strip().strip(".")
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="파일명이 비어 있습니다.")
-    if _FILENAME_FORBIDDEN_PATTERN.search(cleaned):
-        raise HTTPException(
-            status_code=400,
-            detail="파일명에 사용할 수 없는 문자가 포함되어 있습니다.",
-        )
-    # path traversal 추가 방어 — basename 만 사용
-    basename = Path(cleaned).name
-    if basename != cleaned:
-        raise HTTPException(
-            status_code=400,
-            detail="파일명에 경로 구분자가 포함되어 있습니다.",
-        )
-
-    suffix = Path(basename).suffix.lower().lstrip(".")
-    if suffix not in supported_exts:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"지원하지 않는 확장자입니다: .{suffix or '(없음)'} "
-                f"(지원 형식: {sorted(supported_exts)})"
-            ),
-        )
-    return basename
-
-
-def _resolve_unique_upload_path(target_dir: Path, filename: str) -> Path:
-    """동일한 파일명이 이미 존재하면 `name (1).ext`, `name (2).ext` 식으로 중복 회피.
-
-    Args:
-        target_dir: 저장 대상 디렉토리.
-        filename: 정제 완료된 파일명.
-
-    Returns:
-        실제로 저장될 절대 경로 (중복 회피 적용 후).
-    """
-    candidate = target_dir / filename
-    if not candidate.exists():
-        return candidate
-
-    stem = candidate.stem
-    suffix = candidate.suffix
-    for i in range(1, 1000):
-        alt = target_dir / f"{stem} ({i}){suffix}"
-        if not alt.exists():
-            return alt
-    # 비현실적 시나리오 — 1000 개 같은 이름이 쌓여 있을 때만 도달
-    raise HTTPException(status_code=409, detail="동일한 이름의 파일이 너무 많습니다.")
-
-
-@router.post("/uploads", response_model=UploadResponse, status_code=201)
-async def upload_audio(request: Request) -> UploadResponse:
-    """프론트가 fetch 로 전송한 단일 오디오 파일을 audio_input 폴더에 저장한다.
-
-    multipart/form-data 대신 Content-Type=application/octet-stream + X-Filename
-    헤더를 사용한다. python-multipart 같은 추가 의존성을 피하면서, 프론트의
-    File 객체를 그대로 fetch body 로 전달할 수 있어 단순하다.
-
-    저장된 파일은 `core.watcher.FolderWatcher` 가 자동으로 감지하여 큐에
-    `recorded` 상태로 등록한다. 즉 이 엔드포인트는 "큐 진입" 직접 책임을
-    지지 않는다 (단일 책임).
-
-    Headers:
-        X-Filename: URL 인코딩된 원본 파일명. 예: "회의록 2026-04-29.m4a"
-        Content-Length: 본문 크기 (선택, 사전 검증용).
-
-    Returns:
-        UploadResponse: 저장된 파일 정보.
-
-    Raises:
-        HTTPException 400: 헤더 누락, 잘못된 파일명, 미지원 확장자, 빈 본문.
-        HTTPException 413: 본문이 _UPLOAD_MAX_BYTES 초과.
-        HTTPException 500: 디스크 쓰기 실패.
-    """
-    from urllib.parse import unquote
-
-    config = _get_config(request)
-    audio_input_dir = config.paths.resolved_audio_input_dir
-    supported_exts = {fmt.lower().lstrip(".") for fmt in config.audio.supported_input_formats}
-
-    raw_filename = request.headers.get("x-filename")
-    if not raw_filename:
-        raise HTTPException(status_code=400, detail="X-Filename 헤더가 필요합니다.")
-
-    try:
-        decoded = unquote(raw_filename)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"X-Filename 헤더 디코딩 실패: {e}",
-        ) from e
-
-    filename = _sanitize_upload_filename(decoded, supported_exts)
-
-    # 본문 크기 사전 검증 — Content-Length 가 있을 때만 (정확하지 않을 수 있음).
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            cl = int(content_length)
-            if cl > _UPLOAD_MAX_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"파일이 너무 큽니다 (최대 {_UPLOAD_MAX_BYTES // (1024**3)} GB)",
-                )
-        except ValueError:
-            # Content-Length 가 잘못된 경우는 본문 읽으며 실측에 의존
-            pass
-
-    # 디렉토리 보장
-    try:
-        await asyncio.to_thread(audio_input_dir.mkdir, parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"입력 폴더 생성 실패: {e}",
-        ) from e
-
-    target_path = _resolve_unique_upload_path(audio_input_dir, filename)
-
-    # 본문을 스트리밍으로 받아 디스크에 직접 쓴다 — 대용량 파일 메모리 폭주 방지.
-    written = 0
-    tmp_path = target_path.with_suffix(target_path.suffix + ".part")
-    try:
-        # 동기 파일 I/O 를 to_thread 로 위임하지 않고 그대로 사용하는 이유:
-        # FastAPI 의 request.stream() 은 비동기 제너레이터이므로 같은 코루틴에서
-        # 청크별로 받아야 한다. write 는 OS 캐시로 빠르게 끝나며,
-        # 청크 크기는 starlette 기본(64KB)이라 이벤트 루프 블로킹이 미미하다.
-        with open(tmp_path, "wb") as fp:
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                written += len(chunk)
-                if written > _UPLOAD_MAX_BYTES:
-                    fp.close()
-                    tmp_path.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"파일이 너무 큽니다 (최대 {_UPLOAD_MAX_BYTES // (1024**3)} GB)",
-                    )
-                fp.write(chunk)
-
-        if written == 0:
-            tmp_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail="요청 본문이 비어 있습니다.")
-
-        # 원자적 rename — watcher 가 .part 파일은 무시하고, 최종 이름으로 등장
-        # 하는 순간을 새 파일 생성 이벤트로 감지한다.
-        tmp_path.rename(target_path)
-    except HTTPException:
-        # tmp_path 정리는 이미 위에서 처리됨
-        raise
-    except OSError as e:
-        # 미들 단계에서 깨진 .part 정리 (best-effort)
-        tmp_path.unlink(missing_ok=True)
-        logger.error(f"업로드 저장 실패: {target_path} — {e}")
-        raise HTTPException(status_code=500, detail=f"파일 저장 실패: {e}") from e
-
-    logger.info(
-        f"오디오 업로드 완료: filename={target_path.name}, size={written}, path={target_path}"
-    )
-    return UploadResponse(
-        filename=target_path.name,
-        path=str(target_path),
-        size=written,
-    )
 
 
 class SummarizeBatchRequest(BaseModel):
@@ -867,189 +394,6 @@ _resolve_audio_path = _meetings_batch._resolve_audio_path
 batch_action = _meetings_batch.batch_action
 
 router.include_router(_meetings_batch.router)
-
-
-# === 녹음 엔드포인트 ===
-
-
-class RecordingStatusResponse(BaseModel):
-    """녹음 상태 응답 스키마.
-
-    Attributes:
-        state: 녹음 상태 ("idle", "recording", "stopping")
-        is_recording: 녹음 중 여부
-        duration_seconds: 현재 녹음 경과 시간 (초)
-        meeting_id: 현재 녹음 중인 회의 ID
-        device: 사용 중인 오디오 장치명
-        is_system_audio: 시스템 오디오 캡처 여부
-    """
-
-    state: str
-    is_recording: bool = False
-    duration_seconds: float = 0.0
-    meeting_id: str | None = None
-    device: str | None = None
-    is_system_audio: bool = False
-
-
-class AudioDeviceItem(BaseModel):
-    """오디오 장치 응답 스키마.
-
-    Attributes:
-        index: ffmpeg 장치 인덱스
-        name: 장치 이름
-        is_blackhole: BlackHole 가상 장치 여부
-        is_aggregate: macOS Aggregate Device 여부 (본인 마이크 + 시스템 오디오 통합)
-    """
-
-    index: int
-    name: str
-    is_blackhole: bool = False
-    is_aggregate: bool = False
-
-
-class RecordingStartRequest(BaseModel):
-    """녹음 시작 요청 스키마.
-
-    Attributes:
-        meeting_id: 회의 식별자 (선택, 없으면 자동 생성)
-    """
-
-    meeting_id: str | None = None
-
-
-@router.get("/recording/status", response_model=RecordingStatusResponse)
-async def get_recording_status(
-    request: Request,
-) -> RecordingStatusResponse:
-    """녹음 상태를 조회한다.
-
-    Args:
-        request: FastAPI Request 객체
-
-    Returns:
-        RecordingStatusResponse: 현재 녹음 상태
-    """
-    recorder = _get_recorder(request)
-    status = recorder.get_status()
-    return RecordingStatusResponse(**status)
-
-
-@router.post("/recording/start")
-async def start_recording(
-    request: Request,
-    body: RecordingStartRequest | None = None,
-) -> dict[str, Any]:
-    """수동 녹음을 시작한다.
-
-    Args:
-        request: FastAPI Request 객체
-        body: 녹음 시작 요청 (선택)
-
-    Returns:
-        녹음 시작 결과
-
-    Raises:
-        HTTPException: 이미 녹음 중(409), 장치 에러(500), 서버 에러(500)
-    """
-    recorder = _get_recorder(request)
-    meeting_id = body.meeting_id if body else None
-
-    try:
-        from steps.recorder import AlreadyRecordingError, AudioDeviceError
-
-        await recorder.start_recording(meeting_id=meeting_id)
-        return {
-            "status": "ok",
-            "message": "녹음을 시작했습니다.",
-            "meeting_id": recorder._meeting_id,
-            "device": recorder.current_device_name,
-        }
-    except AlreadyRecordingError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except AudioDeviceError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    except Exception as e:
-        logger.exception(f"녹음 시작 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"녹음 시작 중 오류가 발생했습니다: {e}",
-        ) from e
-
-
-@router.post("/recording/stop")
-async def stop_recording(request: Request) -> dict[str, Any]:
-    """녹음을 정지한다.
-
-    Args:
-        request: FastAPI Request 객체
-
-    Returns:
-        녹음 정지 결과
-
-    Raises:
-        HTTPException: 서버 에러(500)
-    """
-    recorder = _get_recorder(request)
-
-    try:
-        result = await recorder.stop_recording()
-        if result is None:
-            return {
-                "status": "ok",
-                "message": "녹음이 정지되었습니다. (최소 시간 미달로 파일 파기)",
-                "discarded": True,
-            }
-
-        return {
-            "status": "ok",
-            "message": "녹음이 정지되었습니다.",
-            "file_path": str(result.file_path),
-            "duration_seconds": result.duration_seconds,
-            "audio_device": result.audio_device,
-        }
-    except Exception as e:
-        logger.exception(f"녹음 정지 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"녹음 정지 중 오류가 발생했습니다: {e}",
-        ) from e
-
-
-@router.get("/recording/devices", response_model=list[AudioDeviceItem])
-async def get_recording_devices(
-    request: Request,
-) -> list[AudioDeviceItem]:
-    """사용 가능한 오디오 장치 목록을 반환한다.
-
-    Args:
-        request: FastAPI Request 객체
-
-    Returns:
-        오디오 장치 목록
-
-    Raises:
-        HTTPException: 장치 검색 실패(500)
-    """
-    recorder = _get_recorder(request)
-
-    try:
-        devices = await recorder.detect_audio_devices()
-        return [
-            AudioDeviceItem(
-                index=dev.index,
-                name=dev.name,
-                is_blackhole=dev.is_blackhole,
-                is_aggregate=dev.is_aggregate,
-            )
-            for dev in devices
-        ]
-    except Exception as e:
-        logger.exception(f"오디오 장치 조회 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"오디오 장치 조회 중 오류가 발생했습니다: {e}",
-        ) from e
 
 
 # === 설정 관리 API ===
