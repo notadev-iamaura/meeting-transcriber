@@ -256,6 +256,16 @@ class STTConfig(BaseModel):
                 f"로컬 모델 경로가 존재하지 않습니다: {self.model_name} "
                 f"(확장: {expanded}). HuggingFace에서 다운로드를 시도합니다."
             )
+        try:
+            from core.stt_model_status import get_effective_hf_model_path
+
+            effective = get_effective_hf_model_path(self.model_name)
+        except Exception as e:
+            logger.debug(f"HF 캐시 모델 경로 해석 건너뜀: {e}")
+            effective = self.model_name
+        if effective != self.model_name:
+            logger.debug(f"HF 캐시 모델 경로 해석: {self.model_name} → {effective}")
+            return effective
         return self.model_name
 
 
