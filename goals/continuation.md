@@ -8,9 +8,9 @@ pause, or escalate.
 
 - Date: 2026-05-07
 - Branch: `main`
-- Baseline commit before Phase F: `23774267d85135c7da5765e6e803465a976b337f`
-- Open PR count after Phase E: 0
-- Completed merge wave: #41, #38, #39, #40, #42, #43, #44, #45, #46, #47
+- Baseline commit before Phase G: `2fec123f1d630eea1c3b24460e2cd126d2bd49df`
+- Open PR count after Phase F: 0
+- Completed merge wave: #41, #38, #39, #40, #42, #43, #44, #45, #46, #47, #48
 
 ## Completed Workstreams
 
@@ -36,8 +36,9 @@ pause, or escalate.
 - Phase D settings/user-settings API router extraction was merged in #46 with
   green CI.
 - Phase E search/chat API router extraction was merged in #47 with green CI.
+- Phase F meeting detail API router extraction was merged in #48 with green CI.
 
-## Current Phase: Phase F, Meeting Detail Router Boundary
+## Current Phase: Phase G, System/Recording/Upload Router Boundary
 
 Goal: continue reducing the `api/routes.py` monolith by extracting the next
 well-tested API domains into dedicated routers while preserving endpoint
@@ -45,25 +46,27 @@ contracts, monkeypatch-compatible helpers, and lazy imports.
 
 Recommended execution order:
 
-1. Phase F1: extract single-meeting detail/status-transition routes into
-   `api/routers/meeting_detail.py`.
-2. Phase F2: move meeting audio streaming, transcript/summary read/write, and
-   single-meeting summarize routes into the same router.
-3. Phase F3: keep `/api/meetings` list and `/api/meetings/summarize-batch` in
-   `api/routes.py`, preserve compatibility re-exports, then update docs.
+1. Phase G1: extract `/api/status`, `/api/system/resources`,
+   `/api/dashboard/stats`, and `/api/system/open-audio-folder` into
+   `api/routers/system.py`.
+2. Phase G2: extract `/api/uploads` and upload filename/path helpers into
+   `api/routers/uploads.py`.
+3. Phase G3: extract `/api/recording/*` schemas and endpoints into
+   `api/routers/recording.py`.
+4. Phase G4: preserve compatibility re-exports and existing monkeypatch paths,
+   then update docs.
 
 Completion criteria:
 
-- `api/routes.py` no longer owns `/api/meetings/{meeting_id}` endpoint
-  implementations.
+- `api/routes.py` no longer owns system, dashboard, upload, or recording
+  endpoint implementations.
 - `api.routes` keeps compatibility re-exports for tests and external imports
-  that still patch helper symbols such as response models and atomic write
-  helpers.
-- Meeting detail endpoint paths, response models, state transitions, audio
-  range handling, transcript/summary IO, and summarize behavior remain
-  unchanged.
-- Targeted route, meeting edit, meetings batch, server, security, and lint gates
-  pass locally.
+  that still patch helper symbols such as response models, upload helpers, and
+  system `sys`/`shutil`/`subprocess` aliases.
+- Endpoint paths, response models, dashboard aggregation, upload streaming,
+  filename validation, and recording error mapping remain unchanged.
+- Targeted route, home dashboard/upload, server, security, recording, and lint
+  gates pass locally.
 - PR CI is green before merge.
 
 ## Continue When
@@ -85,10 +88,10 @@ Completion criteria:
 
 ## Next Workstream Candidates
 
-Recommended order after Phase F:
+Recommended order after Phase G:
 
-1. Continue `api/routes.py` domain router separation with system/recording/upload
-   routes.
+1. Continue `api/routes.py` domain router separation with A/B test routes and
+   remaining meeting list/summarize-batch ownership decisions.
 2. Split `ui/web/style.css` into component-level CSS files with visual/a11y
    gates.
 3. Decide how native marker tests should run in CI: required, manual, or
