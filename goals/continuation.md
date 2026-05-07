@@ -8,9 +8,9 @@ pause, or escalate.
 
 - Date: 2026-05-07
 - Branch: `main`
-- Baseline commit before Phase C: `7c234cecf80064ae6cffc131aded735c044ad8a6`
-- Open PR count after Phase B: 0
-- Completed merge wave: #41, #38, #39, #40, #42, #43, #44
+- Baseline commit before Phase D: `69af82335c9f3bb694bb8684effd81ce4f7cb61c`
+- Open PR count after Phase C: 0
+- Completed merge wave: #41, #38, #39, #40, #42, #43, #44, #45
 
 ## Completed Workstreams
 
@@ -32,8 +32,9 @@ pause, or escalate.
 - Phase B STT model API router extraction was merged in #43 with green CI.
 - The pre-existing viewer missing-transcript UX change was completed, verified,
   and merged separately in #44 before backend Phase C work began.
+- Phase C wiki/reindex API router extraction was merged in #45 with green CI.
 
-## Current Phase: Phase C, Wiki/Reindex Router Boundary
+## Current Phase: Phase D, Settings/User Settings Router Boundary
 
 Goal: continue reducing the `api/routes.py` monolith by extracting the next
 well-tested API domains into dedicated routers while preserving endpoint
@@ -41,22 +42,22 @@ contracts, monkeypatch-compatible helpers, and lazy imports.
 
 Recommended execution order:
 
-1. Preflight: complete and merge the existing viewer missing-transcript UX
-   change separately before touching backend router files.
-2. Phase C1: extract wiki page/search/backfill endpoints from `api/routes.py`
-   into `api/routers/wiki.py`.
-3. Phase C2: extract reindex endpoints and helpers into `api/routers/reindex.py`.
-4. Phase C3: update status docs and route-boundary tests only after the code
-   extraction gates pass.
+1. Phase D1: extract `GET/PUT /api/settings` into `api/routers/settings.py`.
+2. Phase D2: extract `/api/prompts*` and `/api/vocabulary*` into
+   `api/routers/user_settings.py`.
+3. Phase D3: update monkeypatch paths, status docs, and route-boundary tests
+   only after the code extraction gates pass.
 
 Completion criteria:
 
-- `api/routes.py` no longer owns wiki and reindex endpoint implementations.
+- `api/routes.py` no longer owns settings, prompts, or vocabulary endpoint
+  implementations.
 - `api.routes` keeps compatibility re-exports for tests and external imports
   that still patch helper symbols.
-- Wiki/reindex endpoint paths, response models, lazy import behavior, and
-  app-state access semantics remain unchanged.
-- Targeted wiki, reindex, route, and lint gates pass locally.
+- Settings endpoint paths, response models, config.yaml write behavior,
+  user_data JSON persistence, and validation semantics remain unchanged.
+- Targeted settings, user-settings, route, security, and lint gates pass
+  locally.
 - PR CI is green before merge.
 
 ## Continue When
@@ -78,10 +79,10 @@ Completion criteria:
 
 ## Next Workstream Candidates
 
-Recommended order after Phase C:
+Recommended order after Phase D:
 
-1. Continue `api/routes.py` domain router separation with settings/prompts/
-   vocabulary, then search/chat, then meeting detail routes.
+1. Continue `api/routes.py` domain router separation with search/chat, then
+   meeting detail routes, then system/recording/upload routes.
 2. Split `ui/web/style.css` into component-level CSS files with visual/a11y
    gates.
 3. Decide how native marker tests should run in CI: required, manual, or

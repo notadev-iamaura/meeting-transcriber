@@ -82,7 +82,7 @@ pytest -m harness -q
 API/router 변경:
 
 ```bash
-pytest tests/test_api_dependencies.py tests/test_server.py tests/test_routes_meetings_batch.py tests/test_routes_stt_models.py tests/test_routes_reindex.py -q
+pytest tests/test_api_dependencies.py tests/test_server.py tests/test_routes_meetings_batch.py tests/test_routes_stt_models.py tests/test_routes_reindex.py tests/test_user_settings_api.py tests/test_user_settings_e2e.py tests/test_security_fixes.py -q
 pytest tests/wiki/test_routes.py tests/wiki/test_routes_phase2.py tests/wiki/test_routes_backfill.py tests/wiki/test_rag_unchanged.py -q
 pytest tests/test_routes.py -q
 ```
@@ -115,8 +115,9 @@ pytest -m native tests/ -v
 ## 알려진 우선 과제
 
 1. `api/routes.py` domain router 분리를 계속합니다. STT models는 #43에서
-   완료됐고, wiki/reindex는 Phase C에서 분리했습니다. 다음 후보는 settings,
-   search/chat, meeting detail routes입니다.
+   완료됐고, wiki/reindex는 #45에서 분리했습니다. settings/prompts/
+   vocabulary는 Phase D에서 분리했습니다. 다음 후보는 search/chat,
+   meeting detail routes입니다.
 2. `ui/web/style.css`를 component CSS로 나눕니다. 다음 후보는 viewer, settings,
    command palette, recording, layout shell입니다.
 3. native marker 대상 테스트를 CI에서 required/manual/scheduled 중 어떤 방식으로
