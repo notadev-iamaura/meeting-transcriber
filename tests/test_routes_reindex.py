@@ -129,7 +129,7 @@ class TestIndexStatusEndpoint:
         with TestClient(app) as client:
             app.state.job_queue.get_all_jobs = AsyncMock(return_value=jobs)
             with patch(
-                "api.routes._get_chroma_collection_for_status",
+                "api.routers.reindex._get_chroma_collection_for_status",
                 return_value=mock_collection,
             ):
                 response = client.get("/api/reindex/status")
@@ -162,7 +162,7 @@ class TestIndexStatusEndpoint:
         with TestClient(app) as client:
             app.state.job_queue.get_all_jobs = AsyncMock(return_value=jobs)
             with patch(
-                "api.routes._get_chroma_collection_for_status",
+                "api.routers.reindex._get_chroma_collection_for_status",
                 return_value=mock_collection,
             ):
                 response = client.get("/api/reindex/status")
@@ -226,7 +226,7 @@ class TestReindexSingleEndpoint:
             )
             with (
                 patch(
-                    "api.routes._reindex_meeting",
+                    "api.routers.reindex._reindex_meeting",
                     new_callable=AsyncMock,
                     return_value={"chunks": 1, "chroma_stored": True, "fts_stored": True},
                 ),
@@ -256,7 +256,9 @@ class TestReindexAllEndpoint:
         ]
         with TestClient(app) as client:
             app.state.job_queue.get_all_jobs = AsyncMock(return_value=jobs)
-            with patch("api.routes._start_reindex_all", new_callable=AsyncMock) as start_mock:
+            with patch(
+                "api.routers.reindex._start_reindex_all", new_callable=AsyncMock
+            ) as start_mock:
                 response = client.post("/api/reindex/all")
 
         assert response.status_code == 202
