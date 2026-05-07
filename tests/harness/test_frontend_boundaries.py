@@ -342,3 +342,34 @@ def test_viewer_recovery_actions_distinguish_retry_from_restart() -> None:
     assert "일시적인 오류라면 '실패한 단계부터 다시 시도'" in viewer_view
     assert "처음부터 다시 전사 요청 중" in viewer_view
     assert ".viewer-action-btn.retranscribe" in style_css
+
+
+def test_viewer_missing_transcript_uses_meeting_status_not_unconditional_polling() -> None:
+    viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
+
+    load_transcript = viewer_view[
+        viewer_view.index("ViewerView.prototype._loadTranscript") : viewer_view.index(
+            "ViewerView.prototype._handleMissingTranscript"
+        )
+    ]
+    missing_handler = viewer_view[
+        viewer_view.index("ViewerView.prototype._handleMissingTranscript") : viewer_view.index(
+            "ViewerView.prototype._startPipelinePolling"
+        )
+    ]
+
+    assert "self._handleMissingTranscript(self._lastMeetingData)" in load_transcript
+    assert "self._startPipelinePolling()" not in load_transcript
+
+    assert "ViewerView.prototype._stopPipelinePolling" in viewer_view
+    assert "self._stopPipelinePolling();" in missing_handler
+    assert 'status === "recorded"' in missing_handler
+    assert "전사 시작 대기 중" in missing_handler
+    assert 'status === "failed"' in missing_handler
+    assert "전사 처리 실패" in missing_handler
+    assert 'status === "completed"' in missing_handler
+    assert "전사문을 찾을 수 없습니다" in missing_handler
+
+    fallback_index = missing_handler.index("self._startPipelinePolling();")
+    assert missing_handler.index('status === "recorded"') < fallback_index
+    assert missing_handler.index('status === "failed"') < fallback_index

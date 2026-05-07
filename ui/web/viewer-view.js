@@ -43,6 +43,7 @@
             self._currentMatchIndex = -1;
             self._totalMatches = 0;
             self._searchTimeout = null;
+            self._pipelinePollTimer = null;
 
             // 발화 음성 재생 상태 (lazy 초기화 — 첫 재생 시 audio element 생성)
             self._audioElement = null;
@@ -502,8 +503,8 @@
         /**
          * 초기 데이터를 로드한다.
          */
-        ViewerView.prototype._loadData = function () {
-            this._loadMeetingInfo();
+        ViewerView.prototype._loadData = async function () {
+            await this._loadMeetingInfo();
             this._loadTranscript();
             this._loadSummary();
         };
@@ -2011,8 +2012,7 @@
 
                 if (self._allUtterances.length === 0) {
                     els.transcriptEmpty.style.display = "block";
-                    // 처리 중 상태면 파이프라인 진행 표시 + 폴링 시작
-                    self._startPipelinePolling();
+                    self._handleMissingTranscript(self._lastMeetingData);
                     return;
                 }
 
@@ -2050,12 +2050,68 @@
             } catch (e) {
                 if (e.status === 404) {
                     els.transcriptEmpty.style.display = "block";
-                    self._startPipelinePolling();
+                    self._handleMissingTranscript(self._lastMeetingData);
                 } else {
                     errorBanner.show("전사문 로드 실패: " + e.message);
                 }
             } finally {
                 els.transcriptLoading.classList.remove("visible");
+            }
+        };
+
+        /**
+         * 전사문이 없을 때 회의 상태에 맞는 빈 화면을 렌더링한다.
+         * @param {Object|null} meeting - /meetings/{id} 응답
+         */
+        ViewerView.prototype._handleMissingTranscript = function (meeting) {
+            var self = this;
+            var els = self._els;
+            var status = meeting && meeting.status ? meeting.status : "";
+            var emptyText = document.getElementById("viewerEmptyText");
+            var emptySub = document.getElementById("viewerEmptySub");
+
+            function setEmpty(title, subtitle) {
+                self._stopPipelinePolling();
+                if (emptyText) App.safeText(emptyText, title);
+                if (emptySub) App.safeText(emptySub, subtitle);
+                els.pipelineProgress.style.display = "none";
+                els.pipelineStatus.classList.remove("error");
+            }
+
+            if (status === "recorded") {
+                setEmpty(
+                    "전사 시작 대기 중",
+                    "아직 전사문이 없습니다. 전사를 시작하면 진행 상태가 여기에 표시됩니다."
+                );
+                return;
+            }
+
+            if (status === "failed") {
+                setEmpty(
+                    "전사 처리 실패",
+                    meeting.error_message || "오류 내용을 불러오지 못했습니다."
+                );
+                return;
+            }
+
+            if (status === "completed") {
+                setEmpty(
+                    "전사문을 찾을 수 없습니다",
+                    "회의는 완료 상태지만 전사 결과 파일이 없습니다. 처음부터 다시 전사해 주세요."
+                );
+                return;
+            }
+
+            self._startPipelinePolling();
+        };
+
+        /**
+         * 파이프라인 폴링 타이머를 정리한다.
+         */
+        ViewerView.prototype._stopPipelinePolling = function () {
+            if (this._pipelinePollTimer) {
+                clearInterval(this._pipelinePollTimer);
+                this._pipelinePollTimer = null;
             }
         };
 
@@ -2067,6 +2123,8 @@
         ViewerView.prototype._startPipelinePolling = function () {
             var self = this;
             var els = self._els;
+
+            self._stopPipelinePolling();
 
             // 파이프라인 6단계 정의
             var pipelineSteps = [
@@ -2115,6 +2173,7 @@
 
             // 초기 렌더링
             els.pipelineProgress.style.display = "block";
+            els.pipelineStatus.classList.remove("error");
             renderProgress("", []);
             App.safeText(els.pipelineStatus, "상태 확인 중...");
 
@@ -2134,6 +2193,7 @@
                     // 완료 시: 전사문 다시 로드
                     if (status === "completed") {
                         clearInterval(pollTimer);
+                        self._pipelinePollTimer = null;
                         els.pipelineProgress.style.display = "none";
                         els.transcriptEmpty.style.display = "none";
                         self._loadTranscript();
@@ -2145,8 +2205,12 @@
                     // 실패 시: 에러 표시
                     if (status === "failed") {
                         clearInterval(pollTimer);
+                        self._pipelinePollTimer = null;
                         App.safeText(els.pipelineStatus, "처리 실패: " + (meeting.error_message || "알 수 없는 오류"));
                         els.pipelineStatus.classList.add("error");
+                        App.safeText(document.getElementById("viewerEmptyText"), "전사 처리 실패");
+                        if (subEl) App.safeText(subEl, meeting.error_message || "알 수 없는 오류");
+                        self._loadMeetingInfo();
                         return;
                     }
 
@@ -2176,6 +2240,7 @@
                 }
             }, 3000);
 
+            self._pipelinePollTimer = pollTimer;
             self._timers.push(pollTimer);
         };
 
