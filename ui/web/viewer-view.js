@@ -2182,8 +2182,7 @@
             var subEl = document.getElementById("viewerEmptySub");
             if (subEl) subEl.innerHTML = "완료되면 전사문이 자동으로 표시됩니다.";
 
-            // 3초 간격 폴링
-            var pollTimer = setInterval(async function () {
+            async function poll() {
                 try {
                     var meeting = await App.apiRequest(
                         "/meetings/" + encodeURIComponent(self._meetingId)
@@ -2192,8 +2191,7 @@
 
                     // 완료 시: 전사문 다시 로드
                     if (status === "completed") {
-                        clearInterval(pollTimer);
-                        self._pipelinePollTimer = null;
+                        self._stopPipelinePolling();
                         els.pipelineProgress.style.display = "none";
                         els.transcriptEmpty.style.display = "none";
                         self._loadTranscript();
@@ -2204,13 +2202,18 @@
 
                     // 실패 시: 에러 표시
                     if (status === "failed") {
-                        clearInterval(pollTimer);
-                        self._pipelinePollTimer = null;
+                        self._stopPipelinePolling();
                         App.safeText(els.pipelineStatus, "처리 실패: " + (meeting.error_message || "알 수 없는 오류"));
                         els.pipelineStatus.classList.add("error");
                         App.safeText(document.getElementById("viewerEmptyText"), "전사 처리 실패");
                         if (subEl) App.safeText(subEl, meeting.error_message || "알 수 없는 오류");
                         self._loadMeetingInfo();
+                        return;
+                    }
+
+                    if (!processingStatuses[status]) {
+                        self._stopPipelinePolling();
+                        self._handleMissingTranscript(meeting);
                         return;
                     }
 
@@ -2238,8 +2241,10 @@
                 } catch (e) {
                     // 네트워크 오류 등 → 무시하고 계속 폴링
                 }
-            }, 3000);
+            }
 
+            poll();
+            var pollTimer = setInterval(poll, 3000);
             self._pipelinePollTimer = pollTimer;
             self._timers.push(pollTimer);
         };

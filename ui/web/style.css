@@ -4071,7 +4071,12 @@ button {
   .tab-panel { padding: 12px 16px; }
   .back-link { padding: 8px 16px; }
   .meeting-info { padding: 0 16px 12px; }
-  .viewer-header { padding: 16px 16px 12px; }
+  .viewer-header { padding: 56px 16px 12px; }
+  .viewer-header-top {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
   .search-view { padding: 0 16px; }
   .empty-view { padding: 60px 16px; min-height: 300px; }
 
@@ -5478,6 +5483,23 @@ button {
   color: var(--text-secondary);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .viewer-title {
+    flex: 1 1 100%;
+    max-width: 100%;
+    min-width: 0;
+    letter-spacing: 0;
+  }
+
+  .viewer-title-text {
+    display: block;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 
 /* ----- 요약 편집 ----- */
