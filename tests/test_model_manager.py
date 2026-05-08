@@ -230,6 +230,25 @@ async def test_context_manager_exception_still_unloads(manager: Any) -> None:
     assert manager.current_model is None
 
 
+async def test_context_manager_serializes_inference_block(manager: Any) -> None:
+    """동시 acquire 컨텍스트는 실제 사용 구간까지 직렬화한다."""
+    execution_order: list[str] = []
+
+    async def run_context(label: str) -> None:
+        async with manager.acquire("exaone", lambda: FakeModel("exaone")):
+            execution_order.append(f"{label}_start")
+            await asyncio.sleep(0.05)
+            execution_order.append(f"{label}_end")
+
+    task_a = asyncio.create_task(run_context("a"))
+    await asyncio.sleep(0.01)
+    task_b = asyncio.create_task(run_context("b"))
+
+    await asyncio.gather(task_a, task_b)
+
+    assert execution_order == ["a_start", "a_end", "b_start", "b_end"]
+
+
 # === 로드 실패 테스트 ===
 
 

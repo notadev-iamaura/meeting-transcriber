@@ -5,6 +5,7 @@ get_model_status() 와 get_actual_size_mb() 의 동작을 검증한다.
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -61,6 +62,7 @@ class TestGetModelStatus:
             / "abc"
         )
         cache_dir.mkdir(parents=True)
+        (cache_dir / "config.json").write_text("{}")
         (cache_dir / "model.safetensors").write_bytes(b"x" * 16)
 
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
@@ -81,6 +83,60 @@ class TestGetModelStatus:
 
         spec = replace(base_spec, model_path=str(model_dir))
         assert get_model_status(spec) == ModelStatus.NOT_DOWNLOADED
+
+
+class TestResolveHfCachedSnapshot:
+    def test_refs_main_개행_strip_후_snapshot_해석(self, tmp_path, monkeypatch):
+        """refs/main 끝의 개행 때문에 snapshot 경로 해석이 실패하면 안 된다."""
+        from core.stt_model_status import resolve_hf_cached_snapshot
+
+        cache_root = tmp_path / "hub"
+        repo_cache = cache_root / "models--owner--repo"
+        snapshot = repo_cache / "snapshots" / "abc123"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+        (snapshot / "weights.safetensors").write_bytes(b"x")
+        refs_dir = repo_cache / "refs"
+        refs_dir.mkdir()
+        (refs_dir / "main").write_text("abc123\n")
+        monkeypatch.setenv("HF_HUB_CACHE", str(cache_root))
+
+        assert resolve_hf_cached_snapshot("owner/repo") == str(snapshot.resolve())
+
+    def test_refs_main_손상시_최신_유효_snapshot_fallback(self, tmp_path, monkeypatch):
+        """refs/main이 유효하지 않으면 config+weights가 있는 최신 snapshot을 사용한다."""
+        from core.stt_model_status import resolve_hf_cached_snapshot
+
+        cache_root = tmp_path / "hub"
+        repo_cache = cache_root / "models--owner--repo"
+        old_snapshot = repo_cache / "snapshots" / "old"
+        new_snapshot = repo_cache / "snapshots" / "new"
+        old_snapshot.mkdir(parents=True)
+        new_snapshot.mkdir(parents=True)
+        for path in (old_snapshot, new_snapshot):
+            (path / "config.json").write_text("{}")
+            (path / "weights.safetensors").write_bytes(b"x")
+        (repo_cache / "refs").mkdir()
+        (repo_cache / "refs" / "main").write_text("missing-revision\n")
+        old_time = 1_700_000_000
+        new_time = old_time + 10
+        os.utime(old_snapshot, (old_time, old_time))
+        os.utime(new_snapshot, (new_time, new_time))
+        monkeypatch.setenv("HF_HUB_CACHE", str(cache_root))
+
+        assert resolve_hf_cached_snapshot("owner/repo") == str(new_snapshot.resolve())
+
+    def test_config_json만_있는_snapshot은_무시(self, tmp_path, monkeypatch):
+        """불완전한 snapshot은 offline 로딩 대상으로 반환하지 않는다."""
+        from core.stt_model_status import resolve_hf_cached_snapshot
+
+        cache_root = tmp_path / "hub"
+        snapshot = cache_root / "models--owner--repo" / "snapshots" / "abc"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+        monkeypatch.setenv("HF_HUB_CACHE", str(cache_root))
+
+        assert resolve_hf_cached_snapshot("owner/repo") is None
 
 
 class TestGetActualSizeMb:

@@ -75,3 +75,22 @@ class TestResolveModelPath:
 
         # 존재하지 않는 경로이므로 원본 그대로 반환
         assert t._model_name == "test-hf-model"
+
+    def test_HF_repo_ID_캐시_snapshot_절대경로_우선(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HF repo ID가 로컬 캐시에 있으면 cached snapshot 절대경로를 반환한다."""
+        cache_root = tmp_path / "hub"
+        repo_cache = cache_root / "models--owner--repo"
+        snapshot = repo_cache / "snapshots" / "abc123"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+        (snapshot / "weights.safetensors").write_bytes(b"x")
+        refs_dir = repo_cache / "refs"
+        refs_dir.mkdir()
+        (refs_dir / "main").write_text("abc123\n")
+        monkeypatch.setenv("HF_HUB_CACHE", str(cache_root))
+
+        stt = STTConfig(model_name="owner/repo")
+
+        assert stt.resolve_model_path() == str(snapshot.resolve())

@@ -3,7 +3,7 @@
 
 목적: 한 번에 하나의 대형 모델만 메모리에 적재하도록 제어하는 뮤텍스 기반 매니저.
 주요 기능:
-    - asyncio.Lock 기반 동시 로드 방지
+    - asyncio.Lock 기반 동시 로드 및 추론 컨텍스트 직렬화
     - 이전 모델 자동 언로드 (gc.collect + Metal 캐시 정리)
     - async with 컨텍스트 매니저 패턴 지원
     - psutil 기반 메모리 사용량 모니터링
@@ -122,6 +122,7 @@ class ModelLoadManager:
             preflight_runner: MLX 사용 가능성 검사 함수. 테스트에서 mock 주입용.
         """
         self._lock = asyncio.Lock()
+        self._context_lock = asyncio.Lock()
         self._current: ModelInfo | None = None
         self._config = get_config()
         self._gpu_cache_cleanup_enabled = (
@@ -354,6 +355,9 @@ class ModelLoadManager:
                 result = model.transcribe(audio)
             # 블록 종료 시 자동 언로드
 
+        컨텍스트 블록 전체를 직렬화하여 같은 MLX backend 인스턴스에 여러
+        스레드/태스크가 동시에 generate() 또는 transcribe()를 호출하지 못하게 한다.
+
         PERF-001: keep_loaded=True 시 블록 종료 후에도 모델을 언로드하지 않는다.
         연속으로 동일 모델을 사용하는 단계(corrector → summarizer)에서
         불필요한 해제/재로드를 방지한다.
@@ -411,15 +415,23 @@ class _ModelContext:
 
     async def __aenter__(self) -> Any:
         """모델을 로드하고 인스턴스를 반환한다."""
-        return await self._manager.load_model(self._name, self._loader)
+        await self._manager._context_lock.acquire()
+        try:
+            return await self._manager.load_model(self._name, self._loader)
+        except Exception:
+            self._manager._context_lock.release()
+            raise
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """모델을 언로드한다. keep_loaded=True면 유지, 예외 시에는 항상 언로드."""
-        # PERF-001: keep_loaded=True이고 예외가 없으면 모델 유지
-        if self._keep_loaded and exc_type is None:
-            logger.debug(f"모델 유지 (keep_loaded=True): {self._name}")
-            return
-        await self._manager.unload_model()
+        try:
+            # PERF-001: keep_loaded=True이고 예외가 없으면 모델 유지
+            if self._keep_loaded and exc_type is None:
+                logger.debug(f"모델 유지 (keep_loaded=True): {self._name}")
+                return
+            await self._manager.unload_model()
+        finally:
+            self._manager._context_lock.release()
 
 
 # 모듈 수준 싱글턴 인스턴스 (threading.Lock으로 경합 조건 방지)
