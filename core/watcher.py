@@ -21,7 +21,7 @@ import os
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -267,9 +267,9 @@ class FolderWatcher:
         """
         cb_name = getattr(callback, "__name__", repr(callback))
         if asyncio.iscoroutinefunction(callback):
-            self._async_callbacks.append(callback)  # type: ignore[arg-type]
+            self._async_callbacks.append(cast(AsyncCallback, callback))
         else:
-            self._sync_callbacks.append(callback)  # type: ignore[arg-type]
+            self._sync_callbacks.append(cast(SyncCallback, callback))
         logger.debug(f"파일 등록 콜백 등록: {cb_name}")
 
     async def _notify_callbacks(self, file_path: Path) -> None:

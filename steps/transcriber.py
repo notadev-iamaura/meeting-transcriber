@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,13 @@ class TranscriptSegment:
         Returns:
             세그먼트 데이터 딕셔너리
         """
-        return asdict(self)  # type: ignore[return-value]
+        return {
+            "text": self.text,
+            "start": self.start,
+            "end": self.end,
+            "avg_logprob": self.avg_logprob,
+            "no_speech_prob": self.no_speech_prob,
+        }
 
 
 @dataclass
