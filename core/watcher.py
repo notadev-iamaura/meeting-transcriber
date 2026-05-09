@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -111,7 +112,10 @@ class _AudioFileHandler(FileSystemEventHandler):
             if event.is_directory:
                 return
 
-            file_path = Path(event.src_path)
+            src_path = event.src_path
+            if isinstance(src_path, bytes):
+                src_path = os.fsdecode(src_path)
+            file_path = Path(src_path)
 
             if not self._is_audio_file(file_path):
                 logger.debug(f"비오디오 파일 무시: {file_path.name}")
@@ -225,7 +229,7 @@ class FolderWatcher:
 
         # 상태 관리
         self._is_watching: bool = False
-        self._observer: Observer | None = None
+        self._observer: Any | None = None
         self._handler: _AudioFileHandler | None = None
 
         # debounce 중인 파일 추적 (경로 → 마지막 크기 확인 시각)
@@ -277,19 +281,19 @@ class FolderWatcher:
             file_path: 큐에 등록된 오디오 파일 경로
         """
         # 동기 콜백 실행
-        for cb in self._sync_callbacks:
+        for sync_cb in self._sync_callbacks:
             try:
-                cb(file_path)
+                sync_cb(file_path)
             except Exception as e:
-                cb_name = getattr(cb, "__name__", repr(cb))
+                cb_name = getattr(sync_cb, "__name__", repr(sync_cb))
                 logger.error(f"동기 콜백 실행 에러 ({cb_name}): {e}")
 
         # 비동기 콜백 실행
-        for cb in self._async_callbacks:
+        for async_cb in self._async_callbacks:
             try:
-                await cb(file_path)
+                await async_cb(file_path)
             except Exception as e:
-                cb_name = getattr(cb, "__name__", repr(cb))
+                cb_name = getattr(async_cb, "__name__", repr(async_cb))
                 logger.error(f"비동기 콜백 실행 에러 ({cb_name}): {e}")
 
     def _is_excluded(self, path: Path) -> bool:

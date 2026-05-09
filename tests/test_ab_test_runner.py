@@ -264,7 +264,14 @@ class TestConfigModelCopy:
         # 원본은 변경되지 않아야 함
         assert tmp_config.llm.mlx_model_name == original_llm_model
 
-    def test_stt_temp_config_비오염(self, tmp_config: AppConfig) -> None:
+    def test_stt_temp_config_비오염(
+        self,
+        tmp_config: AppConfig,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf-cache"))
+        monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
         original = tmp_config.stt.model_name
         spec = ModelSpec(label="T", model_id="seastar-medium-4bit")
         temp = ab_test_runner._build_stt_temp_config(tmp_config, spec)

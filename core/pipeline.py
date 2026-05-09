@@ -1424,9 +1424,9 @@ class PipelineManager:
                 # state.degraded=True 이더라도 실시간으로 메모리가 회복되었으면 LLM 단계를 실행한다.
                 # 반대로 초기에 OK였어도 실시간 mem_ok=False면 스킵한다.
                 # check_llm_capacity 가 사전 경고(빠듯) + 차단(부족) 둘 다 처리.
-                _, _, warn_msg = self._resource_guard.check_llm_capacity()
-                if warn_msg and warn_msg not in state.warnings:
-                    state.warnings.append(warn_msg)
+                _, _, llm_warning = self._resource_guard.check_llm_capacity()
+                if llm_warning is not None and llm_warning not in state.warnings:
+                    state.warnings.append(llm_warning)
                 mem_ok, mem_free = self._resource_guard.check_memory()
                 if _skip_llm or not mem_ok:
                     # 스킵 사유에 따른 메시지 구분
@@ -1527,24 +1527,35 @@ class PipelineManager:
 
                     elif step == PipelineStep.CORRECT:
                         assert merged_result is not None
+
                         # 이슈 H + 안정성: _llm_lock (동시 MLX 차단) + 하드 타임아웃
                         # (모델 환각 폭주/hang 차단) 을 헬퍼에서 한꺼번에 적용한다.
-                        # lambda 는 기본 인자로 루프 변수를 즉시 바인딩한다 (B023 회피).
+                        # 지역 async 헬퍼는 현재 루프 값을 기본 인자로 바인딩한다 (B023 회피).
+                        async def _run_correct_step(
+                            m: Any = merged_result,
+                            cp: Path = checkpoint_path,
+                        ) -> Any:
+                            return await self._run_step_correct(m, cp)
+
                         corrected_result = await self._run_llm_step_with_timeout(
                             "correct",
-                            lambda m=merged_result, cp=checkpoint_path: self._run_step_correct(
-                                m, cp
-                            ),
+                            _run_correct_step,
                             self._config.pipeline.correct_timeout_seconds,
                         )
 
                     elif step == PipelineStep.SUMMARIZE:
                         assert corrected_result is not None
+
+                        async def _run_summarize_step(
+                            c: Any = corrected_result,
+                            cp: Path = checkpoint_path,
+                            od: Path = output_dir,
+                        ) -> Any:
+                            return await self._run_step_summarize(c, cp, od)
+
                         _summary_result = await self._run_llm_step_with_timeout(
                             "summarize",
-                            lambda c=corrected_result, cp=checkpoint_path, od=output_dir: (
-                                self._run_step_summarize(c, cp, od)
-                            ),
+                            _run_summarize_step,
                             self._config.pipeline.summarize_timeout_seconds,
                         )
 

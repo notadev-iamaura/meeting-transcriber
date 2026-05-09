@@ -24,7 +24,7 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -203,7 +203,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.zoom_detector = None
 
     # 실행 중인 파이프라인 태스크 추적용 세트
-    app.state.running_tasks: set[asyncio.Task] = set()
+    running_tasks: set[asyncio.Task[Any]] = set()
+    app.state.running_tasks = running_tasks
 
     thermal_manager = None
     pipeline_manager = None
@@ -305,14 +306,14 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("FolderWatcher 정지 완료")
 
     # 실행 중인 파이프라인 태스크 정리
-    running_tasks = getattr(app.state, "running_tasks", set())
-    if running_tasks:
-        logger.info(f"실행 중인 파이프라인 태스크 {len(running_tasks)}개 취소 중...")
-        for task in running_tasks:
+    active_tasks: set[asyncio.Task[Any]] = getattr(app.state, "running_tasks", set())
+    if active_tasks:
+        logger.info(f"실행 중인 파이프라인 태스크 {len(active_tasks)}개 취소 중...")
+        for task in active_tasks:
             task.cancel()
         # 모든 태스크가 취소될 때까지 대기 (최대 30초)
         done, pending = await asyncio.wait(
-            running_tasks,
+            active_tasks,
             timeout=30,
             return_when=asyncio.ALL_COMPLETED,
         )
@@ -618,7 +619,11 @@ def _setup_spa_routes(app: FastAPI) -> None:
         for fname in ("spa.js", "app.js", "tokens.css", "style.css", "bulk-actions.css"):
             v = _ver(fname)
             pattern = re.compile(r"(/static/" + re.escape(fname) + r')(\?[^"\'>\s]*)?')
-            html = pattern.sub(lambda m, v=v: f"{m.group(1)}?v={v}", html)
+
+            def _replace_static_version(match: re.Match[str], version: str = v) -> str:
+                return f"{match.group(1)}?v={version}"
+
+            html = pattern.sub(_replace_static_version, html)
         return html
 
     @app.get("/app", response_class=HTMLResponse)

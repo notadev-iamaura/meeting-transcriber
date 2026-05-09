@@ -652,7 +652,7 @@ class PersonExtractor:
         first_seen = str(fm.get("first_seen", "") or "")
         last_seen = str(fm.get("last_seen", "") or "")
         try:
-            meetings_count = int(fm.get("meetings_count", 0) or 0)
+            meetings_count = int(str(fm.get("meetings_count", 0) or 0))
         except (TypeError, ValueError):
             meetings_count = 0
 
@@ -955,16 +955,18 @@ class PersonExtractor:
                 return lines
 
         # 기존 미완료 액션
-        for action in existing_open_actions:
-            if action.owner != person_name:
+        for open_action in existing_open_actions:
+            if open_action.owner != person_name:
                 continue
-            if action.description in seen_descs:
+            if open_action.description in seen_descs:
                 continue
-            seen_descs.add(action.description)
-            cit = action.citation
+            seen_descs.add(open_action.description)
+            cit = open_action.citation
             cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
-            due = f" (due: {action.due_date})" if action.due_date else ""
-            lines.append(f"- [ ] {action.description} (from {action.from_date}){due} {cit_str}")
+            due = f" (due: {open_action.due_date})" if open_action.due_date else ""
+            lines.append(
+                f"- [ ] {open_action.description} (from {open_action.from_date}){due} {cit_str}"
+            )
             if len(lines) >= _MAX_OPEN_ACTIONS_IN_PAGE:
                 break
 

@@ -168,7 +168,7 @@ class ModelLoadManager:
             메모리 사용량 (MB)
         """
         process: psutil.Process = psutil.Process()
-        return process.memory_info().rss / (1024 * 1024)
+        return float(process.memory_info().rss / (1024 * 1024))
 
     def _get_memory_usage_gb(self) -> float:
         """현재 프로세스의 RSS 메모리 사용량을 GB 단위로 반환한다.

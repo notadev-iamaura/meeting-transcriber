@@ -791,7 +791,7 @@ class HybridSearchEngine:
             normalize_embeddings=True,
         )
 
-        return embedding[0].tolist()
+        return [float(value) for value in embedding[0].tolist()]
 
     async def search(
         self,

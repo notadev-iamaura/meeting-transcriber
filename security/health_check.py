@@ -21,6 +21,7 @@ import logging
 import shutil
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -138,7 +139,7 @@ class HealthChecker:
         report = HealthReport()
 
         # 체크 메서드 목록 (순서대로 실행)
-        checks = [
+        checks: list[Callable[[], CheckResult | list[CheckResult]]] = [
             self.check_ollama_server,
             self.check_exaone_model,
             self.check_ffmpeg,

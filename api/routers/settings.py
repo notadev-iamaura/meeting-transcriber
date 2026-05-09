@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 

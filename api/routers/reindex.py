@@ -231,7 +231,6 @@ async def _reindex_meeting(
             utterances=utterances,
             audio_path=getattr(merged, "audio_path", ""),
             num_speakers=getattr(merged, "num_speakers", 0),
-            speakers=list(getattr(merged, "speakers", []) or []),
             total_corrected=0,
         )
     else:
@@ -319,7 +318,7 @@ async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
 
             await ws_manager.broadcast_event(
                 WebSocketEvent(
-                    type=EventType.REINDEX_PROGRESS,
+                    event_type=EventType.REINDEX_PROGRESS.value,
                     data={"meeting_id": meeting_id, "phase": "start"},
                 )
             )
@@ -338,7 +337,7 @@ async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
 
                 await ws_manager.broadcast_event(
                     WebSocketEvent(
-                        type=EventType.REINDEX_PROGRESS,
+                        event_type=EventType.REINDEX_PROGRESS.value,
                         data={
                             "meeting_id": meeting_id,
                             "phase": "failed",
@@ -357,7 +356,7 @@ async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
 
             await ws_manager.broadcast_event(
                 WebSocketEvent(
-                    type=EventType.REINDEX_PROGRESS,
+                    event_type=EventType.REINDEX_PROGRESS.value,
                     data={
                         "meeting_id": meeting_id,
                         "phase": "complete",
@@ -402,7 +401,7 @@ async def _start_reindex_all(app: Any, missing_ids: list[str]) -> None:
             from api.websocket import EventType, WebSocketEvent
 
             await ws_manager.broadcast_event(
-                WebSocketEvent(type=EventType.REINDEX_PROGRESS, data=data),
+                WebSocketEvent(event_type=EventType.REINDEX_PROGRESS.value, data=data),
             )
         except Exception as e:
             logger.debug(f"reindex broadcast 실패 (무시): {e}")

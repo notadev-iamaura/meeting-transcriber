@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from core.job_queue import JobStatus
+from core.perf_stats import PerfStats
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,8 @@ class JobProcessor:
         self._cancellation_requests: set[str] = set()
 
         # 단계별 성능 통계 (EMA) — ETA 예측 및 이상 탐지용
+        self._perf_stats: PerfStats | None
         try:
-            from core.perf_stats import PerfStats
-
             self._perf_stats = PerfStats.load()
         except Exception as e:
             logger.warning(f"perf_stats 초기화 실패 (예측 비활성화): {e}")

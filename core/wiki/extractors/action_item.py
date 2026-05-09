@@ -563,10 +563,10 @@ class ActionItemExtractor:
         # Open 섹션
         parts.append(f"## Open ({open_count})")
         parts.append("")
-        for item in remaining_open:
-            parts.append(self._render_open_line(item))
-        for item in new_open:
-            parts.append(self._render_new_line(item))
+        for open_item in remaining_open:
+            parts.append(self._render_open_line(open_item))
+        for new_item in new_open:
+            parts.append(self._render_new_line(new_item))
         if open_count == 0:
             parts.append("_(없음)_")
         parts.append("")

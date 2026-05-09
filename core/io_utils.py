@@ -81,6 +81,7 @@ def atomic_write_text(
             os.fsync(tf.fileno())
         finally:
             tf.close()
+        assert tmp_name is not None
         os.replace(tmp_name, path)
         tmp_name = None  # 성공 — finally 에서 unlink 안 함
     finally:
