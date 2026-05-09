@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, cast
 
 from config import AppConfig, get_config
 
@@ -125,9 +125,9 @@ class ZoomDetector:
         """
         cb_name = getattr(callback, "__name__", repr(callback))
         if asyncio.iscoroutinefunction(callback):
-            self._async_callbacks.append(callback)  # type: ignore[arg-type]
+            self._async_callbacks.append(cast(AsyncCallback, callback))
         else:
-            self._sync_callbacks.append(callback)  # type: ignore[arg-type]
+            self._sync_callbacks.append(cast(SyncCallback, callback))
         logger.debug(f"미팅 상태 변화 콜백 등록: {cb_name}")
 
     async def _check_zoom_process(self) -> bool:

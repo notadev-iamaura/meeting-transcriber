@@ -557,8 +557,12 @@ class JobQueue:
             )
             conn.commit()
 
+        updated_job = self.get_job_by_meeting_id(meeting_id)
+        if updated_job is None:
+            raise JobQueueError(f"제목 업데이트 후 작업을 찾을 수 없습니다: {meeting_id}")
+
         logger.info("제목 업데이트: meeting_id=%s, title=%r", meeting_id, cleaned)
-        return self.get_job_by_meeting_id(meeting_id)  # type: ignore[return-value]
+        return updated_job
 
     def update_status(
         self,

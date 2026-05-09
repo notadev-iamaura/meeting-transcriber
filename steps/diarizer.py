@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,11 @@ class DiarizationSegment:
         Returns:
             세그먼트 데이터 딕셔너리
         """
-        return asdict(self)  # type: ignore[return-value]
+        return {
+            "speaker": self.speaker,
+            "start": self.start,
+            "end": self.end,
+        }
 
 
 @dataclass

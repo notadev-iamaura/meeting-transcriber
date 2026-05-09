@@ -43,9 +43,9 @@ jobs:
     name: 린트
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -58,6 +58,22 @@ jobs:
       - name: 포맷 검사
         run: ruff format --check .
 
+  type-check:
+    name: 타입 검사
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: mypy 설치
+        run: pip install mypy
+
+      - name: mypy 검사
+        run: mypy config.py api core steps search ui security --no-error-summary
+
   test:
     name: 테스트 (Python ${{ matrix.python-version }})
     runs-on: macos-latest
@@ -65,9 +81,9 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -107,7 +123,7 @@ jobs:
     name: Swift 컴파일 검증 (Aggregate Device)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: swiftc 버전
         run: swift --version
