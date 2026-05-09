@@ -60,7 +60,7 @@ jobs:
 
   type-check:
     name: 타입 검사
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -68,8 +68,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: mypy 설치
-        run: pip install mypy
+      - name: 의존성 설치
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
 
       - name: mypy 검사
         run: mypy config.py api core steps search ui security --no-error-summary

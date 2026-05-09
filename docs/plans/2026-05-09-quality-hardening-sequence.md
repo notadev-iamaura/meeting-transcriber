@@ -26,6 +26,7 @@
 - `.github/workflows/ci.yml`
   - `actions/checkout`과 `actions/setup-python`을 Node 24 기반 버전으로 갱신한다.
   - `mypy config.py api core steps search ui security --no-error-summary`를 별도 job으로 추가한다.
+  - type-check job은 macOS/dev 의존성 환경에서 실행해 로컬 타입 검사 환경과 맞춘다.
 
 ### 검증
 
