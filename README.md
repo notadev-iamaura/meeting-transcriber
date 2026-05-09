@@ -810,11 +810,14 @@ pytest tests/ --cov=core --cov=steps --cov=search --cov=api --cov=security --cov
 # 린트
 ruff check .
 
-# 포맷팅
+# 포맷 검사
+ruff format --check .
+
+# 포맷 적용
 ruff format .
 
 # 타입 체크
-mypy core/ steps/ --ignore-missing-imports
+mypy config.py api core steps search ui security --no-error-summary
 ```
 
 ## 기존 회의 검색 인덱스 백필
