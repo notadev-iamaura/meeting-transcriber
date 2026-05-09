@@ -121,7 +121,7 @@ class ChipsetDetector:
             시스템 RAM 크기 (GB 단위, 반올림)
         """
         total_bytes = psutil.virtual_memory().total
-        return round(total_bytes / (1024**3))
+        return int(round(total_bytes / (1024**3)))
 
     @staticmethod
     def _compute_batch_size(info: ChipsetInfo) -> int:

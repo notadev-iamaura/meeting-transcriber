@@ -19,7 +19,7 @@ import gc
 import hashlib
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 from core.llm_backend import (
     LLMBackendError,
@@ -144,10 +144,12 @@ class MLXBackend:
             from mlx_lm import load  # type: ignore[import-untyped]
 
             logger.info(f"MLX 모델 로드 시작: {self._model_name}")
-            self._model, self._tokenizer = load(
+            loaded = load(
                 self._model_name,
                 tokenizer_config={"trust_remote_code": True},
             )
+            self._model = loaded[0]
+            self._tokenizer = loaded[1]
             logger.info(f"MLX 모델 로드 완료: {self._model_name}")
 
         except ImportError as e:
@@ -172,10 +174,13 @@ class MLXBackend:
         Returns:
             모델 입력용 프롬프트 문자열
         """
-        return self._tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        return cast(
+            str,
+            self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            ),
         )
 
     def _maybe_reset_prompt_cache(self, messages: list[dict[str, str]]) -> None:
@@ -294,7 +299,7 @@ class MLXBackend:
                     max_tokens=self._max_tokens,
                     verbose=False,
                 )
-                return result.text
+                return cast(str, result.text)
             else:
                 from mlx_lm import generate  # type: ignore[import-untyped]
 

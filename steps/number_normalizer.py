@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -453,9 +454,9 @@ def _restore_brands(text: str, brands: list[str]) -> str:
         idx = int(match.group(1))
         if 0 <= idx < len(brands):
             return brands[idx]
-        return match.group(0)  # 인덱스 범위 밖이면 그대로 유지
+        return cast(str, match.group(0))  # 인덱스 범위 밖이면 그대로 유지
 
-    return _PLACEHOLDER_REGEX.sub(_restore, text)
+    return cast(str, _PLACEHOLDER_REGEX.sub(_restore, text))
 
 
 # ============================================================
@@ -496,7 +497,7 @@ def _normalize_mixed(text: str) -> str:
             pass
 
         # 변환 실패 시 원본 유지
-        return match.group(0)
+        return cast(str, match.group(0))
 
     return _MIXED_PATTERN.sub(_replace_mixed, text)
 
@@ -605,10 +606,10 @@ def _replace_native_numbers(text: str, pattern: re.Pattern) -> str:
         unit = m.group(2)
         value = _NATIVE_DIGITS.get(native)
         if value is None:
-            return m.group(0)
+            return cast(str, m.group(0))
         return f"{value} {unit}"
 
-    return pattern.sub(_sub, text)
+    return cast(str, pattern.sub(_sub, text))
 
 
 def normalize_numbers(text: str, level: int = 1) -> str:
@@ -713,4 +714,4 @@ def _replace_korean_numbers(text: str, unit_pattern: re.Pattern) -> str:
         original: str = match.group(0)
         return original
 
-    return unit_pattern.sub(_replace_match, text)
+    return cast(str, unit_pattern.sub(_replace_match, text))

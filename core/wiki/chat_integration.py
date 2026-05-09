@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from core.wiki.router import QueryRouter, RouteDecision, RouterVerdict
 
@@ -277,7 +277,11 @@ class HybridChatService:
         rag_task = self._chat_service.respond(query, **kwargs)
         wiki_task = self._synthesize_from_wiki(query, verdict)
 
-        rag_result, wiki_result = await asyncio.gather(rag_task, wiki_task, return_exceptions=True)
+        gathered: tuple[Any, Any] = cast(
+            tuple[Any, Any],
+            await asyncio.gather(rag_task, wiki_task, return_exceptions=True),
+        )
+        rag_result, wiki_result = gathered
 
         # RAG 실패 시 — None 으로 두고 error_message 기록
         rag_response: Any = None
@@ -406,9 +410,15 @@ class HybridChatService:
             "인용 마커 [meeting:id@HH:MM:SS] 는 그대로 유지하라."
         )
         user_prompt = f"질문: {query}\n\n위키 페이지 발췌:\n\n" + "\n\n---\n\n".join(body_parts)
-        return await self._wiki_llm.generate(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
+        wiki_llm = self._wiki_llm
+        if wiki_llm is None:
+            return "\n\n".join(body_parts)
+        return cast(
+            str,
+            await wiki_llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            ),
         )
 
     # ─── 정적 헬퍼 ──────────────────────────────────────────────────────
@@ -433,12 +443,12 @@ class HybridChatService:
         for line in page.content.splitlines():
             stripped = line.strip()
             if stripped.startswith("# "):
-                return stripped.lstrip("#").strip()
+                return str(stripped.lstrip("#").strip())
 
         # path stem 폴백
         from pathlib import Path
 
-        return Path(str(rel_path)).stem
+        return str(Path(str(rel_path)).stem)
 
     @staticmethod
     def _make_snippet(content: str, max_chars: int = 200) -> str:

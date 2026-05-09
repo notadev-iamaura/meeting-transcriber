@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from filelock import FileLock, Timeout
 from pydantic import BaseModel, Field, field_validator
@@ -492,8 +492,8 @@ def _load_generic(
         mtime_ns, size = _stat_mtime_size(path)
         cached = _cache.get(key)
 
-        if not force_reload and _cache_hit(cached, mtime_ns, size):
-            return cached.data  # type: ignore[return-value]
+        if not force_reload and cached is not None and _cache_hit(cached, mtime_ns, size):
+            return cast(T, cached.data)
 
         # 파일 없음 → 기본값 생성
         if mtime_ns == 0:

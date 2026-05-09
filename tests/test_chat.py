@@ -807,7 +807,7 @@ def _make_integration_test_app(tmp_path: Path) -> FastAPI:
             return_value=MagicMock(),
         ),
     ):
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
     return app
 

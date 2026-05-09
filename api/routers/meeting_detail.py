@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -692,7 +692,10 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
         )
 
     try:
-        data = await asyncio.to_thread(lambda: json.loads(state_path.read_text(encoding="utf-8")))
+        data = cast(
+            dict[str, Any],
+            await asyncio.to_thread(lambda: json.loads(state_path.read_text(encoding="utf-8"))),
+        )
     except (OSError, json.JSONDecodeError) as e:
         logger.exception(f"pipeline_state.json 읽기 실패: {e}")
         raise HTTPException(
@@ -761,7 +764,7 @@ def _find_meeting_audio_path(config: Any, meeting_id: str) -> Path | None:
         for pattern in ("*_16k.wav", "*.wav"):
             matches = sorted(outputs_root.glob(pattern))
             if matches:
-                return matches[0]
+                return cast(Path, matches[0])
 
     return None
 
@@ -1385,7 +1388,7 @@ async def update_transcript(
         # 기존 데이터 로드 (num_speakers 등 메타 필드 보존)
         def _load() -> dict[str, Any]:
             with open(target, encoding="utf-8") as f:
-                return json.load(f)
+                return cast(dict[str, Any], json.load(f))
 
         existing = await asyncio.to_thread(_load)
 
@@ -1480,7 +1483,7 @@ async def replace_transcript_pattern(
 
         def _load() -> dict[str, Any]:
             with open(target, encoding="utf-8") as f:
-                return json.load(f)
+                return cast(dict[str, Any], json.load(f))
 
         existing = await asyncio.to_thread(_load)
         utterances = existing.get("utterances", [])

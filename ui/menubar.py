@@ -22,7 +22,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import rumps
 
@@ -457,7 +457,8 @@ class MeetingTranscriberApp(rumps.App):
                 self._menu_queue_items.append(new_item)
                 # 대기열 헤더 다음 위치에 삽입 시도
                 try:
-                    self.menu.insert_after(
+                    menu = cast(Any, self.menu)
+                    menu.insert_after(
                         self._menu_queue_header.title,
                         new_item,
                     )

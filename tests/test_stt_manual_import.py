@@ -131,6 +131,8 @@ def test_get_effective_model_path_prefers_manual_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """수동 임포트가 있으면 그 경로 우선, 없으면 spec.model_path."""
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf-cache"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
     spec = get_by_id("seastar-medium-4bit")
     manual_dir = tmp_path / "manual"
     manual_dir.mkdir()

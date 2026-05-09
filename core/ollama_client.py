@@ -165,8 +165,9 @@ def chat(
     except json.JSONDecodeError as e:
         raise OllamaResponseError(f"Ollama 응답 JSON 파싱 실패: {e}") from e
 
-    content = response_data.get("message", {}).get("content", "")
-    if not content:
+    message = response_data.get("message", {})
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    if not isinstance(content, str) or not content:
         raise OllamaResponseError("Ollama 응답에 content가 없습니다")
 
     return content

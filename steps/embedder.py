@@ -24,7 +24,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
@@ -366,9 +366,9 @@ def _store_chunks_chroma(
 
         collection.add(
             ids=ids,
-            embeddings=embeddings,
+            embeddings=cast(Any, embeddings),
             documents=documents,
-            metadatas=metadatas,
+            metadatas=cast(Any, metadatas),
         )
         logger.info(f"ChromaDB 저장 완료: meeting_id={meeting_id}, {len(chunks)}개 청크")
     except Exception as e:

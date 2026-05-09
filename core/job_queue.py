@@ -429,6 +429,8 @@ class JobQueue:
                 )
                 conn.commit()
                 job_id = cursor.lastrowid
+                if job_id is None:
+                    raise JobQueueError("작업 등록 실패: SQLite lastrowid가 비어 있습니다")
 
             logger.info(
                 f"작업 등록: id={job_id}, meeting_id={meeting_id}, status={initial_status}, audio={audio_path}"

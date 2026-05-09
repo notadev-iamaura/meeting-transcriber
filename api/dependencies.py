@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException, Request
 
@@ -36,7 +36,7 @@ def get_config(request: Request) -> Any:
 
 def get_outputs_dir(request: Request) -> Path:
     """설정에서 outputs 디렉토리 경로를 반환한다."""
-    return get_config(request).paths.resolved_outputs_dir
+    return cast(Path, get_config(request).paths.resolved_outputs_dir)
 
 
 def get_job_queue(request: Request) -> Any:

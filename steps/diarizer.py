@@ -295,6 +295,8 @@ class Diarizer:
                 self._model_name,
                 token=token,
             )
+            if pipeline is None:
+                raise ModelNotAvailableError(f"pyannote 파이프라인 로드 실패: {self._model_name}")
         except Exception as e:
             raise ModelNotAvailableError(
                 f"pyannote 파이프라인 로드 실패: {self._model_name} — {e}"

@@ -47,7 +47,7 @@ import traceback as tb_mod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ def _load_utterances(config: Any, meeting_id: str) -> list[Any] | None:
             continue
         utterances = data.get("utterances", [])
         if utterances:
-            return utterances
+            return cast(list[Any], utterances)
     return None
 
 
@@ -162,7 +162,7 @@ def _load_summary(config: Any, meeting_id: str) -> str | None:
     for path in md_candidates:
         if path.is_file():
             try:
-                return path.read_text(encoding="utf-8")
+                return str(path.read_text(encoding="utf-8"))
             except OSError as exc:
                 logger.warning("백필: summary md 읽기 실패 — %s (%r)", path, exc)
                 continue
@@ -181,7 +181,7 @@ def _load_summary(config: Any, meeting_id: str) -> str | None:
             continue
         markdown = data.get("markdown")
         if markdown:
-            return markdown
+            return str(markdown)
     return None
 
 

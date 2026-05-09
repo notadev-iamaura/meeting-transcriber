@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Union, cast
 
 from config import AppConfig, get_config
 from core.coreaudio_helper import get_aggregate_device_names
@@ -233,9 +233,9 @@ class AudioRecorder:
             callback: 녹음 완료 시 호출할 콜백 함수
         """
         if asyncio.iscoroutinefunction(callback):
-            self._async_callbacks.append(callback)
+            self._async_callbacks.append(cast(AsyncCallback, callback))
         else:
-            self._sync_callbacks.append(callback)
+            self._sync_callbacks.append(cast(SyncCallback, callback))
 
     async def detect_audio_devices(self) -> list[AudioDevice]:
         """사용 가능한 오디오 입력 장치 목록을 반환한다.
@@ -1144,15 +1144,15 @@ class AudioRecorder:
         Args:
             result: 녹음 결과
         """
-        for cb in self._sync_callbacks:
+        for sync_cb in self._sync_callbacks:
             try:
-                cb(result)
+                sync_cb(result)
             except Exception as e:
                 logger.error(f"동기 콜백 실행 실패: {e}")
 
-        for cb in self._async_callbacks:
+        for async_cb in self._async_callbacks:
             try:
-                await cb(result)
+                await async_cb(result)
             except Exception as e:
                 logger.error(f"비동기 콜백 실행 실패: {e}")
 

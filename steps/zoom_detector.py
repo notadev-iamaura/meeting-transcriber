@@ -183,19 +183,19 @@ class ZoomDetector:
             meeting_started: True면 미팅 시작, False면 미팅 종료
         """
         # 동기 콜백 실행
-        for cb in self._sync_callbacks:
+        for sync_cb in self._sync_callbacks:
             try:
-                cb(meeting_started)
+                sync_cb(meeting_started)
             except Exception as e:
-                cb_name = getattr(cb, "__name__", repr(cb))
+                cb_name = getattr(sync_cb, "__name__", repr(sync_cb))
                 logger.error(f"동기 콜백 실행 에러 ({cb_name}): {e}")
 
         # 비동기 콜백 실행
-        for cb in self._async_callbacks:
+        for async_cb in self._async_callbacks:
             try:
-                await cb(meeting_started)
+                await async_cb(meeting_started)
             except Exception as e:
-                cb_name = getattr(cb, "__name__", repr(cb))
+                cb_name = getattr(async_cb, "__name__", repr(async_cb))
                 logger.error(f"비동기 콜백 실행 에러 ({cb_name}): {e}")
 
     async def _handle_state_change(self, is_active: bool) -> None:

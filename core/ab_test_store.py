@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from config import AppConfig
 
@@ -150,7 +150,7 @@ def read_metadata(config: AppConfig, test_id: str) -> dict[str, Any]:
         raise FileNotFoundError(f"metadata.json 이 없습니다: {path}")
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            return cast(dict[str, Any], json.load(f))
     except json.JSONDecodeError as exc:
         logger.error(f"metadata.json 파싱 실패: {path} ({exc})")
         raise ValueError(f"metadata.json 파싱 실패: {exc}") from exc
