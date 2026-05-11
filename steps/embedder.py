@@ -327,7 +327,7 @@ def _store_chunks_chroma(
     import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
 
     # ChromaDB PersistentClient는 내부적으로 파일 핸들/스레드를 보유하므로
-    # 사용 후 반드시 리소스를 정리해야 한다 (STAB: 리소스 정리)
+    # 공개 종료 API가 있는 버전에서는 사용 후 close()로 정리한다.
     client = None
     try:
         chroma_dir.mkdir(parents=True, exist_ok=True)
@@ -374,17 +374,18 @@ def _store_chunks_chroma(
     except Exception as e:
         raise StorageError(f"ChromaDB 저장 실패: {e}") from e
     finally:
-        # PersistentClient 리소스 정리 (파일 핸들, 내부 스레드 해제)
+        # PersistentClient 리소스 정리 (파일 핸들, 내부 스레드 해제).
+        # ChromaDB 1.x에서는 private _identifier_to_system의 system.stop()을 직접
+        # 호출하면 캐시에는 죽은 System이 남아 같은 프로세스의 다음 client 생성이
+        # default_tenant 오류로 실패한다. 공개 close()만 사용하고, 없는 버전은 no-op.
         if client is not None:
             try:
-                # chromadb >= 0.4.x에서 _identifier_to_system 딕셔너리 정리
-                if hasattr(client, "_identifier_to_system"):
-                    for system in client._identifier_to_system.values():
-                        if hasattr(system, "stop"):
-                            system.stop()
-                elif hasattr(client, "clear_system_cache"):
-                    client.clear_system_cache()
-                logger.debug("ChromaDB PersistentClient 리소스 정리 완료")
+                close = getattr(client, "close", None)
+                if callable(close):
+                    close()
+                    logger.debug("ChromaDB PersistentClient close() 완료")
+                else:
+                    logger.debug("ChromaDB PersistentClient close() 미지원 — 정리 생략")
             except Exception as cleanup_err:
                 logger.warning(f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}")
 

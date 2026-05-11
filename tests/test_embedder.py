@@ -18,6 +18,7 @@
 
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -26,6 +27,7 @@ import pytest
 from config import AppConfig, EmbeddingConfig, PathsConfig
 from steps.chunker import Chunk, ChunkedResult
 from steps.embedder import (
+    _CHROMA_COLLECTION_NAME,
     _FTS_TABLE_NAME,
     EmbeddedChunk,
     EmbeddedResult,
@@ -636,6 +638,92 @@ class TestStoreChunksChroma:
         add_args = mock_collection.add.call_args
         assert add_args[1]["ids"] == ["m1_chunk_0000"]
         assert add_args[1]["documents"] == ["테스트"]
+        mock_client.close.assert_called_once()
+
+    def test_private_system_stop_호출하지_않음(self) -> None:
+        """ChromaDB private System을 직접 stop하지 않고 공개 close()만 호출한다."""
+        mock_chromadb = self._make_mock_chromadb()
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {"ids": []}
+        mock_system = MagicMock()
+        mock_client = MagicMock()
+        mock_client._identifier_to_system = {"test": mock_system}
+        mock_client.get_or_create_collection.return_value = mock_collection
+        mock_chromadb.PersistentClient.return_value = mock_client
+
+        chunks = [self._make_test_chunk()]
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
+
+        mock_client.close.assert_called_once()
+        mock_system.stop.assert_not_called()
+
+    def test_close_없는_chromadb_client도_저장_성공(self) -> None:
+        """구버전 ChromaDB처럼 close()가 없는 client도 private cleanup 없이 통과한다."""
+        mock_chromadb = self._make_mock_chromadb()
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {"ids": []}
+
+        class ClientWithoutClose:
+            def get_or_create_collection(self, **_kwargs):
+                return mock_collection
+
+        mock_chromadb.PersistentClient.return_value = ClientWithoutClose()
+
+        chunks = [self._make_test_chunk()]
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
+
+        mock_collection.add.assert_called_once()
+
+    def test_같은_프로세스에서_연속_저장(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """한 프로세스에서 ChromaDB 저장을 두 번 호출해도 tenant 캐시가 깨지지 않는다."""
+        chromadb = pytest.importorskip("chromadb")
+        monkeypatch.setattr(
+            "steps.embedder.run_preflight",
+            lambda: SimpleNamespace(can_use_chromadb=True),
+        )
+        chroma_dir = tmp_path / "chroma"
+        first = [
+            EmbeddedChunk(
+                chunk_id="m1_chunk_0000",
+                text="첫 번째 회의",
+                embedding=[0.1] * 384,
+                meeting_id="m1",
+                date="2026-05-11",
+                speakers=["A"],
+                start_time=0.0,
+                end_time=5.0,
+            )
+        ]
+        second = [
+            EmbeddedChunk(
+                chunk_id="m2_chunk_0000",
+                text="두 번째 회의",
+                embedding=[0.2] * 384,
+                meeting_id="m2",
+                date="2026-05-11",
+                speakers=["B"],
+                start_time=0.0,
+                end_time=5.0,
+            )
+        ]
+
+        _store_chunks_chroma(first, chroma_dir, "m1")
+        _store_chunks_chroma(second, chroma_dir, "m2")
+
+        client = chromadb.PersistentClient(path=str(chroma_dir))
+        try:
+            collection = client.get_collection(_CHROMA_COLLECTION_NAME)
+            assert collection.count() == 2
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def test_멱등성_기존_삭제(self) -> None:
         """동일 meeting_id의 기존 데이터가 삭제 후 재삽입된다."""
