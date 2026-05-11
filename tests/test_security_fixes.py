@@ -288,6 +288,36 @@ class TestHallucinationFilterSettings:
 class TestConfigYamlAtomicWrite:
     """api/routes.py 가 raw open("w") 대신 atomic_write_text 를 import 하는지 검증."""
 
+    def test_replace_yaml_value_기존_키_주석_보존(self) -> None:
+        """기존 키 교체 시 같은 줄 주석을 보존한다."""
+        from api.config_yaml import replace_yaml_value
+
+        text = 'llm:\n  backend: "mlx"  # keep\n'
+
+        result = replace_yaml_value(text, "llm", "backend", '"ollama"')
+
+        assert result == 'llm:\n  backend: "ollama"  # keep\n'
+
+    def test_replace_yaml_value_누락_키_추가(self) -> None:
+        """섹션은 있고 키가 없으면 섹션 하단에 키를 추가한다."""
+        from api.config_yaml import replace_yaml_value
+
+        text = 'llm:\n  backend: "mlx"\n\nserver:\n  port: 8765\n'
+
+        result = replace_yaml_value(text, "llm", "temperature", "0.0")
+
+        assert "  temperature: 0.0\n\nserver:" in result
+
+    def test_replace_yaml_value_누락_섹션_추가(self) -> None:
+        """섹션이 없으면 파일 끝에 섹션과 키를 추가한다."""
+        from api.config_yaml import replace_yaml_value
+
+        text = "server:\n  port: 8765\n"
+
+        result = replace_yaml_value(text, "llm", "temperature", "0.0")
+
+        assert result.endswith("\nllm:\n  temperature: 0.0\n")
+
     def test_routes_가_io_utils_을_import(self) -> None:
         """api/routes.py 의 _atomic_write_text 가 core.io_utils 의 alias 인지 확인.
 

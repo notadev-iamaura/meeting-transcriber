@@ -121,7 +121,7 @@ class HallucinationFilterConfig(BaseModel):
     compression_ratio, avg_logprob, no_speech_prob, 반복 패턴 기준으로 필터링한다.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     compression_ratio_threshold: float = Field(
         default=2.4,
         ge=1.0,
@@ -178,7 +178,7 @@ class TextPostprocessingConfig(BaseModel):
     Whisper 출력 텍스트의 공백 정규화, 줄바꿈 정리 등을 수행한다.
     """
 
-    enabled: bool = False
+    enabled: bool = True
 
 
 class NumberNormalizationConfig(BaseModel):
@@ -188,7 +188,7 @@ class NumberNormalizationConfig(BaseModel):
     안전한 단위어가 동반될 때만 변환하여 고유명사 오변환을 방지한다.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     level: int = Field(
         default=1,
         ge=0,
@@ -200,10 +200,10 @@ class NumberNormalizationConfig(BaseModel):
 class STTConfig(BaseModel):
     """STT (Speech-to-Text) 모델 설정"""
 
-    model_name: str = "whisper-medium-ko-zeroth"
+    model_name: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
-    batch_size: int = Field(default=16, ge=1, le=64)
+    batch_size: int = Field(default=12, ge=1, le=64)
     auto_detect_chipset: bool = False  # True: 칩셋 기반 batch_size 자동 설정
     initial_prompt: str | None = Field(
         default=None,
@@ -215,7 +215,7 @@ class STTConfig(BaseModel):
     )
     # 이전 윈도우 텍스트 전파 제어 (False: 각 윈도우 독립 전사, 오류 전파 방지)
     condition_on_previous_text: bool = Field(
-        default=True,
+        default=False,
         description="True: 이전 윈도우 텍스트를 다음 윈도우 prompt로 전달. "
         "False: 각 윈도우 독립 전사 (오류 전파 방지, 위원회 권장).",
     )
@@ -273,7 +273,7 @@ class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
 
     model_name: str = "pyannote/speaker-diarization-3.1"
-    device: str = "auto"  # "auto": MPS 가용 시 MPS, 아니면 CPU / "mps" / "cpu"
+    device: str = "cpu"  # pyannote MPS 버그 회피: 런타임은 CPU 강제
     min_speakers: int = Field(default=1, ge=1)
     max_speakers: int = Field(default=10, ge=1, le=20)
     huggingface_token: str | None = None
@@ -303,8 +303,8 @@ class LLMConfig(BaseModel):
     """LLM 백엔드 설정 (MLX 기본, Ollama 선택 가능)
 
     MLX 지원 모델:
-        - mlx-community/EXAONE-3.5-7.8B-Instruct-4bit (한국어 특화, 기본값)
-        - mlx-community/gemma-4-e4b-it-4bit (Google Gemma 4, 다국어)
+        - mlx-community/gemma-4-e4b-it-4bit (Google Gemma 4, 다국어, 기본값)
+        - mlx-community/EXAONE-3.5-7.8B-Instruct-4bit (한국어 특화)
         - mlx-community/gemma-4-e2b-it-4bit (경량, 저사양용)
     """
 
@@ -316,13 +316,13 @@ class LLMConfig(BaseModel):
     host: str = "http://127.0.0.1:11434"
 
     # MLX 전용 설정 (backend: "mlx" 시 사용)
-    mlx_model_name: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+    mlx_model_name: str = "mlx-community/gemma-4-e4b-it-4bit"
     mlx_max_tokens: int = Field(default=2000, ge=100)
 
     # 공통 설정
     max_context_tokens: int = Field(default=8192, ge=1024)
-    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
-    correction_batch_size: int = Field(default=10, ge=1, le=50)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    correction_batch_size: int = Field(default=5, ge=1, le=50)
     request_timeout_seconds: int = Field(default=120, ge=10)
 
     @field_validator("backend")
@@ -353,7 +353,7 @@ class EmbeddingConfig(BaseModel):
     device: str = "mps"  # Apple Silicon MPS 가속
     query_prefix: str = "query: "
     passage_prefix: str = "passage: "
-    batch_size: int = Field(default=32, ge=1, le=128)
+    batch_size: int = Field(default=64, ge=1, le=128)
 
 
 class ChunkingConfig(BaseModel):
@@ -432,7 +432,7 @@ class PipelineConfig(BaseModel):
         ge=600,
         description="동적 타임아웃 최대값 (초, 폭주 방지)",
     )
-    min_disk_free_gb: float = Field(default=2.0, ge=0.5, le=16.0)
+    min_disk_free_gb: float = Field(default=1.0, ge=0.5, le=16.0)
     # 실측 21건 중 최대 가용 메모리 1.9GB → 2.0GB 임계치 영구 미충족 문제 해결을 위해 1.5로 완화
     # 엣지 케이스(1.5GB 이하)는 각 단계 직전 실시간 check_memory()로 추가 보호
     min_memory_free_gb: float = Field(default=1.5, ge=0.5, le=16.0)
@@ -699,6 +699,14 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"true", "1", "yes", "on"}
 
 
+def _normalize_ollama_host(value: str) -> str:
+    """OLLAMA_HOST 값을 AppConfig의 URL 형식으로 정규화한다."""
+    stripped = value.strip()
+    if stripped.startswith(("http://", "https://")):
+        return stripped
+    return f"http://{stripped}"
+
+
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     """환경변수로 설정값을 오버라이드한다.
 
@@ -708,8 +716,10 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         MT_SERVER_HOST: 서버 호스트
         MT_LLM_HOST: Ollama 호스트 URL
         MT_LLM_BACKEND: LLM 백엔드 ("ollama" 또는 "mlx")
+        MT_LLM_MODEL: MLX 모델명
         MT_LOG_LEVEL: 로그 레벨
         HUGGINGFACE_TOKEN: HuggingFace 인증 토큰
+        HF_TOKEN: HuggingFace 인증 토큰 (HUGGINGFACE_TOKEN 미설정 시 사용)
         OLLAMA_HOST: Ollama 호스트 (MT_LLM_HOST 미설정 시 사용)
 
     Args:
@@ -732,7 +742,7 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     if env_llm_host := os.environ.get("MT_LLM_HOST"):
         data.setdefault("llm", {})["host"] = env_llm_host
     elif env_ollama := os.environ.get("OLLAMA_HOST"):
-        data.setdefault("llm", {})["host"] = f"http://{env_ollama}"
+        data.setdefault("llm", {})["host"] = _normalize_ollama_host(env_ollama)
 
     # 로그 레벨 오버라이드
     if env_log := os.environ.get("MT_LOG_LEVEL"):
@@ -764,30 +774,13 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
     # 우선순위: 환경변수 → huggingface-cli 저장 토큰
-    env_hf = os.environ.get("HUGGINGFACE_TOKEN")
+    env_hf = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
     if not env_hf:
         hf_token_path = Path.home() / ".cache" / "huggingface" / "token"
         if hf_token_path.exists():
             env_hf = hf_token_path.read_text().strip()
     if env_hf:
         data.setdefault("diarization", {})["huggingface_token"] = env_hf
-
-    # Wiki 환경변수 (PRD §9 Phase 1.B)
-    if env_wiki_enabled := os.environ.get("MT_WIKI_ENABLED"):
-        # "true"/"True"/"1" → True, 그 외 → False
-        data.setdefault("wiki", {})["enabled"] = env_wiki_enabled.lower() in (
-            "true",
-            "1",
-            "yes",
-        )
-    if env_wiki_root := os.environ.get("MT_WIKI_ROOT"):
-        data.setdefault("wiki", {})["root"] = env_wiki_root
-    if env_wiki_dry := os.environ.get("MT_WIKI_DRY_RUN"):
-        data.setdefault("wiki", {})["dry_run"] = env_wiki_dry.lower() in (
-            "true",
-            "1",
-            "yes",
-        )
 
     return data
 

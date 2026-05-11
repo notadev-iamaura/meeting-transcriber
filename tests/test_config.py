@@ -51,9 +51,13 @@ class TestConfigYamlParsing:
         assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
         assert config.stt.language == "ko"
         assert config.stt.condition_on_previous_text is False
-        assert config.diarization.device == "auto"
+        assert config.diarization.device == "cpu"
         assert config.llm.host == "http://127.0.0.1:11434"
+        assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
+        assert config.llm.temperature == 0.0
+        assert config.llm.correction_batch_size == 5
         assert config.embedding.dimension == 384
+        assert config.embedding.batch_size == 64
         assert config.search.vector_weight == 0.6
         assert config.server.port == 8765
         # 환각 필터링 설정 검증
@@ -63,6 +67,33 @@ class TestConfigYamlParsing:
         assert config.hallucination_filter.repetition_threshold == 3
         # 텍스트 후처리 설정 검증
         assert config.text_postprocessing.enabled is True
+        assert config.number_normalization.enabled is True
+
+    def test_AppConfig_기본값과_config_yaml_핵심정책_일치(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """빈 config 기본값도 현재 운영 config.yaml의 핵심 정책과 일치해야 한다."""
+        for key in ("MT_LLM_MODEL", "MT_LLM_BACKEND", "MT_SERVER_PORT", "MT_BASE_DIR"):
+            monkeypatch.delenv(key, raising=False)
+
+        default = AppConfig()
+        loaded = load_config(Path(__file__).parent.parent / "config.yaml")
+
+        pairs = [
+            (default.stt.model_name, loaded.stt.model_name),
+            (default.stt.batch_size, loaded.stt.batch_size),
+            (default.stt.condition_on_previous_text, loaded.stt.condition_on_previous_text),
+            (default.diarization.device, loaded.diarization.device),
+            (default.llm.mlx_model_name, loaded.llm.mlx_model_name),
+            (default.llm.temperature, loaded.llm.temperature),
+            (default.llm.correction_batch_size, loaded.llm.correction_batch_size),
+            (default.embedding.batch_size, loaded.embedding.batch_size),
+            (default.pipeline.min_disk_free_gb, loaded.pipeline.min_disk_free_gb),
+            (default.hallucination_filter.enabled, loaded.hallucination_filter.enabled),
+            (default.text_postprocessing.enabled, loaded.text_postprocessing.enabled),
+            (default.number_normalization.enabled, loaded.number_normalization.enabled),
+        ]
+        assert all(left == right for left, right in pairs)
 
     def test_커스텀_yaml_파싱(self, tmp_path: Path) -> None:
         """사용자 지정 YAML 파일을 올바르게 파싱하는지 확인한다."""
@@ -85,8 +116,8 @@ class TestConfigYamlParsing:
         assert config.stt.beam_size == 3
         assert config.server.port == 9999
         # 명시하지 않은 값은 기본값 유지
-        assert config.stt.model_name == "whisper-medium-ko-zeroth"
-        assert config.llm.temperature == 0.3
+        assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
+        assert config.llm.temperature == 0.0
 
 
 class TestDefaultValues:
@@ -98,15 +129,25 @@ class TestDefaultValues:
         config = load_config(nonexistent)
 
         assert config.paths.base_dir == "~/.meeting-transcriber"
-        assert config.stt.model_name == "whisper-medium-ko-zeroth"
-        assert config.diarization.device == "auto"
+        assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
+        assert config.stt.batch_size == 12
+        assert config.stt.condition_on_previous_text is False
+        assert config.diarization.device == "cpu"
         assert config.llm.model_name == "exaone3.5:7.8b-instruct-q4_K_M"
+        assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
+        assert config.llm.temperature == 0.0
+        assert config.llm.correction_batch_size == 5
         assert config.embedding.query_prefix == "query: "
         assert config.embedding.passage_prefix == "passage: "
+        assert config.embedding.batch_size == 64
         assert config.chunking.max_tokens == 300
         assert config.search.fts_tokenizer == "unicode61"
         assert config.thermal.cooldown_seconds == 180
         assert config.pipeline.peak_ram_limit_gb == 9.5
+        assert config.pipeline.min_disk_free_gb == 1.0
+        assert config.hallucination_filter.enabled is True
+        assert config.text_postprocessing.enabled is True
+        assert config.number_normalization.enabled is True
 
     def test_빈_yaml_파일_기본값(self, tmp_path: Path) -> None:
         """빈 YAML 파일에서도 기본값이 정상 적용되는지 확인한다."""
@@ -206,12 +247,12 @@ class TestValidation:
     """설정값 검증 테스트"""
 
     def test_device_auto_옵션_허용(self) -> None:
-        """diarization device를 'auto'로 설정하면 그대로 유지되는지 확인한다."""
+        """diarization device='auto' 입력은 하위 호환을 위해 허용한다."""
         diar = DiarizationConfig(device="auto")
         assert diar.device == "auto"
 
     def test_device_mps_옵션_허용(self) -> None:
-        """diarization device를 'mps'로 설정하면 그대로 유지되는지 확인한다."""
+        """diarization device='mps' 입력은 하위 호환을 위해 허용한다."""
         diar = DiarizationConfig(device="mps")
         assert diar.device == "mps"
 
@@ -227,10 +268,10 @@ class TestValidation:
         with pytest.raises(ValidationError, match="device"):
             DiarizationConfig(device="cuda")
 
-    def test_config_기본값_auto(self) -> None:
-        """DiarizationConfig의 device 기본값이 'auto'인지 확인한다."""
+    def test_config_기본값_cpu(self) -> None:
+        """DiarizationConfig의 device 기본값은 pyannote 안정성을 위해 'cpu'이다."""
         diar = DiarizationConfig()
-        assert diar.device == "auto"
+        assert diar.device == "cpu"
 
     def test_auto_detect_chipset_기본값_false(self) -> None:
         """STTConfig의 auto_detect_chipset 기본값이 False인지 확인한다."""
@@ -387,9 +428,17 @@ class TestEnvOverrideFunction:
             "MT_SERVER_PORT",
             "MT_SERVER_HOST",
             "MT_LLM_HOST",
+            "MT_LLM_BACKEND",
+            "MT_LLM_MODEL",
             "MT_LOG_LEVEL",
             "HUGGINGFACE_TOKEN",
+            "HF_TOKEN",
             "OLLAMA_HOST",
+            "MT_WIKI_ENABLED",
+            "MT_WIKI_ROOT",
+            "MT_WIKI_DRY_RUN",
+            "MT_WIKI_ROUTER_ENABLED",
+            "MT_WIKI_ROUTER_LLM_FALLBACK",
         ]:
             monkeypatch.delenv(key, raising=False)
 
@@ -405,6 +454,26 @@ class TestEnvOverrideFunction:
         result = _apply_env_overrides(data)
 
         assert result["server"]["log_level"] == "debug"
+
+    def test_OLLAMA_HOST_scheme_있으면_중복_prefix_하지_않음(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OLLAMA_HOST가 URL이면 그대로 사용한다."""
+        monkeypatch.delenv("MT_LLM_HOST", raising=False)
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+        result = _apply_env_overrides({})
+
+        assert result["llm"]["host"] == "http://127.0.0.1:11434"
+
+    def test_HF_TOKEN_환경변수_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HUGGINGFACE_TOKEN 미설정 시 HF_TOKEN을 사용한다."""
+        monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+        monkeypatch.setenv("HF_TOKEN", "hf_from_hf_token")
+
+        result = _apply_env_overrides({})
+
+        assert result["diarization"]["huggingface_token"] == "hf_from_hf_token"
 
 
 class TestRecordingConfig:
@@ -528,7 +597,7 @@ class TestLLMBackendConfig:
         from config import LLMConfig
 
         llm = LLMConfig()
-        assert llm.mlx_model_name == "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+        assert llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
 
     def test_mlx_max_tokens_기본값(self) -> None:
         """mlx_max_tokens 기본값이 2000인지 확인한다."""
@@ -608,7 +677,7 @@ class TestNumberNormalizationConfig:
     def test_NumberNormalizationConfig_기본값(self) -> None:
         """NumberNormalizationConfig 기본값 검증."""
         config = NumberNormalizationConfig()
-        assert config.enabled is False
+        assert config.enabled is True
         assert config.level == 1
 
     def test_NumberNormalizationConfig_level_범위(self) -> None:
@@ -622,7 +691,7 @@ class TestNumberNormalizationConfig:
         """AppConfig에 NumberNormalizationConfig 기본값 포함."""
         config = AppConfig()
         assert isinstance(config.number_normalization, NumberNormalizationConfig)
-        assert config.number_normalization.enabled is False
+        assert config.number_normalization.enabled is True
 
 
 class TestSTTInitialPrompt:

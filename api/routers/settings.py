@@ -7,7 +7,6 @@ import logging
 import re
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -68,10 +67,10 @@ class SettingsResponse(BaseModel):
     """
 
     llm_backend: str = "mlx"
-    llm_mlx_model_name: str = "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
-    llm_temperature: float = 0.3
+    llm_mlx_model_name: str = "mlx-community/gemma-4-e4b-it-4bit"
+    llm_temperature: float = 0.0
     llm_mlx_max_tokens: int = 2000
-    llm_skip_steps: bool = True
+    llm_skip_steps: bool = False
     stt_language: str = "ko"
     # 환각 필터 (hallucination_filter)
     hf_enabled: bool = True
@@ -275,65 +274,46 @@ async def update_settings(
 
     # === config.yaml 파일 업데이트 ===
     config_path = _get_config_path()
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            yaml_data = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        logger.warning(f"config.yaml 미발견: {config_path}. 새로 생성합니다.")
-        yaml_data = {}
-
     # YAML 필드 매핑 (API 필드명 → YAML 경로)
     changed_fields: list[str] = []
     model_changed = False
 
     if "llm_backend" in updates:
-        yaml_data.setdefault("llm", {})["backend"] = updates["llm_backend"]
         changed_fields.append("llm_backend")
 
     if "llm_mlx_model_name" in updates:
-        yaml_data.setdefault("llm", {})["mlx_model_name"] = updates["llm_mlx_model_name"]
         changed_fields.append("llm_mlx_model_name")
         model_changed = True
 
     if "llm_temperature" in updates:
-        yaml_data.setdefault("llm", {})["temperature"] = updates["llm_temperature"]
         changed_fields.append("llm_temperature")
 
     if "llm_mlx_max_tokens" in updates:
-        yaml_data.setdefault("llm", {})["mlx_max_tokens"] = updates["llm_mlx_max_tokens"]
         changed_fields.append("llm_mlx_max_tokens")
 
     if "llm_skip_steps" in updates:
-        yaml_data.setdefault("pipeline", {})["skip_llm_steps"] = updates["llm_skip_steps"]
         changed_fields.append("llm_skip_steps")
 
     if "stt_language" in updates:
-        yaml_data.setdefault("stt", {})["language"] = updates["stt_language"]
         changed_fields.append("stt_language")
 
     if "hf_enabled" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["enabled"] = updates["hf_enabled"]
         changed_fields.append("hf_enabled")
     if "hf_no_speech_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["no_speech_threshold"] = updates[
-            "hf_no_speech_threshold"
-        ]
         changed_fields.append("hf_no_speech_threshold")
     if "hf_compression_ratio_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["compression_ratio_threshold"] = updates[
-            "hf_compression_ratio_threshold"
-        ]
         changed_fields.append("hf_compression_ratio_threshold")
     if "hf_repetition_threshold" in updates:
-        yaml_data.setdefault("hallucination_filter", {})["repetition_threshold"] = updates[
-            "hf_repetition_threshold"
-        ]
         changed_fields.append("hf_repetition_threshold")
 
     # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
     try:
-        with open(config_path, encoding="utf-8") as f:
-            content = f.read()
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            logger.warning(f"config.yaml 미발견: {config_path}. 새로 생성합니다.")
+            content = ""
 
         # 정규식 기반 값 교체 (모듈 레벨 _replace_yaml_value 사용 — 주석 보존)
         if "llm_backend" in updates:

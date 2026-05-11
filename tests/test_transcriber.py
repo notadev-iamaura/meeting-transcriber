@@ -281,7 +281,7 @@ class TestTranscriberInit:
     def test_기본_초기화(self, config: AppConfig, mock_manager: MagicMock) -> None:
         """config와 manager로 초기화된다."""
         t = Transcriber(config=config, model_manager=mock_manager)
-        assert t._model_name == "whisper-medium-ko-zeroth"
+        assert t._model_name == config.stt.resolve_model_path()
         assert t._language == "ko"
         assert t._beam_size == 5
 
@@ -298,9 +298,9 @@ class TestTranscriberInit:
     def test_condition_on_previous_text_기본값(
         self, config: AppConfig, mock_manager: MagicMock
     ) -> None:
-        """condition_on_previous_text 기본값은 True이다."""
+        """condition_on_previous_text 기본값은 오류 전파 방지를 위해 False이다."""
         t = Transcriber(config=config, model_manager=mock_manager)
-        assert t._condition_on_previous_text is True
+        assert t._condition_on_previous_text is False
 
     def test_condition_on_previous_text_False(self, mock_manager: MagicMock) -> None:
         """condition_on_previous_text=False가 올바르게 전파된다."""
@@ -510,7 +510,7 @@ class TestTranscribe:
         mock_whisper.transcribe.assert_called_once()
         call_kwargs = mock_whisper.transcribe.call_args
         assert call_kwargs[0][0] == str(audio_file)
-        assert call_kwargs[1]["path_or_hf_repo"] == "whisper-medium-ko-zeroth"
+        assert call_kwargs[1]["path_or_hf_repo"] == transcriber._model_name
         assert call_kwargs[1]["language"] == "ko"
         # beam_size는 decode_options → DecodingOptions로 전달됨
         assert call_kwargs[1]["beam_size"] == 5
@@ -558,9 +558,9 @@ class TestTranscribe:
         config: AppConfig,
         mock_manager: MagicMock,
     ) -> None:
-        """Transcriber 초기화 시 _batch_size가 STTConfig 기본값(16)으로 캐싱된다."""
+        """Transcriber 초기화 시 _batch_size가 STTConfig 기본값(12)으로 캐싱된다."""
         t = Transcriber(config=config, model_manager=mock_manager)
-        assert t._batch_size == 16
+        assert t._batch_size == 12
 
     def test_커스텀_batch_size_캐싱(
         self,

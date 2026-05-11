@@ -264,8 +264,12 @@ async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
 
     config_path = _get_config_path()
     try:
-        with open(config_path, encoding="utf-8") as f:
-            content = f.read()
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+        except FileNotFoundError:
+            logger.warning("config.yaml 미발견: %s. 새로 생성합니다.", config_path)
+            content = ""
         content = _replace_yaml_value(content, "stt", "model_name", f'"{new_path}"')
         await asyncio.to_thread(_atomic_write_text, config_path, content)
         logger.info(

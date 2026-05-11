@@ -24,7 +24,7 @@ stt:
 # === 화자분리 설정 ===
 diarization:
   model_name: "pyannote/speaker-diarization-3.1"
-  device: "auto"                             # "auto": MPS 가용 시 MPS, 아니면 CPU / "mps" / "cpu"
+  device: "cpu"                              # pyannote MPS 버그 회피: CPU 강제
   min_speakers: 1                            # 최소 화자 수 (1명이어도 정상 처리)
   max_speakers: 10                           # 최대 화자 수
   # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정

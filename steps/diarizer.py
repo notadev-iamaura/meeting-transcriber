@@ -5,7 +5,7 @@
 주요 기능:
     - pyannote/speaker-diarization-3.1 파이프라인 기반 화자분리
     - ModelLoadManager를 통한 모델 라이프사이클 관리 (뮤텍스)
-    - device='auto'일 때 MPS 가용 시 MPS 사용, 실패 시 CPU 폴백
+    - pyannote MPS 버그 회피를 위해 런타임 CPU 강제
     - 화자별 시간 구간(speaker, start, end) 반환
     - HuggingFace 토큰 검증
     - 비동기(async) 인터페이스 지원
@@ -171,7 +171,7 @@ class Diarizer:
 
     ModelLoadManager를 통해 pyannote 파이프라인의 메모리 라이프사이클을 관리하고,
     config.yaml의 diarization 설정에 따라 화자분리를 수행한다.
-    device='auto'일 때 MPS를 시도하고, 실패 시 CPU로 폴백한다.
+    pyannote MPS 버그 회피 정책에 따라 설정값과 관계없이 CPU로 실행한다.
 
     Args:
         config: 애플리케이션 설정 인스턴스 (None이면 싱글턴 사용)
@@ -232,32 +232,19 @@ class Diarizer:
         return self._hf_token
 
     def _resolve_device(self, torch_module: Any) -> str:
-        """설정된 device 값에 따라 실제 사용할 디바이스를 결정한다.
+        """pyannote 실행 디바이스를 CPU로 강제한다.
 
         Args:
-            torch_module: torch 모듈 (MPS 가용성 확인용)
+            torch_module: 하위 호환 시그니처 유지를 위한 torch 모듈. 사용하지 않는다.
 
         Returns:
-            사용할 디바이스 문자열 ("mps" 또는 "cpu")
+            사용할 디바이스 문자열 ("cpu")
         """
-        if self._device == "cpu":
-            return "cpu"
-
-        mps_available = (
-            hasattr(torch_module.backends, "mps") and torch_module.backends.mps.is_available()
-        )
-
-        if self._device == "auto":
-            if mps_available:
-                logger.info("auto 모드: MPS 가용, MPS 디바이스 사용 시도")
-                return "mps"
-            logger.info("auto 모드: MPS 미가용, CPU 사용")
-            return "cpu"
-
-        # device == "mps"
-        if mps_available:
-            return "mps"
-        logger.warning("MPS 디바이스 요청되었으나 미가용. CPU로 폴백")
+        if self._device != "cpu":
+            logger.warning(
+                "pyannote diarization.device=%s 요청은 MPS 버그 회피 정책에 따라 CPU로 강제합니다.",
+                self._device,
+            )
         return "cpu"
 
     def _load_pipeline(self) -> Any:
