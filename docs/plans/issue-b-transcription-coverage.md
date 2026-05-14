@@ -9,6 +9,12 @@
 > `komixv2` → `mlx-community/whisper-large-v3-turbo` 로 교체하여 회의 도메인
 > 평균 CER **66.17% → 49.80% (-16%p)** 로 개선됨.
 >
+> **2026-05-10 후속 정리**: 이 문서의 파라미터 실험 절차는 재실행하지 않습니다.
+> 후속 STT 품질 개선은 `core/stt_quality_metrics.py`와
+> `scripts/evaluate_stt_quality.py`를 사용해 reference 발화 구간 대비
+> `coverage_rate`, `omission_rate`, `hallucination_time_rate`, 선택적 `CER/WER`
+> 를 기록하는 metric harness 방식으로 진행합니다.
+>
 > 자세한 검증 매트릭스: `docs/BENCHMARK.md §1.1` (4-실험 다중 파일 결과).
 >
 > 이 문서는 의사결정 기록 보존 목적으로만 유지하며, **재실행하지 마십시오**.
