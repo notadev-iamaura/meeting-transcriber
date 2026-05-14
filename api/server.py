@@ -616,7 +616,17 @@ def _setup_spa_routes(app: FastAPI) -> None:
 
         # /static/*.js, /static/*.css 에 ?v=mtime 추가
         # 람다는 기본 인자(v=v)로 현재 루프 반복의 버전 값을 바인딩해 B023 오보 회피 + 의도 명시
-        for fname in ("spa.js", "app.js", "tokens.css", "style.css", "bulk-actions.css"):
+        for fname in (
+            "spa.js",
+            "app.js",
+            "tokens.css",
+            "style.css",
+            "recording.css",
+            "settings.css",
+            "ab-test.css",
+            "wiki.css",
+            "bulk-actions.css",
+        ):
             v = _ver(fname)
             pattern = re.compile(r"(/static/" + re.escape(fname) + r')(\?[^"\'>\s]*)?')
 

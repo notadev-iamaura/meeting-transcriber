@@ -1,0 +1,1274 @@
+/* Settings and settings modal styles extracted from style.css. */
+
+/* ─────────────────────────────────────────
+   설정 페이지 — macOS 시스템 환경설정 스타일
+   ───────────────────────────────────────── */
+
+/* 설정 뷰 컨테이너 */
+.settings-view {
+  /* #content가 overflow:hidden 이므로 settings-view 자체가 스크롤 컨테이너 */
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 32px 24px;
+}
+
+/* 설정 내부 콘텐츠는 중앙 정렬 + max-width 제한 */
+.settings-view > * {
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 설정 헤더 */
+.settings-header {
+  margin-bottom: 28px;
+}
+
+.settings-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* 설정 섹션 (카드형 그룹) */
+.settings-section {
+  background: var(--bg-secondary);
+  border-radius: 10px;
+  padding: 4px 16px;
+  margin-bottom: 24px;
+}
+
+.settings-section-title {
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-secondary);
+  padding: 12px 0 4px;
+  margin: 0;
+}
+
+/* 설정 그룹 내부 */
+.settings-group {
+  padding: 0;
+}
+
+/* 설정 행 (라벨 + 컨트롤) */
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 0.5px solid var(--border-light);
+}
+
+.setting-row:last-child {
+  border-bottom: none;
+}
+
+/* 설정 라벨 */
+.setting-label {
+  font-size: 14px;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  margin-right: 16px;
+}
+
+/* macOS 스타일 셀렉트 드롭다운 */
+.setting-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-content);
+  border: 0.5px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  min-width: 180px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition: border-color var(--duration-fast) var(--ease-macos);
+}
+
+.setting-select:hover {
+  border-color: var(--accent);
+}
+
+.setting-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+/* (?) 도움말 버튼 + 툴팁 — 비개발자용 한 줄 설명 */
+.setting-control-with-help {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.setting-control-with-help .setting-select {
+  flex: 1;
+  max-width: 280px;
+}
+
+.setting-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  user-select: none;
+  position: relative;
+  border: 0.5px solid var(--border);
+  transition: all var(--duration-base) var(--ease-macos);
+  flex-shrink: 0;
+}
+
+.setting-help:hover,
+.setting-help:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* 툴팁 (data-tooltip 속성 기반) */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: normal;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 12px;
+  background: var(--text-primary);
+  color: var(--bg-canvas);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  box-shadow: var(--shadow);
+  z-index: 100;
+  pointer-events: none;
+  text-align: center;
+}
+
+[data-tooltip]:hover::before,
+[data-tooltip]:focus-visible::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--text-primary);
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* 메트릭 툴팁 — 작은 텍스트 위쪽에 표시 */
+.stt-model-metrics .metric[data-tooltip] {
+  cursor: help;
+}
+
+/* macOS 스타일 토글 스위치 (34px x 20px) */
+.setting-toggle {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+}
+
+.setting-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  display: block;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--border);
+  transition: background var(--duration-base) var(--ease-macos);
+  position: relative;
+}
+
+.toggle-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform var(--duration-base) var(--ease-macos);
+}
+
+.setting-toggle input:checked + .toggle-track {
+  background: var(--accent);
+}
+
+.setting-toggle input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(14px);
+}
+
+.setting-toggle input:focus-visible + .toggle-track {
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+/* Temperature 슬라이더 */
+.setting-slider-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.setting-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 140px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  outline: none;
+  cursor: pointer;
+}
+
+.setting-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.setting-slider:focus {
+  outline: none;
+}
+
+.setting-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.setting-slider-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  min-width: 24px;
+  text-align: right;
+}
+
+/* 저장 버튼 영역 */
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 8px;
+}
+
+.settings-save-btn {
+  background: var(--accent);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos), opacity var(--duration-fast) var(--ease-macos);
+}
+
+.settings-save-btn:hover {
+  background: var(--accent-hover);
+}
+
+.settings-save-btn:active {
+  opacity: 0.85;
+}
+
+.settings-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 저장 상태 메시지 */
+.settings-save-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  transition: opacity var(--duration-base) var(--ease-macos);
+}
+
+.settings-save-status.success {
+  color: var(--success);
+}
+
+.settings-save-status.error {
+  color: var(--error);
+}
+
+/* 설정 페이지 반응형 (모바일) */
+@media (max-width: 768px) {
+  .settings-view {
+    padding: 20px 16px;
+  }
+
+  .setting-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .setting-select {
+    width: 100%;
+    min-width: unset;
+  }
+
+  .setting-slider-group {
+    width: 100%;
+  }
+
+  .setting-slider {
+    flex: 1;
+  }
+}
+
+
+/* =========================================================================
+   설정 페이지 — 탭 / 프롬프트 편집 / 용어집 관리
+   PR4: 사용자 편집 가능한 프롬프트 & 고유명사 용어집 UI
+   ========================================================================= */
+
+/* --- Segmented control (상위 탭: 일반/프롬프트/용어집) --- */
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  max-width: 640px;
+  margin: 0 auto 20px;
+  padding: 3px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+}
+
+.settings-tab {
+  flex: 1;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
+}
+
+.settings-tab:hover {
+  color: var(--text-primary);
+}
+
+.settings-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-panel-host {
+  /* 하위 패널이 들어가는 컨테이너 — 특별한 스타일 불필요 */
+}
+
+/* --- Secondary / Destructive 버튼 --- */
+.btn-secondary {
+  padding: 7px 14px;
+  border: 0.5px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-text-destructive {
+  background: transparent;
+  border: none;
+  color: #ff3b30;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 7px 0;
+}
+
+.btn-text-destructive:hover {
+  text-decoration: underline;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn-text-destructive { color: #ff453a; }
+}
+[data-theme="dark"] .btn-text-destructive { color: #ff453a; }
+
+/* --- 프롬프트 편집 패널 --- */
+.prompts-panel {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.prompt-subtabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  padding: 2px;
+  background: var(--bg-secondary);
+  border-radius: 7px;
+  width: fit-content;
+}
+
+.prompt-subtab {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
+}
+
+.prompt-subtab:hover { color: var(--text-primary); }
+
+.prompt-subtab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.prompt-subtab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* .settings-section 토큰을 상속하되 프롬프트 에디터 전용 패딩으로 재정의.
+   .settings-section.prompt-editor-card 선택자는 .settings-section보다 명시도가 높아 !important 불필요. */
+.settings-section.prompt-editor-card {
+  padding: 16px 18px;
+}
+
+.prompt-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.prompt-editor-desc {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 520px;
+}
+
+.prompt-dirty-indicator {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity var(--duration-base) var(--ease-macos);
+  white-space: nowrap;
+}
+
+.prompt-dirty-indicator.active {
+  opacity: 1;
+}
+
+.prompt-textarea {
+  width: 100%;
+  min-height: 320px;
+  max-height: 60vh;
+  padding: 12px 14px;
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  box-sizing: border-box;
+  tab-size: 2;
+}
+
+.prompt-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  .prompt-textarea:focus {
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2);
+  }
+}
+
+.prompt-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-meta .over-limit {
+  color: #ff3b30;
+}
+
+/* .settings-actions.prompt-actions 명시도로 기본 .settings-actions 의 flex-end 를 덮어쓴다. */
+.settings-actions.prompt-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  max-width: 720px;
+}
+
+.prompt-actions-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* --- 용어집 패널 --- */
+.vocabulary-panel {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.vocab-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.vocab-desc {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 480px;
+}
+
+.vocab-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.vocab-search {
+  flex: 1;
+  max-width: 280px;
+  padding: 7px 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.vocab-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.vocab-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.vocab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vocab-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  transition: background var(--duration-fast) var(--ease-macos);
+}
+
+.vocab-card:hover {
+  background: var(--bg-secondary);
+}
+
+.vocab-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.vocab-term {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.vocab-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.vocab-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.vocab-card:hover .vocab-chip {
+  background: var(--bg-card);
+}
+
+.vocab-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.vocab-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-icon {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos), color var(--duration-fast) var(--ease-macos);
+}
+
+.btn-icon:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.btn-icon-destructive:hover {
+  color: #ff3b30;
+}
+
+.vocab-empty {
+  padding: 60px 20px;
+  text-align: center;
+}
+
+.vocab-empty-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.vocab-empty-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* --- Modal --- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  /* macOS 스타일 배경 블러 — docs/design.md §1 */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 1;
+  transition: opacity var(--duration-base) var(--ease-macos);
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 18px 0;
+  color: var(--text-primary);
+}
+
+.modal-field {
+  margin-bottom: 14px;
+}
+
+.modal-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.modal-hint {
+  margin: 6px 0 0 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.modal-error {
+  min-height: 16px;
+  font-size: 12px;
+  color: #ff3b30;
+  margin-top: 6px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* 안내 문구 (info 모달용) — 제목 아래 본문 문단 */
+.modal-message {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-line;
+}
+
+/* 가져오기 모달 (레퍼런스 ImportPanel.jsx) */
+.import-modal-content {
+  max-width: 560px;
+  width: 92vw;
+}
+
+.mono-inline {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  background: var(--bg-secondary);
+  padding: 1px 5px;
+  border-radius: var(--radius);
+}
+
+.import-dropzone {
+  margin-top: 16px;
+  padding: 36px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.import-dropzone:hover,
+.import-dropzone:focus-visible,
+.import-dropzone.dragging {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.import-dropzone-title {
+  font-size: var(--fs-14);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+}
+
+.import-dropzone-sub {
+  font-size: var(--fs-11);
+  color: var(--text-muted);
+}
+
+.import-queue {
+  margin-top: 16px;
+}
+
+.import-queue-header {
+  margin-bottom: 8px;
+}
+
+.import-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.import-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+}
+
+.import-queue-item-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-queue-item-meta {
+  font-size: var(--fs-11);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-queue-item-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.import-queue-item-remove:hover {
+  background: var(--bg-hover);
+  color: var(--error);
+}
+
+.import-notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 149, 0, 0.08);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  line-height: var(--lh-snug);
+}
+
+/* ============================================================
+   STT 모델 카드 UI (Phase 6)
+   설정 > 일반 탭의 "음성 인식 모델 (STT)" 섹션에서 사용
+   ============================================================ */
+
+.settings-section-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: -4px 0 12px 0;
+  line-height: 1.5;
+}
+
+.stt-models {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stt-models-loading,
+.stt-models-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 12px;
+  text-align: center;
+}
+
+.stt-models-error {
+  font-size: 12px;
+  color: var(--error);
+  padding: 12px;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.stt-model-card {
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--bg-card);
+  transition: border-color var(--duration-base) var(--ease-macos),
+              background var(--duration-base) var(--ease-macos);
+}
+
+/* 활성(현재 사용 중) — 레퍼런스 Settings.jsx 의 선택 카드처럼
+   accent border 만 강조하고 내부 inset shadow 는 제거해 톤을 가볍게. */
+.stt-model-card.active {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+/* 추천 — 별도 border 강조 없이 badge 로만 표시 (accent pill).
+   활성/추천 배타가 아니라 함께 있을 수 있으므로 border 는 accent 유지. */
+.stt-model-card.recommended {
+  /* border 변경 없음 — badge 가 의미 전달을 담당 */
+}
+
+.stt-model-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.stt-model-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.stt-model-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.stt-model-badge.recommended {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.stt-model-badge.active {
+  background: rgba(0, 122, 255, 0.15);
+  color: var(--accent);
+}
+
+.stt-model-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.stt-model-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.stt-model-metrics .metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.stt-model-metrics .metric strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.stt-model-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.stt-action-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 0.5px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: opacity var(--duration-fast) var(--ease-macos), background var(--duration-fast) var(--ease-macos), border-color var(--duration-fast) var(--ease-macos);
+}
+
+.stt-action-btn.download {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+
+.stt-action-btn.activate {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.stt-action-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.stt-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.stt-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.stt-active-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.stt-model-progress {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--duration-slow) var(--ease-macos);
+}
+
+.stt-model-error {
+  font-size: 11px;
+  color: var(--error);
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 59, 48, 0.08);
+  border-radius: 4px;
+}
+
+.stt-models-status {
+  margin-top: 10px;
+  font-size: 12px;
+  min-height: 16px;
+  color: var(--text-secondary);
+}
+
+.stt-models-status.success {
+  color: #34c759;
+}
+
+.stt-models-status.error {
+  color: var(--error);
+}
+
+/* 좁은 화면 대응: 메트릭/액션이 카드 폭 안에서 자연스럽게 줄바꿈 */
+@media (max-width: 520px) {
+  .stt-model-metrics {
+    gap: 10px;
+  }
+  .stt-model-card {
+    padding: 12px;
+  }
+}
+
+/* =========================================================================
+   STT 수동 다운로드 섹션 — 네트워크 이슈 사용자용 브라우저 URL + 가져오기
+   ========================================================================= */
+
+.stt-manual-download {
+  margin-top: 12px;
+  padding: 8px 0 0 0;
+  border-top: 1px dashed var(--border);
+}
+
+.stt-manual-download > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+
+.stt-manual-download > summary::-webkit-details-marker { display: none; }
+
+.stt-manual-download > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform var(--duration-fast) var(--ease-macos);
+}
+
+.stt-manual-download[open] > summary::before {
+  content: "▾ ";
+}
+
+.stt-manual-download > summary:hover {
+  color: var(--text-primary);
+}
+
+.stt-manual-body {
+  padding: 10px 4px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.stt-manual-loading,
+.stt-manual-error,
+.stt-manual-unsupported {
+  padding: 8px 0;
+  color: var(--text-secondary);
+}
+
+.stt-manual-error {
+  color: var(--error);
+}
+
+.stt-manual-instructions {
+  margin: 0 0 12px 0;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* 옵션 1: 앱이 URL로 직접 받기 — 권장 경로, 강조 배경 */
+.stt-direct-download-group {
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+
+.stt-direct-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.stt-direct-desc {
+  margin: 0 0 10px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.stt-direct-download-group .stt-action-btn {
+  width: 100%;
+}

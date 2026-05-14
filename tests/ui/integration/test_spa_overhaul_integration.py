@@ -160,7 +160,10 @@ def _spa_page(
     page.route("**/api/**", api_handler or _mock_api)
     try:
         page.goto(base_url + path)
-        page.wait_for_load_state("networkidle")
+        # Viewer/AB test routes may start polling immediately. Waiting for
+        # networkidle makes the helper depend on timer behavior instead of SPA
+        # readiness, so each test waits for its own target UI below.
+        page.wait_for_load_state("domcontentloaded")
         yield page
     finally:
         ctx.close()
