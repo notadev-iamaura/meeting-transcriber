@@ -287,6 +287,20 @@ class ModelLoadManager:
         Raises:
             Exception: 모델 로드 중 발생한 모든 예외 (Lock은 안전하게 해제됨)
         """
+        async with self._context_lock:
+            return await self._load_model_with_state_lock(name, loader)
+
+    async def _load_model_with_state_lock(
+        self,
+        name: str,
+        loader: ModelLoader,
+    ) -> Any:
+        """context lock을 이미 보유한 상태에서 모델을 로드한다.
+
+        직접 load_model() 호출은 active acquire() 컨텍스트가 끝날 때까지 기다린다.
+        반면 _ModelContext.__aenter__는 이미 context lock을 보유하므로 이 helper를
+        호출해 deadlock 없이 내부 상태만 `_lock`으로 보호한다.
+        """
         async with self._lock:
             # 같은 모델이 이미 로드되어 있으면 재사용
             if self._current is not None and self._current.name == name:
@@ -335,11 +349,27 @@ class ModelLoadManager:
     async def unload_model(self) -> None:
         """현재 로드된 모델을 명시적으로 언로드한다.
 
-        Lock을 획득한 후 언로드하여 동시 접근을 방지한다.
+        acquire() 컨텍스트가 모델을 사용 중이면 해당 컨텍스트가 끝날 때까지
+        기다린 뒤 언로드한다. 직접 unload 호출이 active MLX inference 중인
+        backend를 cleanup하지 못하게 하기 위함이다.
         로드된 모델이 없으면 아무 동작도 하지 않는다.
+        """
+        async with self._context_lock:
+            await self._unload_model_locked()
+
+    async def _unload_model_locked(self) -> None:
+        """context lock을 이미 보유한 상태에서 현재 모델을 언로드한다.
+
+        load/unload 내부 상태 변경은 기존 `_lock`으로 보호한다.
+        이 helper는 `_ModelContext.__aexit__`처럼 `_context_lock`을 이미 가진
+        경로에서 deadlock 없이 언로드하기 위해 사용한다.
         """
         async with self._lock:
             await self._unload_current()
+
+    async def _unload_model_from_context(self) -> None:
+        """acquire() 컨텍스트 종료 시 현재 모델을 언로드한다."""
+        await self._unload_model_locked()
 
     def acquire(
         self,
@@ -417,7 +447,7 @@ class _ModelContext:
         """모델을 로드하고 인스턴스를 반환한다."""
         await self._manager._context_lock.acquire()
         try:
-            return await self._manager.load_model(self._name, self._loader)
+            return await self._manager._load_model_with_state_lock(self._name, self._loader)
         except Exception:
             self._manager._context_lock.release()
             raise
@@ -429,7 +459,7 @@ class _ModelContext:
             if self._keep_loaded and exc_type is None:
                 logger.debug(f"모델 유지 (keep_loaded=True): {self._name}")
                 return
-            await self._manager.unload_model()
+            await self._manager._unload_model_from_context()
         finally:
             self._manager._context_lock.release()
 

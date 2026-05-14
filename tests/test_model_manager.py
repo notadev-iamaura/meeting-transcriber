@@ -249,6 +249,77 @@ async def test_context_manager_serializes_inference_block(manager: Any) -> None:
     assert execution_order == ["a_start", "a_end", "b_start", "b_end"]
 
 
+async def test_direct_unload_waits_for_active_context(manager: Any) -> None:
+    """직접 unload_model 호출은 active acquire 컨텍스트 종료를 기다린다."""
+    events: list[str] = []
+    unload_started = asyncio.Event()
+    release_context = asyncio.Event()
+
+    async def use_model() -> None:
+        async with manager.acquire("exaone", lambda: FakeModel("exaone")):
+            events.append("context_start")
+            await unload_started.wait()
+            await asyncio.sleep(0)
+            assert manager.is_model_loaded is True
+            events.append("context_release")
+            release_context.set()
+
+    async def unload_model() -> None:
+        await unload_started.wait()
+        await manager.unload_model()
+        events.append("unload_done")
+
+    context_task = asyncio.create_task(use_model())
+    await asyncio.sleep(0)
+    unload_task = asyncio.create_task(unload_model())
+    unload_started.set()
+
+    await release_context.wait()
+    assert unload_task.done() is False
+
+    await asyncio.gather(context_task, unload_task)
+
+    assert events == ["context_start", "context_release", "unload_done"]
+    assert manager.is_model_loaded is False
+
+
+async def test_direct_load_waits_for_active_context(manager: Any) -> None:
+    """직접 load_model 호출은 active acquire 컨텍스트 종료 후 모델을 교체한다."""
+    events: list[str] = []
+    load_started = asyncio.Event()
+    release_context = asyncio.Event()
+    replacement = FakeModel("replacement")
+
+    async def use_model() -> None:
+        async with manager.acquire("exaone", lambda: FakeModel("exaone")):
+            events.append("context_start")
+            await load_started.wait()
+            await asyncio.sleep(0)
+            assert manager.current_model_name == "exaone"
+            events.append("context_release")
+            release_context.set()
+
+    async def load_replacement() -> None:
+        await load_started.wait()
+        model = await manager.load_model("replacement", lambda: replacement)
+        assert model is replacement
+        events.append("load_done")
+
+    context_task = asyncio.create_task(use_model())
+    await asyncio.sleep(0)
+    load_task = asyncio.create_task(load_replacement())
+    load_started.set()
+
+    await release_context.wait()
+    assert load_task.done() is False
+
+    await asyncio.gather(context_task, load_task)
+
+    assert events == ["context_start", "context_release", "load_done"]
+    assert manager.current_model_name == "replacement"
+    assert manager.current_model is replacement
+
+
 # === 로드 실패 테스트 ===
 
 
