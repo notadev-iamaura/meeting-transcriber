@@ -90,6 +90,116 @@ def _get_config(request: Request) -> Any:
     return config
 
 
+def _read_pipeline_state_for_response(config: Any, meeting_id: str) -> dict[str, Any] | None:
+    """응답 보정용 pipeline_state.json 을 읽는다."""
+    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
+    if not state_path.is_file():
+        return None
+
+    try:
+        data = _json_cache.get(state_path)
+    except Exception as exc:
+        logger.warning(f"pipeline_state.json 응답 보정 읽기 실패: {meeting_id}, error={exc}")
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def _has_transcript_artifact(config: Any, meeting_id: str) -> bool:
+    """회의 전사 탭을 구성할 수 있는 산출물이 있는지 확인한다."""
+    outputs_dir = config.paths.resolved_outputs_dir
+    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    candidates = (
+        outputs_dir / meeting_id / "corrected.json",
+        checkpoints_dir / meeting_id / "correct.json",
+        checkpoints_dir / meeting_id / "merge.json",
+    )
+    return any(path.is_file() for path in candidates)
+
+
+def _build_meeting_item(
+    job: Any,
+    *,
+    pipeline_state: dict[str, Any] | None = None,
+    status_detail: str = "",
+) -> MeetingItem:
+    """Job 과 pipeline_state 를 API 응답 스키마로 변환한다."""
+    skipped_steps = []
+    degraded = False
+    if pipeline_state is not None:
+        raw_skipped = pipeline_state.get("skipped_steps", [])
+        if isinstance(raw_skipped, list):
+            skipped_steps = [str(step) for step in raw_skipped]
+        degraded = bool(pipeline_state.get("degraded", False))
+
+    return MeetingItem(
+        id=job.id,
+        meeting_id=job.meeting_id,
+        audio_path=job.audio_path,
+        status=job.status,
+        retry_count=job.retry_count,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        title=getattr(job, "title", "") or "",
+        degraded=degraded,
+        skipped_steps=skipped_steps,
+        status_detail=status_detail,
+    )
+
+
+async def reconcile_job_state_for_response(
+    raw_queue: Any,
+    config: Any,
+    job: Any,
+    *,
+    include_pipeline_state: bool = True,
+) -> tuple[Any, dict[str, Any] | None, str]:
+    """완료 체크포인트와 실패 job.status 가 충돌하면 DB 상태를 복구한다."""
+    from core.job_queue import JobStatus
+
+    if job.status != JobStatus.FAILED.value:
+        pipeline_state = (
+            _read_pipeline_state_for_response(config, job.meeting_id)
+            if include_pipeline_state
+            else None
+        )
+        return job, pipeline_state, ""
+
+    pipeline_state = _read_pipeline_state_for_response(config, job.meeting_id)
+    if pipeline_state is None or pipeline_state.get("status") != "completed":
+        return job, pipeline_state, ""
+
+    if not _has_transcript_artifact(config, job.meeting_id):
+        return job, pipeline_state, ""
+
+    reason = (
+        "pipeline_state.status=completed 와 전사 산출물이 확인되어 "
+        "failed job.status 를 completed 로 복구함"
+    )
+    try:
+        updated_job = await asyncio.to_thread(
+            raw_queue.force_set_status,
+            job.id,
+            JobStatus.COMPLETED,
+            "",
+        )
+        logger.warning(
+            "회의 상태 불일치 자동 복구: meeting_id=%s, job_id=%s, failed → completed",
+            job.meeting_id,
+            job.id,
+        )
+        return updated_job, pipeline_state, reason
+    except Exception as exc:
+        logger.error(
+            "회의 상태 불일치 자동 복구 실패: meeting_id=%s, job_id=%s, error=%s",
+            job.meeting_id,
+            job.id,
+            exc,
+        )
+        return job, pipeline_state, "상태 불일치 감지됨: DB 복구 실패"
+
+
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
     """백그라운드 태스크의 미처리 예외를 로깅한다."""
     if task.cancelled():
@@ -126,6 +236,9 @@ class MeetingItem(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     title: str = ""
+    degraded: bool = False
+    skipped_steps: list[str] = Field(default_factory=list)
+    status_detail: str = ""
 
 
 class TranscriptUtteranceItem(BaseModel):
@@ -219,16 +332,17 @@ async def get_meeting(request: Request, meeting_id: str) -> MeetingItem:
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        return MeetingItem(
-            id=job.id,
-            meeting_id=job.meeting_id,
-            audio_path=job.audio_path,
-            status=job.status,
-            retry_count=job.retry_count,
-            error_message=job.error_message,
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            title=getattr(job, "title", "") or "",
+        config = _get_config(request)
+        raw_queue = getattr(queue, "queue", queue)
+        job, pipeline_state, status_detail = await reconcile_job_state_for_response(
+            raw_queue,
+            config,
+            job,
+        )
+        return _build_meeting_item(
+            job,
+            pipeline_state=pipeline_state,
+            status_detail=status_detail,
         )
     except HTTPException:
         raise
@@ -341,6 +455,28 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
+        config = _get_config(request)
+        raw_queue = getattr(queue, "queue", queue)
+        job, pipeline_state, status_detail = await reconcile_job_state_for_response(
+            raw_queue,
+            config,
+            job,
+        )
+        if status_detail:
+            if job.status == "completed":
+                return _build_meeting_item(
+                    job,
+                    pipeline_state=pipeline_state,
+                    status_detail=status_detail,
+                )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "회의 산출물은 완료 상태로 보이지만 작업 큐 상태 복구에 실패했습니다. "
+                    f"{status_detail}"
+                ),
+            )
+
         # 재시도 실행 (job_id 기반)
         updated_job = await asyncio.to_thread(queue.queue.retry_job, job.id)
 
@@ -351,17 +487,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
 
         logger.info(f"회의 재시도 요청: {meeting_id} (job_id={job.id})")
 
-        return MeetingItem(
-            id=updated_job.id,
-            meeting_id=updated_job.meeting_id,
-            audio_path=updated_job.audio_path,
-            status=updated_job.status,
-            retry_count=updated_job.retry_count,
-            error_message=updated_job.error_message,
-            created_at=updated_job.created_at,
-            updated_at=updated_job.updated_at,
-            title=getattr(updated_job, "title", "") or "",
-        )
+        return _build_meeting_item(updated_job, pipeline_state=pipeline_state)
     except HTTPException:
         raise
     except (InvalidTransitionError, MaxRetriesExceededError) as e:

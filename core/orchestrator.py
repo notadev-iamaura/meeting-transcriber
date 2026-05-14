@@ -243,6 +243,60 @@ class JobProcessor:
         except Exception as e:
             logger.error(f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}")
 
+    async def _mark_job_completed_after_pipeline(
+        self,
+        job_id: int,
+        meeting_id: str,
+    ) -> bool:
+        """파이프라인 완료 후 작업 큐 상태를 completed 로 확정한다.
+
+        일반 상태 전이(update_status)가 실패하면 pipeline_state 와 DB 상태가 갈라질 수
+        있으므로, 완료 처리에서는 복구 전용 강제 업데이트를 한 번 더 시도한다.
+        """
+        try:
+            await self._job_queue.update_status(job_id, JobStatus.COMPLETED)
+            return True
+        except Exception as exc:
+            logger.error(
+                "작업 완료 상태 업데이트 실패: job_id=%s, meeting_id=%s, error=%s",
+                job_id,
+                meeting_id,
+                exc,
+            )
+
+        raw_queue = getattr(self._job_queue, "queue", None)
+        force_set_status = getattr(raw_queue, "force_set_status", None)
+        if raw_queue is None or not callable(force_set_status):
+            logger.error(
+                "작업 완료 상태 복구 불가: force_set_status 없음 "
+                "job_id=%s, meeting_id=%s",
+                job_id,
+                meeting_id,
+            )
+            return False
+
+        try:
+            await asyncio.to_thread(
+                force_set_status,
+                job_id,
+                JobStatus.COMPLETED,
+                "",
+            )
+            logger.warning(
+                "작업 완료 상태 강제 복구: job_id=%s, meeting_id=%s",
+                job_id,
+                meeting_id,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "작업 완료 상태 강제 복구 실패: job_id=%s, meeting_id=%s, error=%s",
+                job_id,
+                meeting_id,
+                exc,
+            )
+            return False
+
     def _resolve_step_model_id(self, step: str) -> str:
         """단계에 해당하는 활성 모델 ID를 반환한다.
 
@@ -416,9 +470,19 @@ class JobProcessor:
                 skip_llm_steps=None,
             )
 
-            # 완료 상태 업데이트
-            await self._update_job_status_safe(job_id, "completed")
+            # 완료 상태 업데이트. 실패 시 복구 경로를 통해 pipeline_state 와 DB 상태를 맞춘다.
+            status_recovered = await self._mark_job_completed_after_pipeline(job_id, meeting_id)
             await self._thermal_manager.notify_job_completed()
+            if not status_recovered:
+                await self._broadcast_event(
+                    "job_state_inconsistent",
+                    {
+                        "job_id": job_id,
+                        "meeting_id": meeting_id,
+                        "pipeline_status": "completed",
+                        "job_status": "unknown",
+                    },
+                )
             await self._broadcast_event(
                 "job_completed",
                 {"job_id": job_id, "meeting_id": meeting_id, "status": "completed"},

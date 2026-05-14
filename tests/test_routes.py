@@ -78,6 +78,42 @@ def _make_test_app(tmp_path: Path) -> Any:
     return app
 
 
+def _create_completed_pipeline_state(
+    tmp_path: Path,
+    meeting_id: str,
+    *,
+    skipped_steps: list[str] | None = None,
+) -> None:
+    """완료된 pipeline_state.json 과 전사 산출물을 생성한다."""
+    ckpt_dir = tmp_path / "checkpoints" / meeting_id
+    out_dir = tmp_path / "outputs" / meeting_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "pipeline_state.json").write_text(
+        json.dumps(
+            {
+                "meeting_id": meeting_id,
+                "audio_path": f"/audio/{meeting_id}.m4a",
+                "status": "completed",
+                "completed_steps": [
+                    "convert",
+                    "transcribe",
+                    "diarize",
+                    "merge",
+                    "correct",
+                ],
+                "skipped_steps": skipped_steps or [],
+                "step_results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "corrected.json").write_text(
+        json.dumps({"utterances": [{"text": "안녕하세요", "speaker": "SPEAKER_00"}]}),
+        encoding="utf-8",
+    )
+
+
 @dataclass
 class MockJob:
     """테스트용 Job 데이터 클래스."""
@@ -161,12 +197,13 @@ class TestStatusEndpoint:
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            # 모킹: 큐 상태 집계
-            app.state.job_queue.count_by_status = AsyncMock(
-                return_value={"completed": 3, "queued": 1},
-            )
             app.state.job_queue.get_all_jobs = AsyncMock(
-                return_value=[MockJob(1, "m1", "/a.wav"), MockJob(2, "m2", "/b.wav")],
+                return_value=[
+                    MockJob(1, "m1", "/a.wav", "completed"),
+                    MockJob(2, "m2", "/b.wav", "completed"),
+                    MockJob(3, "m3", "/c.wav", "completed"),
+                    MockJob(4, "m4", "/d.wav", "queued"),
+                ],
             )
 
             response = client.get("/api/status")
@@ -175,23 +212,21 @@ class TestStatusEndpoint:
         data = response.json()
         assert data["status"] == "ok"
         assert data["queue_summary"]["completed"] == 3
-        assert data["total_jobs"] == 2
+        assert data["queue_summary"]["queued"] == 1
+        assert data["total_jobs"] == 4
 
     def test_status_active_jobs_계산(self, tmp_path: Path) -> None:
         """진행 중인 작업(recording, transcribing 등)이 올바르게 집계되는지 확인한다."""
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            app.state.job_queue.count_by_status = AsyncMock(
-                return_value={
-                    "recording": 1,
-                    "transcribing": 2,
-                    "completed": 5,
-                    "queued": 0,
-                },
-            )
             app.state.job_queue.get_all_jobs = AsyncMock(
-                return_value=[MockJob(i, f"m{i}", f"/{i}.wav") for i in range(8)],
+                return_value=[
+                    MockJob(1, "m1", "/1.wav", "recording"),
+                    MockJob(2, "m2", "/2.wav", "transcribing"),
+                    MockJob(3, "m3", "/3.wav", "transcribing"),
+                    MockJob(4, "m4", "/4.wav", "completed"),
+                ],
             )
 
             response = client.get("/api/status")
@@ -199,6 +234,31 @@ class TestStatusEndpoint:
         data = response.json()
         # recording(1) + transcribing(2) = 3 active
         assert data["active_jobs"] == 3
+
+    def test_status_완료_산출물이_있는_failed_작업은_집계_전에_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """시스템 상태 집계도 목록과 같은 reconciliation 기준을 사용한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_reconcile_status"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = MockJob(1, meeting_id, "/audio/status.m4a", "failed", retry_count=1)
+        completed_job = MockJob(1, meeting_id, "/audio/status.m4a", "completed", retry_count=1)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[failed_job])
+            queue.force_set_status = MagicMock(return_value=completed_job)
+
+            response = client.get("/api/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["queue_summary"]["completed"] == 1
+        assert "failed" not in data["queue_summary"]
+        queue.force_set_status.assert_called_once()
 
     def test_status_큐_미초기화_503(self, tmp_path: Path) -> None:
         """job_queue가 없을 때 503을 반환하는지 확인한다."""
@@ -286,6 +346,32 @@ class TestMeetingsEndpoint:
         assert "status" in meeting
         assert "created_at" in meeting
 
+    def test_meetings_완료_산출물이_있는_failed_작업은_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """목록 조회 시 completed 체크포인트와 전사 산출물이 있으면 failed 상태를 복구한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_reconcile_list"
+        _create_completed_pipeline_state(tmp_path, meeting_id, skipped_steps=["summarize"])
+
+        failed_job = MockJob(1, meeting_id, "/audio/list.m4a", "failed", retry_count=1)
+        completed_job = MockJob(1, meeting_id, "/audio/list.m4a", "completed", retry_count=1)
+
+        with TestClient(app) as client:
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[failed_job])
+            app.state.job_queue._queue.force_set_status = MagicMock(return_value=completed_job)
+
+            response = client.get("/api/meetings")
+
+        assert response.status_code == 200
+        data = response.json()
+        meeting = data["meetings"][0]
+        assert meeting["status"] == "completed"
+        assert meeting["skipped_steps"] == ["summarize"]
+        assert "completed" in meeting["status_detail"]
+        app.state.job_queue._queue.force_set_status.assert_called_once()
+
 
 # === TestMeetingDetailEndpoint ===
 
@@ -349,6 +435,32 @@ class TestMeetingDetailEndpoint:
         data = response.json()
         assert data["retry_count"] == 2
         assert data["error_message"] == "OOM"
+
+    def test_meeting_상세_완료_산출물이_있는_failed_작업은_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """상세 조회도 목록과 같은 기준으로 상태 불일치를 복구한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_reconcile_detail"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = MockJob(1, meeting_id, "/audio/detail.m4a", "failed", retry_count=1)
+        completed_job = MockJob(1, meeting_id, "/audio/detail.m4a", "completed", retry_count=1)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock(return_value=completed_job)
+
+            response = client.get(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "completed"
+        assert data["retry_count"] == 1
+        assert "completed" in data["status_detail"]
+        queue.force_set_status.assert_called_once()
 
 
 # === TestSearchEndpoint ===
@@ -725,7 +837,7 @@ class TestErrorHandling:
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            app.state.job_queue.count_by_status = AsyncMock(
+            app.state.job_queue.get_all_jobs = AsyncMock(
                 side_effect=RuntimeError("DB 연결 끊김"),
             )
 
@@ -1371,6 +1483,57 @@ class TestRetryMeetingEndpoint:
             response = client.post("/api/meetings/meeting_001/retry")
 
         assert response.status_code == 409
+
+    def test_재시도_완료_산출물이_있으면_재시도_대신_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """최대 재시도 초과 상태라도 completed 산출물이 있으면 completed 로 복구한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retry_reconcile"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = MockJob(1, meeting_id, "/audio/retry.m4a", "failed", retry_count=1)
+        completed_job = MockJob(1, meeting_id, "/audio/retry.m4a", "completed", retry_count=1)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock(return_value=completed_job)
+            queue.retry_job = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "completed"
+        assert "completed" in data["status_detail"]
+        queue.force_set_status.assert_called_once()
+        queue.retry_job.assert_not_called()
+
+    def test_재시도_완료_산출물_복구_실패시_재처리하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """완료 산출물이 확인됐지만 DB 복구가 실패하면 retry_job을 호출하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retry_reconcile_fail"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = MockJob(1, meeting_id, "/audio/retry.m4a", "failed", retry_count=1)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock(side_effect=RuntimeError("DB locked"))
+            queue.retry_job = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 409
+        assert "상태 복구에 실패" in response.json()["detail"]
+        queue.force_set_status.assert_called_once()
+        queue.retry_job.assert_not_called()
 
     def test_재시도는_체크포인트와_결과파일을_보존한다(self, tmp_path: Path) -> None:
         """실패한 단계부터 재시도는 기존 진행 기록을 지우지 않는다."""

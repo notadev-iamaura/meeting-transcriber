@@ -222,20 +222,27 @@ async def get_meetings(
         # (SQLite 쿼리에 LIMIT/OFFSET 추가 시 JobQueue 인터페이스 변경 필요)
         paged_jobs = all_jobs[offset : offset + limit]
 
-        meetings = [
-            MeetingItem(
-                id=job.id,
-                meeting_id=job.meeting_id,
-                audio_path=job.audio_path,
-                status=job.status,
-                retry_count=job.retry_count,
-                error_message=job.error_message,
-                created_at=job.created_at,
-                updated_at=job.updated_at,
-                title=getattr(job, "title", "") or "",
+        config = getattr(request.app.state, "config", None)
+        raw_queue = getattr(queue, "queue", queue)
+        meetings: list[MeetingItem] = []
+        for job in paged_jobs:
+            pipeline_state = None
+            status_detail = ""
+            if config is not None:
+                job, pipeline_state, status_detail = (
+                    await _meeting_detail_router.reconcile_job_state_for_response(
+                        raw_queue,
+                        config,
+                        job,
+                    )
+                )
+            meetings.append(
+                _meeting_detail_router._build_meeting_item(
+                    job,
+                    pipeline_state=pipeline_state,
+                    status_detail=status_detail,
+                )
             )
-            for job in paged_jobs
-        ]
 
         return MeetingsResponse(
             meetings=meetings,

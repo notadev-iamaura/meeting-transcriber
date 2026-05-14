@@ -112,6 +112,35 @@ def _get_routes_compat_attr(name: str, fallback: Any) -> Any:
     return getattr(routes_module, name, fallback)
 
 
+async def _get_reconciled_jobs(queue: Any, config: Any) -> list[Any]:
+    """시스템 집계 전에 회의 상태 불일치를 복구한 Job 목록을 반환한다."""
+    from api.routers.meeting_detail import reconcile_job_state_for_response
+
+    raw_queue = getattr(queue, "queue", queue)
+    all_jobs = await queue.get_all_jobs()
+    reconciled: list[Any] = []
+    for job in all_jobs:
+        job, _pipeline_state, _status_detail = await reconcile_job_state_for_response(
+            raw_queue,
+            config,
+            job,
+            include_pipeline_state=False,
+        )
+        reconciled.append(job)
+    return reconciled
+
+
+def _count_jobs_by_status(jobs: list[Any]) -> dict[str, int]:
+    """Job 목록에서 상태별 개수를 집계한다."""
+    summary: dict[str, int] = {}
+    for job in jobs:
+        status = str(getattr(job, "status", ""))
+        if not status:
+            continue
+        summary[status] = summary.get(status, 0) + 1
+    return summary
+
+
 @router.get("/status", response_model=StatusResponse)
 async def get_status(request: Request) -> StatusResponse:
     """시스템 상태를 반환한다.
@@ -125,10 +154,11 @@ async def get_status(request: Request) -> StatusResponse:
         StatusResponse: 시스템 상태 정보
     """
     queue = _get_job_queue(request)
+    config = _get_config(request)
 
     try:
-        summary = await queue.count_by_status()
-        all_jobs = await queue.get_all_jobs()
+        all_jobs = await _get_reconciled_jobs(queue, config)
+        summary = _count_jobs_by_status(all_jobs)
 
         # 진행 중인 상태 목록 (queued, completed, failed 제외)
         active_statuses = {
@@ -234,7 +264,7 @@ async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
     config = _get_config(request)
 
     try:
-        all_jobs = await queue.get_all_jobs()
+        all_jobs = await _get_reconciled_jobs(queue, config)
     except Exception as e:
         logger.exception(f"대시보드 통계 조회 실패: {e}")
         raise HTTPException(

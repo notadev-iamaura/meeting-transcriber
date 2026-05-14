@@ -93,6 +93,31 @@ def _make_correct_checkpoint(checkpoints_dir: Path, meeting_id: str) -> Path:
     return cp
 
 
+def _create_completed_pipeline_state(tmp_path: Path, meeting_id: str) -> None:
+    """완료된 pipeline_state.json 과 전사 산출물을 생성한다."""
+    ckpt_dir = tmp_path / "checkpoints" / meeting_id
+    out_dir = tmp_path / "outputs" / meeting_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "pipeline_state.json").write_text(
+        json.dumps(
+            {
+                "meeting_id": meeting_id,
+                "audio_path": f"/audio/{meeting_id}.m4a",
+                "status": "completed",
+                "completed_steps": ["convert", "transcribe", "diarize", "merge", "correct"],
+                "skipped_steps": ["summarize"],
+                "step_results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "corrected.json").write_text(
+        json.dumps({"utterances": [{"text": "안녕하세요", "speaker": "SPEAKER_00"}]}),
+        encoding="utf-8",
+    )
+
+
 # === GET /api/reindex/status ===
 
 
@@ -173,6 +198,37 @@ class TestIndexStatusEndpoint:
         assert data["indexed"] == 2
         assert data["missing"] == 1
         assert "m2_missing" in data["missing_meeting_ids"]
+
+    def test_index_status_완료_산출물이_있는_failed_작업은_복구_후_대상에_포함한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """reindex 상태도 completed 산출물이 있는 failed 작업을 completed 로 복구한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_reconcile_reindex"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = _MockJob(id=1, meeting_id=meeting_id, status="failed", retry_count=1)
+        completed_job = _MockJob(id=1, meeting_id=meeting_id, status="completed", retry_count=1)
+        mock_collection = MagicMock()
+        mock_collection.get = MagicMock(return_value={"ids": []})
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[failed_job])
+            queue.force_set_status = MagicMock(return_value=completed_job)
+            with patch(
+                "api.routers.reindex._get_chroma_collection_for_status",
+                return_value=mock_collection,
+            ):
+                response = client.get("/api/reindex/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["missing"] == 1
+        assert data["missing_meeting_ids"] == [meeting_id]
+        queue.force_set_status.assert_called_once()
 
 
 # === POST /api/meetings/{id}/reindex ===

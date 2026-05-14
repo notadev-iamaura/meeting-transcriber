@@ -42,6 +42,24 @@ def _validate_meeting_id(meeting_id: str) -> None:
         )
 
 
+async def _get_reconciled_jobs(queue: Any, config: Any) -> list[Any]:
+    """재색인 대상 집계 전에 완료 상태 불일치를 복구한 Job 목록을 반환한다."""
+    from api.routers.meeting_detail import reconcile_job_state_for_response
+
+    raw_queue = getattr(queue, "queue", queue)
+    all_jobs = await queue.get_all_jobs()
+    reconciled: list[Any] = []
+    for job in all_jobs:
+        job, _pipeline_state, _status_detail = await reconcile_job_state_for_response(
+            raw_queue,
+            config,
+            job,
+            include_pipeline_state=False,
+        )
+        reconciled.append(job)
+    return reconciled
+
+
 # ====================================================================
 # RAG 검색 인덱스 백필 API
 # ====================================================================
@@ -147,7 +165,7 @@ async def get_index_status(request: Request) -> ReindexStatusResponse:
     config = _get_config(request)
 
     try:
-        all_jobs = await queue.get_all_jobs()
+        all_jobs = await _get_reconciled_jobs(queue, config)
     except Exception as e:
         logger.exception(f"회의 목록 조회 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -476,7 +494,7 @@ async def reindex_all(request: Request) -> ReindexAllResponse:
     config = _get_config(request)
 
     try:
-        all_jobs = await queue.get_all_jobs()
+        all_jobs = await _get_reconciled_jobs(queue, config)
     except Exception as e:
         logger.exception(f"reindex-all: 회의 목록 조회 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e

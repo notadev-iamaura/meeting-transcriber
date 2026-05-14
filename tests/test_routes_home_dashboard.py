@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -60,6 +61,31 @@ class MockJob:
     error_message: str = ""
     created_at: str = "2026-03-04T10:00:00"
     updated_at: str = "2026-03-04T10:30:00"
+
+
+def _create_completed_pipeline_state(tmp_path: Path, meeting_id: str) -> None:
+    """완료된 pipeline_state.json 과 전사 산출물을 생성한다."""
+    ckpt_dir = tmp_path / "checkpoints" / meeting_id
+    out_dir = tmp_path / "outputs" / meeting_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "pipeline_state.json").write_text(
+        json.dumps(
+            {
+                "meeting_id": meeting_id,
+                "audio_path": f"/audio/{meeting_id}.m4a",
+                "status": "completed",
+                "completed_steps": ["convert", "transcribe", "diarize", "merge", "correct"],
+                "skipped_steps": ["summarize"],
+                "step_results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "corrected.json").write_text(
+        json.dumps({"utterances": [{"text": "안녕하세요", "speaker": "SPEAKER_00"}]}),
+        encoding="utf-8",
+    )
 
 
 # === GET /api/dashboard/stats ===
@@ -127,6 +153,31 @@ class TestDashboardStatsEndpoint:
         assert data["untranscribed_recordings"] == 1  # recorded (사용자 액션 대기)
         assert data["completed"] == 2
         assert data["failed"] == 1
+
+    def test_stats_완료_산출물이_있는_failed_작업은_집계_전에_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """대시보드 통계도 상태 불일치를 completed 로 복구한 뒤 집계한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_reconcile_dashboard"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+
+        failed_job = MockJob(1, meeting_id, status="failed", retry_count=1)
+        completed_job = MockJob(1, meeting_id, status="completed", retry_count=1)
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[failed_job])
+            queue.force_set_status = MagicMock(return_value=completed_job)
+
+            response = client.get("/api/dashboard/stats")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["completed"] == 1
+        assert data["failed"] == 0
+        queue.force_set_status.assert_called_once()
 
     def test_stats_이번_주_카운트(self, tmp_path: Path) -> None:
         """this_week_meetings 는 created_at 기준 최근 7 일 회의만 카운트한다."""

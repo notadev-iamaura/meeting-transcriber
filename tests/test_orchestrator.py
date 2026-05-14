@@ -284,6 +284,62 @@ class TestUpdateJobStatusSafe:
         await processor._update_job_status_safe(1, "failed")
 
 
+class TestMarkJobCompletedAfterPipeline:
+    """파이프라인 완료 후 작업 상태 확정 테스트."""
+
+    async def test_표준_completed_전이가_성공하면_true를_반환한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """정상 completed 업데이트는 추가 복구 없이 성공해야 한다."""
+        result = await processor._mark_job_completed_after_pipeline(1, "meeting_done")
+
+        assert result is True
+        mock_job_queue.update_status.assert_called_once_with(1, "completed")
+
+    async def test_completed_전이가_실패하면_force_set_status로_복구한다(
+        self,
+        mock_pipeline: AsyncMock,
+        mock_thermal: AsyncMock,
+        mock_ws_manager: AsyncMock,
+    ) -> None:
+        """failed → completed 같은 전이 실패는 강제 복구 경로를 사용한다."""
+
+        class RawQueue:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, str, str]] = []
+
+            def force_set_status(
+                self,
+                job_id: int,
+                status: Any,
+                error_message: str = "",
+            ) -> None:
+                self.calls.append((job_id, str(status), error_message))
+
+        class QueueWrapper:
+            def __init__(self) -> None:
+                self.queue = RawQueue()
+
+            async def update_status(self, *_args: Any, **_kwargs: Any) -> None:
+                raise Exception("상태 전이 불가")
+
+        queue = QueueWrapper()
+        processor = JobProcessor(
+            job_queue=queue,
+            pipeline=mock_pipeline,
+            thermal_manager=mock_thermal,
+            ws_manager=mock_ws_manager,
+            poll_interval=0.1,
+        )
+
+        result = await processor._mark_job_completed_after_pipeline(7, "meeting_done")
+
+        assert result is True
+        assert queue.queue.calls == [(7, "completed", "")]
+
+
 # === Cycle 5: _broadcast_event ===
 
 
