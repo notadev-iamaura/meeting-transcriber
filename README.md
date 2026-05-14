@@ -617,13 +617,16 @@ meeting-transcriber/
 │   └── chat.py              # AI 채팅 (RAG)
 ├── api/                     # REST API
 │   ├── server.py            # FastAPI 서버
-│   ├── routes.py            # API 라우트
+│   ├── routes.py            # 하위 호환 shim
+│   ├── routers/             # 기능별 API 라우터
 │   └── websocket.py         # WebSocket 실시간 통신
 ├── ui/                      # 사용자 인터페이스
 │   ├── menubar.py           # macOS 메뉴바 (rumps)
 │   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
 │       ├── index.html       # 3-Column SPA 셸
-│       ├── style.css        # macOS 네이티브 디자인 시스템
+│       ├── style.css        # 공통 레이아웃/디자인 시스템
+│       ├── *-view.js        # 기능별 SPA view/controller
+│       ├── *.css            # 공통/기능별 component CSS
 │       ├── app.js           # 공통 유틸리티 (API, WebSocket)
 │       └── spa.js           # SPA 라우터 + 뷰 (Home/Viewer/Search/Chat/Settings)
 ├── security/                # 보안
@@ -789,7 +792,8 @@ pytest -m ui tests/ui/behavior/test_bulk_actions_behavior.py -q
 pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
 pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 
-# MLX/Metal 등 native 런타임 테스트는 기본 게이트에서 제외하고 필요 시 명시 실행
+# MLX/Metal 등 native 런타임 테스트는 기본 게이트에서 제외한다.
+# GitHub Actions에서는 workflow_dispatch/주간 schedule diagnostic gate로 실행한다.
 pytest -m native tests/ -v
 
 # 특정 모듈 테스트

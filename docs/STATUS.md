@@ -19,7 +19,9 @@
 - `ui/web/spa.js`는 route view와 global shell controller 대부분을 feature module로 위임합니다.
 - CI는 lint, mypy 타입 검사, Python 3.11/3.12 테스트, Swift compile gate를 통과한 PR만 main에 반영했습니다.
 - consensus harness 문서와 CLI/test support가 main에 포함되어 다음 phase를 같은 방식으로 반복할 수 있습니다.
-- `.venv` 밖의 Python 캐시 산출물은 Git 추적 대상이 아니며, 현재 로컬 작업트리도 clean입니다.
+- native diagnostic gate는 `tests/native/test_preflight_native.py` smoke test를 통해
+  실제 preflight 경로를 검증합니다.
+- `.venv` 밖의 Python 캐시 산출물은 Git 추적 대상이 아닙니다.
 
 ## 완료된 주요 작업
 
@@ -105,7 +107,8 @@ pytest -m ui tests/ui/a11y/test_bulk_actions_a11y.py -q
 pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 ```
 
-환경 의존 gate는 명시적으로 실행합니다.
+환경 의존 gate는 명시적으로 실행합니다. CI에서는 PR required gate로 묶지 않고,
+`workflow_dispatch` 또는 주간 schedule diagnostic gate로 운용합니다.
 
 ```bash
 pytest -m e2e tests/test_e2e_edit_playwright.py -v
@@ -115,14 +118,17 @@ pytest -m native tests/ -v
 
 ## 알려진 우선 과제
 
-1. `api/routes.py`에 남은 A/B test routes를 별도 router로 분리합니다.
-2. 부채 마커를 작은 PR 단위로 줄입니다. 현재 관측 기준은 `type: ignore` 23건,
+1. 부채 마커를 작은 PR 단위로 줄입니다. 현재 관측 기준은 `type: ignore` 23건,
    `noqa` 137건, 빈 `pass` 37건, `TODO/FIXME/HACK/XXX` 2건,
    `pragma: no cover` 2건입니다. 우선순위는 내부 타입 예외, 좁힐 수 있는
    `BLE001`, 의도가 불명확한 빈 `pass`입니다.
-3. `ui/web/style.css`를 component CSS로 나눕니다. 다음 후보는 viewer, settings,
-   command palette, recording, layout shell입니다.
-4. native marker 대상 테스트를 CI에서 required/manual/scheduled 중 어떤 방식으로
-   운용할지 결정합니다.
-5. `docs/plans/issue-b-transcription-coverage.md`의 STT 누락/환각 개선 계획을
-   실험 harness와 메트릭 기반 phase로 전환합니다.
+2. `ui/web/style.css`를 component CSS로 계속 나눕니다. 완료: bulk actions,
+   A/B test, Wiki, recording HUD, settings/STT model UI. 다음 후보는 viewer,
+   command palette, layout shell입니다.
+3. native marker 대상 테스트는 CI required gate가 아닌 manual/scheduled diagnostic
+   gate로 운용합니다. 현재 smoke test는 preflight subprocess 경로를 검증하며,
+   실제 장치/Metal 이상 여부를 주간 점검 기준으로 봅니다.
+4. STT 누락/환각 개선은 `core/stt_quality_metrics.py`와
+   `scripts/evaluate_stt_quality.py` 기반 metric harness로 진행합니다.
+   다음 단계는 실제 회의 reference interval fixture를 추가해 baseline 리포트를
+   `docs/BENCHMARK.md`에 반영하는 것입니다.

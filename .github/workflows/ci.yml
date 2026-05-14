@@ -16,6 +16,11 @@ name: CI
 # Swift 컴파일 검증)을 참조하지 않도록 설정되어 있어야 한다 — 만약 required
 # 로 묶여 있으면 PR 이 영원히 pending 상태로 막힌다 (GitHub 알려진 한계).
 on:
+  workflow_dispatch:
+  schedule:
+    # native/MLX/CoreAudio 환경 의존 gate는 PR required gate가 아니라
+    # 주간 diagnostic gate로 운용한다.
+    - cron: '0 18 * * 0'
   push:
     branches: [main]
     paths-ignore:
@@ -138,3 +143,26 @@ jobs:
           swiftc scripts/create_aggregate_device.swift -o /tmp/create_aggregate
           file /tmp/create_aggregate
           /tmp/create_aggregate || echo "실행은 건너뜀 (BlackHole 없음 정상)"
+
+  native-gate:
+    name: Native diagnostic gate
+    runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: ffmpeg 설치
+        run: brew install ffmpeg
+
+      - name: 의존성 설치
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Native marker 테스트 실행
+        timeout-minutes: 30
+        run: pytest -m native tests/ -v --tb=short
