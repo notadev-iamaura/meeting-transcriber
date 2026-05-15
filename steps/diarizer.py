@@ -18,12 +18,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from steps.diarization_process_guard import ZoomPauseGuard, terminate_process
 
 logger = logging.getLogger(__name__)
 
@@ -205,13 +211,33 @@ class Diarizer:
         self._max_speakers = self._config.diarization.max_speakers
         self._hf_token = self._config.diarization.huggingface_token
         self._timeout_seconds = self._config.diarization.timeout_seconds
+        self._protect_zoom_meetings = bool(
+            getattr(self._config.diarization, "protect_zoom_meetings", False)
+        )
+        self._zoom_protection_mode = getattr(
+            self._config.diarization,
+            "zoom_protection_mode",
+            "off",
+        )
+        self._zoom_protection_poll_seconds = float(
+            getattr(self._config.diarization, "zoom_protection_poll_seconds", 1.0)
+        )
 
         logger.info(
             f"Diarizer 초기화: model={self._model_name}, "
             f"device={self._device}, "
             f"speakers={self._min_speakers}~{self._max_speakers}, "
-            f"timeout={self._timeout_seconds}초"
+            f"timeout={self._timeout_seconds}초, "
+            f"zoom_protection={self._zoom_protection_mode if self._protect_zoom_meetings else 'off'}"
         )
+
+    def _reserve_external_worker_slot(self) -> object:
+        """worker 프로세스가 pyannote를 로드하는 동안 모델 슬롯을 예약한다.
+
+        실제 pyannote 모델은 child process 안에서 로드되지만, 부모 프로세스의
+        ModelLoadManager 컨텍스트를 잡아 다른 대형 모델이 동시에 로드되지 않게 한다.
+        """
+        return object()
 
     def _validate_token(self) -> str:
         """HuggingFace 토큰이 설정되어 있는지 검증한다.
@@ -365,6 +391,113 @@ class Diarizer:
 
         return result
 
+    def _should_use_zoom_protected_worker(self) -> bool:
+        """Zoom 보호용 worker 프로세스를 사용할지 반환한다."""
+        return (
+            self._protect_zoom_meetings
+            and self._zoom_protection_mode == "pause"
+            and hasattr(signal, "SIGSTOP")
+            and hasattr(signal, "SIGCONT")
+        )
+
+    def _build_worker_payload(self, audio_path: Path, output_path: Path) -> dict[str, Any]:
+        """worker 프로세스에 전달할 JSON payload 를 생성한다."""
+        token = self._validate_token()
+        return {
+            "model_name": self._model_name,
+            "audio_path": str(audio_path),
+            "output_path": str(output_path),
+            "min_speakers": self._min_speakers,
+            "max_speakers": self._max_speakers,
+            "huggingface_token": token,
+        }
+
+    async def _run_zoom_protected_worker(self, audio_path: Path) -> DiarizationResult:
+        """별도 worker 프로세스에서 화자분리를 실행하고 Zoom 중에는 일시정지한다."""
+        self._validate_token()
+        process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
+        guard = ZoomPauseGuard(
+            process_name=process_name,
+            poll_interval_seconds=self._zoom_protection_poll_seconds,
+        )
+
+        try:
+            await asyncio.wait_for(guard.wait_until_idle(), timeout=self._timeout_seconds)
+        except TimeoutError as e:
+            raise DiarizationError(
+                "Zoom 회의가 지속되어 화자분리 worker 시작 대기가 시간 초과되었습니다."
+            ) from e
+
+        async with self._manager.acquire("pyannote", self._reserve_external_worker_slot):
+            return await self._run_zoom_protected_worker_with_guard(audio_path, guard)
+
+    async def _run_zoom_protected_worker_with_guard(
+        self,
+        audio_path: Path,
+        guard: ZoomPauseGuard,
+    ) -> DiarizationResult:
+        """이미 ModelLoadManager 슬롯을 확보한 상태에서 worker를 실행한다."""
+
+        with tempfile.TemporaryDirectory(prefix="meeting-transcriber-diarize-") as tmpdir:
+            output_path = Path(tmpdir) / "diarization.json"
+            stderr_path = Path(tmpdir) / "worker.stderr.log"
+            payload = self._build_worker_payload(audio_path, output_path)
+            env = os.environ.copy()
+            root = str(Path(__file__).resolve().parents[1])
+            env["PYTHONPATH"] = (
+                root if not env.get("PYTHONPATH") else f"{root}{os.pathsep}{env['PYTHONPATH']}"
+            )
+
+            process: subprocess.Popen[str] | None = None
+            with stderr_path.open("w+", encoding="utf-8") as stderr_file:
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, "-m", "steps.diarization_worker"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=stderr_file,
+                        text=True,
+                        env=env,
+                    )
+                    if process.stdin is None:
+                        raise DiarizationError("화자분리 worker stdin 초기화 실패")
+                    process.stdin.write(json.dumps(payload, ensure_ascii=False))
+                    process.stdin.close()
+
+                    logger.info(
+                        f"Zoom 보호 화자분리 worker 시작: pid={process.pid}, "
+                        f"audio={audio_path.name}"
+                    )
+                    returncode = await guard.supervise(process, self._timeout_seconds)
+                    stderr_file.seek(0)
+                    stderr = stderr_file.read()
+                except asyncio.CancelledError:
+                    if process is not None:
+                        terminate_process(process)
+                    raise
+                except TimeoutError as e:
+                    if process is not None:
+                        terminate_process(process)
+                    raise DiarizationError(str(e)) from e
+                except DiarizationError:
+                    if process is not None:
+                        terminate_process(process)
+                    raise
+                except Exception as e:
+                    if process is not None:
+                        terminate_process(process)
+                    raise DiarizationError("화자분리 worker 실행 중 오류가 발생했습니다.") from e
+
+            if returncode != 0:
+                detail = stderr.strip() or f"exit={returncode}"
+                raise DiarizationError(f"화자분리 worker 실패: {detail}")
+            if not output_path.exists():
+                raise DiarizationError("화자분리 worker 결과 파일이 생성되지 않았습니다.")
+
+            result = DiarizationResult.from_checkpoint(output_path)
+            logger.info(f"Zoom 보호 화자분리 worker 완료: pid={process.pid}")
+            return result
+
     def _parse_annotation(self, annotation: Any) -> list[DiarizationSegment]:
         """pyannote Annotation 객체를 DiarizationSegment 리스트로 변환한다.
 
@@ -405,9 +538,10 @@ class Diarizer:
     async def diarize(self, audio_path: Path) -> DiarizationResult:
         """오디오 파일에서 화자분리를 수행한다.
 
-        ModelLoadManager를 통해 pyannote 파이프라인을 로드하고,
-        화자분리 완료 후 모델을 언로드한다. 화자분리 작업은 별도 스레드에서
-        실행하여 이벤트 루프를 블로킹하지 않는다.
+        Zoom 보호가 활성화된 macOS 환경에서는 별도 worker 프로세스를 사용해
+        Zoom 회의 중 worker만 일시정지한다. 보호가 꺼져 있거나 플랫폼 신호가
+        없으면 기존처럼 ModelLoadManager로 pyannote 파이프라인을 로드하고,
+        별도 스레드에서 실행해 이벤트 루프를 블로킹하지 않는다.
 
         Args:
             audio_path: 화자분리할 오디오 파일 경로 (16kHz mono WAV 권장)
@@ -425,6 +559,21 @@ class Diarizer:
         self._validate_audio(audio_path)
 
         logger.info(f"화자분리 시작: {audio_path.name}")
+
+        if self._should_use_zoom_protected_worker():
+            result = await self._run_zoom_protected_worker(audio_path)
+            if not result.segments:
+                raise EmptyAudioError(
+                    "화자를 식별할 수 없습니다. "
+                    "오디오에 명확한 음성이 포함되어 있는지 확인해주세요."
+                )
+            logger.info(
+                f"화자분리 완료: {audio_path.name} | "
+                f"화자 수: {result.num_speakers} | "
+                f"세그먼트 수: {len(result.segments)} | "
+                f"전체 길이: {result.total_duration:.1f}초"
+            )
+            return result
 
         try:
             async with self._manager.acquire("pyannote", self._load_pipeline) as pipeline:

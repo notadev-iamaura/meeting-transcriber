@@ -56,6 +56,10 @@ def mock_config():
     config.diarization.max_speakers = 10
     config.diarization.huggingface_token = "hf_test_token_12345"
     config.diarization.timeout_seconds = 1800
+    config.diarization.protect_zoom_meetings = False
+    config.diarization.zoom_protection_mode = "off"
+    config.diarization.zoom_protection_poll_seconds = 1.0
+    config.zoom.process_name = "CptHost"
     config.pipeline.peak_ram_limit_gb = 9.5
     return config
 
@@ -501,6 +505,92 @@ class TestDiarize:
         assert len(result.segments) == 3
         assert result.audio_path == str(sample_audio)
         manager.acquire.assert_called_once_with("pyannote", diarizer._load_pipeline)
+
+    @pytest.mark.asyncio
+    async def test_Zoom_보호_활성시_worker_경로를_사용한다(
+        self, mock_config, mock_manager, sample_audio
+    ):
+        """Zoom 보호가 켜져 있으면 in-process pyannote 대신 worker 경로를 사용한다."""
+        manager, _ = mock_manager
+        mock_config.diarization.protect_zoom_meetings = True
+        mock_config.diarization.zoom_protection_mode = "pause"
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        worker_result = DiarizationResult(
+            segments=[DiarizationSegment("SPEAKER_00", 0.0, 5.0)],
+            num_speakers=1,
+            audio_path=str(sample_audio),
+        )
+
+        with patch.object(
+            diarizer,
+            "_run_zoom_protected_worker",
+            new=AsyncMock(return_value=worker_result),
+        ) as run_worker:
+            result = await diarizer.diarize(sample_audio)
+
+        assert result is worker_result
+        run_worker.assert_awaited_once_with(sample_audio)
+        manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_Zoom_보호_worker는_ModelLoadManager_슬롯을_예약한다(
+        self, mock_config, mock_manager, sample_audio
+    ):
+        """worker 실행 중에도 대형 모델 동시 로드를 막기 위해 pyannote 슬롯을 잡는다."""
+        manager, _ = mock_manager
+        mock_config.diarization.protect_zoom_meetings = True
+        mock_config.diarization.zoom_protection_mode = "pause"
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        fake_guard = MagicMock()
+        fake_guard.wait_until_idle = AsyncMock()
+        worker_result = DiarizationResult(
+            segments=[DiarizationSegment("SPEAKER_00", 0.0, 5.0)],
+            num_speakers=1,
+            audio_path=str(sample_audio),
+        )
+
+        with (
+            patch("steps.diarizer.ZoomPauseGuard", return_value=fake_guard),
+            patch.object(
+                diarizer,
+                "_run_zoom_protected_worker_with_guard",
+                new=AsyncMock(return_value=worker_result),
+            ) as run_worker,
+        ):
+            result = await diarizer._run_zoom_protected_worker(sample_audio)
+
+        assert result is worker_result
+        fake_guard.wait_until_idle.assert_awaited_once()
+        manager.acquire.assert_called_once_with("pyannote", diarizer._reserve_external_worker_slot)
+        run_worker.assert_awaited_once_with(sample_audio, fake_guard)
+
+    @pytest.mark.asyncio
+    async def test_Zoom_보호_worker_시작_대기는_타임아웃된다(
+        self, mock_config, mock_manager, sample_audio
+    ):
+        """Zoom active 상태가 지속되면 worker 시작 전 무기한 대기하지 않는다."""
+        manager, _ = mock_manager
+        mock_config.diarization.protect_zoom_meetings = True
+        mock_config.diarization.zoom_protection_mode = "pause"
+        mock_config.diarization.timeout_seconds = 60
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        fake_guard = MagicMock()
+        fake_guard.wait_until_idle = AsyncMock(side_effect=TimeoutError)
+
+        with (
+            patch("steps.diarizer.ZoomPauseGuard", return_value=fake_guard),
+            patch.object(
+                diarizer,
+                "_run_zoom_protected_worker_with_guard",
+                new=AsyncMock(),
+            ) as run_worker,
+        ):
+            with pytest.raises(DiarizationError, match="시작 대기"):
+                await diarizer._run_zoom_protected_worker(sample_audio)
+
+        fake_guard.wait_until_idle.assert_awaited_once()
+        manager.acquire.assert_not_called()
+        run_worker.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_파일_없으면_FileNotFoundError(self, mock_config, mock_manager, tmp_path):
