@@ -52,6 +52,8 @@ class TestConfigYamlParsing:
         assert config.stt.language == "ko"
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "cpu"
+        assert config.diarization.protect_zoom_meetings is True
+        assert config.diarization.zoom_protection_mode == "pause"
         assert config.llm.host == "http://127.0.0.1:11434"
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0
@@ -88,6 +90,8 @@ class TestConfigYamlParsing:
             (default.stt.batch_size, loaded.stt.batch_size),
             (default.stt.condition_on_previous_text, loaded.stt.condition_on_previous_text),
             (default.diarization.device, loaded.diarization.device),
+            (default.diarization.protect_zoom_meetings, loaded.diarization.protect_zoom_meetings),
+            (default.diarization.zoom_protection_mode, loaded.diarization.zoom_protection_mode),
             (default.llm.mlx_model_name, loaded.llm.mlx_model_name),
             (default.llm.temperature, loaded.llm.temperature),
             (default.llm.correction_batch_size, loaded.llm.correction_batch_size),
@@ -137,6 +141,8 @@ class TestDefaultValues:
         assert config.stt.batch_size == 12
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "cpu"
+        assert config.diarization.protect_zoom_meetings is True
+        assert config.diarization.zoom_protection_mode == "pause"
         assert config.llm.model_name == "exaone3.5:7.8b-instruct-q4_K_M"
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0

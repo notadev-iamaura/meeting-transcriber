@@ -278,6 +278,9 @@ class DiarizationConfig(BaseModel):
     max_speakers: int = Field(default=10, ge=1, le=20)
     huggingface_token: str | None = None
     timeout_seconds: int = Field(default=1800, ge=60, description="화자분리 타임아웃 (초)")
+    protect_zoom_meetings: bool = True
+    zoom_protection_mode: str = Field(default="pause", pattern="^(pause|off)$")
+    zoom_protection_poll_seconds: float = Field(default=1.0, ge=0.5, le=10.0)
 
     @field_validator("device")
     @classmethod
