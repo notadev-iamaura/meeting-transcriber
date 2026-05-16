@@ -74,6 +74,7 @@ class STTModelDownloader:
         """
         self._models_dir = Path(models_dir).expanduser()
         self._models_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir = self._models_dir.parent
         self._jobs: dict[str, DownloadJob] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
@@ -304,7 +305,7 @@ class STTModelDownloader:
         if not urls:
             raise RuntimeError(f"직접 다운로드 URL 을 찾을 수 없어요: {spec.id}")
 
-        target_dir = Path(get_manual_import_dir(spec))
+        target_dir = Path(get_manual_import_dir(spec, base_dir=str(self._base_dir)))
         target_dir.mkdir(parents=True, exist_ok=True)
 
         # 진행률 범위를 파일 개수에 맞춰 할당 (10% → 90%)
@@ -364,4 +365,4 @@ class STTModelDownloader:
 
     def _verify(self, spec: STTModelSpec) -> bool:
         """다운로드 직후 모델이 READY 상태인지 확인한다."""
-        return get_model_status(spec) == ModelStatus.READY
+        return get_model_status(spec, base_dir=self._base_dir) == ModelStatus.READY

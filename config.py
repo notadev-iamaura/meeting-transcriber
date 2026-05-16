@@ -235,7 +235,7 @@ class STTConfig(BaseModel):
             return None
         return v
 
-    def resolve_model_path(self) -> str:
+    def resolve_model_path(self, base_dir: str | Path | None = None) -> str:
         """모델 경로를 해석한다.
 
         tilde(~) 확장 및 로컬 경로 존재 확인을 수행한다.
@@ -257,8 +257,17 @@ class STTConfig(BaseModel):
                 f"(확장: {expanded}). HuggingFace에서 다운로드를 시도합니다."
             )
         try:
-            from core.stt_model_status import get_effective_hf_model_path
+            from core.stt_model_registry import STT_MODELS
+            from core.stt_model_status import get_effective_hf_model_path, get_effective_model_path
 
+            for spec in STT_MODELS:
+                if self.model_name in {spec.model_path, spec.hf_source}:
+                    effective_spec = get_effective_model_path(spec, base_dir=base_dir)
+                    if effective_spec != spec.model_path:
+                        logger.debug(
+                            f"등록 STT 모델 경로 해석: {self.model_name} → {effective_spec}"
+                        )
+                        return effective_spec
             effective = get_effective_hf_model_path(self.model_name)
         except Exception as e:
             logger.debug(f"HF 캐시 모델 경로 해석 건너뜀: {e}")

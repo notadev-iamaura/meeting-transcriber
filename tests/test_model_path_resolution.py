@@ -94,3 +94,25 @@ class TestResolveModelPath:
         stt = STTConfig(model_name="owner/repo")
 
         assert stt.resolve_model_path() == str(snapshot.resolve())
+
+    def test_등록_STT_repo_ID는_base_dir_수동임포트_우선(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """base_dir 아래 수동 임포트가 있으면 HF repo ID 대신 로컬 경로를 쓴다."""
+        manual_dir = tmp_path / "stt_models" / "seastar-medium-4bit-manual"
+        manual_dir.mkdir(parents=True)
+        (manual_dir / "config.json").write_text("{}")
+        (manual_dir / "weights.safetensors").write_bytes(b"x")
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hf-cache"))
+
+        def _manual_dir(spec, base_dir=None):
+            root = Path(base_dir).expanduser() if base_dir else tmp_path
+            return str(root / "stt_models" / f"{spec.id}-manual")
+
+        monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", _manual_dir)
+
+        stt = STTConfig(model_name="youngouk/seastar-medium-ko-4bit-mlx")
+
+        assert stt.resolve_model_path(base_dir=tmp_path) == str(manual_dir)

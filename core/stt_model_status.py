@@ -66,6 +66,18 @@ def _get_hf_repo_cache_path(repo_id: str) -> Path:
     return _get_hf_hub_cache_root() / cache_name
 
 
+def _get_manual_import_path(spec: STTModelSpec, base_dir: str | Path | None = None) -> Path:
+    """수동 임포트 경로를 반환한다.
+
+    테스트에서 기존 1-인자 함수로 monkeypatch 한 경우도 받아들여 하위 호환을
+    유지한다.
+    """
+    try:
+        return Path(get_manual_import_dir(spec, base_dir=str(base_dir) if base_dir else None))
+    except TypeError:
+        return Path(get_manual_import_dir(spec))
+
+
 def _is_valid_snapshot_dir(path: Path) -> bool:
     """mlx-whisper 로딩에 필요한 최소 파일이 있는 snapshot인지 확인한다."""
     if not path.is_dir():
@@ -164,7 +176,7 @@ def get_effective_hf_model_path(model_path: str) -> str:
     return cached if cached is not None else model_path
 
 
-def _check_manual_import(spec: STTModelSpec) -> bool:
+def _check_manual_import(spec: STTModelSpec, base_dir: str | Path | None = None) -> bool:
     """수동 임포트 디렉토리에 유효한 모델이 존재하는지 확인한다.
 
     사용자가 HF CDN 대신 브라우저로 직접 다운로드한 파일을
@@ -175,9 +187,7 @@ def _check_manual_import(spec: STTModelSpec) -> bool:
         True: weights.safetensors + config.json 모두 존재
         False: 디렉토리 없음 또는 필수 파일 누락
     """
-    from pathlib import Path
-
-    manual_dir = Path(get_manual_import_dir(spec))
+    manual_dir = _get_manual_import_path(spec, base_dir=base_dir)
     if not manual_dir.exists():
         return False
     weights = manual_dir / "weights.safetensors"
@@ -185,7 +195,7 @@ def _check_manual_import(spec: STTModelSpec) -> bool:
     return weights.exists() and config.exists()
 
 
-def get_effective_model_path(spec: STTModelSpec) -> str:
+def get_effective_model_path(spec: STTModelSpec, base_dir: str | Path | None = None) -> str:
     """활성화·전사 시 실제로 사용할 모델 경로를 반환한다.
 
     우선순위:
@@ -202,12 +212,12 @@ def get_effective_model_path(spec: STTModelSpec) -> str:
     Returns:
         모델 로드에 사용할 경로 문자열.
     """
-    if _check_manual_import(spec):
-        return get_manual_import_dir(spec)
+    if _check_manual_import(spec, base_dir=base_dir):
+        return str(_get_manual_import_path(spec, base_dir=base_dir))
     return get_effective_hf_model_path(spec.model_path)
 
 
-def get_model_status(spec: STTModelSpec) -> ModelStatus:
+def get_model_status(spec: STTModelSpec, base_dir: str | Path | None = None) -> ModelStatus:
     """모델의 다운로드 상태를 확인한다.
 
     확인 순서:
@@ -230,7 +240,7 @@ def get_model_status(spec: STTModelSpec) -> ModelStatus:
         다운로더(STTModelDownloader)의 in-memory 상태와 결합해 상위 계층에서 계산한다.
     """
     # 1. 수동 임포트 우선 (사용자가 브라우저로 직접 받아 배치한 경우)
-    if _check_manual_import(spec):
+    if _check_manual_import(spec, base_dir=base_dir):
         return ModelStatus.READY
 
     # 2. HF repo ID 형태면 HF 캐시 확인

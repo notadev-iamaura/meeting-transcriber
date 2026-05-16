@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from api.routes import router
+from config import AppConfig, PathsConfig
 from core.stt_model_registry import (
     get_by_id,
     get_hf_download_urls,
@@ -172,6 +173,30 @@ def test_get_model_status_ready_via_manual_import(
     assert get_model_status(spec) == ModelStatus.READY
 
 
+def test_manual_import_status_uses_configured_base_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """수동 임포트 탐지는 기본 홈이 아니라 전달된 base_dir를 우선해야 한다."""
+    spec = get_by_id("seastar-medium-4bit")
+    manual_dir = tmp_path / "custom-data" / "stt_models" / "seastar-medium-4bit-manual"
+    manual_dir.mkdir(parents=True)
+    (manual_dir / "config.json").write_text("{}")
+    (manual_dir / "weights.safetensors").write_bytes(b"x")
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hf-cache"))
+
+    def _manual_dir(spec, base_dir=None):
+        root = Path(base_dir).expanduser() if base_dir else tmp_path / "default-data"
+        return str(root / "stt_models" / f"{spec.id}-manual")
+
+    monkeypatch.setattr("core.stt_model_status.get_manual_import_dir", _manual_dir)
+
+    base_dir = tmp_path / "custom-data"
+
+    assert get_model_status(spec, base_dir=base_dir) == ModelStatus.READY
+    assert get_effective_model_path(spec, base_dir=base_dir) == str(manual_dir)
+
+
 # === API 엔드포인트 ===
 
 
@@ -186,6 +211,30 @@ def test_manual_download_info_returns_urls(client: TestClient) -> None:
     assert len(data["files"]) == 2
     assert data["target_directory"].endswith("seastar-medium-4bit-manual")
     assert "다운로드" in data["instructions"]
+
+
+def test_manual_download_info_uses_configured_base_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """수동 다운로드 안내 경로는 app config의 base_dir를 사용해야 한다."""
+    def _manual_dir(spec, base_dir=None):
+        root = Path(base_dir).expanduser() if base_dir else tmp_path / "default-data"
+        return str(root / "stt_models" / f"{spec.id}-manual")
+
+    monkeypatch.setattr("core.stt_model_registry.get_manual_import_dir", _manual_dir)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path / "app-data")))
+    client = TestClient(app)
+
+    resp = client.get("/api/stt-models/seastar-medium-4bit/manual-download-info")
+
+    assert resp.status_code == 200
+    assert resp.json()["target_directory"] == str(
+        tmp_path / "app-data" / "stt_models" / "seastar-medium-4bit-manual"
+    )
 
 
 def test_manual_download_info_ghost613_supported(

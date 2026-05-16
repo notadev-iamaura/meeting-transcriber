@@ -62,7 +62,32 @@ class STTModelsResponse(BaseModel):
     active_model_path: str
 
 
-def _is_active_stt_model(spec: STTModelSpec, active_path: str) -> bool:
+def _config_base_dir(config: Any) -> Path:
+    """설정 객체에서 STT 모델 저장 기준 디렉토리를 가져온다."""
+    paths = getattr(config, "paths", None)
+    resolved = getattr(paths, "resolved_base_dir", None)
+    if resolved is not None:
+        return Path(resolved)
+    base_dir = getattr(paths, "base_dir", None)
+    if base_dir:
+        return Path(str(base_dir)).expanduser().resolve()
+    return Path("~/.meeting-transcriber").expanduser().resolve()
+
+
+def _request_base_dir(request: Request) -> Path:
+    """요청 앱 상태에서 base_dir를 찾고, 없으면 기본 데이터 디렉토리를 쓴다."""
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        return Path("~/.meeting-transcriber").expanduser().resolve()
+    return _config_base_dir(config)
+
+
+def _is_active_stt_model(
+    spec: STTModelSpec,
+    active_path: str,
+    *,
+    base_dir: str | Path | None = None,
+) -> bool:
     """spec 이 현재 활성 STT 모델인지 판정한다."""
     from core.stt_model_status import get_effective_model_path
 
@@ -72,7 +97,7 @@ def _is_active_stt_model(spec: STTModelSpec, active_path: str) -> bool:
     except Exception:  # noqa: BLE001
         pass
     try:
-        effective = get_effective_model_path(spec)
+        effective = get_effective_model_path(spec, base_dir=base_dir)
         if effective not in candidates:
             candidates.append(effective)
         try:
@@ -96,12 +121,13 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
 
     downloader = getattr(request.app.state, "stt_downloader", None)
     active_path = config.stt.model_name
+    base_dir = _config_base_dir(config)
 
     models: list[STTModelInfo] = []
     active_id: str | None = None
 
     for spec in STT_MODELS:
-        disk_status = get_model_status(spec)
+        disk_status = get_model_status(spec, base_dir=base_dir)
         job = downloader.get_progress(spec.id) if downloader is not None else None
         runtime_status = job.status if job is not None else disk_status
 
@@ -115,14 +141,18 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
             job = None
             runtime_status = disk_status
 
-        is_active = _is_active_stt_model(spec, active_path)
+        is_active = _is_active_stt_model(spec, active_path, base_dir=base_dir)
         if is_active:
             active_id = spec.id
 
         actual_size: float | None = None
         if disk_status == ModelStatus.READY:
             try:
-                actual_size = get_actual_size_mb(spec.model_path)
+                from core.stt_model_status import get_effective_model_path
+
+                actual_size = get_actual_size_mb(
+                    get_effective_model_path(spec, base_dir=base_dir)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("실제 모델 크기 계산 실패 (%s): %s", spec.id, exc)
 
@@ -247,7 +277,8 @@ async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
-    if get_model_status(spec) != ModelStatus.READY:
+    base_dir = _config_base_dir(config)
+    if get_model_status(spec, base_dir=base_dir) != ModelStatus.READY:
         raise HTTPException(
             status_code=400,
             detail="모델이 다운로드되지 않았습니다. 먼저 다운로드하세요.",
@@ -256,7 +287,7 @@ async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     previous_model = config.stt.model_name
     from core.stt_model_status import get_effective_model_path
 
-    spec_path = get_effective_model_path(spec)
+    spec_path = get_effective_model_path(spec, base_dir=base_dir)
     if spec_path.startswith(("~", "/", "./", "../")):
         new_path = str(Path(spec_path).expanduser())
     else:
@@ -339,7 +370,10 @@ class STTImportResponse(BaseModel):
     "/stt-models/{model_id}/manual-download-info",
     response_model=STTManualDownloadInfo,
 )
-async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
+async def get_stt_manual_download_info(
+    request: Request,
+    model_id: str,
+) -> STTManualDownloadInfo:
     """수동 다운로드용 HF 직접 URL 목록과 타겟 폴더 경로를 반환한다."""
     from core.stt_model_registry import get_hf_download_urls, get_manual_import_dir
 
@@ -349,7 +383,7 @@ async def get_stt_manual_download_info(model_id: str) -> STTManualDownloadInfo:
 
     urls = get_hf_download_urls(spec)
 
-    target_dir = get_manual_import_dir(spec)
+    target_dir = get_manual_import_dir(spec, base_dir=str(_request_base_dir(request)))
     files = [STTManualDownloadFile(name=u["name"], url=u["url"]) for u in urls]
 
     return STTManualDownloadInfo(
@@ -400,7 +434,7 @@ async def import_stt_manual(
             ),
         )
 
-    target_dir = Path(get_manual_import_dir(spec))
+    target_dir = Path(get_manual_import_dir(spec, base_dir=str(_request_base_dir(request))))
     target_dir.mkdir(parents=True, exist_ok=True)
 
     copied: list[str] = []
