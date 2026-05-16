@@ -76,6 +76,16 @@ def _make_status_response(
     return json.dumps(data).encode("utf-8")
 
 
+def _make_app_shell(config: AppConfig) -> MeetingTranscriberApp:
+    """네이티브 rumps 객체 생성 없이 테스트용 앱 객체를 만든다."""
+    app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+    app.config = config
+    app._current_status = AppStatus.DISCONNECTED
+    app._status_url = build_api_url(config, "/api/status")
+    app._web_url = build_api_url(config, "/app")
+    return app
+
+
 # === TestBuildApiUrl ===
 
 
@@ -640,7 +650,7 @@ class TestNativeWindowIntegration:
             server=ServerConfig(host="127.0.0.1", port=8765),
             window=WindowConfig(use_native=True),
         )
-        app = MeetingTranscriberApp(config)
+        app = _make_app_shell(config)
 
         with (
             patch("ui.menubar.launch_native_window") as mock_launch,
@@ -661,7 +671,7 @@ class TestNativeWindowIntegration:
             server=ServerConfig(host="127.0.0.1", port=8765),
             window=WindowConfig(use_native=True),
         )
-        app = MeetingTranscriberApp(config)
+        app = _make_app_shell(config)
 
         with (
             patch("ui.menubar.launch_native_window", side_effect=OSError("실패")),
@@ -680,7 +690,7 @@ class TestNativeWindowIntegration:
             server=ServerConfig(host="127.0.0.1", port=8765),
             window=WindowConfig(use_native=False),
         )
-        app = MeetingTranscriberApp(config)
+        app = _make_app_shell(config)
 
         with (
             patch("ui.menubar.launch_native_window") as mock_launch,
@@ -697,7 +707,7 @@ class TestNativeWindowIntegration:
             paths=PathsConfig(base_dir=str(tmp_path)),
             server=ServerConfig(host="127.0.0.1", port=8765),
         )
-        app = MeetingTranscriberApp(config)
+        app = _make_app_shell(config)
 
         with (
             patch("ui.menubar.launch_native_window") as mock_launch,

@@ -68,6 +68,10 @@ class TestConfigYamlParsing:
         # 텍스트 후처리 설정 검증
         assert config.text_postprocessing.enabled is True
         assert config.number_normalization.enabled is True
+        # 라이프사이클 자동 실행은 기존 오디오 삭제 방지를 위해 기본 OFF
+        assert config.lifecycle.enabled is False
+        assert config.lifecycle.interval_hours == 24
+        assert config.lifecycle.run_on_startup is False
 
     def test_AppConfig_기본값과_config_yaml_핵심정책_일치(
         self, monkeypatch: pytest.MonkeyPatch
@@ -148,6 +152,8 @@ class TestDefaultValues:
         assert config.hallucination_filter.enabled is True
         assert config.text_postprocessing.enabled is True
         assert config.number_normalization.enabled is True
+        assert config.lifecycle.enabled is False
+        assert config.lifecycle.interval_hours == 24
 
     def test_빈_yaml_파일_기본값(self, tmp_path: Path) -> None:
         """빈 YAML 파일에서도 기본값이 정상 적용되는지 확인한다."""
@@ -343,6 +349,11 @@ class TestValidation:
 
         lc2 = LifecycleConfig(cold_action="archive")
         assert lc2.cold_action == "archive"
+
+    def test_lifecycle_warm_days는_hot_days_이상(self) -> None:
+        """warm_days가 hot_days보다 작으면 설정 오류를 발생시킨다."""
+        with pytest.raises(ValidationError, match="warm_days"):
+            LifecycleConfig(hot_days=90, warm_days=30)
 
     def test_beam_size_범위_검증(self) -> None:
         """beam_size가 유효 범위를 벗어나면 에러가 발생하는지 확인한다."""

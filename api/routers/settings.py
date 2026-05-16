@@ -77,6 +77,13 @@ class SettingsResponse(BaseModel):
     hf_no_speech_threshold: float = 0.9
     hf_compression_ratio_threshold: float = 2.4
     hf_repetition_threshold: int = 3
+    # 데이터 라이프사이클
+    lifecycle_enabled: bool = False
+    lifecycle_hot_days: int = 30
+    lifecycle_warm_days: int = 90
+    lifecycle_cold_action: str = "delete_audio"
+    lifecycle_interval_hours: int = 24
+    lifecycle_run_on_startup: bool = False
     available_models: list[dict] = Field(default_factory=lambda: _AVAILABLE_MODELS)
 
 
@@ -105,6 +112,13 @@ class SettingsUpdateRequest(BaseModel):
     hf_no_speech_threshold: float | None = None
     hf_compression_ratio_threshold: float | None = None
     hf_repetition_threshold: int | None = None
+    # 데이터 라이프사이클
+    lifecycle_enabled: bool | None = None
+    lifecycle_hot_days: int | None = None
+    lifecycle_warm_days: int | None = None
+    lifecycle_cold_action: str | None = None
+    lifecycle_interval_hours: int | None = None
+    lifecycle_run_on_startup: bool | None = None
 
 
 class SettingsUpdateResponse(BaseModel):
@@ -119,6 +133,29 @@ class SettingsUpdateResponse(BaseModel):
     settings: SettingsResponse
     message: str = "설정이 저장되었습니다."
     changed_fields: list[str] = Field(default_factory=list)
+
+
+def _build_settings_response(config: Any) -> SettingsResponse:
+    """현재 config 객체를 SettingsResponse로 변환한다."""
+    return SettingsResponse(
+        llm_backend=config.llm.backend,
+        llm_mlx_model_name=config.llm.mlx_model_name,
+        llm_temperature=config.llm.temperature,
+        llm_mlx_max_tokens=config.llm.mlx_max_tokens,
+        llm_skip_steps=config.pipeline.skip_llm_steps,
+        stt_language=config.stt.language,
+        hf_enabled=config.hallucination_filter.enabled,
+        hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
+        hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
+        hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
+        lifecycle_enabled=config.lifecycle.enabled,
+        lifecycle_hot_days=config.lifecycle.hot_days,
+        lifecycle_warm_days=config.lifecycle.warm_days,
+        lifecycle_cold_action=config.lifecycle.cold_action,
+        lifecycle_interval_hours=config.lifecycle.interval_hours,
+        lifecycle_run_on_startup=config.lifecycle.run_on_startup,
+        available_models=_AVAILABLE_MODELS,
+    )
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -143,19 +180,7 @@ async def get_settings(request: Request) -> SettingsResponse:
             detail="서버 설정이 초기화되지 않았습니다.",
         )
 
-    return SettingsResponse(
-        llm_backend=config.llm.backend,
-        llm_mlx_model_name=config.llm.mlx_model_name,
-        llm_temperature=config.llm.temperature,
-        llm_mlx_max_tokens=config.llm.mlx_max_tokens,
-        llm_skip_steps=config.pipeline.skip_llm_steps,
-        stt_language=config.stt.language,
-        hf_enabled=config.hallucination_filter.enabled,
-        hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
-        hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
-        hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
-        available_models=_AVAILABLE_MODELS,
-    )
+    return _build_settings_response(config)
 
 
 @router.put("/settings", response_model=SettingsUpdateResponse)
@@ -189,19 +214,7 @@ async def update_settings(
     updates = body.model_dump(exclude_none=True)
     if not updates:
         return SettingsUpdateResponse(
-            settings=SettingsResponse(
-                llm_backend=config.llm.backend,
-                llm_mlx_model_name=config.llm.mlx_model_name,
-                llm_temperature=config.llm.temperature,
-                llm_mlx_max_tokens=config.llm.mlx_max_tokens,
-                llm_skip_steps=config.pipeline.skip_llm_steps,
-                stt_language=config.stt.language,
-                hf_enabled=config.hallucination_filter.enabled,
-                hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
-                hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
-                hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
-                available_models=_AVAILABLE_MODELS,
-            ),
+            settings=_build_settings_response(config),
             message="변경할 설정이 없습니다.",
             changed_fields=[],
         )
@@ -272,6 +285,43 @@ async def update_settings(
                 detail="hf_repetition_threshold 는 2~10 범위의 정수여야 합니다.",
             )
 
+    if "lifecycle_hot_days" in updates:
+        v = updates["lifecycle_hot_days"]
+        if not (isinstance(v, int) and 1 <= v <= 3650):
+            raise HTTPException(
+                status_code=400,
+                detail="lifecycle_hot_days 는 1~3650 범위의 정수여야 합니다.",
+            )
+    if "lifecycle_warm_days" in updates:
+        v = updates["lifecycle_warm_days"]
+        if not (isinstance(v, int) and 1 <= v <= 3650):
+            raise HTTPException(
+                status_code=400,
+                detail="lifecycle_warm_days 는 1~3650 범위의 정수여야 합니다.",
+            )
+    effective_hot_days = updates.get("lifecycle_hot_days", config.lifecycle.hot_days)
+    effective_warm_days = updates.get("lifecycle_warm_days", config.lifecycle.warm_days)
+    if effective_warm_days < effective_hot_days:
+        raise HTTPException(
+            status_code=400,
+            detail="lifecycle_warm_days 는 lifecycle_hot_days 이상이어야 합니다.",
+        )
+    if "lifecycle_cold_action" in updates and updates["lifecycle_cold_action"] not in (
+        "delete_audio",
+        "archive",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="lifecycle_cold_action 은 'delete_audio' 또는 'archive' 만 허용됩니다.",
+        )
+    if "lifecycle_interval_hours" in updates:
+        v = updates["lifecycle_interval_hours"]
+        if not (isinstance(v, int) and 1 <= v <= 168):
+            raise HTTPException(
+                status_code=400,
+                detail="lifecycle_interval_hours 는 1~168 범위의 정수여야 합니다.",
+            )
+
     # === config.yaml 파일 업데이트 ===
     config_path = _get_config_path()
     # YAML 필드 매핑 (API 필드명 → YAML 경로)
@@ -305,6 +355,18 @@ async def update_settings(
         changed_fields.append("hf_compression_ratio_threshold")
     if "hf_repetition_threshold" in updates:
         changed_fields.append("hf_repetition_threshold")
+    if "lifecycle_enabled" in updates:
+        changed_fields.append("lifecycle_enabled")
+    if "lifecycle_hot_days" in updates:
+        changed_fields.append("lifecycle_hot_days")
+    if "lifecycle_warm_days" in updates:
+        changed_fields.append("lifecycle_warm_days")
+    if "lifecycle_cold_action" in updates:
+        changed_fields.append("lifecycle_cold_action")
+    if "lifecycle_interval_hours" in updates:
+        changed_fields.append("lifecycle_interval_hours")
+    if "lifecycle_run_on_startup" in updates:
+        changed_fields.append("lifecycle_run_on_startup")
 
     # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
     try:
@@ -361,6 +423,31 @@ async def update_settings(
                 "repetition_threshold",
                 str(updates["hf_repetition_threshold"]),
             )
+        if "lifecycle_enabled" in updates:
+            val = "true" if updates["lifecycle_enabled"] else "false"
+            content = _replace_yaml_value(content, "lifecycle", "enabled", val)
+        if "lifecycle_hot_days" in updates:
+            content = _replace_yaml_value(
+                content, "lifecycle", "hot_days", str(updates["lifecycle_hot_days"])
+            )
+        if "lifecycle_warm_days" in updates:
+            content = _replace_yaml_value(
+                content, "lifecycle", "warm_days", str(updates["lifecycle_warm_days"])
+            )
+        if "lifecycle_cold_action" in updates:
+            content = _replace_yaml_value(
+                content, "lifecycle", "cold_action", f'"{updates["lifecycle_cold_action"]}"'
+            )
+        if "lifecycle_interval_hours" in updates:
+            content = _replace_yaml_value(
+                content,
+                "lifecycle",
+                "interval_hours",
+                str(updates["lifecycle_interval_hours"]),
+            )
+        if "lifecycle_run_on_startup" in updates:
+            val = "true" if updates["lifecycle_run_on_startup"] else "false"
+            content = _replace_yaml_value(content, "lifecycle", "run_on_startup", val)
 
         # 원자적 쓰기 + .bak 백업 (도중 죽어도 config.yaml 손상 방지)
         await asyncio.to_thread(_atomic_write_text, config_path, content)
@@ -413,8 +500,29 @@ async def update_settings(
         new_hf = config.hallucination_filter.model_copy(update=hf_updates)
         config = config.model_copy(update={"hallucination_filter": new_hf})
 
+    lifecycle_updates: dict[str, Any] = {}
+    if "lifecycle_enabled" in updates:
+        lifecycle_updates["enabled"] = updates["lifecycle_enabled"]
+    if "lifecycle_hot_days" in updates:
+        lifecycle_updates["hot_days"] = updates["lifecycle_hot_days"]
+    if "lifecycle_warm_days" in updates:
+        lifecycle_updates["warm_days"] = updates["lifecycle_warm_days"]
+    if "lifecycle_cold_action" in updates:
+        lifecycle_updates["cold_action"] = updates["lifecycle_cold_action"]
+    if "lifecycle_interval_hours" in updates:
+        lifecycle_updates["interval_hours"] = updates["lifecycle_interval_hours"]
+    if "lifecycle_run_on_startup" in updates:
+        lifecycle_updates["run_on_startup"] = updates["lifecycle_run_on_startup"]
+    if lifecycle_updates:
+        new_lifecycle = config.lifecycle.model_copy(update=lifecycle_updates)
+        config = config.model_copy(update={"lifecycle": new_lifecycle})
+
     # app.state.config 갱신
     request.app.state.config = config
+
+    lifecycle_scheduler = getattr(request.app.state, "lifecycle_scheduler", None)
+    if lifecycle_updates and lifecycle_scheduler is not None:
+        await lifecycle_scheduler.update_config(config)
 
     # 응답 메시지 구성
     message = "설정이 저장되었습니다."
@@ -422,19 +530,7 @@ async def update_settings(
         message += " 모델 변경은 다음 LLM 호출 시 적용됩니다."
 
     return SettingsUpdateResponse(
-        settings=SettingsResponse(
-            llm_backend=config.llm.backend,
-            llm_mlx_model_name=config.llm.mlx_model_name,
-            llm_temperature=config.llm.temperature,
-            llm_mlx_max_tokens=config.llm.mlx_max_tokens,
-            llm_skip_steps=config.pipeline.skip_llm_steps,
-            stt_language=config.stt.language,
-            hf_enabled=config.hallucination_filter.enabled,
-            hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
-            hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
-            hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
-            available_models=_AVAILABLE_MODELS,
-        ),
+        settings=_build_settings_response(config),
         message=message,
         changed_fields=changed_fields,
     )

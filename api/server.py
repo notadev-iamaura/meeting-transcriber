@@ -288,12 +288,33 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.stt_downloader = None
         logger.warning(f"STTModelDownloader 초기화 실패: {e}")
 
+    # 12. LifecycleScheduler 초기화 (오디오 보존/삭제 정책 자동 실행)
+    if lightweight_runtime:
+        app.state.lifecycle_scheduler = None
+        logger.info(f"LifecycleScheduler 비활성화 (runtime_profile={runtime_profile})")
+    else:
+        try:
+            from security.lifecycle_scheduler import LifecycleScheduler
+
+            lifecycle_scheduler = LifecycleScheduler(config)
+            await lifecycle_scheduler.start()
+            app.state.lifecycle_scheduler = lifecycle_scheduler
+            logger.info("LifecycleScheduler 초기화 완료")
+        except Exception as e:
+            app.state.lifecycle_scheduler = None
+            logger.warning(f"LifecycleScheduler 초기화 실패: {e}")
+
     logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
 
     yield  # 앱 실행
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # LifecycleScheduler 정지
+    if hasattr(app.state, "lifecycle_scheduler") and app.state.lifecycle_scheduler is not None:
+        await app.state.lifecycle_scheduler.stop()
+        logger.info("LifecycleScheduler 정지 완료")
 
     # JobProcessor 정지
     if hasattr(app.state, "job_processor") and app.state.job_processor is not None:

@@ -112,6 +112,14 @@ llm:
 
 pipeline:
   skip_llm_steps: false
+
+lifecycle:
+  enabled: false
+  hot_days: 30
+  warm_days: 90
+  cold_action: "delete_audio"
+  interval_hours: 24
+  run_on_startup: false
 """,
         encoding="utf-8",
     )
@@ -140,6 +148,14 @@ pipeline:
             compression_ratio_threshold=2.4,
             repetition_threshold=3,
         ),
+        lifecycle=SimpleNamespace(
+            enabled=False,
+            hot_days=30,
+            warm_days=90,
+            cold_action="delete_audio",
+            interval_hours=24,
+            run_on_startup=False,
+        ),
     )
 
     # cfg + 각 하위 네임스페이스가 Pydantic model_copy 를 지원해야 함
@@ -152,11 +168,12 @@ pipeline:
         _add_model_copy(ns)
         return ns
 
-    for sub in (cfg.stt, cfg.llm, cfg.pipeline, cfg.hallucination_filter):
+    for sub in (cfg.stt, cfg.llm, cfg.pipeline, cfg.hallucination_filter, cfg.lifecycle):
         _add_model_copy(sub)
     _add_model_copy(cfg)
 
     app.state.config = cfg
+    app.state.lifecycle_scheduler = None
 
     # _get_config_path 를 monkeypatch
     import api.routers.settings as settings_router
@@ -275,6 +292,91 @@ class TestHallucinationFilterSettings:
         ],
     )
     def test_hf_검증_범위_벗어나면_400(
+        self,
+        client: TestClient,
+        payload: dict,
+        expected_detail: str,
+    ) -> None:
+        resp = client.put("/api/settings", json=payload)
+        assert resp.status_code == 400
+        assert expected_detail in resp.json().get("detail", "")
+
+
+class TestLifecycleSettings:
+    """데이터 라이프사이클 설정 API 회귀 방지."""
+
+    def test_get_settings_가_lifecycle_필드를_노출(self, client: TestClient) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["lifecycle_enabled"] is False
+        assert data["lifecycle_hot_days"] == 30
+        assert data["lifecycle_warm_days"] == 90
+        assert data["lifecycle_cold_action"] == "delete_audio"
+        assert data["lifecycle_interval_hours"] == 24
+        assert data["lifecycle_run_on_startup"] is False
+
+    def test_put_settings_가_lifecycle_필드를_저장(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/settings",
+            json={
+                "lifecycle_enabled": True,
+                "lifecycle_hot_days": 14,
+                "lifecycle_warm_days": 60,
+                "lifecycle_cold_action": "delete_audio",
+                "lifecycle_interval_hours": 12,
+                "lifecycle_run_on_startup": True,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        changed = set(body["changed_fields"])
+        assert {
+            "lifecycle_enabled",
+            "lifecycle_hot_days",
+            "lifecycle_warm_days",
+            "lifecycle_cold_action",
+            "lifecycle_interval_hours",
+            "lifecycle_run_on_startup",
+        }.issubset(changed)
+        settings = body["settings"]
+        assert settings["lifecycle_enabled"] is True
+        assert settings["lifecycle_hot_days"] == 14
+        assert settings["lifecycle_warm_days"] == 60
+        assert settings["lifecycle_interval_hours"] == 12
+        assert settings["lifecycle_run_on_startup"] is True
+
+    def test_lifecycle_설정_변경시_scheduler_갱신(self, client: TestClient) -> None:
+        class _Scheduler:
+            def __init__(self) -> None:
+                self.updated = False
+
+            async def update_config(self, config) -> None:  # type: ignore[no-untyped-def]
+                self.updated = True
+                self.config = config
+
+        scheduler = _Scheduler()
+        client.app.state.lifecycle_scheduler = scheduler
+
+        resp = client.put("/api/settings", json={"lifecycle_enabled": True})
+
+        assert resp.status_code == 200, resp.text
+        assert scheduler.updated is True
+        assert scheduler.config.lifecycle.enabled is True
+
+    @pytest.mark.parametrize(
+        "payload,expected_detail",
+        [
+            ({"lifecycle_hot_days": 0}, "lifecycle_hot_days"),
+            ({"lifecycle_warm_days": 0}, "lifecycle_warm_days"),
+            ({"lifecycle_hot_days": 90, "lifecycle_warm_days": 30}, "lifecycle_warm_days"),
+            ({"lifecycle_cold_action": "delete_all"}, "lifecycle_cold_action"),
+            ({"lifecycle_interval_hours": 0}, "lifecycle_interval_hours"),
+            ({"lifecycle_interval_hours": 169}, "lifecycle_interval_hours"),
+        ],
+    )
+    def test_lifecycle_검증_범위_벗어나면_400(
         self,
         client: TestClient,
         payload: dict,

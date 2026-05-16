@@ -559,6 +559,47 @@
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
+                '    <h3 class="settings-section-title">저장소 관리</h3>',
+                '    <p class="settings-section-desc">오래된 회의 오디오는 주기적으로 압축하거나 삭제하고 회의록 텍스트는 유지합니다.</p>',
+                '    <div class="settings-group">',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleEnabled">자동 정리</label>',
+                '        <label class="setting-toggle">',
+                '          <input type="checkbox" id="settingsLifecycleEnabled">',
+                '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+                '        </label>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleInterval">점검 주기</label>',
+                '        <div class="setting-number-group">',
+                '          <input type="number" class="setting-input" id="settingsLifecycleInterval" min="1" max="168" step="1">',
+                '          <span class="setting-unit">시간</span>',
+                '        </div>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleHotDays">원본 유지</label>',
+                '        <div class="setting-number-group">',
+                '          <input type="number" class="setting-input" id="settingsLifecycleHotDays" min="1" max="3650" step="1">',
+                '          <span class="setting-unit">일</span>',
+                '        </div>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleWarmDays">오디오 삭제</label>',
+                '        <div class="setting-number-group">',
+                '          <input type="number" class="setting-input" id="settingsLifecycleWarmDays" min="1" max="3650" step="1">',
+                '          <span class="setting-unit">일 이후</span>',
+                '        </div>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleRunOnStartup">시작 시 점검</label>',
+                '        <label class="setting-toggle">',
+                '          <input type="checkbox" id="settingsLifecycleRunOnStartup">',
+                '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+                '        </label>',
+                '      </div>',
+                '    </div>',
+                '  </section>',
+                '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">음성 인식 모델 (STT)</h3>',
                 '    <p class="settings-section-desc">한국어 회의 전사에 사용할 모델을 선택하세요. 다운로드 완료 후 활성화하면 다음 전사부터 적용돼요.</p>',
                 '    <div class="stt-models" id="settingsSttModels" aria-live="polite">',
@@ -602,6 +643,11 @@
                 hfCompRatioValue: document.getElementById("settingsHfCompRatioValue"),
                 hfRepetition: document.getElementById("settingsHfRepetition"),
                 hfRepetitionValue: document.getElementById("settingsHfRepetitionValue"),
+                lifecycleEnabled: document.getElementById("settingsLifecycleEnabled"),
+                lifecycleInterval: document.getElementById("settingsLifecycleInterval"),
+                lifecycleHotDays: document.getElementById("settingsLifecycleHotDays"),
+                lifecycleWarmDays: document.getElementById("settingsLifecycleWarmDays"),
+                lifecycleRunOnStartup: document.getElementById("settingsLifecycleRunOnStartup"),
             };
             // 모델별 description 캐시 (툴팁 갱신용)
             this._modelDescriptions = {};
@@ -703,6 +749,17 @@
                     els.hfRepetition.value = data.hf_repetition_threshold;
                     els.hfRepetitionValue.textContent = data.hf_repetition_threshold;
                 }
+                els.lifecycleEnabled.checked = !!data.lifecycle_enabled;
+                if (data.lifecycle_interval_hours !== undefined && data.lifecycle_interval_hours !== null) {
+                    els.lifecycleInterval.value = data.lifecycle_interval_hours;
+                }
+                if (data.lifecycle_hot_days !== undefined && data.lifecycle_hot_days !== null) {
+                    els.lifecycleHotDays.value = data.lifecycle_hot_days;
+                }
+                if (data.lifecycle_warm_days !== undefined && data.lifecycle_warm_days !== null) {
+                    els.lifecycleWarmDays.value = data.lifecycle_warm_days;
+                }
+                els.lifecycleRunOnStartup.checked = !!data.lifecycle_run_on_startup;
             } catch (err) {
                 errorBanner.show("설정 불러오기 실패: " + (err.message || err));
             }
@@ -739,6 +796,11 @@
                 hf_no_speech_threshold: parseFloat(els.hfNoSpeech.value),
                 hf_compression_ratio_threshold: parseFloat(els.hfCompRatio.value),
                 hf_repetition_threshold: parseInt(els.hfRepetition.value, 10),
+                lifecycle_enabled: els.lifecycleEnabled.checked,
+                lifecycle_interval_hours: parseInt(els.lifecycleInterval.value, 10),
+                lifecycle_hot_days: parseInt(els.lifecycleHotDays.value, 10),
+                lifecycle_warm_days: parseInt(els.lifecycleWarmDays.value, 10),
+                lifecycle_run_on_startup: els.lifecycleRunOnStartup.checked,
             };
 
             try {

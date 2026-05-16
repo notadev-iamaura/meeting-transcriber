@@ -114,13 +114,17 @@ class TestSTTModelDownloader:
         assert progress.status == ModelStatus.READY
 
     async def test_검증_실패시_ERROR(self, downloader, monkeypatch):
-        """HF 다운로드는 성공했지만 _verify 가 False 이면 ERROR."""
+        """HF/direct 다운로드 후에도 _verify 가 False 이면 ERROR."""
         from core.stt_model_status import ModelStatus
 
         async def fake_hf(spec, job):
             pass
 
+        async def fake_direct(spec, job):
+            pass
+
         monkeypatch.setattr(downloader, "_hf_download", fake_hf)
+        monkeypatch.setattr(downloader, "_direct_url_download", fake_direct)
         monkeypatch.setattr(downloader, "_verify", lambda spec: False)
 
         await downloader.start_download("seastar-medium-4bit")

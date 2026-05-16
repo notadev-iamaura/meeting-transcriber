@@ -105,6 +105,27 @@
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
+.setting-input {
+  background: var(--bg-content);
+  border: 0.5px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  min-width: 88px;
+  padding: 6px 10px;
+  transition: border-color var(--duration-fast) var(--ease-macos);
+}
+
+.setting-input:hover {
+  border-color: var(--accent);
+}
+
+.setting-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
 /* (?) 도움말 버튼 + 툴팁 — 비개발자용 한 줄 설명 */
 .setting-control-with-help {
   display: flex;
@@ -246,6 +267,18 @@
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.setting-number-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setting-unit {
+  color: var(--text-secondary);
+  font-size: 13px;
+  min-width: 36px;
 }
 
 .setting-slider {

@@ -16,6 +16,7 @@ import asyncio
 import gc
 import logging
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine
@@ -48,12 +49,14 @@ def _env_flag_enabled(name: str) -> bool:
 
 
 def _import_mlx_core() -> Any:
-    """MLX core 모듈을 지연 import한다.
+    """이미 로드된 MLX core 모듈을 반환한다.
 
-    native import 경계를 한 곳으로 모아 단위 테스트에서 쉽게 mock할 수 있게 한다.
+    cleanup 경계에서 `import mlx.core` 를 새로 실행하면 환경에 따라 C++ abort 로
+    프로세스가 종료될 수 있다. 모델 로드 과정에서 이미 들어온 모듈만 사용한다.
     """
-    import mlx.core as mx  # type: ignore[import-untyped]
-
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
+        raise ImportError("mlx.core is not loaded")
     return mx
 
 
@@ -199,7 +202,11 @@ class ModelLoadManager:
 
         try:
             mx = self._mlx_core_importer()
-            mx.metal.clear_cache()
+            clear_cache = getattr(getattr(mx, "metal", None), "clear_cache", None)
+            if not callable(clear_cache):
+                logger.debug("mlx.core.metal.clear_cache 없음 — Metal 캐시 정리 건너뜀")
+                return
+            clear_cache()
             logger.debug("Metal GPU 캐시 정리 완료")
         except ImportError:
             logger.debug("mlx 미설치 — Metal 캐시 정리 건너뜀")

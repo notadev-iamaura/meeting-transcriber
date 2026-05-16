@@ -162,9 +162,12 @@ recording:
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:
+  enabled: false                            # 자동 실행 여부 (기본 OFF: 기존 오디오 자동 삭제 방지)
   hot_days: 30                               # Hot 보존 기간 (일, WAV 원본 유지)
   warm_days: 90                              # Warm 보존 기간 (일, FLAC 압축)
   cold_action: "delete_audio"                # Cold 정책: delete_audio | archive
+  interval_hours: 24                         # 자동 점검 주기 (시간)
+  run_on_startup: false                      # 서버 시작 직후 1회 실행 여부
 
 # === VAD (Voice Activity Detection) 설정 ===
 # 주의: mlx-whisper + 외부 silero-vad 조합에서 VAD ON 은 실행시간을 약 3배 늘리고

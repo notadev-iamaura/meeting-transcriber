@@ -4,7 +4,7 @@
 목적: watchdog 라이브러리로 오디오 입력 폴더를 감시하여
      새 오디오 파일 감지 시 작업 큐에 자동 등록한다.
 주요 기능:
-    - watchdog Observer로 폴더 실시간 감시 (macOS FSEvents 활용)
+    - watchdog PollingObserver로 폴더 감시 (macOS FSEvents native crash 회피)
     - 오디오 확장자 화이트리스트 필터링
     - debounce로 파일 복사 완료 대기 (크기 안정화 확인)
     - AsyncJobQueue에 자동 등록
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from config import AppConfig, get_config
 from core.job_queue import AsyncJobQueue, JobQueueError
@@ -496,7 +496,9 @@ class FolderWatcher:
         """폴더 감시를 시작한다.
 
         감시 대상 디렉토리가 없으면 자동 생성한다.
-        watchdog Observer를 시작하여 백그라운드에서 파일 이벤트를 감시한다.
+        watchdog PollingObserver를 시작하여 백그라운드에서 파일 이벤트를 감시한다.
+        macOS FSEvents 기반 Observer는 테스트/앱 종료 시 native extension
+        세그폴트가 재현되어 사용하지 않는다.
 
         Raises:
             AlreadyWatchingError: 이미 감시 중인 경우
@@ -515,14 +517,16 @@ class FolderWatcher:
         # 현재 이벤트 루프 획득
         loop = asyncio.get_running_loop()
 
-        # watchdog 핸들러 및 Observer 생성
+        # watchdog 핸들러 및 PollingObserver 생성
         self._handler = _AudioFileHandler(
             supported_extensions=self._supported_extensions,
             on_new_file=self._handle_new_file,
             loop=loop,
         )
 
-        self._observer = Observer()
+        # macOS FSEvents native observer는 shutdown 경계에서 Python 프로세스를
+        # 세그폴트시킬 수 있다. 입력 폴더 규모가 작으므로 polling 안정성을 우선한다.
+        self._observer = PollingObserver(timeout=max(0.2, self._check_interval))
         self._observer.schedule(
             self._handler,
             str(self._watch_dir),

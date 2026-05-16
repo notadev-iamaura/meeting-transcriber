@@ -18,6 +18,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import logging
+import sys
 from collections.abc import Iterator
 from typing import Any, cast
 
@@ -442,12 +443,19 @@ class MLXBackend:
         gc.collect()
 
         try:
-            import mlx.core as mx  # type: ignore[import-untyped]
-
-            mx.metal.clear_cache()
+            # cleanup 경로에서 새로 `import mlx.core` 를 시도하면 Apple Silicon
+            # 가상화/테스트 환경에서 C++ abort 로 프로세스가 종료될 수 있다.
+            # 모델 로드 과정에서 이미 들어온 mlx.core 가 있을 때만 캐시를 정리한다.
+            mx = sys.modules.get("mlx.core")
+            if mx is None:
+                logger.debug("mlx.core 미로드 — Metal 캐시 정리 건너뜀")
+                return
+            clear_cache = getattr(getattr(mx, "metal", None), "clear_cache", None)
+            if not callable(clear_cache):
+                logger.debug("mlx.core.metal.clear_cache 없음 — Metal 캐시 정리 건너뜀")
+                return
+            clear_cache()
             logger.debug("Metal GPU 캐시 정리 완료")
-        except ImportError:
-            logger.debug("mlx 미설치 — Metal 캐시 정리 건너뜀")
         except Exception as e:
             logger.warning(f"Metal 캐시 정리 중 오류 (무시): {e}")
 

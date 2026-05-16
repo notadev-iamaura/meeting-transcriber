@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -559,9 +559,23 @@ class RecordingConfig(BaseModel):
 class LifecycleConfig(BaseModel):
     """데이터 라이프사이클 관리 설정"""
 
+    enabled: bool = Field(
+        default=False,
+        description="자동 라이프사이클 실행 여부. 기존 오디오 자동 삭제를 피하기 위해 기본값은 false.",
+    )
     hot_days: int = Field(default=30, ge=1)
     warm_days: int = Field(default=90, ge=1)
     cold_action: str = "delete_audio"
+    interval_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="자동 라이프사이클 점검 주기(시간).",
+    )
+    run_on_startup: bool = Field(
+        default=False,
+        description="서버 시작 직후 1회 실행 여부. 삭제 작업이므로 기본값은 false.",
+    )
 
     @field_validator("cold_action")
     @classmethod
@@ -581,6 +595,13 @@ class LifecycleConfig(BaseModel):
         if v not in allowed:
             raise ValueError(f"cold_action은 {allowed} 중 하나여야 합니다. 입력값: {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_day_order(self) -> LifecycleConfig:
+        """warm_days가 hot_days보다 작지 않도록 검증한다."""
+        if self.warm_days < self.hot_days:
+            raise ValueError("warm_days는 hot_days 이상이어야 합니다.")
+        return self
 
 
 class WikiConfig(BaseModel):
