@@ -43,7 +43,16 @@ pytestmark = [pytest.mark.ui]
 # ============================================================================
 
 # `/api/meetings/batch` 응답에 대한 단일 진실 공급원 — 모든 시나리오가 동일 응답을 기대.
-_BATCH_OK_RESPONSE = {"queued": 3, "skipped": 1, "message": "3개 처리, 1개 건너뜀"}
+_BATCH_OK_RESPONSE = {
+    "status": "ok",
+    "action": "full",
+    "scope": "all",
+    "matched": 4,
+    "queued": 3,
+    "skipped": 1,
+    "meeting_ids": ["m1", "m2", "m3"],
+    "message": "3개 처리, 1개 건너뜀",
+}
 
 
 def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
@@ -52,7 +61,7 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
     Returns:
         captured["calls"] — 각 호출의 {action, scope, meeting_ids?, hours?} 페이로드.
     """
-    captured: dict[str, list[dict]] = {"calls": []}
+    captured: dict[str, list[dict]] = {"calls": [], "preview_calls": []}
 
     def _handle(route, request):
         try:
@@ -66,6 +75,24 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
             body=json.dumps(_BATCH_OK_RESPONSE),
         )
 
+    def _handle_preview(route, request):
+        try:
+            body = request.post_data_json or {}
+        except Exception:
+            body = {}
+        captured["preview_calls"].append(
+            {"method": request.method, "url": request.url, "body": body}
+        )
+        preview = dict(_BATCH_OK_RESPONSE)
+        preview["action"] = body.get("action", preview["action"])
+        preview["scope"] = body.get("scope", preview["scope"])
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(preview),
+        )
+
+    page.route("**/api/meetings/batch/preview", _handle_preview)
     page.route("**/api/meetings/batch", _handle)
     return captured
 
@@ -819,7 +846,7 @@ class TestHomeBulkDropdowns:
     ) -> None:
         """Given: [전체 일괄] 메뉴 열림 + route mock
         When:  "전사+요약" (data-option="both") 항목 클릭
-        Then:  POST /api/meetings/batch with scope="all", action="full".
+        Then:  확인 모달이 뜨고 [시작] 클릭 후 POST /api/meetings/batch with scope="all", action="full".
 
         근거: bulk-actions.md §3 "전체 범위 메뉴".
         """
@@ -827,6 +854,11 @@ class TestHomeBulkDropdowns:
         ui_page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").click()
         ui_page.wait_for_timeout(200)
         ui_page.locator(".home-action-dropdown [role='menuitemradio'][data-option='both']").click()
+        ui_page.wait_for_timeout(500)
+        assert len(captured["preview_calls"]) == 1, "preview API 1회 호출 기대"
+        assert len(captured["calls"]) == 0, "옵션 클릭만으로 batch 실행되면 안 됨"
+        expect(ui_page.locator("#homeBatchConfirmModal")).to_be_visible()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, f"batch API 1회 호출 기대 (got {captured['calls']})"
         body = captured["calls"][0]["body"]
@@ -836,7 +868,7 @@ class TestHomeBulkDropdowns:
     def test_H4_최근_24시간_드롭다운은_scope_recent_hours_24_로_호출(self, ui_page: Page) -> None:
         """Given: [최근 24시간] 메뉴 열림 + route mock
         When:  "전사만" (data-option="transcribe") 항목 클릭
-        Then:  POST /api/meetings/batch with scope="recent", hours=24, action="transcribe".
+        Then:  확인 모달이 뜨고 [시작] 클릭 후 POST /api/meetings/batch with scope="recent", hours=24, action="transcribe".
 
         근거: bulk-actions.md §3 "최근 24시간 범위 메뉴".
         """
@@ -846,6 +878,11 @@ class TestHomeBulkDropdowns:
         ui_page.locator(
             ".home-action-dropdown [role='menuitemradio'][data-option='transcribe']"
         ).click()
+        ui_page.wait_for_timeout(500)
+        assert len(captured["preview_calls"]) == 1, "preview API 1회 호출 기대"
+        assert len(captured["calls"]) == 0, "옵션 클릭만으로 batch 실행되면 안 됨"
+        expect(ui_page.locator("#homeBatchConfirmModal")).to_be_visible()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
         body = captured["calls"][0]["body"]
@@ -906,3 +943,29 @@ class TestHomeBulkDropdowns:
         assert focused_id == "all-bulk", (
             f"Esc 후 포커스는 트리거로 복귀해야 함 (got data-dropdown={focused_id!r})"
         )
+
+    def test_H7_홈_재진입_후에도_확인_모달_시작이_batch_API_를_호출한다(
+        self, ui_page: Page
+    ) -> None:
+        """Given: HomeView 를 떠났다가 다시 진입
+        When:  [전체 일괄] 옵션 선택 후 확인 모달의 [시작] 클릭
+        Then:  이전 HomeView 의 stale handler 가 남지 않고 batch API 가 호출된다.
+        """
+        captured = _install_batch_route_mock(ui_page)
+
+        ui_page.evaluate("() => window.SPA.Router.navigate('/app/chat')")
+        ui_page.wait_for_url("**/app/chat")
+        expect(ui_page.locator("#homeBatchConfirmModal")).to_have_count(0)
+
+        ui_page.evaluate("() => window.SPA.Router.navigate('/app')")
+        ui_page.wait_for_url("**/app")
+        ui_page.wait_for_selector(".home-action-btn--dropdown[data-dropdown='all-bulk']")
+
+        ui_page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").click()
+        ui_page.locator(".home-action-dropdown [role='menuitemradio'][data-option='both']").click()
+        expect(ui_page.locator("#homeBatchConfirmModal")).to_be_visible()
+        ui_page.locator("#homeBatchConfirmStart").click()
+        ui_page.wait_for_timeout(500)
+
+        assert len(captured["preview_calls"]) == 1, "preview API 1회 호출 기대"
+        assert len(captured["calls"]) == 1, "홈 재진입 후에도 batch API 1회 호출 기대"

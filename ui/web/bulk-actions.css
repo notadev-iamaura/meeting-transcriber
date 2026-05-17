@@ -430,6 +430,53 @@
   width: 12px;
 }
 
+/* ── 11.3.1 홈 일괄 처리 확인 다이얼로그 ── */
+.home-batch-confirm-content {
+  max-width: 460px;
+}
+
+.home-batch-confirm-body {
+  color: var(--text-secondary);
+}
+
+.home-batch-confirm-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.home-batch-confirm-list > div {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.home-batch-confirm-list dt {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.home-batch-confirm-list dd {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.home-batch-confirm-warning {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 0.5px solid rgba(255, 149, 0, 0.35);
+  border-radius: var(--radius);
+  background: rgba(255, 149, 0, 0.10);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* ── 11.4 동적 토스트 폴백 (homeStatusMessage 가 없는 라우트용) ── */
 .bulk-toast {
   position: fixed;

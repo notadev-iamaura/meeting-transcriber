@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -104,6 +105,42 @@ class BatchActionResponse(BaseModel):
     queued: int
     skipped: int
     meeting_ids: list[str]
+
+
+class BatchPreviewResponse(BaseModel):
+    """일괄 처리 미리보기 응답 스키마.
+
+    실제 파이프라인 실행 없이 `POST /api/meetings/batch` 와 동일한 대상 산정
+    규칙으로 matched / queued / skipped 를 계산한다.
+    """
+
+    status: Literal["ok", "no_targets"]
+    message: str
+    action: str
+    scope: str
+    matched: int
+    queued: int
+    skipped: int
+    meeting_ids: list[str]
+
+
+@dataclass(frozen=True)
+class PreparedBatch:
+    """일괄 처리 대상 산정 결과."""
+
+    matched: int
+    skipped: int
+    items: list[tuple[str, str, Path | None]]
+
+    @property
+    def queued(self) -> int:
+        """실제 실행 가능한 회의 수."""
+        return len(self.items)
+
+    @property
+    def meeting_ids(self) -> list[str]:
+        """실제 실행 가능한 회의 ID 목록."""
+        return [mid for (mid, _cls, _ap) in self.items]
 
 
 def _has_merge_checkpoint(checkpoints_dir: Path, meeting_id: str) -> bool:
@@ -347,6 +384,111 @@ def _classify_eligibility_sync(
     return pairs
 
 
+async def _prepare_batch(
+    request: Request,
+    body: BatchActionRequest,
+) -> PreparedBatch:
+    """일괄 처리 대상 목록을 실행 없이 산정한다.
+
+    `preview` 와 실제 `batch_action` 이 같은 계산 경로를 쓰게 하여,
+    확인 다이얼로그에 표시한 queued/skipped 수와 실제 시작 응답이 어긋나지
+    않도록 한다.
+    """
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="서버 설정이 초기화되지 않았습니다.",
+        )
+    queue = _get_job_queue(request)
+
+    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    outputs_dir = config.paths.resolved_outputs_dir
+    # Phase 6 perf M-1: base_dir resolve 를 1회만 수행하여 _resolve_audio_path
+    # 호출 시마다 반복 계산하지 않는다.
+    base_dir_resolved = config.paths.resolved_base_dir
+
+    if body.scope == "selected":
+        for mid in body.meeting_ids:
+            _validate_meeting_id(mid)
+        all_jobs: list[Any] = []
+    elif body.scope == "recent":
+        all_jobs = await queue.get_all_jobs()
+    else:  # "all"
+        all_jobs = []
+
+    candidate_ids = await asyncio.to_thread(
+        _collect_candidate_ids_sync,
+        body.scope,
+        body.meeting_ids,
+        all_jobs,
+        body.hours,
+        checkpoints_dir,
+    )
+    matched = len(candidate_ids)
+
+    eligible_pairs = await asyncio.to_thread(
+        _classify_eligibility_sync,
+        candidate_ids,
+        body.action,
+        body.scope,
+        checkpoints_dir,
+        outputs_dir,
+    )
+
+    final_items: list[tuple[str, str, Path | None]] = []
+    for mid, classification in eligible_pairs:
+        if classification == "transcribe":
+            audio_path = await _resolve_audio_path(queue, mid, base_dir_resolved)
+            if audio_path is None:
+                continue
+            final_items.append((mid, classification, audio_path))
+        else:
+            final_items.append((mid, classification, None))
+
+    queued = len(final_items)
+    return PreparedBatch(
+        matched=matched,
+        skipped=matched - queued,
+        items=final_items,
+    )
+
+
+@router.post("/meetings/batch/preview", response_model=BatchPreviewResponse)
+async def batch_action_preview(
+    request: Request,
+    body: BatchActionRequest,
+) -> BatchPreviewResponse:
+    """일괄 처리 대상을 미리 계산한다.
+
+    백그라운드 파이프라인을 시작하지 않는다. 홈 확인 다이얼로그에서 사용자가
+    실제 규모를 확인한 뒤 명시적으로 [시작]을 누르게 하기 위한 엔드포인트다.
+    """
+    prepared = await _prepare_batch(request, body)
+    if prepared.queued == 0:
+        return BatchPreviewResponse(
+            status="no_targets",
+            message="일괄 처리 대상 회의가 없습니다.",
+            action=body.action,
+            scope=body.scope,
+            matched=prepared.matched,
+            queued=0,
+            skipped=prepared.skipped,
+            meeting_ids=[],
+        )
+
+    return BatchPreviewResponse(
+        status="ok",
+        message=f"일괄 처리 대상 {prepared.queued}건을 찾았습니다.",
+        action=body.action,
+        scope=body.scope,
+        matched=prepared.matched,
+        queued=prepared.queued,
+        skipped=prepared.skipped,
+        meeting_ids=prepared.meeting_ids,
+    )
+
+
 @router.post("/meetings/batch", response_model=BatchActionResponse)
 async def batch_action(
     request: Request,
@@ -378,71 +520,12 @@ async def batch_action(
     """
     # === 1. 의존성 로딩 ===
     pipeline = _get_pipeline_manager(request)
-    config = getattr(request.app.state, "config", None)
-    if config is None:
-        raise HTTPException(
-            status_code=503,
-            detail="서버 설정이 초기화되지 않았습니다.",
-        )
-    queue = _get_job_queue(request)
-
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
-    outputs_dir = config.paths.resolved_outputs_dir
-    # Phase 6 perf M-1: base_dir resolve 를 1회만 수행하여 _resolve_audio_path
-    # 호출 시마다 반복 계산하지 않는다.
-    base_dir_resolved = config.paths.resolved_base_dir
-
-    # === 2. selected 사전 검증 / recent Job 사전 조회 ===
-    if body.scope == "selected":
-        for mid in body.meeting_ids:
-            _validate_meeting_id(mid)
-        all_jobs: list[Any] = []
-    elif body.scope == "recent":
-        # Phase 3 Major: AsyncJobQueue.get_all_jobs() 는 비동기 (내부적으로
-        # to_thread). asyncio.to_thread 로 다시 감싸지 않는다.
-        all_jobs = await queue.get_all_jobs()
-    else:  # "all"
-        all_jobs = []
-
-    # === 3. 후보 ID 수집 (Phase 6 perf C-1: to_thread) ===
-    candidate_ids = await asyncio.to_thread(
-        _collect_candidate_ids_sync,
-        body.scope,
-        body.meeting_ids,
-        all_jobs,
-        body.hours,
-        checkpoints_dir,
-    )
-    matched = len(candidate_ids)
-
-    # === 4. 분류·eligibility (Phase 6 perf C-1: to_thread) ===
-    eligible_pairs = await asyncio.to_thread(
-        _classify_eligibility_sync,
-        candidate_ids,
-        body.action,
-        body.scope,
-        checkpoints_dir,
-        outputs_dir,
-    )
-
-    # === 5. transcribe 분류는 audio_path 사전 검증 (Phase 3 Major #2) ===
-    # audio 파일이 없거나 base_dir 외부면 백그라운드 큐에 넣지 않고 skipped 로
-    # 카운트한다. 이렇게 해야 응답의 queued 가 실제 실행 가능 수와 일치한다.
-    final_items: list[tuple[str, str, Path | None]] = []
-    for mid, classification in eligible_pairs:
-        if classification == "transcribe":
-            audio_path = await _resolve_audio_path(queue, mid, base_dir_resolved)
-            if audio_path is None:
-                # 사전 제외 — skipped 로 카운트
-                continue
-            final_items.append((mid, classification, audio_path))
-        else:
-            # summarize 분류는 audio_path 불필요
-            final_items.append((mid, classification, None))
-
-    queued = len(final_items)
-    skipped = matched - queued
-    queued_ids = [mid for (mid, _cls, _ap) in final_items]
+    prepared = await _prepare_batch(request, body)
+    matched = prepared.matched
+    queued = prepared.queued
+    skipped = prepared.skipped
+    final_items = prepared.items
+    queued_ids = prepared.meeting_ids
 
     # === 6. 후보 0 건이면 즉시 종료 ===
     if queued == 0:

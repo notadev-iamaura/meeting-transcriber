@@ -392,6 +392,55 @@ class TestBatchActionFilter:
         assert data["skipped"] == 1
 
 
+class TestBatchPreview:
+    """POST /api/meetings/batch/preview 대상 산정 검증."""
+
+    def test_batch_preview_returns_counts_without_starting_pipeline(self, tmp_path: Path) -> None:
+        """preview 는 batch 와 같은 카운트를 반환하되 백그라운드 실행은 하지 않는다."""
+        app = _make_test_app(tmp_path)
+
+        _make_meeting_dirs(tmp_path, "m_pending", has_merge=True, has_summary=False)
+        _make_meeting_dirs(tmp_path, "m_done", has_merge=True, has_summary=True)
+
+        with TestClient(app) as client:
+            mock_pipeline = _setup_pipeline_mock(app)
+            response = client.post(
+                "/api/meetings/batch/preview",
+                json={"action": "summarize", "scope": "all"},
+            )
+            _drain_background_tasks(client, app)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["matched"] == 2
+        assert data["queued"] == 1
+        assert data["skipped"] == 1
+        assert data["meeting_ids"] == ["m_pending"]
+        mock_pipeline.run.assert_not_called()
+        mock_pipeline.run_llm_steps.assert_not_called()
+
+    def test_batch_preview_no_targets(self, tmp_path: Path) -> None:
+        """대상이 없으면 no_targets 로 반환한다."""
+        app = _make_test_app(tmp_path)
+        _make_meeting_dirs(tmp_path, "m_done", has_merge=True, has_summary=True)
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            response = client.post(
+                "/api/meetings/batch/preview",
+                json={"action": "full", "scope": "all"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "no_targets"
+        assert data["matched"] == 1
+        assert data["queued"] == 0
+        assert data["skipped"] == 1
+        assert data["meeting_ids"] == []
+
+
 # ============================================================================
 # scope 정책 테스트
 # ============================================================================

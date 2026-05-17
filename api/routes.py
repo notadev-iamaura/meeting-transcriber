@@ -391,6 +391,7 @@ from api.routers import meetings_batch as _meetings_batch  # noqa: E402
 
 BatchActionRequest = _meetings_batch.BatchActionRequest
 BatchActionResponse = _meetings_batch.BatchActionResponse
+BatchPreviewResponse = _meetings_batch.BatchPreviewResponse
 _classify_eligibility_sync = _meetings_batch._classify_eligibility_sync
 _classify_meeting_for_batch = _meetings_batch._classify_meeting_for_batch
 _collect_candidate_ids_sync = _meetings_batch._collect_candidate_ids_sync
@@ -399,6 +400,7 @@ _has_summary_output = _meetings_batch._has_summary_output
 _is_meeting_eligible = _meetings_batch._is_meeting_eligible
 _resolve_audio_path = _meetings_batch._resolve_audio_path
 batch_action = _meetings_batch.batch_action
+batch_action_preview = _meetings_batch.batch_action_preview
 
 router.include_router(_meetings_batch.router)
 

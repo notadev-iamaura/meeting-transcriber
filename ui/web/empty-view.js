@@ -25,7 +25,7 @@
     /**
      * EmptyView 가 새로 렌더된 후 호출되어 두 드롭다운을 마운트.
      * - 트리거: aria-expanded 토글, chevron 회전 (CSS), 메뉴 표시
-     * - 메뉴 항목: scope/action 디스패치 → POST /api/meetings/batch
+     * - 메뉴 항목: scope/action 선택 → preview 확인 모달 → POST /api/meetings/batch
      * - 키보드: Enter/Space=열기, ↑↓=항목 이동, Enter=선택, Esc=닫기
      * - 외부 클릭 → 닫기 (메뉴 위에서 클릭은 메뉴 내부 핸들러가 처리)
      */
@@ -36,10 +36,45 @@
         // 메뉴 옵션 단일 진실 — 두 드롭다운 동일.
         // data-option 'both' 가 기본 (aria-checked='true').
         var MENU_OPTIONS = [
-            { option: "both", label: "전사+요약 (통합)", checked: true },
-            { option: "transcribe", label: "전사만", checked: false },
-            { option: "summarize", label: "요약만", checked: false },
+            { option: "both", label: "전사+요약 시작", checked: true },
+            { option: "transcribe", label: "전사만 시작", checked: false },
+            { option: "summarize", label: "요약만 시작", checked: false },
         ];
+
+        var ACTION_LABELS = {
+            both: "전사 + 요약",
+            transcribe: "전사",
+            summarize: "요약",
+        };
+
+        var SCOPE_LABELS = {
+            "all-bulk": "전체 회의",
+            "recent-24h": "최근 24시간",
+        };
+        var confirmSeq = 0;
+
+        function buildPayload(wrapper, option) {
+            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
+            if (!trigger) return null;
+            var dropdownId = trigger.getAttribute("data-dropdown");
+            var apiAction = (option === "both") ? "full" : option;
+            var payload = { action: apiAction };
+            if (dropdownId === "all-bulk") {
+                payload.scope = "all";
+            } else if (dropdownId === "recent-24h") {
+                payload.scope = "recent";
+                payload.hours = 24;
+            } else {
+                return null;
+            }
+            return {
+                dropdownId: dropdownId,
+                option: option,
+                payload: payload,
+                actionLabel: ACTION_LABELS[option] || option,
+                scopeLabel: SCOPE_LABELS[dropdownId] || dropdownId,
+            };
+        }
 
         function _populateMenu(menu) {
             // lazy-render — 닫힐 때 비우고 열 때 채움. Playwright strict mode 매칭 우회.
@@ -92,27 +127,175 @@
             if (first) first.focus();
         }
 
-        async function dispatchOption(wrapper, option) {
+        function ensureConfirmDialog() {
+            var existing = document.getElementById("homeBatchConfirmModal");
+            if (existing) return existing;
+
+            var modal = document.createElement("div");
+            modal.id = "homeBatchConfirmModal";
+            modal.className = "modal-overlay hidden home-batch-confirm-modal";
+            modal.setAttribute("role", "dialog");
+            modal.setAttribute("aria-modal", "true");
+            modal.setAttribute("aria-labelledby", "homeBatchConfirmTitle");
+            modal.innerHTML = [
+                '<div class="modal-content home-batch-confirm-content">',
+                '  <h3 class="modal-title" id="homeBatchConfirmTitle">일괄 처리를 시작할까요?</h3>',
+                '  <div class="home-batch-confirm-body" id="homeBatchConfirmBody" aria-live="polite"></div>',
+                '  <div class="modal-error" id="homeBatchConfirmError"></div>',
+                '  <div class="modal-actions">',
+                '    <button type="button" class="btn-secondary" id="homeBatchConfirmCancel">취소</button>',
+                '    <button type="button" class="settings-save-btn" id="homeBatchConfirmStart">시작</button>',
+                '  </div>',
+                '</div>',
+            ].join("\n");
+            document.body.appendChild(modal);
+
+            modal.addEventListener("click", function (e) {
+                if (e.target === modal) closeConfirmDialog();
+            });
+            document.addEventListener("keydown", function (e) {
+                if (e.key === "Escape" && !modal.classList.contains("hidden")) {
+                    closeConfirmDialog();
+                }
+            });
+            modal.querySelector("#homeBatchConfirmCancel").addEventListener("click", closeConfirmDialog);
+            modal.querySelector("#homeBatchConfirmStart").addEventListener("click", function () {
+                var state = modal._batchConfirmState;
+                if (!state || !state.payload) return;
+                dispatchPayload(state.payload, modal);
+            });
+
+            return modal;
+        }
+
+        function closeConfirmDialog() {
+            var modal = document.getElementById("homeBatchConfirmModal");
+            if (!modal) return;
+            modal.classList.add("hidden");
+            modal._batchConfirmState = null;
+            confirmSeq += 1;
+        }
+
+        function renderConfirmDialog(state) {
+            var modal = ensureConfirmDialog();
+            var body = modal.querySelector("#homeBatchConfirmBody");
+            var error = modal.querySelector("#homeBatchConfirmError");
+            var start = modal.querySelector("#homeBatchConfirmStart");
+            var cancel = modal.querySelector("#homeBatchConfirmCancel");
+            modal._batchConfirmState = state;
+            error.textContent = "";
+            cancel.textContent = state.canStart ? "취소" : "닫기";
+            start.disabled = !state.canStart || state.loading;
+
+            if (state.loading) {
+                body.innerHTML = [
+                    '<p class="modal-message">대상을 확인하는 중입니다.</p>',
+                    '<dl class="home-batch-confirm-list">',
+                    '  <div><dt>범위</dt><dd></dd></div>',
+                    '  <div><dt>작업</dt><dd></dd></div>',
+                    '</dl>',
+                ].join("\n");
+                body.querySelectorAll("dd")[0].textContent = state.scopeLabel;
+                body.querySelectorAll("dd")[1].textContent = state.actionLabel;
+                start.textContent = "확인 중...";
+                modal.classList.remove("hidden");
+                cancel.focus();
+                return;
+            }
+
+            var queued = state.preview && typeof state.preview.queued === "number"
+                ? state.preview.queued
+                : 0;
+            var skipped = state.preview && typeof state.preview.skipped === "number"
+                ? state.preview.skipped
+                : 0;
+            var matched = state.preview && typeof state.preview.matched === "number"
+                ? state.preview.matched
+                : queued + skipped;
+
+            body.innerHTML = [
+                '<dl class="home-batch-confirm-list">',
+                '  <div><dt>범위</dt><dd></dd></div>',
+                '  <div><dt>작업</dt><dd></dd></div>',
+                '  <div><dt>대상</dt><dd></dd></div>',
+                '  <div><dt>건너뜀</dt><dd></dd></div>',
+                '</dl>',
+                '<p class="home-batch-confirm-warning">MacBook 발열과 RAM 사용량이 증가할 수 있습니다.</p>',
+            ].join("\n");
+            var values = body.querySelectorAll("dd");
+            values[0].textContent = state.scopeLabel;
+            values[1].textContent = state.actionLabel;
+            values[2].textContent = queued + "건" + (matched !== queued ? " / 후보 " + matched + "건" : "");
+            values[3].textContent = skipped + "건";
+
+            if (queued === 0) {
+                error.textContent = "처리할 회의가 없습니다.";
+                start.textContent = "시작";
+            } else {
+                start.textContent = "시작";
+            }
+            modal.classList.remove("hidden");
+            if (queued > 0) {
+                start.focus();
+            } else {
+                cancel.focus();
+            }
+        }
+
+        async function confirmOption(wrapper, option) {
             if (owner && owner._destroyed) return;
             var trigger = wrapper.querySelector(".home-action-btn--dropdown");
             if (!trigger) return;
-            var dropdownId = trigger.getAttribute("data-dropdown");
-            // UI 'both' → 백엔드 'full'
-            var apiAction = (option === "both") ? "full" : option;
-            var payload = { action: apiAction };
-            if (dropdownId === "all-bulk") {
-                payload.scope = "all";
-            } else if (dropdownId === "recent-24h") {
-                payload.scope = "recent";
-                payload.hours = 24;
-            } else {
-                return;
-            }
-            // 트리거 disabled — in-flight 중복 호출 방지
+            var state = buildPayload(wrapper, option);
+            if (!state) return;
+            var seq = confirmSeq + 1;
+            confirmSeq = seq;
+            renderConfirmDialog(Object.assign({}, state, {
+                loading: true,
+                canStart: false,
+                seq: seq,
+            }));
+
             trigger.disabled = true;
+            try {
+                var preview = await App.apiPost("/meetings/batch/preview", state.payload);
+                if (owner && owner._destroyed) return;
+                if (seq !== confirmSeq) return;
+                renderConfirmDialog(Object.assign({}, state, {
+                    loading: false,
+                    canStart: !!(preview && preview.queued > 0),
+                    preview: preview,
+                    seq: seq,
+                }));
+            } catch (err) {
+                if (owner && owner._destroyed) return;
+                if (seq !== confirmSeq) return;
+                renderConfirmDialog(Object.assign({}, state, {
+                    loading: false,
+                    canStart: false,
+                    preview: null,
+                    seq: seq,
+                }));
+                var modal = ensureConfirmDialog();
+                var error = modal.querySelector("#homeBatchConfirmError");
+                error.textContent = "대상 확인 실패: " + (err && err.message ? err.message : "서버 오류");
+            } finally {
+                if (owner && owner._destroyed) return;
+                trigger.disabled = false;
+            }
+        }
+
+        async function dispatchPayload(payload, modal) {
+            if (owner && owner._destroyed) return;
+            var start = modal.querySelector("#homeBatchConfirmStart");
+            var cancel = modal.querySelector("#homeBatchConfirmCancel");
+            start.disabled = true;
+            cancel.disabled = true;
+            start.textContent = "시작 중...";
             try {
                 var resp = await App.apiPost("/meetings/batch", payload);
                 if (owner && owner._destroyed) return;
+                closeConfirmDialog();
                 var queued = (resp && resp.queued != null) ? resp.queued : 0;
                 var skipped = (resp && resp.skipped != null) ? resp.skipped : 0;
                 var msg = queued + "건 처리"
@@ -120,10 +303,11 @@
                 showBulkToast(msg, "info");
             } catch (err) {
                 if (owner && owner._destroyed) return;
-                showBulkToast("처리 실패: " + (err && err.message ? err.message : "서버 오류"), "error");
-            } finally {
-                if (owner && owner._destroyed) return;
-                trigger.disabled = false;
+                var error = modal.querySelector("#homeBatchConfirmError");
+                error.textContent = "처리 실패: " + (err && err.message ? err.message : "서버 오류");
+                start.disabled = false;
+                cancel.disabled = false;
+                start.textContent = "시작";
             }
         }
 
@@ -160,7 +344,7 @@
                 var option = item.getAttribute("data-option");
                 if (!option) return;
                 closeMenu(wrapper);
-                dispatchOption(wrapper, option);
+                confirmOption(wrapper, option);
             });
 
             menu.addEventListener("keydown", function (e) {
@@ -188,7 +372,7 @@
                         e.preventDefault();
                         var option2 = current.getAttribute("data-option");
                         closeMenu(wrapper);
-                        if (option2) dispatchOption(wrapper, option2);
+                        if (option2) confirmOption(wrapper, option2);
                     }
                 }
             });
@@ -213,6 +397,11 @@
                 });
             });
         }
+    }
+
+    function _removeHomeBatchConfirmDialog() {
+        var modal = document.getElementById("homeBatchConfirmModal");
+        if (modal) modal.remove();
     }
 
 
@@ -473,6 +662,7 @@
             document.removeEventListener("recap:dashboard-refresh", this._dashboardRefreshHandler);
             this._dashboardRefreshHandler = null;
         }
+        _removeHomeBatchConfirmDialog();
     };
 
     /**
