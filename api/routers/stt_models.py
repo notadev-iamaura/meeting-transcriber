@@ -446,6 +446,9 @@ async def import_stt_manual(
             shutil.copy2(str(src_file), str(tmp_file))
             tmp_file.replace(dst_file)
             copied.append(name)
+        from core.stt_model_status import clear_actual_size_cache
+
+        clear_actual_size_cache()
         logger.info("STT 모델 수동 가져오기 완료: %s <- %s", target_dir, source)
     except OSError as exc:
         logger.exception("STT 모델 수동 가져오기 실패: %s", exc)

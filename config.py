@@ -835,7 +835,11 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         yaml.YAMLError: YAML 파싱 실패 시
         pydantic.ValidationError: 설정값 검증 실패 시
     """
-    path = config_path or _DEFAULT_CONFIG_PATH
+    path = config_path or (
+        Path(env_config).expanduser().resolve()
+        if (env_config := os.environ.get("MT_CONFIG_PATH"))
+        else _DEFAULT_CONFIG_PATH
+    )
 
     if path.exists():
         logger.info(f"설정 파일 로드: {path}")

@@ -491,25 +491,45 @@ class JobProcessor:
             logger.info(f"작업 처리 완료: job_id={job_id}")
 
         except asyncio.CancelledError:
-            # 사용자 취소: recorded 상태로 되돌리고 취소 요청 set 에서 제거
+            is_user_cancel = meeting_id in self._cancellation_requests
             self._cancellation_requests.discard(meeting_id)
+
+            if is_user_cancel:
+                try:
+                    # JobStatus 전이 규칙 우회: 직접 강제 업데이트
+                    await asyncio.to_thread(
+                        self._job_queue.queue.force_set_status,
+                        job_id,
+                        JobStatus.RECORDED,
+                        "사용자가 취소함",
+                    )
+                except Exception as exc:
+                    logger.error(f"취소 후 상태 복귀 실패: job_id={job_id}, error={exc}")
+                await self._thermal_manager.notify_job_completed()
+                await self._broadcast_event(
+                    "job_cancelled",
+                    {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
+                )
+                logger.info(f"작업 취소 완료: job_id={job_id}, meeting_id={meeting_id}")
+                # 사용자 취소는 작업 루프를 계속 동작시켜야 하므로 재전파하지 않는다.
+                return
+
             try:
-                # JobStatus 전이 규칙 우회: 직접 강제 업데이트
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
                     job_id,
-                    JobStatus.RECORDED,
-                    "사용자가 취소함",
+                    JobStatus.QUEUED,
+                    "앱 종료로 작업이 중단되어 재시도 대기 중입니다.",
                 )
             except Exception as exc:
-                logger.error(f"취소 후 상태 복귀 실패: job_id={job_id}, error={exc}")
+                logger.error(f"종료 중 작업 재대기 실패: job_id={job_id}, error={exc}")
             await self._thermal_manager.notify_job_completed()
             await self._broadcast_event(
-                "job_cancelled",
-                {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
+                "job_interrupted",
+                {"job_id": job_id, "meeting_id": meeting_id, "status": "queued"},
             )
-            logger.info(f"작업 취소 완료: job_id={job_id}, meeting_id={meeting_id}")
-            # CancelledError 를 다시 raise 하지 않음 — 작업 루프는 계속 동작해야 함
+            logger.info(f"작업 종료 중단 처리: job_id={job_id}, meeting_id={meeting_id}")
+            raise
 
         except Exception as e:
             # 실패 상태 업데이트

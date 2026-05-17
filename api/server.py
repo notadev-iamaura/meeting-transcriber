@@ -19,6 +19,7 @@ FastAPI 백엔드 서버 모듈 (FastAPI Backend Server Module)
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -282,7 +283,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from core.stt_model_downloader import STTModelDownloader
 
         stt_models_dir = config.paths.resolved_base_dir / "stt_models"
-        app.state.stt_downloader = STTModelDownloader(models_dir=stt_models_dir)
+        app.state.stt_downloader = STTModelDownloader(
+            models_dir=stt_models_dir,
+            task_registry=running_tasks,
+        )
         logger.info(f"STTModelDownloader 초기화 완료 — {stt_models_dir}")
     except Exception as e:
         app.state.stt_downloader = None
@@ -326,15 +330,25 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await app.state.folder_watcher.stop()
         logger.info("FolderWatcher 정지 완료")
 
+    # STTModelDownloader 정지
+    if hasattr(app.state, "stt_downloader") and app.state.stt_downloader is not None:
+        close_downloader = getattr(app.state.stt_downloader, "close", None)
+        if callable(close_downloader):
+            close_result = close_downloader()
+            if inspect.isawaitable(close_result):
+                await close_result
+        logger.info("STTModelDownloader 정지 완료")
+
     # 실행 중인 파이프라인 태스크 정리
     active_tasks: set[asyncio.Task[Any]] = getattr(app.state, "running_tasks", set())
     if active_tasks:
         logger.info(f"실행 중인 파이프라인 태스크 {len(active_tasks)}개 취소 중...")
-        for task in active_tasks:
+        tasks_snapshot = set(active_tasks)
+        for task in tasks_snapshot:
             task.cancel()
         # 모든 태스크가 취소될 때까지 대기 (최대 30초)
         done, pending = await asyncio.wait(
-            active_tasks,
+            tasks_snapshot,
             timeout=30,
             return_when=asyncio.ALL_COMPLETED,
         )

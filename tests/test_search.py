@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -722,15 +722,18 @@ class TestSearchGracefulDegradation:
         config.paths.resolved_meetings_db = fts_db_with_data
 
         manager = MagicMock()
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock()
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        manager.acquire.return_value = ctx
 
         engine = HybridSearchEngine(config, manager)
 
-        # PERF-005: 캐시된 임베딩 모델 mock 직접 설정
         mock_model = MagicMock()
         mock_embedding = MagicMock()
         mock_embedding.tolist.return_value = [0.1] * 384
         mock_model.encode.return_value = [mock_embedding]
-        engine._embed_model = mock_model
+        ctx.__aenter__.return_value = mock_model
 
         response = await engine.search("프로젝트")
 

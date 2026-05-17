@@ -181,3 +181,27 @@ class TestGetActualSizeMb:
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         assert get_actual_size_mb("owner/non-existent") == 0.0
+
+    def test_디스크_크기_반복계산은_TTL_캐시를_사용(self, tmp_path, monkeypatch):
+        """동일 경로 크기 조회는 짧은 TTL 안에서 rglob 반복을 피한다."""
+        from core import stt_model_status
+
+        stt_model_status.clear_actual_size_cache()
+        model_dir = tmp_path / "model-cache"
+        model_dir.mkdir()
+        (model_dir / "weights.safetensors").write_bytes(b"x" * 1024)
+
+        original_rglob = type(model_dir).rglob
+        calls = {"n": 0}
+
+        def counting_rglob(self, pattern):
+            calls["n"] += 1
+            return original_rglob(self, pattern)
+
+        monkeypatch.setattr(type(model_dir), "rglob", counting_rglob)
+
+        first = stt_model_status.get_actual_size_mb(str(model_dir))
+        second = stt_model_status.get_actual_size_mb(str(model_dir))
+
+        assert first == second
+        assert calls["n"] == 1

@@ -16,12 +16,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
@@ -332,3 +336,41 @@ class TestReindexAllEndpoint:
             response = client.post("/api/reindex/all")
         assert response.status_code == 409
         assert "이미 진행" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_reindex_all_실제_동시_요청은_하나만_시작(self, tmp_path: Path) -> None:
+        """busy check/set이 원자적이라 실제 동시 요청 중 하나만 시작해야 한다."""
+        from api.routers import reindex
+
+        config = _make_test_config(tmp_path)
+        _make_correct_checkpoint(config.paths.resolved_checkpoints_dir, "m1")
+        app = SimpleNamespace(state=SimpleNamespace(running_tasks=set(), config=config))
+        request = SimpleNamespace(app=app)
+        jobs = [_MockJob(id=1, meeting_id="m1", status="completed")]
+        queue = MagicMock()
+
+        async def slow_reconciled_jobs(*_args: Any, **_kwargs: Any) -> list[_MockJob]:
+            await asyncio.sleep(0.05)
+            return jobs
+
+        with (
+            patch("api.routers.reindex._get_job_queue", return_value=queue),
+            patch("api.routers.reindex._get_config", return_value=config),
+            patch("api.routers.reindex._get_reconciled_jobs", side_effect=slow_reconciled_jobs),
+            patch("api.routers.reindex._get_chroma_collection_for_status", return_value=None),
+            patch("api.routers.reindex._start_reindex_all", new_callable=AsyncMock),
+        ):
+            results = await asyncio.gather(
+                reindex.reindex_all(request),  # type: ignore[arg-type]
+                reindex.reindex_all(request),  # type: ignore[arg-type]
+                return_exceptions=True,
+            )
+
+        started = [result for result in results if not isinstance(result, Exception)]
+        conflicts = [
+            result
+            for result in results
+            if isinstance(result, HTTPException) and result.status_code == 409
+        ]
+        assert len(started) == 1
+        assert len(conflicts) == 1

@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from enum import StrEnum
 from pathlib import Path
 
 from .stt_model_registry import STTModelSpec, get_manual_import_dir
 
 logger = logging.getLogger(__name__)
+
+_SIZE_CACHE_TTL_SECONDS = 5.0
+_SIZE_CACHE: dict[str, tuple[float, float]] = {}
 
 
 class ModelStatus(StrEnum):
@@ -268,6 +272,32 @@ def get_model_status(spec: STTModelSpec, base_dir: str | Path | None = None) -> 
     return ModelStatus.READY
 
 
+def clear_actual_size_cache(model_path: str | None = None) -> None:
+    """모델 디스크 크기 계산 캐시를 비운다."""
+    if model_path is None:
+        _SIZE_CACHE.clear()
+        return
+    _SIZE_CACHE.pop(model_path, None)
+
+
+def _get_cached_size(cache_key: str) -> float | None:
+    """TTL 내 캐시된 디스크 크기를 반환한다."""
+    cached = _SIZE_CACHE.get(cache_key)
+    if cached is None:
+        return None
+    cached_at, size_mb = cached
+    if time.monotonic() - cached_at > _SIZE_CACHE_TTL_SECONDS:
+        _SIZE_CACHE.pop(cache_key, None)
+        return None
+    return size_mb
+
+
+def _set_cached_size(cache_key: str, size_mb: float) -> float:
+    """디스크 크기 계산 결과를 TTL 캐시에 저장하고 반환한다."""
+    _SIZE_CACHE[cache_key] = (time.monotonic(), size_mb)
+    return size_mb
+
+
 def get_actual_size_mb(model_path: str) -> float:
     """모델 경로의 실제 디스크 사용량을 MB 단위로 반환한다.
 
@@ -277,11 +307,15 @@ def get_actual_size_mb(model_path: str) -> float:
     Returns:
         MB 단위 크기. 경로가 없으면 0.0.
     """
+    cached_size = _get_cached_size(model_path)
+    if cached_size is not None:
+        return cached_size
+
     # HF repo ID 형식(owner/name)은 로컬 경로가 아니라 HuggingFace 캐시를 조회한다.
     if _is_hf_repo_id(model_path):
         cache_dir = _get_hf_repo_cache_path(model_path)
         if not cache_dir.exists():
-            return 0.0
+            return _set_cached_size(model_path, 0.0)
         try:
             total = sum(
                 f.stat().st_size
@@ -291,13 +325,13 @@ def get_actual_size_mb(model_path: str) -> float:
         except OSError as exc:
             logger.warning("HF 캐시 크기 계산 실패 (%s): %s", cache_dir, exc)
             return 0.0
-        return round(total / (1024**2), 1)
+        return _set_cached_size(model_path, round(total / (1024**2), 1))
 
     path = Path(model_path).expanduser()
     if not path.exists():
-        return 0.0
+        return _set_cached_size(model_path, 0.0)
     if path.is_file():
-        return round(path.stat().st_size / (1024**2), 1)
+        return _set_cached_size(model_path, round(path.stat().st_size / (1024**2), 1))
     try:
         # 심볼릭 링크는 중복 계산을 피하려 제외
         total = sum(
@@ -306,4 +340,4 @@ def get_actual_size_mb(model_path: str) -> float:
     except OSError as exc:
         logger.warning("디스크 크기 계산 실패 (%s): %s", path, exc)
         return 0.0
-    return round(total / (1024**2), 1)
+    return _set_cached_size(model_path, round(total / (1024**2), 1))

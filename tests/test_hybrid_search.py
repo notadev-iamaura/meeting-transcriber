@@ -641,12 +641,6 @@ class TestHybridSearchEngine:
         engine._chroma_dir = config.paths.resolved_chroma_db_dir
         engine._meetings_db = config.paths.resolved_meetings_db
 
-        # PERF-005: 임베딩 모델 캐시 (테스트용 mock 모델 미리 설정)
-        mock_model = MagicMock()
-        mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
-        engine._embed_model = mock_model
-        engine._embed_model_lock = threading.Lock()
-
         # PERF-011: ChromaDB 캐시 (검색 함수가 패치되므로 None으로 설정)
         engine._chroma_client = None
         engine._chroma_collection = None
@@ -1017,9 +1011,6 @@ class TestPerformanceOptimizations:
         engine._chroma_dir = config.paths.resolved_chroma_db_dir
         engine._meetings_db = config.paths.resolved_meetings_db
 
-        # 캐시 필드 초기화 (비어있는 상태)
-        engine._embed_model = None
-        engine._embed_model_lock = threading.Lock()
         engine._chroma_client = None
         engine._chroma_collection = None
         engine._chroma_lock = threading.Lock()
@@ -1029,27 +1020,25 @@ class TestPerformanceOptimizations:
         engine._fts_conn_lock = threading.Lock()
         return engine
 
-    def test_PERF005_임베딩_모델_캐시_재사용(self) -> None:
-        """PERF-005: 임베딩 모델이 한 번만 로드되고 캐시되는지 확인한다."""
+    @pytest.mark.asyncio
+    async def test_PERF005_검색은_ModelLoadManager로_임베딩_모델_관리(self) -> None:
+        """PERF-005: 검색용 임베딩 모델은 ModelLoadManager 경유로 관리한다."""
         engine = self._create_engine_with_caching()
 
-        # mock 모델 로더 설정
         mock_model = MagicMock()
         mock_model.encode.return_value = [MagicMock(tolist=MagicMock(return_value=[0.1] * 384))]
+        ctx = engine._model_manager.acquire.return_value
+        ctx.__aenter__ = AsyncMock(return_value=mock_model)
 
-        with patch.object(engine, "_load_model", return_value=mock_model) as mock_loader:
-            # 첫 번째 호출: 모델 로드 실행
-            model1 = engine._get_embed_model()
-            # 두 번째 호출: 캐시에서 반환 (로드 안 함)
-            model2 = engine._get_embed_model()
-            # 세 번째 호출: 캐시에서 반환 (로드 안 함)
-            model3 = engine._get_embed_model()
+        with (
+            patch("search.hybrid_search._search_vector", return_value=[]),
+            patch("search.hybrid_search._search_fts", return_value=[]),
+        ):
+            await engine.search("프로젝트 일정")
 
-        # _load_model은 정확히 1번만 호출되어야 함
-        assert mock_loader.call_count == 1
-        # 모든 반환값이 동일한 인스턴스여야 함
-        assert model1 is model2
-        assert model2 is model3
+        engine._model_manager.acquire.assert_called_once_with("e5_search", engine._load_model)
+        ctx.__aenter__.assert_awaited_once()
+        ctx.__aexit__.assert_awaited_once()
 
     def test_PERF011_chroma_클라이언트_캐시_재사용(self, tmp_path: Path) -> None:
         """PERF-011: ChromaDB 클라이언트가 한 번만 생성되고 캐시되는지 확인한다."""

@@ -609,10 +609,6 @@ class HybridSearchEngine:
         self._chroma_dir = self._config.paths.resolved_chroma_db_dir
         self._meetings_db = self._config.paths.resolved_meetings_db
 
-        # PERF-005: 임베딩 모델 캐시 (지연 초기화, 스레드 안전)
-        self._embed_model: Any = None
-        self._embed_model_lock = threading.Lock()
-
         # PERF-011: ChromaDB 클라이언트 및 컬렉션 캐시 (지연 초기화, 스레드 안전)
         self._chroma_client: Any = None
         self._chroma_collection: Any = None
@@ -679,11 +675,11 @@ class HybridSearchEngine:
                 return None
 
     def _get_embed_model(self) -> Any:
-        """캐시된 임베딩 모델을 반환한다 (지연 초기화). (PERF-005)
+        """검색용 임베딩 모델을 반환한다.
 
-        첫 호출 시 SentenceTransformer 모델을 로드하고 캐시한다.
-        이후 호출에서는 캐시된 인스턴스를 재사용하여 1-2초 오버헤드를 제거한다.
-        threading.Lock으로 동시 초기화를 방지한다.
+        검색 실행 경로는 ModelLoadManager.acquire()를 사용한다. 이 메서드는
+        기존 단위 테스트와 직접 호출 호환성을 위한 얇은 로더이며 모델을
+        장기 캐시하지 않는다.
 
         Returns:
             SentenceTransformer 모델 인스턴스
@@ -691,17 +687,7 @@ class HybridSearchEngine:
         Raises:
             ModelLoadError: 모델 로드 실패 시
         """
-        # 빠른 경로: 이미 로드된 경우 락 없이 반환
-        if self._embed_model is not None:
-            return self._embed_model
-
-        with self._embed_model_lock:
-            # 더블 체크 락킹 (Double-Checked Locking)
-            if self._embed_model is not None:
-                return self._embed_model
-
-            self._embed_model = self._load_model()
-            return self._embed_model
+        return self._load_model()
 
     def _get_fts_connection(self) -> sqlite3.Connection | None:
         """캐시된 FTS5 SQLite 연결을 반환한다 (지연 초기화).
@@ -845,9 +831,9 @@ class HybridSearchEngine:
         if meeting_id_filter:
             filters_applied["meeting_id"] = meeting_id_filter
 
-        # 1. 쿼리 임베딩 생성 (PERF-005: 캐시된 모델 사용)
-        model = self._get_embed_model()
-        query_embedding = await asyncio.to_thread(self._embed_query, model, query)
+        # 1. 쿼리 임베딩 생성 (ModelLoadManager로 모델 수명주기 일원화)
+        async with self._model_manager.acquire("e5_search", self._load_model) as model:
+            query_embedding = await asyncio.to_thread(self._embed_query, model, query)
 
         # 2-3. 벡터 검색과 FTS5 검색을 병렬 실행 (PERF-010)
         # 두 검색은 독립적인 I/O 작업이므로 동시에 수행할 수 있다.

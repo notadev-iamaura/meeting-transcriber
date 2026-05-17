@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 
 def get_config_path() -> Path:
-    """프로젝트 루트의 config.yaml 파일 경로를 반환한다."""
+    """설정 저장 대상 config.yaml 파일 경로를 반환한다."""
+    if env_path := os.environ.get("MT_CONFIG_PATH"):
+        return Path(env_path).expanduser().resolve()
     return Path(__file__).parent.parent / "config.yaml"
 
 

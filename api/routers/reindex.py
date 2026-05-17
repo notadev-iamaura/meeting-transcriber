@@ -33,6 +33,24 @@ def _log_task_exception(task: asyncio.Task[Any]) -> None:
         )
 
 
+def _get_reindex_lock(app: Any) -> asyncio.Lock:
+    """reindex-all 전역 실행 상태를 보호하는 앱 단위 락을 반환한다."""
+    lock = getattr(app.state, "reindex_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.reindex_lock = lock
+    return lock
+
+
+def _track_background_task(app: Any, task: asyncio.Task[Any]) -> None:
+    """서버 shutdown에서 취소/대기할 수 있도록 백그라운드 태스크를 등록한다."""
+    running_tasks = getattr(app.state, "running_tasks", None)
+    if running_tasks is None:
+        return
+    running_tasks.add(task)
+    task.add_done_callback(running_tasks.discard)
+
+
 def _validate_meeting_id(meeting_id: str) -> None:
     """meeting_id 형식을 검증한다 (path traversal 방지)."""
     if not _MEETING_ID_PATTERN.match(meeting_id):
@@ -467,7 +485,9 @@ async def _start_reindex_all(app: Any, missing_ids: list[str]) -> None:
             }
         )
     finally:
-        app.state.reindex_lock_busy = False
+        lock = _get_reindex_lock(app)
+        async with lock:
+            app.state.reindex_lock_busy = False
         logger.info(f"reindex-all 종료: 전체 {total}, 성공 {processed}, 실패 {len(failed)}")
 
 
@@ -483,12 +503,14 @@ async def reindex_all(request: Request) -> ReindexAllResponse:
     """
     app = request.app
 
-    # 동시성 가드
-    if getattr(app.state, "reindex_lock_busy", False):
-        raise HTTPException(
-            status_code=409,
-            detail="이미 진행 중인 일괄 백필 작업이 있습니다.",
-        )
+    lock = _get_reindex_lock(app)
+    async with lock:
+        if getattr(app.state, "reindex_lock_busy", False):
+            raise HTTPException(
+                status_code=409,
+                detail="이미 진행 중인 일괄 백필 작업이 있습니다.",
+            )
+        app.state.reindex_lock_busy = True
 
     queue = _get_job_queue(request)
     config = _get_config(request)
@@ -496,28 +518,35 @@ async def reindex_all(request: Request) -> ReindexAllResponse:
     try:
         all_jobs = await _get_reconciled_jobs(queue, config)
     except Exception as e:
+        async with lock:
+            app.state.reindex_lock_busy = False
         logger.exception(f"reindex-all: 회의 목록 조회 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    completed_jobs = [j for j in all_jobs if getattr(j, "status", "") == "completed"]
-    collection = _get_chroma_collection_for_status(config)
+    try:
+        completed_jobs = [j for j in all_jobs if getattr(j, "status", "") == "completed"]
+        collection = _get_chroma_collection_for_status(config)
 
-    missing_ids: list[str] = []
-    for job in completed_jobs:
-        mid = job.meeting_id
-        # correct/merge 체크포인트가 있어야 백필 가능
-        cp_dir = config.paths.resolved_checkpoints_dir / mid
-        if not (cp_dir / "correct.json").exists() and not (cp_dir / "merge.json").exists():
-            continue
-        if _count_chunks_for_meeting(collection, mid) == 0:
-            missing_ids.append(mid)
+        missing_ids: list[str] = []
+        for job in completed_jobs:
+            mid = job.meeting_id
+            # correct/merge 체크포인트가 있어야 백필 가능
+            cp_dir = config.paths.resolved_checkpoints_dir / mid
+            if not (cp_dir / "correct.json").exists() and not (cp_dir / "merge.json").exists():
+                continue
+            if _count_chunks_for_meeting(collection, mid) == 0:
+                missing_ids.append(mid)
+    except Exception:
+        async with lock:
+            app.state.reindex_lock_busy = False
+        raise
 
-    # 락 설정 + 백그라운드 작업 시작
-    app.state.reindex_lock_busy = True
+    # 백그라운드 작업 시작
     task = asyncio.create_task(
         _start_reindex_all(app, missing_ids),
         name=f"reindex_all_{len(missing_ids)}",
     )
+    _track_background_task(app, task)
     task.add_done_callback(_log_task_exception)
 
     return ReindexAllResponse(

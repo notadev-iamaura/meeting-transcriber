@@ -1,7 +1,7 @@
 """
 STT 모델 직접 URL 다운로드 테스트.
 
-`huggingface_hub` 실패 시 자동 폴백 + 명시적 `prefer_direct` 경로 검증.
+`huggingface_hub` 실패 시 자동 폴백 금지 + 명시적 `prefer_direct` 경로 검증.
 urllib.request 호출은 mock 처리한다.
 """
 
@@ -94,12 +94,12 @@ def _make_fake_urlopen(file_contents: dict[str, bytes]):
     return _fake
 
 
-# === 자동 폴백 ===
+# === 자동 폴백 금지 ===
 
 
 class TestDownloadFallback:
-    async def test_hf_실패시_direct_URL_자동_폴백(self, downloader, monkeypatch):
-        """huggingface_hub 가 실패하면 direct URL 다운로드로 자동 폴백한다."""
+    async def test_hf_실패시_direct_URL_자동_폴백하지_않음(self, downloader, monkeypatch):
+        """huggingface_hub 가 실패해도 direct URL 다운로드로 자동 우회하지 않는다."""
         hf_called = {"n": 0}
         direct_called = {"n": 0}
 
@@ -124,9 +124,10 @@ class TestDownloadFallback:
         await downloader.wait_for("seastar-medium-4bit")
 
         progress = downloader.get_progress("seastar-medium-4bit")
-        assert progress.status == ModelStatus.READY
+        assert progress.status == ModelStatus.ERROR
+        assert "manual-download-info" in progress.error_message
         assert hf_called["n"] == 1
-        assert direct_called["n"] == 1
+        assert direct_called["n"] == 0
 
     async def test_hf_성공시_direct_미호출(self, downloader, monkeypatch):
         """huggingface_hub 가 성공하면 direct URL 경로는 호출되지 않는다."""
@@ -149,8 +150,8 @@ class TestDownloadFallback:
         assert progress.status == ModelStatus.READY
         assert direct_called["n"] == 0
 
-    async def test_두_방법_모두_실패시_ERROR_메시지(self, downloader, monkeypatch):
-        """둘 다 실패하면 두 오류 정보를 모두 포함한 에러 메시지를 반환."""
+    async def test_hf_실패시_수동다운로드_안내_ERROR_메시지(self, downloader, monkeypatch):
+        """HF 실패 메시지는 자동 우회 대신 브라우저 수동 다운로드 안내를 포함한다."""
 
         async def failing_hf(spec, job):
             raise RuntimeError("HF 오류")
@@ -167,7 +168,7 @@ class TestDownloadFallback:
         progress = downloader.get_progress("seastar-medium-4bit")
         assert progress.status == ModelStatus.ERROR
         assert "HF 오류" in progress.error_message
-        assert "네트워크 오류" in progress.error_message
+        assert "브라우저 수동 다운로드" in progress.error_message
 
 
 # === 명시적 prefer_direct ===

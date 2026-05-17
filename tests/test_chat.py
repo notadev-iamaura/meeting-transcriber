@@ -28,6 +28,7 @@ Phase 3 통합 테스트 + RAG Chat 엔진 단위 테스트
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -638,6 +639,54 @@ class TestChatEngineStreaming:
         error_event = events[-1]
         assert error_event["type"] == "error"
         assert "스트리밍 연결 실패" in error_event["data"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_스트리밍_닫기시_worker_완료_후_model_cleanup(self) -> None:
+        """소비자가 중간에 닫아도 worker 종료 후 모델 컨텍스트를 해제해야 한다."""
+        engine = self._make_engine()
+        worker_finished = threading.Event()
+
+        def stream_tokens():
+            yield "첫 토큰"
+            threading.Event().wait(0.05)
+            worker_finished.set()
+
+        ctx = engine._model_manager.acquire.return_value
+        backend_mock = ctx.__aenter__.return_value
+        backend_mock.chat_stream.return_value = stream_tokens()
+
+        async def assert_worker_finished(*_args: Any) -> None:
+            assert worker_finished.is_set()
+
+        ctx.__aexit__ = AsyncMock(side_effect=assert_worker_finished)
+
+        agen = engine.stream_chat("질문")
+        try:
+            references = await agen.__anext__()
+            token = await agen.__anext__()
+            assert references["type"] == "references"
+            assert token == {"type": "token", "data": "첫 토큰"}
+        finally:
+            await agen.aclose()
+
+        ctx.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_스트리밍_긴_응답에서_토큰_손실_없음(self) -> None:
+        """bounded queue가 가득 차도 정상 완료 토큰을 버리면 안 된다."""
+        engine = self._make_engine()
+        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
+        tokens = [f"t{i}," for i in range(200)]
+        backend_mock.chat_stream.return_value = iter(tokens)
+
+        events = []
+        async for event in engine.stream_chat("긴 답변"):
+            events.append(event)
+
+        token_events = [event for event in events if event["type"] == "token"]
+        assert [event["data"] for event in token_events] == tokens
+        assert events[-1]["type"] == "done"
+        assert events[-1]["data"]["answer"] == "".join(tokens)
 
 
 class TestChatEngineBackend:

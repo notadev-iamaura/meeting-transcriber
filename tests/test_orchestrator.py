@@ -530,6 +530,36 @@ class TestProcessJobFailure:
 
         mock_thermal.notify_job_completed.assert_called_once()
 
+    async def test_shutdown_cancel은_사용자취소로_recorded_처리하지_않음(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_thermal: AsyncMock,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """시스템 종료 취소는 사용자 취소가 아니므로 queued로 재대기해야 한다."""
+        from core.job_queue import JobStatus
+
+        calls: list[tuple[int, Any, str]] = []
+        raw_queue = MagicMock()
+        raw_queue.force_set_status = MagicMock(
+            side_effect=lambda job_id, status, error_message="": calls.append(
+                (job_id, status, error_message)
+            )
+        )
+        mock_job_queue.queue = raw_queue
+        job = _make_job(job_id=9, meeting_id="shutdown_cancel")
+        mock_pipeline.run.side_effect = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await processor._process_job(job)
+
+        assert calls == [
+            (9, JobStatus.QUEUED, "앱 종료로 작업이 중단되어 재시도 대기 중입니다.")
+        ]
+        assert all(status != JobStatus.RECORDED for _job_id, status, _msg in calls)
+        mock_thermal.notify_job_completed.assert_called_once()
+
 
 # === Cycle 8: _run_loop 통합 ===
 

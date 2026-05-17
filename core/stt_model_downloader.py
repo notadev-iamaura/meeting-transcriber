@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .stt_model_registry import (
     STTModelSpec,
@@ -32,9 +33,24 @@ from .stt_model_registry import (
     get_hf_download_urls,
     get_manual_import_dir,
 )
-from .stt_model_status import ModelStatus, get_model_status
+from .stt_model_status import ModelStatus, clear_actual_size_cache, get_model_status
 
 logger = logging.getLogger(__name__)
+
+
+async def _await_thread_result(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """to_thread 작업이 취소 요청을 받아도 실제 스레드 종료까지 기다린다."""
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    cancel_requested = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancel_requested = True
+    result = task.result()
+    if cancel_requested:
+        raise asyncio.CancelledError
+    return result
 
 
 class DownloadConflictError(Exception):
@@ -65,7 +81,11 @@ class STTModelDownloader:
         - wait_for() 로 테스트/검증 시 완료 대기 가능
     """
 
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(
+        self,
+        models_dir: Path,
+        task_registry: set[asyncio.Task[Any]] | None = None,
+    ) -> None:
         """다운로더 초기화.
 
         Args:
@@ -78,6 +98,7 @@ class STTModelDownloader:
         self._jobs: dict[str, DownloadJob] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._task_registry = task_registry
 
     # ------------------------------------------------------------
     # 공개 API
@@ -119,9 +140,14 @@ class STTModelDownloader:
                 current_step="queued",
             )
             self._jobs[model_id] = job
-            self._tasks[model_id] = asyncio.create_task(
-                self._run_download(spec, job, prefer_direct=prefer_direct)
+            task = asyncio.create_task(
+                self._run_download(spec, job, prefer_direct=prefer_direct),
+                name=f"stt_download_{model_id}",
             )
+            self._tasks[model_id] = task
+            if self._task_registry is not None:
+                self._task_registry.add(task)
+                task.add_done_callback(self._task_registry.discard)
             logger.info(
                 "STT 모델 다운로드 시작: %s (%s, prefer_direct=%s)",
                 model_id,
@@ -182,6 +208,31 @@ class STTModelDownloader:
                 # 태스크 내부 예외는 _run_download 에서 이미 기록됨.
                 logger.debug("wait_for: 태스크 예외 흡수 (%s)", model_id)
 
+    async def close(self, timeout: float | None = None) -> None:
+        """진행 중인 다운로드 태스크를 취소하고 종료를 대기한다."""
+        active_tasks = [task for task in self._tasks.values() if not task.done()]
+        if not active_tasks:
+            return
+
+        logger.info("STT 다운로드 태스크 %d개 취소 중", len(active_tasks))
+        for task in active_tasks:
+            task.cancel()
+        if timeout is None:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+            done = active_tasks
+        else:
+            done_set, pending = await asyncio.wait(active_tasks, timeout=timeout)
+            if pending:
+                logger.warning(
+                    "STT 다운로드 태스크 %d개가 %.1f초 내 종료되지 않음",
+                    len(pending),
+                    timeout,
+                )
+            done = list(done_set)
+        for task in done:
+            if self._task_registry is not None:
+                self._task_registry.discard(task)
+
     # ------------------------------------------------------------
     # 내부 오케스트레이션
     # ------------------------------------------------------------
@@ -195,9 +246,10 @@ class STTModelDownloader:
     ) -> None:
         """다운로드 → 검증 파이프라인을 실행한다.
 
-        기본적으로 `huggingface_hub` 를 먼저 시도하고, 네트워크·SSL·인증 오류 등으로
-        실패하면 자동으로 HF 직접 URL 을 이용한 `urllib` 스트리밍 다운로드로
-        폴백한다. 두 방법 모두 실패하면 ERROR 상태로 종료한다.
+        기본적으로 `huggingface_hub` 를 먼저 시도한다. 네트워크·SSL·인증 오류 등으로
+        실패하면 자동 우회하지 않고 ERROR 상태와 브라우저 수동 다운로드 안내를 남긴다.
+        direct URL 다운로드는 사용자가 명시적으로 선택한 `prefer_direct=True` 경로에서만
+        실행한다.
 
         Args:
             spec: 다운로드할 모델 spec
@@ -208,8 +260,6 @@ class STTModelDownloader:
         """
         job.status = ModelStatus.DOWNLOADING
         job.progress_percent = 5
-        hf_error: Exception | None = None
-
         if not prefer_direct:
             try:
                 job.current_step = "downloading"
@@ -221,21 +271,28 @@ class STTModelDownloader:
                     job.progress_percent = 100
                     job.completed_at = datetime.now()
                     logger.info("STT 모델 다운로드 완료 (huggingface_hub): %s", spec.id)
+                    clear_actual_size_cache()
                     return
-                # 다운로드는 성공했으나 검증 실패 → direct 폴백 시도
-                logger.warning(
-                    "huggingface_hub 다운로드 후 검증 실패, direct URL 폴백: %s",
-                    spec.id,
-                )
+                raise RuntimeError("모델 검증 실패: 다운로드된 파일이 올바르지 않아요")
+            except asyncio.CancelledError:
+                job.status = ModelStatus.ERROR
+                job.error_message = "서버 종료로 다운로드가 중단되었습니다."
+                job.completed_at = datetime.now()
+                logger.info("STT 모델 다운로드 취소: %s", spec.id)
+                raise
             except Exception as exc:
-                hf_error = exc
-                logger.warning(
-                    "huggingface_hub 다운로드 실패, direct URL 폴백 시도: %s — %s",
-                    spec.id,
-                    exc,
+                job.status = ModelStatus.ERROR
+                job.error_message = (
+                    f"huggingface_hub 다운로드 실패: {exc}. "
+                    "자동 우회 다운로드는 실행하지 않았습니다. "
+                    f"/api/stt-models/{spec.id}/manual-download-info 에서 브라우저 수동 다운로드 "
+                    "정보를 확인해 주세요."
                 )
+                job.completed_at = datetime.now()
+                logger.warning("STT 모델 다운로드 실패: %s — %s", spec.id, exc)
+                return
 
-        # 직접 URL 다운로드 (폴백 또는 명시적 선택)
+        # 직접 URL 다운로드 (명시적 선택)
         try:
             job.current_step = "downloading_direct"
             job.progress_percent = 10
@@ -247,17 +304,17 @@ class STTModelDownloader:
             job.status = ModelStatus.READY
             job.progress_percent = 100
             job.completed_at = datetime.now()
-            method = "direct URL" if prefer_direct else "direct URL 폴백"
-            logger.info("STT 모델 다운로드 완료 (%s): %s", method, spec.id)
+            clear_actual_size_cache()
+            logger.info("STT 모델 다운로드 완료 (direct URL): %s", spec.id)
+        except asyncio.CancelledError:
+            job.status = ModelStatus.ERROR
+            job.error_message = "서버 종료로 다운로드가 중단되었습니다."
+            job.completed_at = datetime.now()
+            logger.info("STT 모델 다운로드 취소: %s", spec.id)
+            raise
         except Exception as exc:
             job.status = ModelStatus.ERROR
-            # 두 방법 모두 실패했을 때 원인을 명확히 제공
-            if hf_error is not None:
-                job.error_message = (
-                    f"huggingface_hub 실패: {hf_error} / 직접 URL 다운로드도 실패: {exc}"
-                )
-            else:
-                job.error_message = str(exc)
+            job.error_message = str(exc)
             job.completed_at = datetime.now()
             logger.exception("STT 모델 다운로드 실패: %s", spec.id)
 
@@ -272,7 +329,7 @@ class STTModelDownloader:
         except ImportError as exc:
             raise RuntimeError("huggingface_hub 이 설치되어 있지 않습니다") from exc
 
-        await asyncio.to_thread(
+        await _await_thread_result(
             snapshot_download,
             repo_id=spec.hf_source,
         )
@@ -361,7 +418,7 @@ class STTModelDownloader:
             base_percent = 10 + (idx * per_file)
             dest = target_dir / file_info["name"]
             logger.info("direct URL 다운로드: %s → %s", file_info["url"], dest)
-            await asyncio.to_thread(_download_one, file_info["url"], dest, base_percent)
+            await _await_thread_result(_download_one, file_info["url"], dest, base_percent)
 
     def _verify(self, spec: STTModelSpec) -> bool:
         """다운로드 직후 모델이 READY 상태인지 확인한다."""

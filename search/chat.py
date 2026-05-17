@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import threading
 import unicodedata
 from collections.abc import AsyncGenerator
 from dataclasses import asdict, dataclass
@@ -779,7 +780,32 @@ class ChatEngine:
         try:
             async with self._model_manager.acquire("exaone", self._create_backend) as backend:
                 # 동기 스트리밍 스레드 ↔ 비동기 제너레이터 브릿지용 큐
-                token_queue: queue.Queue[str | None | Exception] = queue.Queue()
+                token_queue: queue.Queue[str | None | Exception] = queue.Queue(maxsize=128)
+                stop_event = threading.Event()
+
+                def _put_stream_item(item: str | None | Exception) -> None:
+                    """취소 신호를 존중하며 스트리밍 큐에 항목을 넣는다."""
+                    while not stop_event.is_set():
+                        try:
+                            token_queue.put(item, timeout=0.2)
+                            return
+                        except queue.Full:
+                            continue
+
+                def _signal_stream_done(*, force: bool = False) -> None:
+                    """스트림 종료 sentinel을 큐에 넣는다."""
+                    if not force:
+                        _put_stream_item(None)
+                        return
+                    while True:
+                        try:
+                            token_queue.put_nowait(None)
+                            return
+                        except queue.Full:
+                            try:
+                                token_queue.get_nowait()
+                            except queue.Empty:
+                                return
 
                 def _stream_worker() -> None:
                     """별도 스레드에서 LLM 스트리밍 호출을 실행한다."""
@@ -787,13 +813,15 @@ class ChatEngine:
                         for token in backend.chat_stream(
                             messages=messages,
                         ):
-                            token_queue.put(token)
+                            if stop_event.is_set():
+                                break
+                            _put_stream_item(token)
                     except Exception as e:
                         # 에러도 큐로 전달하여 비동기 측에서 처리
-                        token_queue.put(e)
+                        _put_stream_item(e)
                     finally:
                         # 종료 신호 (None sentinel)
-                        token_queue.put(None)
+                        _signal_stream_done(force=stop_event.is_set())
 
                 # 별도 스레드에서 스트리밍 시작
                 loop = asyncio.get_event_loop()
@@ -802,28 +830,40 @@ class ChatEngine:
                 # 큐에서 토큰을 비동기로 꺼내면서 즉시 yield
                 full_answer_parts: list[str] = []
                 timeout_seconds = self._config.llm.request_timeout_seconds
-                while True:
-                    try:
-                        item = await asyncio.to_thread(
-                            token_queue.get,
-                            timeout=timeout_seconds,
-                        )
-                    except Exception:
-                        # 큐 타임아웃 등 예외 시 루프 종료
-                        break
+                try:
+                    while True:
+                        try:
+                            item = await asyncio.to_thread(
+                                token_queue.get,
+                                timeout=timeout_seconds,
+                            )
+                        except Exception:
+                            # 큐 타임아웃 등 예외 시 루프 종료
+                            break
 
-                    if item is None:
-                        # 스트리밍 완료 신호
-                        break
-                    if isinstance(item, Exception):
-                        # 스트리밍 스레드에서 발생한 에러 전파
-                        raise item
+                        if item is None:
+                            # 스트리밍 완료 신호
+                            break
+                        if isinstance(item, Exception):
+                            # 스트리밍 스레드에서 발생한 에러 전파
+                            raise item
 
-                    full_answer_parts.append(item)
-                    yield {"type": "token", "data": item}
-
-                # 스레드 완료 대기
-                await stream_task
+                        full_answer_parts.append(item)
+                        yield {"type": "token", "data": item}
+                finally:
+                    stop_event.set()
+                    _signal_stream_done(force=True)
+                    cancel_requested = False
+                    while not stream_task.done():
+                        try:
+                            await asyncio.shield(stream_task)
+                        except asyncio.CancelledError:
+                            cancel_requested = True
+                            stop_event.set()
+                            _signal_stream_done()
+                    await stream_task
+                    if cancel_requested:
+                        raise asyncio.CancelledError
 
             full_answer = "".join(full_answer_parts)
             full_answer = unicodedata.normalize("NFC", full_answer.strip())
