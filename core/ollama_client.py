@@ -111,6 +111,7 @@ def chat(
     messages: list[dict[str, str]],
     temperature: float = 0.3,
     num_ctx: int = 8192,
+    max_tokens: int | None = None,
     timeout: int = 120,
 ) -> str:
     """Ollama /api/chat 엔드포인트를 호출하여 응답 텍스트를 반환한다.
@@ -123,6 +124,7 @@ def chat(
         messages: Ollama messages 형식의 대화 목록
         temperature: 생성 온도
         num_ctx: 컨텍스트 윈도우 크기
+        max_tokens: 응답 생성 토큰 상한. Ollama의 num_predict로 전달한다.
         timeout: 요청 타임아웃 (초)
 
     Returns:
@@ -143,6 +145,8 @@ def chat(
             "num_ctx": num_ctx,
         },
     }
+    if max_tokens is not None:
+        payload["options"]["num_predict"] = max_tokens
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -180,6 +184,7 @@ def chat_stream(
     messages: list[dict[str, str]],
     temperature: float = 0.3,
     num_ctx: int = 8192,
+    max_tokens: int | None = None,
     timeout: int = 120,
 ) -> Iterator[str]:
     """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
@@ -193,6 +198,7 @@ def chat_stream(
         messages: Ollama messages 형식의 대화 목록
         temperature: 생성 온도
         num_ctx: 컨텍스트 윈도우 크기
+        max_tokens: 응답 생성 토큰 상한. Ollama의 num_predict로 전달한다.
         timeout: 요청 타임아웃 (초)
 
     Yields:
@@ -212,6 +218,8 @@ def chat_stream(
             "num_ctx": num_ctx,
         },
     }
+    if max_tokens is not None:
+        payload["options"]["num_predict"] = max_tokens
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(

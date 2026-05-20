@@ -15,6 +15,7 @@ STT 전사기 모듈 (Speech-to-Text Transcriber Module)
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import unicodedata
@@ -230,6 +231,11 @@ class Transcriber:
             raise ModelNotAvailableError(
                 "mlx-whisper가 설치되어 있지 않습니다. 'pip install mlx-whisper'로 설치하세요."
             ) from e
+        except RuntimeError as e:
+            raise ModelNotAvailableError(
+                "mlx-whisper 초기화 중 MLX/Metal 런타임 오류가 발생했습니다. "
+                f"{e}"
+            ) from e
 
     def _validate_audio(self, audio_path: Path) -> None:
         """오디오 파일의 유효성을 검증한다.
@@ -318,6 +324,7 @@ class Transcriber:
 
     def _build_transcribe_kwargs(
         self,
+        whisper_module: Any | None = None,
         vad_clip_timestamps: list[float] | None = None,
     ) -> dict[str, Any]:
         """Whisper 전사 파라미터를 공통 딕셔너리로 구성한다.
@@ -339,6 +346,10 @@ class Transcriber:
             "condition_on_previous_text": self._condition_on_previous_text,
         }
 
+        if whisper_module is not None and self._supports_batch_size(whisper_module):
+            kwargs["batch_size"] = self._batch_size
+            logger.debug(f"mlx-whisper batch_size 적용: {self._batch_size}")
+
         # 컨텍스트 바이어싱: initial_prompt 전달 (None이면 생략)
         if self._initial_prompt is not None:
             kwargs["initial_prompt"] = self._initial_prompt
@@ -350,6 +361,23 @@ class Transcriber:
             logger.debug(f"VAD clip_timestamps 적용: {len(vad_clip_timestamps) // 2}개 구간")
 
         return kwargs
+
+    @staticmethod
+    def _supports_batch_size(whisper_module: Any) -> bool:
+        """현재 mlx_whisper.transcribe 구현이 batch_size를 명시 지원하는지 확인한다.
+
+        mlx-whisper 버전별 API 차이가 있어 지원 여부를 확인하지 않고 전달하면
+        TypeError가 발생할 수 있다. `**kwargs`만 있는 mock/래퍼는 실제 하위 구현이
+        거부할 수 있으므로, 명시적 `batch_size` 파라미터가 있을 때만 활성화한다.
+        """
+        transcribe_fn = getattr(whisper_module, "transcribe", None)
+        if transcribe_fn is None:
+            return False
+        try:
+            signature = inspect.signature(transcribe_fn)
+        except (TypeError, ValueError):
+            return False
+        return "batch_size" in signature.parameters
 
     async def _transcribe_with_fallback(
         self,
@@ -371,7 +399,10 @@ class Transcriber:
             mlx_whisper.transcribe() 결과 딕셔너리
         """
         # 공통 파라미터 구성 (beam search / greedy 양쪽 동일)
-        kwargs = self._build_transcribe_kwargs(vad_clip_timestamps)
+        kwargs = self._build_transcribe_kwargs(
+            whisper_module,
+            vad_clip_timestamps,
+        )
 
         try:
             return await asyncio.wait_for(

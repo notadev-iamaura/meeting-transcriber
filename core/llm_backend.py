@@ -57,6 +57,7 @@ class LLMBackend(Protocol):
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
         """LLM에 메시지를 보내고 전체 응답 텍스트를 반환한다.
@@ -65,6 +66,7 @@ class LLMBackend(Protocol):
             messages: 대화 메시지 목록 (role, content 쌍)
             temperature: 생성 온도 (None이면 기본값 사용)
             num_ctx: 컨텍스트 윈도우 크기 (None이면 기본값 사용)
+            max_tokens: 응답 생성 토큰 상한 (None이면 기본값 사용)
             timeout: 요청 타임아웃 초 (None이면 기본값 사용)
 
         Returns:
@@ -82,6 +84,7 @@ class LLMBackend(Protocol):
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> Iterator[str]:
         """LLM에 메시지를 보내고 토큰을 스트리밍으로 반환한다.
@@ -90,6 +93,7 @@ class LLMBackend(Protocol):
             messages: 대화 메시지 목록 (role, content 쌍)
             temperature: 생성 온도 (None이면 기본값 사용)
             num_ctx: 컨텍스트 윈도우 크기 (None이면 기본값 사용)
+            max_tokens: 응답 생성 토큰 상한 (None이면 기본값 사용)
             timeout: 요청 타임아웃 초 (None이면 기본값 사용)
 
         Yields:
@@ -149,6 +153,7 @@ class OllamaBackend:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
         """Ollama /api/chat 엔드포인트를 호출하여 응답을 반환한다.
@@ -157,6 +162,7 @@ class OllamaBackend:
             messages: 대화 메시지 목록
             temperature: 생성 온도 (None이면 초기화 시 설정값 사용)
             num_ctx: 컨텍스트 윈도우 크기
+            max_tokens: 응답 생성 토큰 상한
             timeout: 요청 타임아웃 초
 
         Returns:
@@ -174,6 +180,7 @@ class OllamaBackend:
             messages=messages,
             temperature=temperature if temperature is not None else self._temperature,
             num_ctx=num_ctx if num_ctx is not None else self._num_ctx,
+            max_tokens=max_tokens,
             timeout=timeout if timeout is not None else self._timeout,
         )
 
@@ -183,6 +190,7 @@ class OllamaBackend:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> Iterator[str]:
         """Ollama /api/chat 엔드포인트를 스트리밍 모드로 호출한다.
@@ -191,6 +199,7 @@ class OllamaBackend:
             messages: 대화 메시지 목록
             temperature: 생성 온도
             num_ctx: 컨텍스트 윈도우 크기
+            max_tokens: 응답 생성 토큰 상한
             timeout: 요청 타임아웃 초
 
         Yields:
@@ -208,6 +217,7 @@ class OllamaBackend:
             messages=messages,
             temperature=temperature if temperature is not None else self._temperature,
             num_ctx=num_ctx if num_ctx is not None else self._num_ctx,
+            max_tokens=max_tokens,
             timeout=timeout if timeout is not None else self._timeout,
         )
 

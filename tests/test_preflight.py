@@ -181,6 +181,19 @@ class TestCheckMetalAvailability:
         assert _check_metal_availability() is True
 
     @patch("core.preflight.subprocess.run")
+    def test_metal_검증은_실제_eval_수행(self, mock_run: MagicMock) -> None:
+        """is_available만 믿지 않고 실제 MLX 연산까지 검증한다."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        assert _check_metal_availability() is True
+
+        command = mock_run.call_args.args[0]
+        probe_code = command[2]
+        assert "mx.metal.is_available()" in probe_code
+        assert "mx.array" in probe_code
+        assert "mx.eval" in probe_code
+
+    @patch("core.preflight.subprocess.run")
     def test_metal_불가(self, mock_run: MagicMock) -> None:
         mock_run.return_value = MagicMock(returncode=1, stderr="Metal not available")
         assert _check_metal_availability() is False

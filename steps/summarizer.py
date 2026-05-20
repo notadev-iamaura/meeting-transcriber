@@ -390,11 +390,13 @@ class Summarizer:
             SummaryError: 기타 API 오류 시
         """
         try:
+            max_tokens = getattr(self._config.llm, "summarize_max_tokens", None)
             content = backend.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
+                max_tokens=max_tokens if isinstance(max_tokens, int) else None,
             )
         except LLMGenerationError as e:
             raise SummaryError(str(e)) from e

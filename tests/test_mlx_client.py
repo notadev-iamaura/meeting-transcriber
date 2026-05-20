@@ -176,6 +176,24 @@ class TestMLXBackendChat:
 
         assert result == "테스트 응답"
 
+    def test_max_tokens_오버라이드(self) -> None:
+        """chat(max_tokens=...)가 MLX generate 상한을 호출 단위로 덮어쓴다."""
+        mock_generate = MagicMock(return_value="테스트 응답")
+        backend = self._create_backend()
+
+        mock_mlx_lm = MagicMock()
+        mock_mlx_lm.generate = mock_generate
+
+        import sys
+
+        with patch.dict(sys.modules, {"mlx_lm": mock_mlx_lm}):
+            backend.chat(
+                messages=[{"role": "user", "content": "안녕"}],
+                max_tokens=512,
+            )
+
+        assert mock_generate.call_args.kwargs["max_tokens"] == 512
+
     def test_temperature_오버라이드(self) -> None:
         """temperature 파라미터로 초기값을 덮어쓸 수 있다."""
         backend = self._create_backend()

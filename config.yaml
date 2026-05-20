@@ -17,7 +17,7 @@ stt:
   model_name: "mlx-community/whisper-large-v3-turbo"  # 6 회의 벤치마크 기반 (docs/BENCHMARK.md §1). komixv2 대비 CER -16%p
   language: "ko"  # 전사 언어
   beam_size: 5                               # 빔 서치 크기
-  batch_size: 12                             # 배치 크기 (PERF: 16GB RAM에서 피크 메모리 절감)
+  batch_size: 12                             # mlx-whisper가 명시 지원하는 버전에서만 전달 (0.4.3은 미지원)
   initial_prompt: null                        # 전사 컨텍스트 힌트 (komixv2 모델에서 환각 유발 확인, 비활성 유지)
   condition_on_previous_text: false           # 이전 윈도우 텍스트 전파 비활성 (오류 전파 방지, 위원회 합의)
 
@@ -38,7 +38,10 @@ llm:
   model_name: "exaone3.5:7.8b-instruct-q4_K_M"               # Ollama 선택 시 사용될 모델명
   host: "http://127.0.0.1:11434"             # Ollama 로컬 전용
   mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §4). EXAONE 전환 시 "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
-  mlx_max_tokens: 2000                       # MLX 최대 생성 토큰
+  mlx_max_tokens: 2000                       # MLX 기본 최대 생성 토큰 (아래 단계별 상한이 우선)
+  correction_max_tokens: 800                 # 교정 단계 응답 상한 (짧은 배치 출력 폭주 방지)
+  summarize_max_tokens: 1600                 # 요약 단계 응답 상한 (회의록 품질 유지 범위)
+  chat_max_tokens: 1000                      # RAG 채팅 응답 상한
   max_context_tokens: 8192                   # 컨텍스트 윈도우
   temperature: 0.0  # 생성 온도 (MLX 4bit 환경에서 0.0~0.5 출력 동일 관찰 → 결정성 최대, BENCHMARK.md §3)
   correction_batch_size: 5                   # 보정 시 배치 크기 (발화 수). 원문 변형 최소화 관점에서 선택 (BENCHMARK.md §3)

@@ -471,7 +471,11 @@ class ChatEngine:
             ChatError: 기타 API 오류 시
         """
         try:
-            return backend.chat(messages=messages)
+            max_tokens = getattr(self._config.llm, "chat_max_tokens", None)
+            return backend.chat(
+                messages=messages,
+                max_tokens=max_tokens if isinstance(max_tokens, int) else None,
+            )
         except LLMGenerationError as e:
             raise ChatError(str(e)) from e
 
@@ -810,8 +814,10 @@ class ChatEngine:
                 def _stream_worker() -> None:
                     """별도 스레드에서 LLM 스트리밍 호출을 실행한다."""
                     try:
+                        max_tokens = getattr(self._config.llm, "chat_max_tokens", None)
                         for token in backend.chat_stream(
                             messages=messages,
+                            max_tokens=max_tokens if isinstance(max_tokens, int) else None,
                         ):
                             if stop_event.is_set():
                                 break

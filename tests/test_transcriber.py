@@ -15,6 +15,7 @@ STT 전사기 모듈 테스트 (Transcriber Module Tests)
 
 from __future__ import annotations
 
+import builtins
 import json
 from pathlib import Path
 from typing import Any
@@ -461,6 +462,23 @@ class TestLoadWhisperModule:
             result = transcriber._load_whisper_module()
             assert result is mock_module
 
+    def test_임포트중_Metal_RuntimeError는_모델불가로_변환(
+        self, transcriber: Transcriber, _preflight_ok: Any
+    ) -> None:
+        """mlx_whisper import 중 Metal RuntimeError가 앱 밖으로 새지 않는다."""
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "mlx_whisper":
+                raise RuntimeError("[metal::load_device] No Metal device available")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            pytest.raises(ModelNotAvailableError, match="MLX/Metal 런타임 오류"),
+        ):
+            transcriber._load_whisper_module()
+
 
 # === 전사 (transcribe) 테스트 ===
 
@@ -578,7 +596,7 @@ class TestTranscribe:
         mock_manager: MagicMock,
         audio_file: Path,
     ) -> None:
-        """batch_size는 mlx-whisper API에 전달되지 않는다 (미지원 파라미터)."""
+        """batch_size 미지원 mlx-whisper API에는 안전하게 전달하지 않는다."""
         ctx = mock_manager.acquire.return_value
         mock_whisper = ctx.__aenter__.return_value
 
@@ -586,6 +604,34 @@ class TestTranscribe:
 
         call_kwargs = mock_whisper.transcribe.call_args[1]
         assert "batch_size" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_batch_size_지원시_전달(
+        self,
+        config: AppConfig,
+        mock_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """mlx-whisper가 batch_size를 명시 지원하면 설정값을 전달한다."""
+        custom_config = AppConfig(stt={"batch_size": 8})
+        t = Transcriber(config=custom_config, model_manager=mock_manager)
+        ctx = mock_manager.acquire.return_value
+        mock_whisper = ctx.__aenter__.return_value
+        captured: dict[str, Any] = {}
+
+        def transcribe_with_batch(audio: str, *, batch_size: int, **kwargs: Any) -> dict[str, Any]:
+            captured["audio"] = audio
+            captured["batch_size"] = batch_size
+            captured.update(kwargs)
+            return _make_raw_result()
+
+        mock_whisper.transcribe = transcribe_with_batch
+
+        await t.transcribe(audio_file)
+
+        assert captured["audio"] == str(audio_file)
+        assert captured["batch_size"] == 8
+        assert captured["word_timestamps"] is True
 
     @pytest.mark.asyncio
     async def test_파일_없음_에러(self, transcriber: Transcriber) -> None:

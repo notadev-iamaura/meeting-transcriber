@@ -153,6 +153,7 @@ def _create_summarizer() -> Summarizer:
     """
     instance = Summarizer.__new__(Summarizer)
     instance._config = MagicMock()
+    instance._config.llm.summarize_max_tokens = 1600
     instance._manager = MagicMock()
     instance._max_context = 8192
     instance._max_input_tokens = 8192 - 2000  # 6192
@@ -639,6 +640,7 @@ class TestSummarizer:
 
         assert "회의 개요" in result
         backend.chat.assert_called_once()
+        assert backend.chat.call_args.kwargs["max_tokens"] == 1600
 
     def test_call_llm_타임아웃(self) -> None:
         """LLM 백엔드 타임아웃 시 SummaryError를 발생한다."""

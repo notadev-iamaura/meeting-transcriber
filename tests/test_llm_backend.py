@@ -134,6 +134,7 @@ class TestOllamaBackend:
             messages=messages,
             temperature=0.3,
             num_ctx=8192,
+            max_tokens=None,
             timeout=120,
         )
 

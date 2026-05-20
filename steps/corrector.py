@@ -357,11 +357,15 @@ class Corrector:
         # 재시도 로직: LLMGenerationError 발생 시 재시도
         for attempt in range(1, self._MAX_BATCH_RETRIES + 2):
             try:
+                config = getattr(self, "_config", None)
+                llm_config = getattr(config, "llm", None)
+                max_tokens = getattr(llm_config, "correction_max_tokens", None)
                 response_text = backend.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},
                     ],
+                    max_tokens=max_tokens if isinstance(max_tokens, int) else None,
                 )
                 corrections = _parse_correction_response(response_text, len(batch))
 

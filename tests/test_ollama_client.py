@@ -292,7 +292,7 @@ class TestChat:
             )
 
     def test_옵션_전달(self) -> None:
-        """temperature, num_ctx 옵션이 payload에 올바르게 전달된다."""
+        """temperature, num_ctx, max_tokens 옵션이 payload에 올바르게 전달된다."""
         response = _make_ollama_response("응답")
         mock_resp = _make_mock_urlopen(response)
 
@@ -310,12 +310,14 @@ class TestChat:
                 messages=[{"role": "user", "content": "질문"}],
                 temperature=0.5,
                 num_ctx=4096,
+                max_tokens=700,
                 timeout=60,
             )
 
         assert captured["body"]["model"] == "test-model"
         assert captured["body"]["options"]["temperature"] == 0.5
         assert captured["body"]["options"]["num_ctx"] == 4096
+        assert captured["body"]["options"]["num_predict"] == 700
         assert captured["body"]["stream"] is False
         assert captured["timeout"] == 60
 

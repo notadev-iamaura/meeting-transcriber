@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from config import AppConfig
 from core.llm_backend import LLMConnectionError, LLMGenerationError
 from core.ollama_client import (
     OllamaConnectionError,
@@ -448,6 +449,25 @@ class TestCorrector정상보정:
         assert result.utterances[0].original_text == "오늘 화의를 시작하겠습니다"
         assert result.utterances[0].was_corrected is True
         assert result.total_corrected == 1
+
+    def test_교정_max_tokens_전달(self) -> None:
+        """교정 단계는 작업별 응답 토큰 상한을 백엔드에 전달한다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_max_tokens": 512}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0)]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 1
+        assert failed == 0
+        assert result[0].text == "오늘 회의를 시작하겠습니다"
+        assert backend.chat.call_args.kwargs["max_tokens"] == 512
 
     @pytest.mark.asyncio
     async def test_다중_발화_보정(self) -> None:

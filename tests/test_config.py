@@ -623,6 +623,15 @@ class TestLLMBackendConfig:
         llm = LLMConfig()
         assert llm.mlx_max_tokens == 2000
 
+    def test_작업별_max_tokens_기본값(self) -> None:
+        """교정/요약/채팅 응답 상한이 작업별로 분리되어 있다."""
+        from config import LLMConfig
+
+        llm = LLMConfig()
+        assert llm.correction_max_tokens == 800
+        assert llm.summarize_max_tokens == 1600
+        assert llm.chat_max_tokens == 1000
+
     def test_mlx_max_tokens_범위_검증(self) -> None:
         """mlx_max_tokens가 최소값(100) 미만이면 에러가 발생하는지 확인한다."""
         from pydantic import ValidationError
@@ -631,6 +640,15 @@ class TestLLMBackendConfig:
 
         with pytest.raises(ValidationError):
             LLMConfig(mlx_max_tokens=50)
+
+    def test_작업별_max_tokens_범위_검증(self) -> None:
+        """작업별 응답 상한도 최소값 미만이면 거부한다."""
+        from pydantic import ValidationError
+
+        from config import LLMConfig
+
+        with pytest.raises(ValidationError):
+            LLMConfig(correction_max_tokens=50)
 
     def test_MT_LLM_BACKEND_환경변수_오버라이드(self, tmp_path, monkeypatch) -> None:
         """MT_LLM_BACKEND 환경변수로 backend가 오버라이드되는지 확인한다."""

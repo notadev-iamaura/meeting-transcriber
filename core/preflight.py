@@ -106,12 +106,21 @@ def _check_metal_availability() -> bool:
         logger.info("CI 환경 감지 — Metal/MLX 검증 스킵 (mlx import abort 방지)")
         return False
 
+    probe_code = (
+        "import mlx.core as mx; "
+        "assert mx.metal.is_available(), 'Metal not available'; "
+        "x = mx.array([1.0]); "
+        "y = x + 1.0; "
+        "mx.eval(y); "
+        "assert y.tolist() == [2.0]"
+    )
+
     try:
         result = subprocess.run(
             [
                 sys.executable,
                 "-c",
-                "import mlx.core as mx; assert mx.metal.is_available(), 'Metal not available'",
+                probe_code,
             ],
             capture_output=True,
             timeout=15,
@@ -200,7 +209,8 @@ def run_preflight(*, force: bool = False) -> PreflightResult:
             if not metal_available:
                 all_warnings.append(
                     "Metal GPU를 사용할 수 없습니다. "
-                    "SSH/headless 환경이거나 macOS가 오래된 버전일 수 있습니다."
+                    "SSH/headless, sandboxed/virtualized 실행 환경이거나 "
+                    "macOS가 오래된 버전일 수 있습니다."
                 )
         else:
             all_warnings.append(

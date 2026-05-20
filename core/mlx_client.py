@@ -229,6 +229,7 @@ class MLXBackend:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
         """MLX로 텍스트를 생성하여 전체 응답을 반환한다.
@@ -240,6 +241,7 @@ class MLXBackend:
             messages: 대화 메시지 목록
             temperature: 생성 온도 (None이면 초기화 시 설정값 사용)
             num_ctx: 미사용 (인터페이스 호환용)
+            max_tokens: 응답 생성 토큰 상한 (None이면 초기화 시 설정값 사용)
             timeout: 미사용 (인터페이스 호환용)
 
         Returns:
@@ -255,6 +257,7 @@ class MLXBackend:
             self._maybe_reset_prompt_cache(messages)
             prompt = self._apply_chat_template(messages)
             temp = temperature if temperature is not None else self._temperature
+            token_limit = max_tokens if max_tokens is not None else self._max_tokens
 
             if self._use_vlm:
                 # mlx-vlm: stream_generate + PromptCacheState 로 시스템 프롬프트
@@ -274,7 +277,7 @@ class MLXBackend:
                         self._vlm_prompt_cache_state = None
 
                 stream_kwargs: dict[str, Any] = {
-                    "max_tokens": self._max_tokens,
+                    "max_tokens": token_limit,
                     "verbose": False,
                 }
                 if self._vlm_prompt_cache_state is not None:
@@ -297,7 +300,7 @@ class MLXBackend:
                     self._model,
                     self._processor,
                     prompt=prompt,
-                    max_tokens=self._max_tokens,
+                    max_tokens=token_limit,
                     verbose=False,
                 )
                 return cast(str, result.text)
@@ -307,7 +310,7 @@ class MLXBackend:
                 # mlx-lm 0.30.x+ 에서 temp 인자가 제거되고 sampler 로 대체됨
                 # 구버전 호환: make_sampler 가 없으면 temp 직접 전달
                 gen_kwargs: dict[str, Any] = {
-                    "max_tokens": self._max_tokens,
+                    "max_tokens": token_limit,
                 }
                 try:
                     from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
@@ -354,6 +357,7 @@ class MLXBackend:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> Iterator[str]:
         """MLX로 텍스트를 스트리밍 생성한다.
@@ -364,6 +368,7 @@ class MLXBackend:
             messages: 대화 메시지 목록
             temperature: 생성 온도
             num_ctx: 미사용 (인터페이스 호환용)
+            max_tokens: 응답 생성 토큰 상한 (None이면 초기화 시 설정값 사용)
             timeout: 미사용 (인터페이스 호환용)
 
         Yields:
@@ -378,6 +383,7 @@ class MLXBackend:
         try:
             prompt = self._apply_chat_template(messages)
             temp = temperature if temperature is not None else self._temperature
+            token_limit = max_tokens if max_tokens is not None else self._max_tokens
 
             if self._use_vlm:
                 # mlx-vlm은 스트리밍을 별도로 지원하지 않으므로
@@ -386,7 +392,7 @@ class MLXBackend:
                     self._model,
                     self._processor,
                     prompt=prompt,
-                    max_tokens=self._max_tokens,
+                    max_tokens=token_limit,
                     verbose=False,
                 )
                 yield result.text
@@ -395,7 +401,7 @@ class MLXBackend:
 
                 # mlx-lm 0.30.x+ 에서 temp 인자가 제거되고 sampler 로 대체됨
                 stream_kwargs: dict[str, Any] = {
-                    "max_tokens": self._max_tokens,
+                    "max_tokens": token_limit,
                 }
                 try:
                     from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]

@@ -203,7 +203,15 @@ class STTConfig(BaseModel):
     model_name: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
-    batch_size: int = Field(default=12, ge=1, le=64)
+    batch_size: int = Field(
+        default=12,
+        ge=1,
+        le=64,
+        description=(
+            "mlx_whisper.transcribe가 batch_size를 명시 지원하는 버전에서만 전달한다. "
+            "0.4.x 계열처럼 **decode_options만 받는 버전에는 전달하지 않는다."
+        ),
+    )
     auto_detect_chipset: bool = False  # True: 칩셋 기반 batch_size 자동 설정
     initial_prompt: str | None = Field(
         default=None,
@@ -330,6 +338,21 @@ class LLMConfig(BaseModel):
     # MLX 전용 설정 (backend: "mlx" 시 사용)
     mlx_model_name: str = "mlx-community/gemma-4-e4b-it-4bit"
     mlx_max_tokens: int = Field(default=2000, ge=100)
+    correction_max_tokens: int = Field(
+        default=800,
+        ge=100,
+        description="전사문 교정 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
+    )
+    summarize_max_tokens: int = Field(
+        default=1600,
+        ge=100,
+        description="회의록 요약 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
+    )
+    chat_max_tokens: int = Field(
+        default=1000,
+        ge=100,
+        description="RAG 채팅 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
+    )
 
     # 공통 설정
     max_context_tokens: int = Field(default=8192, ge=1024)
