@@ -281,6 +281,13 @@
   min-width: 36px;
 }
 
+.setting-inline-status {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: right;
+}
+
 .setting-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -377,6 +384,10 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+
+  .setting-inline-status {
+    text-align: left;
   }
 
   .setting-select {

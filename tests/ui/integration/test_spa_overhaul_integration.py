@@ -221,6 +221,13 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
                 body='{"opened": true, "path": "/tmp/audio_input"}',
             )
             return
+        if "/api/meetings/batch/preview" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"queued": 2, "skipped": 1}',
+            )
+            return
         if "/api/meetings/batch" in url:
             batch_payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
@@ -273,6 +280,8 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
 
         page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").click()
         page.locator(".home-action-dropdown [role='menuitemradio'][data-option='both']").click()
+        page.wait_for_selector("#homeBatchConfirmStart:not(:disabled)")
+        page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
             "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
         )
@@ -285,6 +294,8 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
         page.locator(
             ".home-action-dropdown [role='menuitemradio'][data-option='transcribe']"
         ).click()
+        page.wait_for_selector("#homeBatchConfirmStart:not(:disabled)")
+        page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
             "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
         )
@@ -1760,6 +1771,180 @@ def test_settings_route_renders_tabs(browser: Browser, spa_static_server: str) -
         prompts_tab = page.locator('.settings-tab[data-tab="prompts"]')
         assert prompts_tab.get_attribute("aria-selected") == "true"
         assert page.locator("#settingsPanelHost").count() == 1
+
+
+def test_settings_auto_processing_gui_save_and_run_now(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """자동 전사/요약 설정 GUI 저장과 즉시 실행 경로를 E2E로 검증한다."""
+    captured_settings: list[dict] = []
+    run_now_calls: list[str] = []
+    state = {"has_result": False}
+
+    def settings_api(route: Route) -> None:
+        url = route.request.url
+        method = route.request.method
+        if "/api/settings" in url and method == "GET":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "llm_backend": "mlx",
+                        "llm_mlx_model_name": "mlx-community/gemma-4-e4b-it-4bit",
+                        "llm_temperature": 0.0,
+                        "llm_mlx_max_tokens": 2000,
+                        "llm_skip_steps": False,
+                        "stt_language": "ko",
+                        "hf_enabled": True,
+                        "hf_no_speech_threshold": 0.9,
+                        "hf_compression_ratio_threshold": 2.4,
+                        "hf_repetition_threshold": 3,
+                        "lifecycle_enabled": False,
+                        "lifecycle_hot_days": 30,
+                        "lifecycle_warm_days": 90,
+                        "lifecycle_cold_action": "delete_audio",
+                        "lifecycle_interval_hours": 24,
+                        "lifecycle_run_on_startup": False,
+                        "auto_processing_enabled": False,
+                        "auto_processing_run_at": "02:00",
+                        "auto_processing_recent_hours": 48,
+                        "auto_processing_action": "full",
+                        "auto_processing_run_on_startup_if_missed": False,
+                        "available_models": [
+                            {
+                                "id": "mlx-community/gemma-4-e4b-it-4bit",
+                                "label": "Gemma 4 E4B",
+                                "size": "~5.3GB",
+                                "description": "테스트 모델",
+                            }
+                        ],
+                    }
+                ),
+            )
+            return
+        if "/api/settings" in url and method == "PUT":
+            payload = json.loads(route.request.post_data or "{}")
+            captured_settings.append(payload)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "settings": payload,
+                        "message": "설정이 저장되었습니다.",
+                        "changed_fields": list(payload.keys()),
+                    }
+                ),
+            )
+            return
+        if "/api/auto-processing/status" in url:
+            body = {
+                "enabled": True,
+                "running": True,
+                "processing": False,
+                "run_at": "03:30",
+                "recent_hours": 72,
+                "action": "summarize",
+                "run_on_startup_if_missed": True,
+                "next_run_at": "2026-05-21T03:30:00",
+                "last_started_at": None,
+                "last_completed_at": None,
+                "last_error": None,
+                "last_result": None,
+            }
+            if state["has_result"]:
+                body["last_result"] = {
+                    "action": "summarize",
+                    "recent_hours": 72,
+                    "matched": 2,
+                    "queued": 2,
+                    "transcribed": 0,
+                    "summarized": 2,
+                    "skipped": 0,
+                    "failed": 0,
+                    "meeting_ids": ["m1", "m2"],
+                    "errors": [],
+                }
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+            return
+        if "/api/auto-processing/run-now" in url:
+            run_now_calls.append(url)
+            state["has_result"] = True
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "status": "ok",
+                        "result": {
+                            "action": "summarize",
+                            "recent_hours": 72,
+                            "matched": 2,
+                            "queued": 2,
+                            "transcribed": 0,
+                            "summarized": 2,
+                            "skipped": 0,
+                            "failed": 0,
+                            "meeting_ids": ["m1", "m2"],
+                            "errors": [],
+                        },
+                    }
+                ),
+            )
+            return
+        if "/api/stt-models" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"models": []}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/settings",
+        api_handler=settings_api,
+    ) as page:
+        page.wait_for_selector("#settingsAutoProcessingEnabled", state="attached")
+        page.evaluate(
+            """() => {
+                document.querySelector('#settingsAutoProcessingEnabled').checked = true;
+                document.querySelector('#settingsAutoProcessingEnabled').dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        page.locator("#settingsAutoProcessingRunAt").fill("03:30")
+        page.locator("#settingsAutoProcessingRecentHours").fill("72")
+        page.locator("#settingsAutoProcessingAction").select_option("summarize")
+        page.evaluate(
+            """() => {
+                document.querySelector('#settingsAutoProcessingRunOnStartup').checked = true;
+                document.querySelector('#settingsAutoProcessingRunOnStartup').dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        page.locator("#settingsSaveBtn").click()
+        page.wait_for_function(
+            "() => document.querySelector('#settingsSaveStatus').textContent.includes('저장 완료')"
+        )
+
+        assert captured_settings
+        payload = captured_settings[-1]
+        assert payload["auto_processing_enabled"] is True
+        assert payload["auto_processing_run_at"] == "03:30"
+        assert payload["auto_processing_recent_hours"] == 72
+        assert payload["auto_processing_action"] == "summarize"
+        assert payload["auto_processing_run_on_startup_if_missed"] is True
+
+        page.locator("#settingsAutoProcessingRunNow").click()
+        page.wait_for_function(
+            "() => document.querySelector('#settingsAutoProcessingStatus').textContent.includes('최근 2건')"
+        )
+
+    assert run_now_calls
 
 
 # ============================================================

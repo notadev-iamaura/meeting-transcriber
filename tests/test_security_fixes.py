@@ -120,6 +120,13 @@ lifecycle:
   cold_action: "delete_audio"
   interval_hours: 24
   run_on_startup: false
+
+auto_processing:
+  enabled: false
+  run_at: "02:00"
+  recent_hours: 48
+  action: "full"
+  run_on_startup_if_missed: false
 """,
         encoding="utf-8",
     )
@@ -156,6 +163,13 @@ lifecycle:
             interval_hours=24,
             run_on_startup=False,
         ),
+        auto_processing=SimpleNamespace(
+            enabled=False,
+            run_at="02:00",
+            recent_hours=48,
+            action="full",
+            run_on_startup_if_missed=False,
+        ),
     )
 
     # cfg + 각 하위 네임스페이스가 Pydantic model_copy 를 지원해야 함
@@ -168,12 +182,20 @@ lifecycle:
         _add_model_copy(ns)
         return ns
 
-    for sub in (cfg.stt, cfg.llm, cfg.pipeline, cfg.hallucination_filter, cfg.lifecycle):
+    for sub in (
+        cfg.stt,
+        cfg.llm,
+        cfg.pipeline,
+        cfg.hallucination_filter,
+        cfg.lifecycle,
+        cfg.auto_processing,
+    ):
         _add_model_copy(sub)
     _add_model_copy(cfg)
 
     app.state.config = cfg
     app.state.lifecycle_scheduler = None
+    app.state.auto_processing_scheduler = None
 
     # _get_config_path 를 monkeypatch
     import api.routers.settings as settings_router
@@ -377,6 +399,90 @@ class TestLifecycleSettings:
         ],
     )
     def test_lifecycle_검증_범위_벗어나면_400(
+        self,
+        client: TestClient,
+        payload: dict,
+        expected_detail: str,
+    ) -> None:
+        resp = client.put("/api/settings", json=payload)
+        assert resp.status_code == 400
+        assert expected_detail in resp.json().get("detail", "")
+
+
+class TestAutoProcessingSettings:
+    """자동 전사/요약 설정 API 회귀 방지."""
+
+    def test_get_settings_가_auto_processing_필드를_노출(self, client: TestClient) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["auto_processing_enabled"] is False
+        assert data["auto_processing_run_at"] == "02:00"
+        assert data["auto_processing_recent_hours"] == 48
+        assert data["auto_processing_action"] == "full"
+        assert data["auto_processing_run_on_startup_if_missed"] is False
+
+    def test_put_settings_가_auto_processing_필드를_저장(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/settings",
+            json={
+                "auto_processing_enabled": True,
+                "auto_processing_run_at": "03:30",
+                "auto_processing_recent_hours": 72,
+                "auto_processing_action": "summarize",
+                "auto_processing_run_on_startup_if_missed": True,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        changed = set(body["changed_fields"])
+        assert {
+            "auto_processing_enabled",
+            "auto_processing_run_at",
+            "auto_processing_recent_hours",
+            "auto_processing_action",
+            "auto_processing_run_on_startup_if_missed",
+        }.issubset(changed)
+        settings = body["settings"]
+        assert settings["auto_processing_enabled"] is True
+        assert settings["auto_processing_run_at"] == "03:30"
+        assert settings["auto_processing_recent_hours"] == 72
+        assert settings["auto_processing_action"] == "summarize"
+        assert settings["auto_processing_run_on_startup_if_missed"] is True
+
+    def test_auto_processing_설정_변경시_scheduler_갱신(
+        self,
+        client: TestClient,
+    ) -> None:
+        class _Scheduler:
+            def __init__(self) -> None:
+                self.updated = False
+
+            async def update_config(self, config) -> None:  # type: ignore[no-untyped-def]
+                self.updated = True
+                self.config = config
+
+        scheduler = _Scheduler()
+        client.app.state.auto_processing_scheduler = scheduler
+
+        resp = client.put("/api/settings", json={"auto_processing_enabled": True})
+
+        assert resp.status_code == 200, resp.text
+        assert scheduler.updated is True
+        assert scheduler.config.auto_processing.enabled is True
+
+    @pytest.mark.parametrize(
+        "payload,expected_detail",
+        [
+            ({"auto_processing_run_at": "24:00"}, "auto_processing_run_at"),
+            ({"auto_processing_run_at": "2:00"}, "auto_processing_run_at"),
+            ({"auto_processing_recent_hours": 0}, "auto_processing_recent_hours"),
+            ({"auto_processing_recent_hours": 721}, "auto_processing_recent_hours"),
+            ({"auto_processing_action": "delete"}, "auto_processing_action"),
+        ],
+    )
+    def test_auto_processing_검증_범위_벗어나면_400(
         self,
         client: TestClient,
         payload: dict,

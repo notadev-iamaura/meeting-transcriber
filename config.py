@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -616,6 +616,34 @@ class LifecycleConfig(BaseModel):
         return self
 
 
+class AutoProcessingConfig(BaseModel):
+    """자동 전사/요약 실행 설정"""
+
+    enabled: bool = Field(
+        default=False,
+        description="매일 지정 시각에 최근 회의 중 누락된 전사/요약을 자동 처리할지 여부.",
+    )
+    run_at: str = Field(
+        default="02:00",
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="자동 처리 실행 시각(HH:MM, 로컬 시간).",
+    )
+    recent_hours: int = Field(
+        default=48,
+        ge=1,
+        le=720,
+        description="자동 처리 대상 최근 시간 범위.",
+    )
+    action: Literal["transcribe", "summarize", "full"] = Field(
+        default="full",
+        description="자동 처리 동작: 전사만, 요약만, 또는 누락분 전체.",
+    )
+    run_on_startup_if_missed: bool = Field(
+        default=False,
+        description="앱 시작 시 오늘 실행 시각이 이미 지났으면 한 번 실행할지 여부.",
+    )
+
+
 class WikiConfig(BaseModel):
     """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
 
@@ -702,6 +730,7 @@ class AppConfig(BaseModel):
     watcher: WatcherConfig = Field(default_factory=WatcherConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
+    auto_processing: AutoProcessingConfig = Field(default_factory=AutoProcessingConfig)
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
     window: WindowConfig = Field(default_factory=WindowConfig)
     vad: VADConfig = Field(default_factory=VADConfig)

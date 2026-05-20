@@ -84,6 +84,12 @@ class SettingsResponse(BaseModel):
     lifecycle_cold_action: str = "delete_audio"
     lifecycle_interval_hours: int = 24
     lifecycle_run_on_startup: bool = False
+    # 자동 전사/요약
+    auto_processing_enabled: bool = False
+    auto_processing_run_at: str = "02:00"
+    auto_processing_recent_hours: int = 48
+    auto_processing_action: str = "full"
+    auto_processing_run_on_startup_if_missed: bool = False
     available_models: list[dict] = Field(default_factory=lambda: _AVAILABLE_MODELS)
 
 
@@ -119,6 +125,12 @@ class SettingsUpdateRequest(BaseModel):
     lifecycle_cold_action: str | None = None
     lifecycle_interval_hours: int | None = None
     lifecycle_run_on_startup: bool | None = None
+    # 자동 전사/요약
+    auto_processing_enabled: bool | None = None
+    auto_processing_run_at: str | None = None
+    auto_processing_recent_hours: int | None = None
+    auto_processing_action: str | None = None
+    auto_processing_run_on_startup_if_missed: bool | None = None
 
 
 class SettingsUpdateResponse(BaseModel):
@@ -154,6 +166,13 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         lifecycle_cold_action=config.lifecycle.cold_action,
         lifecycle_interval_hours=config.lifecycle.interval_hours,
         lifecycle_run_on_startup=config.lifecycle.run_on_startup,
+        auto_processing_enabled=config.auto_processing.enabled,
+        auto_processing_run_at=config.auto_processing.run_at,
+        auto_processing_recent_hours=config.auto_processing.recent_hours,
+        auto_processing_action=config.auto_processing.action,
+        auto_processing_run_on_startup_if_missed=(
+            config.auto_processing.run_on_startup_if_missed
+        ),
         available_models=_AVAILABLE_MODELS,
     )
 
@@ -321,6 +340,29 @@ async def update_settings(
                 status_code=400,
                 detail="lifecycle_interval_hours 는 1~168 범위의 정수여야 합니다.",
             )
+    if "auto_processing_run_at" in updates:
+        v = updates["auto_processing_run_at"]
+        if not (isinstance(v, str) and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", v)):
+            raise HTTPException(
+                status_code=400,
+                detail="auto_processing_run_at 은 HH:MM 형식이어야 합니다.",
+            )
+    if "auto_processing_recent_hours" in updates:
+        v = updates["auto_processing_recent_hours"]
+        if not (isinstance(v, int) and 1 <= v <= 720):
+            raise HTTPException(
+                status_code=400,
+                detail="auto_processing_recent_hours 는 1~720 범위의 정수여야 합니다.",
+            )
+    if "auto_processing_action" in updates and updates["auto_processing_action"] not in (
+        "transcribe",
+        "summarize",
+        "full",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="auto_processing_action 은 'transcribe', 'summarize', 'full' 만 허용됩니다.",
+        )
 
     # === config.yaml 파일 업데이트 ===
     config_path = _get_config_path()
@@ -367,6 +409,16 @@ async def update_settings(
         changed_fields.append("lifecycle_interval_hours")
     if "lifecycle_run_on_startup" in updates:
         changed_fields.append("lifecycle_run_on_startup")
+    if "auto_processing_enabled" in updates:
+        changed_fields.append("auto_processing_enabled")
+    if "auto_processing_run_at" in updates:
+        changed_fields.append("auto_processing_run_at")
+    if "auto_processing_recent_hours" in updates:
+        changed_fields.append("auto_processing_recent_hours")
+    if "auto_processing_action" in updates:
+        changed_fields.append("auto_processing_action")
+    if "auto_processing_run_on_startup_if_missed" in updates:
+        changed_fields.append("auto_processing_run_on_startup_if_missed")
 
     # YAML 파일 저장 (주석 보존: 정규식으로 해당 키의 값만 교체)
     try:
@@ -448,6 +500,38 @@ async def update_settings(
         if "lifecycle_run_on_startup" in updates:
             val = "true" if updates["lifecycle_run_on_startup"] else "false"
             content = _replace_yaml_value(content, "lifecycle", "run_on_startup", val)
+        if "auto_processing_enabled" in updates:
+            val = "true" if updates["auto_processing_enabled"] else "false"
+            content = _replace_yaml_value(content, "auto_processing", "enabled", val)
+        if "auto_processing_run_at" in updates:
+            content = _replace_yaml_value(
+                content,
+                "auto_processing",
+                "run_at",
+                f'"{updates["auto_processing_run_at"]}"',
+            )
+        if "auto_processing_recent_hours" in updates:
+            content = _replace_yaml_value(
+                content,
+                "auto_processing",
+                "recent_hours",
+                str(updates["auto_processing_recent_hours"]),
+            )
+        if "auto_processing_action" in updates:
+            content = _replace_yaml_value(
+                content,
+                "auto_processing",
+                "action",
+                f'"{updates["auto_processing_action"]}"',
+            )
+        if "auto_processing_run_on_startup_if_missed" in updates:
+            val = "true" if updates["auto_processing_run_on_startup_if_missed"] else "false"
+            content = _replace_yaml_value(
+                content,
+                "auto_processing",
+                "run_on_startup_if_missed",
+                val,
+            )
 
         # 원자적 쓰기 + .bak 백업 (도중 죽어도 config.yaml 손상 방지)
         await asyncio.to_thread(_atomic_write_text, config_path, content)
@@ -517,12 +601,33 @@ async def update_settings(
         new_lifecycle = config.lifecycle.model_copy(update=lifecycle_updates)
         config = config.model_copy(update={"lifecycle": new_lifecycle})
 
+    auto_processing_updates: dict[str, Any] = {}
+    if "auto_processing_enabled" in updates:
+        auto_processing_updates["enabled"] = updates["auto_processing_enabled"]
+    if "auto_processing_run_at" in updates:
+        auto_processing_updates["run_at"] = updates["auto_processing_run_at"]
+    if "auto_processing_recent_hours" in updates:
+        auto_processing_updates["recent_hours"] = updates["auto_processing_recent_hours"]
+    if "auto_processing_action" in updates:
+        auto_processing_updates["action"] = updates["auto_processing_action"]
+    if "auto_processing_run_on_startup_if_missed" in updates:
+        auto_processing_updates["run_on_startup_if_missed"] = updates[
+            "auto_processing_run_on_startup_if_missed"
+        ]
+    if auto_processing_updates:
+        new_auto_processing = config.auto_processing.model_copy(update=auto_processing_updates)
+        config = config.model_copy(update={"auto_processing": new_auto_processing})
+
     # app.state.config 갱신
     request.app.state.config = config
 
     lifecycle_scheduler = getattr(request.app.state, "lifecycle_scheduler", None)
     if lifecycle_updates and lifecycle_scheduler is not None:
         await lifecycle_scheduler.update_config(config)
+
+    auto_processing_scheduler = getattr(request.app.state, "auto_processing_scheduler", None)
+    if auto_processing_updates and auto_processing_scheduler is not None:
+        await auto_processing_scheduler.update_config(config)
 
     # 응답 메시지 구성
     message = "설정이 저장되었습니다."
