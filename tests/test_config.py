@@ -52,6 +52,8 @@ class TestConfigYamlParsing:
         assert config.stt.language == "ko"
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "cpu"
+        assert config.diarization.min_speakers == 2
+        assert config.diarization.max_speakers == 4
         assert config.diarization.protect_zoom_meetings is True
         assert config.diarization.zoom_protection_mode == "pause"
         assert config.llm.host == "http://127.0.0.1:11434"
@@ -90,6 +92,8 @@ class TestConfigYamlParsing:
             (default.stt.batch_size, loaded.stt.batch_size),
             (default.stt.condition_on_previous_text, loaded.stt.condition_on_previous_text),
             (default.diarization.device, loaded.diarization.device),
+            (default.diarization.min_speakers, loaded.diarization.min_speakers),
+            (default.diarization.max_speakers, loaded.diarization.max_speakers),
             (default.diarization.protect_zoom_meetings, loaded.diarization.protect_zoom_meetings),
             (default.diarization.zoom_protection_mode, loaded.diarization.zoom_protection_mode),
             (default.llm.mlx_model_name, loaded.llm.mlx_model_name),
