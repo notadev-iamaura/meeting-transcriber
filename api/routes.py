@@ -425,6 +425,15 @@ update_settings = _settings_router.update_settings
 router.include_router(_settings_router.router)
 
 
+# 자동 전사/요약 스케줄러 API
+from api.routers import auto_processing as _auto_processing_router  # noqa: E402
+
+get_auto_processing_status = _auto_processing_router.get_auto_processing_status
+run_auto_processing_now = _auto_processing_router.run_auto_processing_now
+
+router.include_router(_auto_processing_router.router)
+
+
 # 사용자 편집 가능 프롬프트/용어집 API 는 api.routers.user_settings 로 분리한다.
 # 아래 re-export 는 기존 `api.routes.PromptsResponse` 같은 접근을 보존한다.
 from api.routers import user_settings as _user_settings_router  # noqa: E402

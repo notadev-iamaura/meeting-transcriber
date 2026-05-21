@@ -175,6 +175,14 @@ lifecycle:
   interval_hours: 24                         # 자동 점검 주기 (시간)
   run_on_startup: false                      # 서버 시작 직후 1회 실행 여부
 
+# === 자동 전사/요약 설정 ===
+auto_processing:
+  enabled: false                             # 매일 지정 시각에 누락된 전사/요약 자동 처리
+  run_at: "02:00"                            # 실행 시각 (HH:MM, 로컬 시간)
+  recent_hours: 48                           # 최근 N시간 내 회의만 대상
+  action: "full"                             # transcribe | summarize | full
+  run_on_startup_if_missed: false            # 시작 시 오늘 실행 시간이 지났으면 1회 실행
+
 # === VAD (Voice Activity Detection) 설정 ===
 # 주의: mlx-whisper + 외부 silero-vad 조합에서 VAD ON 은 실행시간을 약 3배 늘리고
 # 커버리지를 낮추는 관찰이 있음 (BENCHMARK.md §1). 기본 OFF. 필요 시 true 로 전환.

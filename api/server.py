@@ -308,12 +308,43 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.lifecycle_scheduler = None
             logger.warning(f"LifecycleScheduler 초기화 실패: {e}")
 
+    # 13. AutoProcessingScheduler 초기화 (누락 전사/요약 자동 실행)
+    if lightweight_runtime:
+        app.state.auto_processing_scheduler = None
+        logger.info(f"AutoProcessingScheduler 비활성화 (runtime_profile={runtime_profile})")
+    elif pipeline_manager is not None:
+        try:
+            from core.auto_processing_scheduler import AutoProcessingScheduler
+
+            auto_processing_scheduler = AutoProcessingScheduler(
+                config=config,
+                job_queue=async_queue,
+                pipeline=pipeline_manager,
+            )
+            await auto_processing_scheduler.start()
+            app.state.auto_processing_scheduler = auto_processing_scheduler
+            logger.info("AutoProcessingScheduler 초기화 완료")
+        except Exception as e:
+            app.state.auto_processing_scheduler = None
+            logger.warning(f"AutoProcessingScheduler 초기화 실패: {e}")
+    else:
+        app.state.auto_processing_scheduler = None
+        logger.warning("PipelineManager 미초기화로 AutoProcessingScheduler 비활성화")
+
     logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
 
     yield  # 앱 실행
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # AutoProcessingScheduler 정지
+    if (
+        hasattr(app.state, "auto_processing_scheduler")
+        and app.state.auto_processing_scheduler is not None
+    ):
+        await app.state.auto_processing_scheduler.stop()
+        logger.info("AutoProcessingScheduler 정지 완료")
 
     # LifecycleScheduler 정지
     if hasattr(app.state, "lifecycle_scheduler") and app.state.lifecycle_scheduler is not None:

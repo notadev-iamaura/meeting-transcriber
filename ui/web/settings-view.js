@@ -511,6 +511,53 @@
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
+                '    <h3 class="settings-section-title">자동 전사/요약</h3>',
+                '    <p class="settings-section-desc">앱이 실행 중일 때 지정된 시각에 최근 회의 중 아직 전사나 요약이 없는 항목을 순차 처리합니다.</p>',
+                '    <div class="settings-group">',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingEnabled">자동 처리</label>',
+                '        <label class="setting-toggle">',
+                '          <input type="checkbox" id="settingsAutoProcessingEnabled">',
+                '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+                '        </label>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingRunAt">실행 시각</label>',
+                '        <input type="time" class="setting-input" id="settingsAutoProcessingRunAt" min="00:00" max="23:59" step="60" value="02:00">',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingRecentHours">대상 범위</label>',
+                '        <div class="setting-number-group">',
+                '          <input type="number" class="setting-input" id="settingsAutoProcessingRecentHours" min="1" max="720" step="1" value="48">',
+                '          <span class="setting-unit">시간 이내</span>',
+                '        </div>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingAction">처리 방식</label>',
+                '        <select class="setting-select" id="settingsAutoProcessingAction">',
+                '          <option value="full">누락분 전체</option>',
+                '          <option value="transcribe">전사만</option>',
+                '          <option value="summarize">요약만</option>',
+                '        </select>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingRunOnStartup">놓친 일정 보정</label>',
+                '        <label class="setting-toggle">',
+                '          <input type="checkbox" id="settingsAutoProcessingRunOnStartup">',
+                '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+                '        </label>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <div class="setting-label">실행 상태</div>',
+                '        <div class="setting-inline-status" id="settingsAutoProcessingStatus">불러오는 중…</div>',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <div class="setting-label">수동 실행</div>',
+                '        <button type="button" class="btn-secondary" id="settingsAutoProcessingRunNow">지금 실행</button>',
+                '      </div>',
+                '    </div>',
+                '  </section>',
+                '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">음성 인식</h3>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
@@ -648,6 +695,13 @@
                 lifecycleHotDays: document.getElementById("settingsLifecycleHotDays"),
                 lifecycleWarmDays: document.getElementById("settingsLifecycleWarmDays"),
                 lifecycleRunOnStartup: document.getElementById("settingsLifecycleRunOnStartup"),
+                autoProcessingEnabled: document.getElementById("settingsAutoProcessingEnabled"),
+                autoProcessingRunAt: document.getElementById("settingsAutoProcessingRunAt"),
+                autoProcessingRecentHours: document.getElementById("settingsAutoProcessingRecentHours"),
+                autoProcessingAction: document.getElementById("settingsAutoProcessingAction"),
+                autoProcessingRunOnStartup: document.getElementById("settingsAutoProcessingRunOnStartup"),
+                autoProcessingStatus: document.getElementById("settingsAutoProcessingStatus"),
+                autoProcessingRunNow: document.getElementById("settingsAutoProcessingRunNow"),
             };
             // 모델별 description 캐시 (툴팁 갱신용)
             this._modelDescriptions = {};
@@ -690,8 +744,15 @@
             els.saveBtn.addEventListener("click", onSave);
             self._listeners.push({ el: els.saveBtn, type: "click", fn: onSave });
 
+            var onRunNow = function () {
+                self._runAutoProcessingNow();
+            };
+            els.autoProcessingRunNow.addEventListener("click", onRunNow);
+            self._listeners.push({ el: els.autoProcessingRunNow, type: "click", fn: onRunNow });
+
             // STT 모델 목록 로드
             self._loadSttModels();
+            self._loadAutoProcessingStatus();
 
             // 고급 기능 — A/B 테스트 링크
             var abTestLink = document.getElementById("settingsAbTestLink");
@@ -760,6 +821,18 @@
                     els.lifecycleWarmDays.value = data.lifecycle_warm_days;
                 }
                 els.lifecycleRunOnStartup.checked = !!data.lifecycle_run_on_startup;
+                els.autoProcessingEnabled.checked = !!data.auto_processing_enabled;
+                if (data.auto_processing_run_at) {
+                    els.autoProcessingRunAt.value = data.auto_processing_run_at;
+                }
+                if (data.auto_processing_recent_hours !== undefined && data.auto_processing_recent_hours !== null) {
+                    els.autoProcessingRecentHours.value = data.auto_processing_recent_hours;
+                }
+                if (data.auto_processing_action) {
+                    els.autoProcessingAction.value = data.auto_processing_action;
+                }
+                els.autoProcessingRunOnStartup.checked = !!data.auto_processing_run_on_startup_if_missed;
+                self._loadAutoProcessingStatus();
             } catch (err) {
                 errorBanner.show("설정 불러오기 실패: " + (err.message || err));
             }
@@ -801,6 +874,11 @@
                 lifecycle_hot_days: parseInt(els.lifecycleHotDays.value, 10),
                 lifecycle_warm_days: parseInt(els.lifecycleWarmDays.value, 10),
                 lifecycle_run_on_startup: els.lifecycleRunOnStartup.checked,
+                auto_processing_enabled: els.autoProcessingEnabled.checked,
+                auto_processing_run_at: els.autoProcessingRunAt.value || "02:00",
+                auto_processing_recent_hours: parseInt(els.autoProcessingRecentHours.value, 10),
+                auto_processing_action: els.autoProcessingAction.value,
+                auto_processing_run_on_startup_if_missed: els.autoProcessingRunOnStartup.checked,
             };
 
             try {
@@ -815,6 +893,7 @@
                 }
                 els.saveStatus.textContent = "저장 완료";
                 els.saveStatus.className = "settings-save-status success";
+                await this._loadAutoProcessingStatus();
                 setTimeout(function () {
                     els.saveStatus.textContent = "";
                     els.saveStatus.className = "settings-save-status";
@@ -825,6 +904,93 @@
             } finally {
                 els.saveBtn.disabled = false;
                 els.saveBtn.textContent = "변경사항 저장";
+            }
+        };
+
+        GeneralSettingsPanel.prototype._loadAutoProcessingStatus = async function () {
+            var els = this._els;
+            if (!els.autoProcessingStatus) return;
+            try {
+                var data = await App.apiRequest("/auto-processing/status");
+                this._renderAutoProcessingStatus(data);
+            } catch (err) {
+                els.autoProcessingStatus.textContent = "상태 조회 실패";
+                if (els.autoProcessingRunNow) els.autoProcessingRunNow.disabled = false;
+            }
+        };
+
+        GeneralSettingsPanel.prototype._renderAutoProcessingStatus = function (data) {
+            var els = this._els;
+            if (!els.autoProcessingStatus) return;
+
+            var parts = [];
+            if (data.processing) {
+                parts.push("처리 중");
+            } else if (data.enabled) {
+                parts.push("대기 중");
+            } else {
+                parts.push("꺼짐");
+            }
+
+            if (data.next_run_at && data.enabled) {
+                var next = new Date(data.next_run_at);
+                if (!isNaN(next.getTime())) {
+                    parts.push("다음 " + next.toLocaleString());
+                }
+            }
+
+            if (data.last_result) {
+                parts.push(
+                    "최근 " +
+                    data.last_result.queued +
+                    "건, 실패 " +
+                    data.last_result.failed +
+                    "건"
+                );
+            } else if (data.last_error) {
+                parts.push("최근 실패");
+            }
+
+            els.autoProcessingStatus.textContent = parts.join(" · ");
+            if (els.autoProcessingRunNow) {
+                els.autoProcessingRunNow.disabled = !!data.processing;
+                els.autoProcessingRunNow.textContent = data.processing ? "실행 중…" : "지금 실행";
+            }
+        };
+
+        GeneralSettingsPanel.prototype._runAutoProcessingNow = async function () {
+            var els = this._els;
+            if (!els.autoProcessingRunNow) return;
+            els.autoProcessingRunNow.disabled = true;
+            els.autoProcessingRunNow.textContent = "실행 중…";
+            if (els.autoProcessingStatus) {
+                els.autoProcessingStatus.textContent = "처리 중";
+            }
+            try {
+                var data = await App.apiRequest("/auto-processing/run-now", {
+                    method: "POST",
+                });
+                var result = data.result || {};
+                if (els.autoProcessingStatus) {
+                    els.autoProcessingStatus.textContent =
+                        "완료 · 대상 " +
+                        (result.queued || 0) +
+                        "건 · 전사 " +
+                        (result.transcribed || 0) +
+                        "건 · 요약 " +
+                        (result.summarized || 0) +
+                        "건 · 실패 " +
+                        (result.failed || 0) +
+                        "건";
+                }
+                await this._loadAutoProcessingStatus();
+            } catch (err) {
+                if (els.autoProcessingStatus) {
+                    els.autoProcessingStatus.textContent = "실행 실패: " + (err.message || err);
+                }
+            } finally {
+                els.autoProcessingRunNow.disabled = false;
+                els.autoProcessingRunNow.textContent = "지금 실행";
             }
         };
 
