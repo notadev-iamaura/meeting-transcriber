@@ -1202,29 +1202,55 @@ class PipelineManager:
         self,
         *,
         meeting_id: str,
+        meeting_date: str,
+        summary_result: Any | None,
+        corrected_result: Any | None,
         state: PipelineState,
         state_path: Path,
     ) -> None:
-        """9단계 Wiki 컴파일 (Phase 1 dry-run, non-fatal).
+        """9단계 Wiki 컴파일 (non-fatal).
 
-        Phase 1 동작:
-            - WikiCompiler 가 wiki/log.md 에 dry-run 한 줄 기록 + git commit
-            - 실패 시 PipelineError 를 catch 하여 state.warnings 에 기록만 하고
-              메인 파이프라인은 정상 종료 ("completed" 유지)
+        wiki.dry_run=False 인 실제 컴파일 경로에서는 summary markdown 과
+        corrected utterances 를 WikiCompilerV2 까지 전달한다. 이 단계는 여전히
+        non-fatal 이므로 Wiki 실패가 메인 파이프라인의 completed 상태를 깨지 않는다.
 
         Args:
             meeting_id: 회의 ID — wiki log 마커에 기록.
+            meeting_date: 회의 날짜 (YYYY-MM-DD).
+            summary_result: 요약 단계 결과. markdown 또는 summary 속성을 사용한다.
+            corrected_result: 보정 단계 결과. utterances 속성을 사용한다.
             state: 파이프라인 상태 — step_results / warnings 에 결과 기록.
             state_path: 상태 파일 경로 — non-fatal 실패 시도 저장.
         """
         # 지연 import — wiki 패키지가 없는 테스트 환경에서 import 비용 회피
+        from datetime import date as date_cls
+
         from steps.wiki_compiler import WikiCompiler  # noqa: PLC0415
 
         step_start = time.monotonic()
         step_name = PipelineStep.WIKI_COMPILE.value
         try:
             wiki = WikiCompiler(self._config, self._model_manager)
-            wiki_result = await wiki.run(meeting_id=meeting_id)
+            summary_text = ""
+            if summary_result is not None:
+                summary_text = str(
+                    getattr(
+                        summary_result,
+                        "markdown",
+                        getattr(summary_result, "summary", ""),
+                    )
+                    or ""
+                )
+            utterances = []
+            if corrected_result is not None:
+                utterances = list(getattr(corrected_result, "utterances", []) or [])
+            parsed_meeting_date = date_cls.fromisoformat(meeting_date)
+            wiki_result = await wiki.run(
+                meeting_id=meeting_id,
+                summary=summary_text or None,
+                utterances=utterances,
+                meeting_date=parsed_meeting_date,
+            )
             elapsed = time.monotonic() - step_start
             logger.info(
                 "wiki 9단계 완료 (non-fatal): %s — %s",
@@ -1674,8 +1700,12 @@ class PipelineManager:
         # (기존 mock_config 기반 단위 테스트가 9단계를 실수로 실행하지 않도록).
         wiki_cfg = getattr(self._config, "wiki", None)
         if wiki_cfg is not None and getattr(wiki_cfg, "enabled", False) is True:
+            meeting_date = self._derive_meeting_date(meeting_id, audio_path)
             await self._run_step_wiki_compile(
                 meeting_id=meeting_id,
+                meeting_date=meeting_date,
+                summary_result=_summary_result,
+                corrected_result=corrected_result,
                 state=state,
                 state_path=state_path,
             )

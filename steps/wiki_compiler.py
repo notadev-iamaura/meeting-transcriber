@@ -161,6 +161,7 @@ class WikiCompiler:
         meeting_id: str,
         summary: str | None = None,
         utterances: list[Any] | None = None,
+        meeting_date: date | None = None,
     ) -> dict[str, Any]:
         """Phase 1 dry-run: 빈 wiki 골격 + log.md 한 줄 append.
 
@@ -169,6 +170,7 @@ class WikiCompiler:
                 Phase 1 은 형식 검증을 하지 않는다 (Phase 2 D2 에서 검증).
             summary: 요약 텍스트. Phase 1 에서는 사용하지 않음.
             utterances: 발화 리스트. Phase 1 에서는 사용하지 않음.
+            meeting_date: 회의 날짜. None 이면 오늘 날짜로 폴백한다.
 
         Returns:
             결과 딕셔너리:
@@ -206,6 +208,7 @@ class WikiCompiler:
             return await self._run_v2(
                 store=store,
                 meeting_id=meeting_id,
+                meeting_date=meeting_date,
                 summary=summary,
                 utterances=utterances or [],
             )
@@ -226,6 +229,7 @@ class WikiCompiler:
         *,
         store: WikiStore,
         meeting_id: str,
+        meeting_date: date | None,
         summary: str,
         utterances: list[Any],
     ) -> dict[str, Any]:
@@ -237,6 +241,7 @@ class WikiCompiler:
         Args:
             store: 초기화된 WikiStore.
             meeting_id: 회의 ID.
+            meeting_date: 회의 날짜. None 이면 오늘 날짜로 폴백.
             summary: 8단계 요약 결과.
             utterances: 5단계 보정 발화 리스트.
 
@@ -258,7 +263,7 @@ class WikiCompiler:
             )
             result = await v2.compile_meeting(
                 meeting_id=meeting_id,
-                meeting_date=date.today(),
+                meeting_date=meeting_date or date.today(),
                 summary=summary,
                 utterances=utterances,
             )

@@ -76,6 +76,7 @@
                 '    <button type="button" class="settings-tab" data-tab="prompts" role="tab">프롬프트</button>',
                 '    <button type="button" class="settings-tab" data-tab="vocabulary" role="tab">용어집</button>',
                 '    <button type="button" class="settings-tab" data-tab="reindex" role="tab">검색 인덱스</button>',
+                '    <button type="button" class="settings-tab" data-tab="wiki-backfill" role="tab">Decision Wiki</button>',
                 '  </div>',
                 '  <div class="settings-panel-host" id="settingsPanelHost" role="tabpanel"></div>',
                 '</div>',
@@ -137,6 +138,8 @@
                 this._currentPanel = new VocabularySettingsPanel(host);
             } else if (name === "reindex") {
                 this._currentPanel = new ReindexSettingsPanel(host);
+            } else if (name === "wiki-backfill") {
+                this._currentPanel = new WikiBackfillSettingsPanel(host);
             } else {
                 this._currentPanel = new GeneralSettingsPanel(host);
                 name = "general";
@@ -445,6 +448,144 @@
             if (this._wsHandler) {
                 document.removeEventListener("ws:reindex_progress", this._wsHandler);
                 this._wsHandler = null;
+            }
+        };
+
+        function WikiBackfillSettingsPanel(host) {
+            this._host = host;
+            this._jobId = window.localStorage.getItem("wikiBackfillJobId") || "";
+            this._pollTimer = null;
+            this._render();
+            if (this._jobId) this._loadStatus();
+        }
+
+        WikiBackfillSettingsPanel.prototype._render = function () {
+            this._host.innerHTML = [
+                '<div class="reindex-panel">',
+                '  <section class="settings-section">',
+                '    <h3 class="settings-section-title">Decision Wiki 백필</h3>',
+                '    <p class="settings-section-desc">기존 회의의 요약과 보정 발화를 다시 읽어 verified citation 기반 decision page를 생성합니다.</p>',
+                '    <div class="reindex-batch-controls">',
+                '      <button type="button" class="btn btn-primary" id="wikiBackfillStartBtn">전체 백필 시작</button>',
+                '      <button type="button" class="btn btn-secondary" id="wikiBackfillCancelBtn" disabled>취소</button>',
+                '      <button type="button" class="btn btn-secondary" id="wikiBackfillResumeBtn" disabled>재개</button>',
+                '      <button type="button" class="btn btn-secondary" id="wikiBackfillRetryBtn" disabled>실패 재시도</button>',
+                '    </div>',
+                '    <div class="reindex-progress" id="wikiBackfillProgress" aria-live="polite">',
+                '      <div class="reindex-progress-text" id="wikiBackfillProgressText">대기 중</div>',
+                '      <div class="reindex-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">',
+                '        <div class="reindex-progress-bar-fill" id="wikiBackfillProgressFill"></div>',
+                '      </div>',
+                '    </div>',
+                '  </section>',
+                '  <section class="settings-section">',
+                '    <h3 class="settings-section-title">실패 내역</h3>',
+                '    <div class="reindex-missing-list" id="wikiBackfillErrors"><div class="reindex-missing-empty">표시할 실패 내역이 없습니다.</div></div>',
+                '  </section>',
+                '</div>',
+            ].join("\n");
+
+            var self = this;
+            document.getElementById("wikiBackfillStartBtn").addEventListener("click", function () { self._start(); });
+            document.getElementById("wikiBackfillCancelBtn").addEventListener("click", function () { self._cancel(); });
+            document.getElementById("wikiBackfillResumeBtn").addEventListener("click", function () { self._resume(); });
+            document.getElementById("wikiBackfillRetryBtn").addEventListener("click", function () { self._retryFailed(); });
+        };
+
+        WikiBackfillSettingsPanel.prototype._start = async function () {
+            try {
+                var data = await App.apiRequest("/wiki/backfill", {
+                    method: "POST",
+                    body: JSON.stringify({ dry_run: false }),
+                });
+                this._setJob(data.job_id);
+                this._loadStatus();
+            } catch (e) {
+                window.alert("Wiki 백필 시작 실패: " + e.message);
+            }
+        };
+
+        WikiBackfillSettingsPanel.prototype._cancel = async function () {
+            if (!this._jobId) return;
+            await App.apiRequest("/wiki/backfill/" + encodeURIComponent(this._jobId) + "/cancel", { method: "POST" });
+            this._loadStatus();
+        };
+
+        WikiBackfillSettingsPanel.prototype._resume = async function () {
+            if (!this._jobId) return;
+            var data = await App.apiRequest("/wiki/backfill/" + encodeURIComponent(this._jobId) + "/resume", { method: "POST" });
+            this._setJob(data.job_id);
+            this._loadStatus();
+        };
+
+        WikiBackfillSettingsPanel.prototype._retryFailed = async function () {
+            if (!this._jobId) return;
+            var data = await App.apiRequest("/wiki/backfill/" + encodeURIComponent(this._jobId) + "/retry-failed", { method: "POST" });
+            this._setJob(data.job_id);
+            this._loadStatus();
+        };
+
+        WikiBackfillSettingsPanel.prototype._setJob = function (jobId) {
+            this._jobId = jobId || "";
+            if (this._jobId) window.localStorage.setItem("wikiBackfillJobId", this._jobId);
+        };
+
+        WikiBackfillSettingsPanel.prototype._loadStatus = async function () {
+            if (!this._jobId) return;
+            try {
+                var data = await App.apiRequest("/wiki/backfill/" + encodeURIComponent(this._jobId));
+                this._renderStatus(data);
+                if (data.status === "running") this._schedulePoll();
+            } catch (e) {
+                var text = document.getElementById("wikiBackfillProgressText");
+                if (text) text.textContent = "상태 조회 실패: " + e.message;
+            }
+        };
+
+        WikiBackfillSettingsPanel.prototype._schedulePoll = function () {
+            var self = this;
+            if (self._pollTimer) clearTimeout(self._pollTimer);
+            self._pollTimer = setTimeout(function () { self._loadStatus(); }, 1500);
+        };
+
+        WikiBackfillSettingsPanel.prototype._renderStatus = function (data) {
+            var processed = data.processed || 0;
+            var total = data.total || 0;
+            var ratio = total > 0 ? Math.round((processed / total) * 100) : 0;
+            var text = document.getElementById("wikiBackfillProgressText");
+            var fill = document.getElementById("wikiBackfillProgressFill");
+            if (text) {
+                text.textContent = data.status + " · " + processed + " / " + total +
+                    " · 성공 " + (data.succeeded || 0) + " · 실패 " + (data.failed || 0);
+            }
+            if (fill) fill.style.width = ratio + "%";
+
+            document.getElementById("wikiBackfillCancelBtn").disabled = data.status !== "running";
+            document.getElementById("wikiBackfillResumeBtn").disabled = data.status !== "interrupted" && data.status !== "cancelled";
+            document.getElementById("wikiBackfillRetryBtn").disabled = !(data.failed > 0);
+
+            var errorsEl = document.getElementById("wikiBackfillErrors");
+            var errors = data.errors || [];
+            if (!errorsEl) return;
+            if (errors.length === 0) {
+                errorsEl.innerHTML = '<div class="reindex-missing-empty">표시할 실패 내역이 없습니다.</div>';
+                return;
+            }
+            errorsEl.innerHTML = errors.map(function (err) {
+                return '<div class="reindex-missing-row"><div class="reindex-missing-id">' +
+                    App.escapeHtml(err.meeting_id || "(unknown)") + '</div><div>' +
+                    App.escapeHtml(err.error_type + ": " + err.message) + '</div></div>';
+            }).join("");
+        };
+
+        WikiBackfillSettingsPanel.prototype.isDirty = function () {
+            return false;
+        };
+
+        WikiBackfillSettingsPanel.prototype.destroy = function () {
+            if (this._pollTimer) {
+                clearTimeout(this._pollTimer);
+                this._pollTimer = null;
             }
         };
 

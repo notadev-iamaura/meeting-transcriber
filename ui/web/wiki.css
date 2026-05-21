@@ -123,6 +123,38 @@
   background: var(--text-muted);
 }
 
+.wiki-decision-filters {
+  display: grid;
+  grid-template-columns: 120px minmax(120px, 1fr) minmax(120px, 1fr) 132px 132px 96px;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-canvas);
+  flex-shrink: 0;
+}
+
+.wiki-filter-control {
+  min-width: 0;
+  height: 30px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+}
+
+.wiki-filter-control:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.wiki-filter-control--small {
+  max-width: 96px;
+}
+
 /* 본문 — 트리(좌) + 미리보기(우) 의 flex row */
 .wiki-body {
   display: flex;

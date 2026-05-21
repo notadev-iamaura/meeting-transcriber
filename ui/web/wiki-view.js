@@ -50,6 +50,7 @@
         var WIKI_CATEGORIES = [
             // (backendTypes 배열) — 백엔드에서 올 수 있는 type 값 후보들
             { id: "decisions",    label: "결정사항",   types: ["decisions", "decision"] },
+            { id: "pending",      label: "검토 필요",   types: ["pending"] },
             { id: "action_items", label: "액션아이템", types: ["action_items", "action_item"] },
             { id: "people",       label: "인물",       types: ["people", "person"] },
             { id: "projects",     label: "프로젝트",   types: ["projects", "project"] },
@@ -221,6 +222,20 @@
                 '      <span id="wikiHealthLabel">상태 확인 중…</span>',
                 '    </button>',
                 '  </div>',
+                '  <div class="wiki-decision-filters" aria-label="결정사항 필터">',
+                '    <select id="wikiStatusFilter" class="wiki-filter-control" aria-label="상태">',
+                '      <option value="">상태 전체</option>',
+                '      <option value="decided">확정</option>',
+                '      <option value="pending">검토 필요</option>',
+                '      <option value="rejected">거부</option>',
+                '      <option value="superseded">대체됨</option>',
+                '    </select>',
+                '    <input type="search" id="wikiProjectFilter" class="wiki-filter-control" placeholder="프로젝트" aria-label="프로젝트">',
+                '    <input type="search" id="wikiPersonFilter" class="wiki-filter-control" placeholder="관련자/담당자" aria-label="관련자 또는 담당자">',
+                '    <input type="date" id="wikiDateFromFilter" class="wiki-filter-control" aria-label="시작일">',
+                '    <input type="date" id="wikiDateToFilter" class="wiki-filter-control" aria-label="종료일">',
+                '    <input type="number" id="wikiConfidenceFilter" class="wiki-filter-control wiki-filter-control--small" min="0" max="10" step="1" placeholder="신뢰도" aria-label="최소 신뢰도">',
+                '  </div>',
                 // 본문 (트리 + 미리보기)
                 '  <div class="wiki-body">',
                 '    <nav class="wiki-tree" id="wikiTree" aria-label="위키 페이지 트리"></nav>',
@@ -236,6 +251,12 @@
                 healthBadge: document.getElementById("wikiHealthBadge"),
                 healthDot: document.getElementById("wikiHealthDot"),
                 healthLabel: document.getElementById("wikiHealthLabel"),
+                statusFilter: document.getElementById("wikiStatusFilter"),
+                projectFilter: document.getElementById("wikiProjectFilter"),
+                personFilter: document.getElementById("wikiPersonFilter"),
+                dateFromFilter: document.getElementById("wikiDateFromFilter"),
+                dateToFilter: document.getElementById("wikiDateToFilter"),
+                confidenceFilter: document.getElementById("wikiConfidenceFilter"),
                 tree: document.getElementById("wikiTree"),
                 preview: document.getElementById("wikiPreview"),
             };
@@ -270,6 +291,28 @@
             };
             els.searchInput.addEventListener("input", onSearchInput);
             self._listeners.push({ el: els.searchInput, type: "input", fn: onSearchInput });
+
+            var onFilterChange = function () {
+                var q = els.searchInput.value.trim();
+                if (q || self._hasDecisionFilters()) {
+                    self._performSearch(q || "decision");
+                } else {
+                    self._exitSearchMode();
+                }
+            };
+            [
+                els.statusFilter,
+                els.projectFilter,
+                els.personFilter,
+                els.dateFromFilter,
+                els.dateToFilter,
+                els.confidenceFilter,
+            ].forEach(function (el) {
+                el.addEventListener("change", onFilterChange);
+                el.addEventListener("input", onFilterChange);
+                self._listeners.push({ el: el, type: "change", fn: onFilterChange });
+                self._listeners.push({ el: el, type: "input", fn: onFilterChange });
+            });
 
             // ESC — 검색 초기화 또는 모달 닫기
             var onSearchKeydown = function (e) {
@@ -502,8 +545,21 @@
 
             self._searchMode = true;
 
+            var params = new URLSearchParams();
+            params.set("q", q);
+            params.set("limit", "50");
+            params.set("page_type", "decision");
+            if (self._els.statusFilter.value) params.set("status", self._els.statusFilter.value);
+            if (self._els.projectFilter.value.trim()) params.set("project", self._els.projectFilter.value.trim());
+            if (self._els.personFilter.value.trim()) {
+                params.set("person", self._els.personFilter.value.trim());
+            }
+            if (self._els.dateFromFilter.value) params.set("date_from", self._els.dateFromFilter.value);
+            if (self._els.dateToFilter.value) params.set("date_to", self._els.dateToFilter.value);
+            if (self._els.confidenceFilter.value) params.set("min_confidence", self._els.confidenceFilter.value);
+
             App.apiRequest(
-                "/wiki/search?q=" + encodeURIComponent(q) + "&limit=20",
+                "/wiki/search?" + params.toString(),
                 ctrl ? { signal: ctrl.signal } : {}
             )
                 .then(function (data) {
@@ -519,6 +575,18 @@
                         App.escapeHtml("검색에 실패했습니다: " + (err.message || "알 수 없는 오류")) +
                         "</div>";
                 });
+        };
+
+        WikiView.prototype._hasDecisionFilters = function () {
+            var els = this._els;
+            return Boolean(
+                els.statusFilter.value ||
+                els.projectFilter.value.trim() ||
+                els.personFilter.value.trim() ||
+                els.dateFromFilter.value ||
+                els.dateToFilter.value ||
+                els.confidenceFilter.value
+            );
         };
 
         /**

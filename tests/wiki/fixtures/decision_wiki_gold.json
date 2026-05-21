@@ -1,0 +1,12 @@
+{
+  "meeting_id": "1234abcd",
+  "query": "Q3 출시일 결정",
+  "expected_decisions": [
+    {
+      "id": "decision-2026-05-21-q3-launch-date",
+      "title": "Q3 출시일 확정",
+      "citation": "[meeting:1234abcd@00:01:20]",
+      "project": "Apollo"
+    }
+  ]
+}

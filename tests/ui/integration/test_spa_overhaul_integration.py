@@ -221,6 +221,13 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
                 body='{"opened": true, "path": "/tmp/audio_input"}',
             )
             return
+        if "/api/meetings/batch/preview" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"queued": 2, "skipped": 1, "matched": 3}',
+            )
+            return
         if "/api/meetings/batch" in url:
             batch_payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
@@ -273,6 +280,8 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
 
         page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").click()
         page.locator(".home-action-dropdown [role='menuitemradio'][data-option='both']").click()
+        page.wait_for_selector("#homeBatchConfirmModal:not(.hidden)", state="attached")
+        page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
             "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
         )
@@ -285,6 +294,8 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
         page.locator(
             ".home-action-dropdown [role='menuitemradio'][data-option='transcribe']"
         ).click()
+        page.wait_for_selector("#homeBatchConfirmModal:not(.hidden)", state="attached")
+        page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
             "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
         )
@@ -1163,7 +1174,8 @@ def test_wiki_search_detail_citation_and_unicode_slug_contract(
 
         assert len(search_urls) == 1
         assert "q=%EC%B6%9C%EC%8B%9C" in search_urls[0]
-        assert "limit=20" in search_urls[0]
+        assert "limit=50" in search_urls[0]
+        assert "page_type=decision" in search_urls[0]
 
         page.locator(".wiki-tree__item", has_text="철수 상세").click()
         page.wait_for_selector(".wiki-preview-page-title", state="attached")
@@ -1180,6 +1192,226 @@ def test_wiki_search_detail_citation_and_unicode_slug_contract(
         assert citation.get_attribute("data-seconds") == "3723"
         citation.click()
         page.wait_for_url("**/app/viewer/abc12345?t=3723")
+
+
+def test_wiki_decision_filters_and_pending_category_contract(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """DW-E01/E03/E04: decision 필터 query와 pending category/detail 표시를 검증."""
+    search_urls: list[str] = []
+
+    def wiki_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/wiki/search" in url:
+            search_urls.append(url)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "results": [
+                            {
+                                "path": "decisions/launch.md",
+                                "type": "decisions",
+                                "title": "출시 결정",
+                                "snippet": "Q3 출시일 확정",
+                                "score": 1.2,
+                                "citations": ["[meeting:abc12345@00:01:20]"],
+                                "metadata": {
+                                    "status": "decided",
+                                    "project": "Apollo",
+                                    "confidence": 9,
+                                },
+                            }
+                        ]
+                    }
+                ),
+            )
+            return
+        if "/api/wiki/pages/pending/decisions/review" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "path": "pending/decisions/review.md",
+                        "type": "pending",
+                        "title": "검토 필요 결정",
+                        "frontmatter": {
+                            "status": "pending",
+                            "confidence": 5,
+                            "source_meetings": ["abc12345"],
+                            "owners": ["지연"],
+                        },
+                        "content": "# 검토 필요 결정\n\n확인 필요 [meeting:abc12345@00:01:20]",
+                    }
+                ),
+            )
+            return
+        if "/api/wiki/health" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "ok", "raw_markdown": "# Health"}),
+            )
+            return
+        if "/api/wiki/pages" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "pages": [
+                            {
+                                "path": "pending/decisions/review.md",
+                                "type": "pending",
+                                "title": "검토 필요 결정",
+                                "last_updated": "2026-05-21T00:00:00",
+                            }
+                        ]
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1280, "height": 800},
+        path="/app/wiki",
+        api_handler=wiki_api,
+    ) as page:
+        page.wait_for_selector(".wiki-tree__item", state="attached")
+        pending = page.locator('.wiki-tree__category[data-cat="pending"]')
+        assert "검토 필요" in pending.inner_text()
+
+        page.locator(".wiki-tree__item", has_text="검토 필요 결정").click()
+        page.wait_for_selector(".wiki-preview-page-title", state="attached")
+        frontmatter = page.locator(".wiki-preview-frontmatter").inner_text()
+        assert "pending" in frontmatter
+        assert "abc12345" in frontmatter
+        assert "지연" in frontmatter
+
+        page.locator("#wikiStatusFilter").select_option("decided")
+        page.locator("#wikiProjectFilter").fill("Apollo")
+        page.locator("#wikiPersonFilter").fill("지연")
+        page.locator("#wikiDateFromFilter").fill("2026-05-01")
+        page.locator("#wikiDateToFilter").fill("2026-05-31")
+        page.locator("#wikiConfidenceFilter").fill("7")
+        page.wait_for_timeout(450)
+
+        assert search_urls, "filter change should call /api/wiki/search"
+        latest = search_urls[-1]
+        for fragment in (
+            "page_type=decision",
+            "status=decided",
+            "project=Apollo",
+            "person=%EC%A7%80%EC%97%B0",
+            "date_from=2026-05-01",
+            "date_to=2026-05-31",
+            "min_confidence=7",
+        ):
+            assert fragment in latest
+
+
+def test_settings_wiki_backfill_panel_calls_start_cancel_resume_retry(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """DW-F06: Settings Decision Wiki 백필 패널의 API contract를 검증."""
+    calls: list[str] = []
+
+    def settings_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/wiki/backfill/job-start/retry-failed" in url:
+            calls.append("retry")
+            route.fulfill(
+                status=202,
+                content_type="application/json",
+                body='{"job_id":"job-retry","started_at":"2026-05-21T10:00:03","message":"retry"}',
+            )
+            return
+        if "/api/wiki/backfill/job-start/resume" in url:
+            calls.append("resume")
+            route.fulfill(
+                status=202,
+                content_type="application/json",
+                body='{"job_id":"job-start","started_at":"2026-05-21T10:00:02","message":"resume"}',
+            )
+            return
+        if "/api/wiki/backfill/job-start/cancel" in url:
+            calls.append("cancel")
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"job_id":"job-start","status":"cancelling"}',
+            )
+            return
+        if "/api/wiki/backfill/job-start" in url:
+            calls.append("status")
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "job_id": "job-start",
+                        "status": "running",
+                        "processed": 1,
+                        "total": 2,
+                        "succeeded": 1,
+                        "failed": 1,
+                        "errors": [
+                            {
+                                "meeting_id": "deadbeef",
+                                "error_type": "summary_missing",
+                                "message": "요약 없음",
+                            }
+                        ],
+                    }
+                ),
+            )
+            return
+        if "/api/wiki/backfill" in url:
+            calls.append("start")
+            route.fulfill(
+                status=202,
+                content_type="application/json",
+                body='{"job_id":"job-start","started_at":"2026-05-21T10:00:00","message":"started"}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1280, "height": 800},
+        path="/app/settings/wiki-backfill",
+        api_handler=settings_api,
+    ) as page:
+        page.wait_for_selector("#wikiBackfillStartBtn", state="attached")
+        page.locator("#wikiBackfillStartBtn").click()
+        page.wait_for_function("() => localStorage.getItem('wikiBackfillJobId') === 'job-start'")
+        page.wait_for_timeout(300)
+        assert "start" in calls
+        assert "status" in calls
+        assert "실패 1" in page.locator("#wikiBackfillProgressText").inner_text()
+        assert "deadbeef" in page.locator("#wikiBackfillErrors").inner_text()
+
+        page.locator("#wikiBackfillCancelBtn").click()
+        page.wait_for_timeout(100)
+        assert "cancel" in calls
+
+        page.evaluate("() => document.querySelector('#wikiBackfillResumeBtn').disabled = false")
+        page.locator("#wikiBackfillResumeBtn").click()
+        page.wait_for_timeout(100)
+        assert "resume" in calls
+
+        page.evaluate("() => document.querySelector('#wikiBackfillRetryBtn').disabled = false")
+        page.locator("#wikiBackfillRetryBtn").click()
+        page.wait_for_timeout(100)
+        assert "retry" in calls
 
 
 def test_wiki_health_modal_closes_and_destroy_cleans_it(
@@ -1756,9 +1988,10 @@ def test_settings_route_renders_tabs(browser: Browser, spa_static_server: str) -
             pytest.fail("설정 화면 미렌더 — .settings-view 부재")
 
         tabs = page.locator(".settings-tab")
-        assert tabs.count() == 4
+        assert tabs.count() == 5
         prompts_tab = page.locator('.settings-tab[data-tab="prompts"]')
         assert prompts_tab.get_attribute("aria-selected") == "true"
+        assert page.locator('.settings-tab[data-tab="wiki-backfill"]').count() == 1
         assert page.locator("#settingsPanelHost").count() == 1
 
 

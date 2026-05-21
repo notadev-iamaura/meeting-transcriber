@@ -208,8 +208,8 @@
                 },
             },
             {
-                // /app/settings 및 /app/settings/{tab} (tab: general|prompts|vocabulary)
-                pattern: /^\/app\/settings(?:\/(general|prompts|vocabulary))?$/,
+                // /app/settings 및 /app/settings/{tab}
+                pattern: /^\/app\/settings(?:\/(general|prompts|vocabulary|reindex|wiki-backfill))?$/,
                 handler: function (match) {
                     return new SettingsView({ initialTab: match[1] || "general" });
                 },
