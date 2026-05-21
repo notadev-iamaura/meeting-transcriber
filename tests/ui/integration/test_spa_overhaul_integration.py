@@ -513,6 +513,51 @@ def test_global_resource_bar_renders_resources_and_ignores_failures(
         assert "visible" not in (page.locator("#errorBanner").get_attribute("class") or "")
 
 
+def test_home_medium_width_layout_does_not_overlap_status_bar(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """사이드바가 있는 중간 폭에서 홈 카드와 전역 리소스 바가 겹치지 않는다."""
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 887, "height": 500},
+        path="/app",
+    ) as page:
+        page.wait_for_selector(".home-view", state="attached")
+        page.wait_for_selector("#globalResourceBar", state="attached")
+
+        layout = page.evaluate(
+            """
+            () => {
+                const bar = document.querySelector('#globalResourceBar').getBoundingClientRect();
+                const stats = document.querySelector('.home-stats').getBoundingClientRect();
+                const theme = document.querySelector('#themeToggle').getBoundingClientRect();
+                const cards = [...document.querySelectorAll('.home-stat-card')]
+                    .map((el) => el.getBoundingClientRect());
+                const intersects = (a, b) => !(
+                    a.right <= b.left || a.left >= b.right ||
+                    a.bottom <= b.top || a.top >= b.bottom
+                );
+                return {
+                    barParentId: document.querySelector('#globalResourceBar').parentElement.id,
+                    barBottom: bar.bottom,
+                    statsTop: stats.top,
+                    cardRows: new Set(cards.map((card) => Math.round(card.top))).size,
+                    barOverlapsTheme: intersects(bar, theme),
+                    barOverlapsCards: cards.some((card) => intersects(bar, card))
+                };
+            }
+            """
+        )
+
+        assert layout["barParentId"] == "content-wrapper"
+        assert layout["barBottom"] <= layout["statsTop"]
+        assert layout["cardRows"] == 2
+        assert layout["barOverlapsTheme"] is False
+        assert layout["barOverlapsCards"] is False
+
+
 def test_global_resource_bar_singleton_and_stop_guard(
     browser: Browser,
     spa_static_server: str,

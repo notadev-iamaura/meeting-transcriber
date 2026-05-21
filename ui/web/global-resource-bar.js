@@ -27,7 +27,10 @@
         function _ensureDom() {
             if (_el && doc.body && doc.body.contains(_el)) return _el;
             _el = doc.getElementById("globalResourceBar");
-            if (_el) return _el;
+            if (_el) {
+                _mountDom(_el);
+                return _el;
+            }
 
             _el = doc.createElement("div");
             _el.id = "globalResourceBar";
@@ -47,8 +50,18 @@
                 '</div>',
                 '<div class="grb-model" id="grb-model-text" title="현재 로드된 모델"></div>',
             ].join("");
-            doc.body.appendChild(_el);
+            _mountDom(_el);
             return _el;
+        }
+
+        function _mountDom(el) {
+            var wrapper = doc.getElementById("content-wrapper");
+            var content = doc.getElementById("content");
+            if (wrapper && content && content.parentElement === wrapper) {
+                wrapper.insertBefore(el, content);
+                return;
+            }
+            if (doc.body) doc.body.appendChild(el);
         }
 
         function _applyBarState(bar, pct) {
