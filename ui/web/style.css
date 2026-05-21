@@ -1092,16 +1092,29 @@ button {
 /* 대시보드 통계 카드 그리드 — 4 칼럼, 모바일에서 2 칼럼으로 떨어짐 */
 .home-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 1060px) {
   .home-stats {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+@media (max-width: 720px) {
   .home-view {
     padding: 16px 16px 12px;
+  }
+}
+
+@media (max-width: 420px) {
+  .home-view {
+    padding-top: 64px;
+  }
+
+  .home-stats {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1114,6 +1127,7 @@ button {
   flex-direction: column;
   gap: 4px;
   min-height: 84px;
+  min-width: 0;
 }
 
 .home-stat-label {
@@ -1136,6 +1150,7 @@ button {
 .home-stat-sub {
   font-size: 12px;
   color: var(--text-muted, var(--text-secondary));
+  overflow-wrap: anywhere;
 }
 
 /* 액션 버튼 행 — 좌측 정렬, wrap 으로 좁은 화면 대응 */
@@ -1149,6 +1164,8 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
+  min-width: 0;
   padding: 8px 14px;
   font-size: 13px;
   font-weight: 500;
@@ -1182,6 +1199,13 @@ button {
 .home-action-btn svg {
   flex-shrink: 0;
   color: var(--text-secondary);
+}
+
+.home-action-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 액션 결과 안내 — toast 가 아닌 in-flow 메시지 (선택적, 비어있을 때 자리만 차지하지 않음) */
@@ -1326,15 +1350,21 @@ button {
 }
 
 
-/* --- 11-1b. 글로벌 리소스 바 (모든 탭 공통, 우측 상단 fixed) --- */
+/* --- 11-1b. 글로벌 리소스 바 (모든 탭 공통, 콘텐츠 상단 sticky) --- */
 
 .global-resource-bar {
-  position: fixed;
-  top: 8px;
-  right: 56px;
+  position: sticky;
+  top: 0;
+  align-self: flex-end;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
+  row-gap: 6px;
+  max-width: calc(100% - 80px);
+  min-width: 0;
+  flex-shrink: 0;
+  margin: 8px 64px 0 16px;
   padding: 6px 12px;
   background: var(--bg-card);
   border: 0.5px solid var(--border);
@@ -1352,6 +1382,7 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .global-resource-bar .grb-label {
@@ -1382,7 +1413,7 @@ button {
 
 .global-resource-bar .grb-value {
   font-variant-numeric: tabular-nums;
-  min-width: 36px;
+  min-width: 44px;
 }
 
 .global-resource-bar .grb-model {
@@ -1396,6 +1427,21 @@ button {
 
 .global-resource-bar .grb-model:empty {
   display: none;
+}
+
+@media (max-width: 768px) {
+  .global-resource-bar {
+    align-self: stretch;
+    justify-content: flex-end;
+    margin: 8px 60px 0 56px;
+    max-width: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .global-resource-bar {
+    display: none;
+  }
 }
 
 
