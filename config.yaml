@@ -25,8 +25,8 @@ stt:
 diarization:
   model_name: "pyannote/speaker-diarization-3.1"
   device: "cpu"                              # pyannote MPS 버그 회피: CPU 강제
-  min_speakers: 1                            # 최소 화자 수 (1명이어도 정상 처리)
-  max_speakers: 10                           # 최대 화자 수
+  min_speakers: 2                            # 최소 화자 수 (회의 기본값: 2명 이상)
+  max_speakers: 4                            # 최대 화자 수 (기본 회의 규모 최적화)
   protect_zoom_meetings: true                # Zoom 회의 중 화자분리 worker 일시정지
   zoom_protection_mode: "pause"              # pause: 별도 worker 를 SIGSTOP/SIGCONT 로 제어
   zoom_protection_poll_seconds: 1.0          # Zoom 상태 확인 간격 (초)
