@@ -55,6 +55,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -287,13 +288,17 @@ def ui_bulk_meeting_ids(ui_bulk_base_dir: Path) -> list[str]:
     """
     _ensure_jobs_db(ui_bulk_base_dir)
 
-    # 의도적으로 분/초 단위로 시간차를 두어 created_at desc 정렬이 명확.
+    # 의도적으로 분 단위로 시간차를 두어 created_at desc 정렬이 명확.
+    # 회의 ID는 시각 baseline 표시를 안정화하기 위해 고정하되, created_at은
+    # 실행 시점 기준 최근 24시간 안에 두어 대시보드 "이번 주" 통계가
+    # 날짜 흐름에 따라 깨지지 않게 한다.
+    now = datetime.now().replace(microsecond=0)
     seed_specs = [
-        ("meeting_20260429_120500", True, "2026-04-29T12:05:00"),
-        ("meeting_20260429_120400", False, "2026-04-29T12:04:00"),
-        ("meeting_20260429_120300", True, "2026-04-29T12:03:00"),
-        ("meeting_20260429_120200", False, "2026-04-29T12:02:00"),
-        ("meeting_20260429_120100", True, "2026-04-29T12:01:00"),
+        ("meeting_20260429_120500", True, (now - timedelta(minutes=0)).isoformat()),
+        ("meeting_20260429_120400", False, (now - timedelta(minutes=1)).isoformat()),
+        ("meeting_20260429_120300", True, (now - timedelta(minutes=2)).isoformat()),
+        ("meeting_20260429_120200", False, (now - timedelta(minutes=3)).isoformat()),
+        ("meeting_20260429_120100", True, (now - timedelta(minutes=4)).isoformat()),
     ]
 
     for meeting_id, has_merge, created_at in seed_specs:

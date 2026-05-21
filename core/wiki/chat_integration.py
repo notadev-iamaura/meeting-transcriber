@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 from core.wiki.router import QueryRouter, RouteDecision, RouterVerdict
@@ -319,13 +320,12 @@ class HybridChatService:
     ) -> tuple[str, list[WikiAnswerSource]]:
         """위키 페이지를 검색·합성해 (answer, sources) 반환한다.
 
-        구현 (Phase 5 최소 동작):
+        구현:
             - wiki_store 가 None 이면 RuntimeError raise → 호출자가 RAG 폴백.
-            - wiki_store.all_pages() 로 페이지 목록을 받아 첫 N개 페이지를 읽어
-              본문을 이어붙인다 (Phase 5 단순 정책).
-            - 페이지가 0개면 RuntimeError raise.
-            - wiki_llm 이 있으면 본문을 합성에 사용 (Phase 5.D 확장 영역).
-              현재는 페이지 raw 본문을 그대로 answer 로 반환.
+            - FTS5/BM25 검색 결과만 컨텍스트로 사용한다.
+            - 검색 결과가 0개면 RuntimeError raise.
+            - wiki_llm 이 있으면 검색된 본문으로 합성하되, citation 을 잃으면
+              검색 결과 기반 fallback 을 반환한다.
 
         Args:
             query: 사용자 질문.
@@ -340,37 +340,43 @@ class HybridChatService:
         if self._wiki_store is None:
             raise RuntimeError("wiki_store_not_provided")
 
-        # 페이지 목록 수집 — all_pages() 는 Iterator[Path] 반환
+        from core.wiki.search_index import WikiSearchIndex  # noqa: PLC0415
+
         try:
-            page_paths = list(self._wiki_store.all_pages())
-        except Exception as exc:  # noqa: BLE001 — store 실패는 호출자에서 폴백
-            raise RuntimeError(f"wiki_store_list_failed: {exc}") from exc
+            index = WikiSearchIndex(self._wiki_store.root)
+            index.rebuild(self._wiki_store)
+            search_results = index.search(
+                query,
+                top_k=5,
+                page_types=["decision"],
+            )
+        except Exception as exc:  # noqa: BLE001 — 검색 실패는 호출자에서 폴백
+            raise RuntimeError(f"wiki_search_failed: {exc}") from exc
 
-        if not page_paths:
-            raise RuntimeError("wiki_no_pages_found")
+        if not search_results:
+            raise RuntimeError("wiki_no_search_results")
 
-        # Phase 5 최소 정책: 상위 3개 페이지만 읽어 합치기
-        # (Phase 5.D 에서 verdict.matched_signals 기반 정교한 검색 도입 예정)
-        max_pages = 3
         sources: list[WikiAnswerSource] = []
         body_parts: list[str] = []
 
-        for rel_path in sorted(page_paths)[:max_pages]:
+        for result in search_results:
+            rel_path = Path(result.page_path)
             try:
                 page = self._wiki_store.read_page(rel_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("wiki 페이지 읽기 실패: %s (%s)", rel_path, exc)
                 continue
 
-            # 제목 추출 — frontmatter.title > 첫 # 제목 > path stem
             title = self._extract_title(page, rel_path)
-            snippet = self._make_snippet(page.content, max_chars=200)
-            citation_strs = [f"[meeting:{c.meeting_id}@{c.timestamp_str}]" for c in page.citations]
+            snippet = result.snippet or self._make_snippet(page.content, max_chars=200)
+            citation_strs = result.citations or [
+                f"[meeting:{c.meeting_id}@{c.timestamp_str}]" for c in page.citations
+            ]
 
             sources.append(
                 WikiAnswerSource(
-                    page_path=str(rel_path),
-                    page_type=str(page.page_type),
+                    page_path=result.page_path,
+                    page_type=result.page_type,
                     title=title,
                     snippet=snippet,
                     citations=citation_strs,
@@ -378,17 +384,47 @@ class HybridChatService:
             )
             body_parts.append(f"## {title}\n\n{page.content.strip()}\n")
 
+        if not body_parts:
+            raise RuntimeError("wiki_no_readable_search_results")
+
+        fallback_answer = self._build_search_fallback_answer(query, sources)
+
         # answer 합성 — wiki_llm 이 있으면 합성, 없으면 raw 결합
         if self._wiki_llm is not None:
             try:
                 answer = await self._llm_synthesize(query, body_parts)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("LLM 위키 합성 실패, raw 본문 사용: %s", exc)
-                answer = "\n\n".join(body_parts)
+                logger.warning("LLM 위키 합성 실패, 검색 결과 fallback 사용: %s", exc)
+                answer = fallback_answer
         else:
-            answer = "\n\n".join(body_parts)
+            answer = fallback_answer
+
+        if not self._answer_preserves_any_citation(answer, sources):
+            logger.info("LLM 위키 답변에 citation 이 없어 검색 결과 fallback 사용")
+            answer = fallback_answer
 
         return answer, sources
+
+    @staticmethod
+    def _answer_preserves_any_citation(answer: str, sources: list[WikiAnswerSource]) -> bool:
+        """답변이 검색 근거 citation 을 하나 이상 보존했는지 확인한다."""
+        citation_markers = [marker for source in sources for marker in source.citations]
+        if not citation_markers:
+            return True
+        return any(marker in answer for marker in citation_markers)
+
+    @staticmethod
+    def _build_search_fallback_answer(query: str, sources: list[WikiAnswerSource]) -> str:
+        """LLM 이 citation 을 잃을 때 쓰는 검색 결과 기반 답변을 만든다."""
+        lines: list[str] = [f"질문과 관련된 Decision Wiki 검색 결과입니다: {query}"]
+        for idx, source in enumerate(sources, start=1):
+            citations = ", ".join(source.citations[:3])
+            snippet = source.snippet.strip()
+            if citations:
+                lines.append(f"{idx}. {source.title}: {snippet} {citations}")
+            else:
+                lines.append(f"{idx}. {source.title}: {snippet}")
+        return "\n".join(lines)
 
     async def _llm_synthesize(
         self,

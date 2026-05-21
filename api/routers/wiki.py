@@ -144,10 +144,15 @@ async def list_wiki_pages(request: Request) -> WikiPagesResponse:
         fm = page.frontmatter or {}
         title = fm.get("title")
         last_updated = fm.get("last_updated") or fm.get("updated_at")
+        type_value = (
+            "pending"
+            if rel_path.parts and rel_path.parts[0] == "pending"
+            else str(page.page_type.value)
+        )
         items.append(
             WikiPageItem(
                 path=str(rel_path),
-                type=str(page.page_type.value),
+                type=type_value,
                 title=str(title) if title is not None else None,
                 last_updated=str(last_updated) if last_updated is not None else None,
             )
@@ -227,6 +232,7 @@ _WIKI_PAGE_TYPE_TO_DIRNAME: dict[str, str] = {
     "person": "people",
     "project": "projects",
     "topic": "topics",
+    "pending": "pending",
 }
 
 # 검색 결과 limit 의 안전 상한. 기본 20, 사용자가 100 까지 요청할 수 있고
@@ -286,7 +292,9 @@ class WikiSearchResult(BaseModel):
         type: page_type (디렉토리명, 복수형).
         title: 페이지 제목 (frontmatter 또는 첫 H1).
         snippet: q 주변 컨텍스트 발췌 (앞 30 + q + 뒤 30 자 안팎).
-        score: 단순 매칭 횟수 (Phase 3 에서 BM25 로 교체 예정).
+        score: BM25 기반 관련도 점수. 클수록 관련도가 높다.
+        citations: 페이지 본문에서 추출한 회의 인용 마커.
+        metadata: status/project/participants/owners 등 frontmatter 메타데이터.
     """
 
     path: str
@@ -294,6 +302,8 @@ class WikiSearchResult(BaseModel):
     title: str | None = None
     snippet: str
     score: float
+    citations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WikiSearchResponse(BaseModel):
@@ -350,6 +360,23 @@ def _resolve_wiki_root(request: Request) -> Path | None:
     if not wiki_root.exists():
         return None
     return wiki_root
+
+
+def _make_search_snippet(content: str, query_lower: str) -> str:
+    """기존 api.routes re-export 호환용 snippet helper.
+
+    `/api/wiki/search` 자체는 BM25 색인의 snippet 을 사용하지만, 오래된 테스트와
+    외부 참조가 이 private helper 를 import 할 수 있어 제거하지 않는다.
+    """
+    content_lower = content.lower()
+    pos = content_lower.find(query_lower)
+    if pos == -1:
+        return ""
+    start = max(0, pos - _WIKI_SEARCH_SNIPPET_BEFORE)
+    end = min(len(content), pos + len(query_lower) + _WIKI_SEARCH_SNIPPET_AFTER)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(content) else ""
+    return f"{prefix}{content[start:end]}{suffix}".strip()
 
 
 @router.get(
@@ -417,7 +444,7 @@ async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> W
     from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
 
     rel_path_str = slug if slug.endswith(".md") else f"{slug}.md"
-    rel_path = Path(dirname) / rel_path_str
+    rel_path = Path("pending") / rel_path_str if dirname == "pending" else Path(dirname) / rel_path_str
 
     store = WikiStore(wiki_root)
     try:
@@ -458,38 +485,13 @@ async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> W
     )
 
 
-def _make_search_snippet(content: str, query_lower: str) -> str:
-    """본문에서 q 주변 컨텍스트를 발췌한 snippet 을 만든다.
-
-    Args:
-        content: 페이지 본문 (frontmatter 제거 후).
-        query_lower: 소문자로 변환된 검색어.
-
-    Returns:
-        앞 30 + q + 뒤 30자 안팎의 발췌 문자열. q 가 본문에 없으면 빈 문자열.
-    """
-    content_lower = content.lower()
-    pos = content_lower.find(query_lower)
-    if pos == -1:
-        return ""
-
-    start = max(0, pos - _WIKI_SEARCH_SNIPPET_BEFORE)
-    end = min(len(content), pos + len(query_lower) + _WIKI_SEARCH_SNIPPET_AFTER)
-    snippet = content[start:end]
-
-    # 시작/끝이 잘렸음을 표시하기 위해 ellipsis 추가 (UX 향상).
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(content) else ""
-    return f"{prefix}{snippet}{suffix}".strip()
-
-
 @router.get(
     "/wiki/search",
     response_model=WikiSearchResponse,
     summary="위키 페이지 전문 검색",
     description=(
-        "LLM Wiki Phase 2.G — 단순 substring 매칭으로 페이지 본문/제목을 검색한다. "
-        "Phase 3 에서 SQLite FTS5 또는 BM25 로 교체 예정. "
+        "Decision Wiki MVP — SQLite FTS5/BM25 로 decision/wiki 페이지를 검색한다. "
+        "status/date/project/person/confidence 필터를 지원한다. "
         "wiki.enabled=False 면 빈 결과 반환."
     ),
 )
@@ -497,19 +499,31 @@ async def search_wiki(
     request: Request,
     q: str = "",
     limit: int = _WIKI_SEARCH_DEFAULT_LIMIT,
+    page_type: str | None = None,
+    status: str | None = None,
+    project: str | None = None,
+    participant: str | None = None,
+    owner: str | None = None,
+    person: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_confidence: int | None = None,
 ) -> WikiSearchResponse:
-    """위키 페이지를 단순 substring 매칭으로 검색한다 (PRD §7.1).
-
-    Phase 2 한계 (PRD §8 의 명시적 단순화):
-        - FTS5 / BM25 / 토큰화 없음 — 본문에 q 가 그대로 들어있어야 매칭.
-        - 동의어 / 형태소 분석 없음.
-        - 한국어 어미 변형 매칭 없음 ("결정한", "결정했다" 별도 매칭).
-        - score 는 단순 매칭 횟수 — 정규화 안 함.
+    """위키 페이지를 FTS5/BM25 기반으로 검색한다.
 
     Args:
         request: FastAPI Request 객체.
         q: 검색어. 빈 문자열이면 빈 결과 반환.
         limit: 최대 반환 개수 (기본 20, 최대 100).
+        page_type: decision/person/project/topic/log 중 선택 필터.
+        status: decision 상태 필터.
+        project: project frontmatter 필터.
+        participant: participants 포함 필터.
+        owner: owners 포함 필터.
+        person: participants 또는 owners 포함 필터.
+        date_from: decision_date 하한(YYYY-MM-DD).
+        date_to: decision_date 상한(YYYY-MM-DD).
+        min_confidence: 최소 confidence.
 
     Returns:
         WikiSearchResponse — results / total / query.
@@ -530,63 +544,50 @@ async def search_wiki(
     if not query:
         return WikiSearchResponse(results=[], total=0, query=q)
 
-    query_lower = query.lower()
-
-    # ── 3. 모든 페이지 read 후 매칭 검사 ───────────────────────────
-    from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
+    # ── 3. FTS5/BM25 색인 검색 ────────────────────────────────────
+    from core.wiki.search_index import WikiSearchIndex  # noqa: PLC0415
+    from core.wiki.store import WikiStore  # noqa: PLC0415
 
     store = WikiStore(wiki_root)
-    candidates: list[tuple[float, WikiSearchResult]] = []
-
-    for rel_path in store.all_pages():
-        try:
-            page = store.read_page(rel_path)
-        except WikiStoreError as exc:
-            logger.warning(
-                "wiki 검색: 페이지 read 실패: %s (%s)",
-                rel_path,
-                exc.detail or exc.reason,
-            )
-            continue
-        except Exception as exc:  # noqa: BLE001 — 깨진 페이지 1건이 검색을 막지 않게
-            logger.warning("wiki 검색: 페이지 처리 실패: %s (%s)", rel_path, exc)
-            continue
-
-        # 매칭 대상은 (제목 + 본문). frontmatter title 도 함께 검사.
-        fm_title_raw = page.frontmatter.get("title", "") if page.frontmatter else ""
-        fm_title = str(fm_title_raw) if fm_title_raw is not None else ""
-        haystack = f"{fm_title}\n{page.content}".lower()
-        match_count = haystack.count(query_lower)
-        if match_count == 0:
-            continue
-
-        # 디렉토리명을 type 필드로 직접 사용 (단수/복수 혼동 회피).
-        first_part = rel_path.parts[0] if rel_path.parts else ""
-        type_str = (
-            first_part if first_part in _WIKI_PAGE_TYPE_TO_DIRNAME else str(page.page_type.value)
+    index = WikiSearchIndex(wiki_root)
+    try:
+        index.rebuild(store)
+        raw_results = index.search(
+            query,
+            top_k=limit,
+            page_types=[page_type] if page_type else None,
+            status=status,
+            project=project,
+            participant=participant,
+            owner=owner,
+            person=person,
+            date_from=date_from,
+            date_to=date_to,
+            min_confidence=min_confidence,
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki BM25 검색 실패: %r", exc, exc_info=True)
+        return WikiSearchResponse(results=[], total=0, query=q)
 
-        title = _extract_title_from_markdown(page.frontmatter, page.content)
-        snippet = _make_search_snippet(page.content, query_lower)
-        score = float(match_count)
-
-        candidates.append(
-            (
-                score,
-                WikiSearchResult(
-                    path=str(rel_path),
-                    type=type_str,
-                    title=title,
-                    snippet=snippet,
-                    score=score,
-                ),
-            )
+    results = [
+        WikiSearchResult(
+            path=item.page_path,
+            type=(
+                "pending"
+                if item.page_path.startswith("pending/")
+                else
+                f"{item.page_type}s"
+                if item.page_type in {"decision", "person", "project", "topic"}
+                else item.page_type
+            ),
+            title=item.title,
+            snippet=item.snippet,
+            score=item.score,
+            citations=item.citations,
+            metadata=item.metadata,
         )
-
-    # ── 4. score 내림차순 정렬 + limit 적용 ────────────────────────
-    # path 를 보조 정렬키로 사용해 동점일 때 deterministic 순서를 보장.
-    candidates.sort(key=lambda item: (-item[0], item[1].path))
-    results = [item[1] for item in candidates[:limit]]
+        for item in raw_results
+    ]
 
     return WikiSearchResponse(results=results, total=len(results), query=q)
 
@@ -597,9 +598,9 @@ async def search_wiki(
 # 하면 백그라운드 태스크가 실행되며 즉시 job_id 를 반환한다. GET 으로 진행
 # 상태를 조회하고 cancel 엔드포인트로 중단 가능.
 #
-# 작업 추적은 in-memory ProgressTracker (dict) 로 단순화 — 서버 재시작 시
-# 작업이 사라진다는 단점은 있으나, 백필은 사용자 명시 호출 시점에만 실행
-# 되므로 운영상 충분하다 (영속화는 필요 시 Phase 5 에서 SQLite 통합).
+# 작업 추적은 실행 중 cancel_event/task 를 위해 in-memory dict 를 유지하되,
+# 사용자에게 노출되는 상태는 SQLite 에도 저장한다. 서버 재시작 후 running job 은
+# interrupted 로 복구되고 실패 meeting_ids 는 retry-failed 로 재실행할 수 있다.
 
 
 # 백필 작업 추적용 in-memory 레지스트리.
@@ -742,6 +743,9 @@ async def start_wiki_backfill(
 
     config = _get_config(request)
     raw_queue = _get_raw_job_queue(request)
+    from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
+
+    state_store = WikiBackfillStateStore(config.wiki.resolved_root)
 
     # since / until 파싱 — 잘못된 형식은 400.
     since_date: Any = None
@@ -783,6 +787,16 @@ async def start_wiki_backfill(
     }
     with _wiki_backfill_lock:
         _wiki_backfill_jobs[job_id] = job_state
+    state_store.create_job(
+        job_id=job_id,
+        started_at=started_at,
+        request={
+            "since": body.since,
+            "until": body.until,
+            "meeting_ids": body.meeting_ids,
+            "dry_run": body.dry_run,
+        },
+    )
 
     def _progress_cb(processed: int, total: int, current: str) -> None:
         # 동시 접근은 dict 단위로 안전하지만, 명시적 락으로 일관성 보장.
@@ -790,6 +804,12 @@ async def start_wiki_backfill(
             job_state["processed"] = processed
             job_state["total"] = total
             job_state["current_meeting_id"] = current
+        state_store.update_progress(
+            job_id=job_id,
+            processed=processed,
+            total=total,
+            current_meeting_id=current,
+        )
 
     async def _run_backfill() -> None:
         """백그라운드에서 backfill 호출 후 결과를 job_state 에 저장."""
@@ -814,11 +834,25 @@ async def start_wiki_backfill(
                 else:
                     job_state["status"] = "completed"
                 job_state["finished_at"] = _dt.now().isoformat()
+                terminal_status = job_state["status"]
+                finished_at = job_state["finished_at"]
+            state_store.complete_job(
+                job_id=job_id,
+                status=terminal_status,
+                finished_at=finished_at,
+                result=result,
+            )
         except Exception as exc:  # noqa: BLE001 — 백그라운드 미처리 예외 격리.
             logger.error("백필 백그라운드 실패: job_id=%s, %r", job_id, exc)
             with _wiki_backfill_lock:
                 job_state["status"] = "failed"
                 job_state["finished_at"] = _dt.now().isoformat()
+                finished_at = job_state["finished_at"]
+            state_store.fail_job(
+                job_id=job_id,
+                finished_at=finished_at,
+                message=str(exc),
+            )
 
     task = asyncio.create_task(_run_backfill(), name=f"wiki_backfill_{job_id}")
     task.add_done_callback(_log_task_exception)
@@ -857,13 +891,39 @@ async def get_wiki_backfill_status(
     """
     with _wiki_backfill_lock:
         state = _wiki_backfill_jobs.get(job_id)
-        if state is None:
+        snapshot = dict(state) if state is not None else None
+
+    if snapshot is None:
+        config = _get_config(request)
+        from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
+
+        durable = WikiBackfillStateStore(config.wiki.resolved_root).get_job(job_id)
+        if durable is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"백필 작업을 찾을 수 없습니다: {job_id}",
             )
-        # 스냅샷 (락 안에서 dict 복사).
-        snapshot = dict(state)
+        return WikiBackfillStatusResponse(
+            job_id=durable.job_id,
+            status=durable.status,
+            processed=durable.processed,
+            total=durable.total,
+            current_meeting_id=durable.current_meeting_id,
+            succeeded=durable.succeeded,
+            skipped=durable.skipped,
+            failed=durable.failed,
+            errors=[
+                WikiBackfillErrorItem(
+                    meeting_id=str(err.get("meeting_id", "")),
+                    error_type=str(err.get("error_type", "unknown")),
+                    message=str(err.get("message", "")),
+                )
+                for err in durable.errors
+            ],
+            started_at=durable.started_at,
+            finished_at=durable.finished_at,
+            duration_seconds=durable.duration_seconds,
+        )
 
     result = snapshot.get("result")
     errors_serialized: list[WikiBackfillErrorItem] = []
@@ -932,12 +992,83 @@ async def cancel_wiki_backfill(
     with _wiki_backfill_lock:
         state = _wiki_backfill_jobs.get(job_id)
         if state is None:
+            cancel_event = None
+        else:
+            cancel_event = state["cancel_event"]
+
+    config = _get_config(request)
+    from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
+
+    state_store = WikiBackfillStateStore(config.wiki.resolved_root)
+    if cancel_event is None:
+        if state_store.get_job(job_id) is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"백필 작업을 찾을 수 없습니다: {job_id}",
             )
-        cancel_event: asyncio.Event = state["cancel_event"]
+    else:
+        cancel_event.set()
+    from datetime import datetime as _dt
 
-    cancel_event.set()
+    state_store.cancel_job(job_id=job_id, finished_at=_dt.now().isoformat())
     logger.info("백필 취소 신호 전송: job_id=%s", job_id)
     return {"job_id": job_id, "status": "cancelling"}
+
+
+@router.post(
+    "/wiki/backfill/{job_id}/retry-failed",
+    response_model=WikiBackfillStartedResponse,
+    status_code=202,
+    summary="백필 실패 회의만 재시도",
+)
+async def retry_failed_wiki_backfill(
+    request: Request,
+    job_id: str,
+) -> WikiBackfillStartedResponse:
+    """기존 durable job 의 실패 meeting_ids 만 새 백필 작업으로 재시도한다."""
+    config = _get_config(request)
+    from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
+
+    state_store = WikiBackfillStateStore(config.wiki.resolved_root)
+    failed_ids = state_store.failed_meeting_ids(job_id)
+    if not failed_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"재시도할 실패 회의가 없습니다: {job_id}",
+        )
+    return await start_wiki_backfill(
+        request,
+        WikiBackfillRequest(meeting_ids=failed_ids, dry_run=False),
+    )
+
+
+@router.post(
+    "/wiki/backfill/{job_id}/resume",
+    response_model=WikiBackfillStartedResponse,
+    status_code=202,
+    summary="중단된 백필 조건으로 재개",
+)
+async def resume_wiki_backfill(
+    request: Request,
+    job_id: str,
+) -> WikiBackfillStartedResponse:
+    """서버 재시작 등으로 interrupted 된 백필의 원래 요청 조건을 새 job 으로 재실행한다."""
+    config = _get_config(request)
+    from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
+
+    durable = WikiBackfillStateStore(config.wiki.resolved_root).get_job(job_id)
+    if durable is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"백필 작업을 찾을 수 없습니다: {job_id}",
+        )
+    req = durable.request
+    return await start_wiki_backfill(
+        request,
+        WikiBackfillRequest(
+            since=req.get("since"),
+            until=req.get("until"),
+            meeting_ids=req.get("meeting_ids"),
+            dry_run=bool(req.get("dry_run", False)),
+        ),
+    )

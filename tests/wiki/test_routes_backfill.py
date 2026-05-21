@@ -248,3 +248,113 @@ class TestCancelBackfill:
             response = client.post("/api/wiki/backfill/non-existent-id-99999/cancel")
 
         assert response.status_code == 404
+
+
+class TestDurableBackfillRoutes:
+    """Durable Wiki backfill 상태 복구/resume/retry 엔드포인트."""
+
+    def test_get_status는_sqlite_durable_job을_복구한다(self, tmp_path: Path) -> None:
+        """DW-F02: 메모리에 없는 running job은 interrupted로 조회된다."""
+        config = _make_test_config(tmp_path)
+        app = _make_test_app(config)
+        from core.wiki.backfill_state import WikiBackfillStateStore
+
+        state_store = WikiBackfillStateStore(config.wiki.resolved_root)
+        state_store.create_job(
+            job_id="durable-job",
+            started_at="2026-05-21T10:00:00",
+            request={"since": "2026-05-01", "dry_run": False},
+        )
+        state_store.update_progress(
+            job_id="durable-job",
+            processed=2,
+            total=5,
+            current_meeting_id="1234abcd",
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api/wiki/backfill/durable-job")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "interrupted"
+        assert data["processed"] == 2
+        assert data["total"] == 5
+        assert data["current_meeting_id"] == "1234abcd"
+
+    def test_retry_failed는_실패_meeting_ids만_새_job으로_전달한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """DW-F03: retry-failed는 durable errors의 meeting_id만 backfill에 전달한다."""
+        config = _make_test_config(tmp_path)
+        app = _make_test_app(config)
+        from core.wiki.backfill_state import WikiBackfillStateStore
+        from scripts.backfill_wiki import BackfillError, BackfillResult
+
+        state_store = WikiBackfillStateStore(config.wiki.resolved_root)
+        state_store.create_job(job_id="failed-job", started_at="2026-05-21T10:00:00", request={})
+        state_store.complete_job(
+            job_id="failed-job",
+            status="failed",
+            finished_at="2026-05-21T10:02:00",
+            result=BackfillResult(
+                total=3,
+                succeeded=1,
+                skipped=0,
+                failed=2,
+                errors=[
+                    BackfillError("deadbeef", "summary_missing", "요약 없음"),
+                    BackfillError("feedcafe", "utterances_missing", "발화 없음"),
+                ],
+            ),
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_backfill(**kwargs: Any) -> Any:
+            captured["meeting_ids"] = kwargs.get("meeting_ids")
+            return BackfillResult(total=2, succeeded=2, skipped=0, failed=0)
+
+        with patch("scripts.backfill_wiki.backfill", new=AsyncMock(side_effect=fake_backfill)):
+            with TestClient(app) as client:
+                response = client.post("/api/wiki/backfill/failed-job/retry-failed")
+
+        assert response.status_code == 202
+        assert captured["meeting_ids"] == ["deadbeef", "feedcafe"]
+
+    def test_resume은_기존_request_조건으로_새_job을_시작한다(self, tmp_path: Path) -> None:
+        """DW-F04: resume은 durable request의 since/until/meeting_ids/dry_run을 재사용한다."""
+        config = _make_test_config(tmp_path)
+        app = _make_test_app(config)
+        from core.wiki.backfill_state import WikiBackfillStateStore
+        from scripts.backfill_wiki import BackfillResult
+
+        state_store = WikiBackfillStateStore(config.wiki.resolved_root)
+        state_store.create_job(
+            job_id="interrupted-job",
+            started_at="2026-05-21T10:00:00",
+            request={
+                "since": "2026-05-01",
+                "until": "2026-05-20",
+                "meeting_ids": ["1234abcd"],
+                "dry_run": True,
+            },
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_backfill(**kwargs: Any) -> Any:
+            captured["since"] = kwargs.get("since")
+            captured["until"] = kwargs.get("until")
+            captured["meeting_ids"] = kwargs.get("meeting_ids")
+            captured["dry_run"] = kwargs.get("dry_run")
+            return BackfillResult(total=1, succeeded=0, skipped=0, failed=0)
+
+        with patch("scripts.backfill_wiki.backfill", new=AsyncMock(side_effect=fake_backfill)):
+            with TestClient(app) as client:
+                response = client.post("/api/wiki/backfill/interrupted-job/resume")
+
+        assert response.status_code == 202
+        assert captured["meeting_ids"] == ["1234abcd"]
+        assert captured["dry_run"] is True
+        assert str(captured["since"]) == "2026-05-01"
+        assert str(captured["until"]) == "2026-05-20"

@@ -37,6 +37,7 @@ from core.wiki.extractors.topic import TopicExtractor
 from core.wiki.guard import GuardVerdict, WikiGuard
 from core.wiki.lint import WikiLinter
 from core.wiki.llm_client import WikiLLMClient, WikiLLMError
+from core.wiki.search_index import WikiSearchIndex
 from core.wiki.store import WikiStore, WikiStoreError
 
 logger = logging.getLogger(__name__)
@@ -412,6 +413,16 @@ class WikiCompilerV2:
                 pages_rejected=pages_rejected,
             )
 
+        # ── 7b. 검색 색인 갱신 ──────────────────────────────────────
+        # Wiki 페이지는 파일 시스템이 원장이고 FTS5는 파생 색인이다. 단일 ingest 후
+        # 전체 rebuild 비용은 MVP 규모(<1000 pages)에서 작고, pending/rejected 이동까지
+        # 한 번에 반영되므로 stale index 위험을 줄인다.
+        if pages_created or pages_updated or pages_pending:
+            try:
+                WikiSearchIndex(self._store.root).rebuild(self._store)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("wiki 검색 색인 rebuild 실패 — ingest 는 유지: %r", exc)
+
         # ── 9. lint 트리거 (Phase 4 신규) ────────────────────────────
         # 매 compile_meeting 후 카운터 +1. lint_interval 도달 시 lint_all 실행.
         # lint 자체 실패는 ingest 를 막지 않는다 (graceful).
@@ -545,7 +556,7 @@ class WikiCompilerV2:
             # D3 미달 — pending/ 에 격리 저장 (사용자가 나중에 검토)
             pending_path = Path("pending") / rel_path
             try:
-                store.write_page(pending_path, content)
+                store.write_page(pending_path, _set_frontmatter_status(content, "pending"))
                 pages_pending.append(rel_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("pending 저장 실패 — rejected 처리: path=%s, %r", rel_path, exc)
@@ -560,3 +571,23 @@ class WikiCompilerV2:
                 len(verdict.rejected_citations),
             )
             pages_rejected.append((rel_path, verdict.reason))
+
+
+def _set_frontmatter_status(content: str, status: str) -> str:
+    """Markdown frontmatter 의 status 값을 교체하거나 추가한다."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content
+    end_idx: int | None = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_idx = idx
+            break
+    if end_idx is None:
+        return content
+    for idx in range(1, end_idx):
+        if lines[idx].startswith("status:"):
+            lines[idx] = f"status: {status}"
+            return "\n".join(lines) + ("\n" if content.endswith("\n") else "")
+    lines.insert(end_idx, f"status: {status}")
+    return "\n".join(lines) + ("\n" if content.endswith("\n") else "")

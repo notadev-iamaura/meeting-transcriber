@@ -32,6 +32,7 @@ def _build_config(
     tmp_path: Path,
     wiki_enabled: bool,
     wiki_root: Path | None = None,
+    wiki_dry_run: bool = True,
 ) -> MagicMock:
     """PipelineManager 가 요구하는 최소 config 모킹 객체.
 
@@ -80,7 +81,7 @@ def _build_config(
     config.wiki = WikiConfig(
         enabled=wiki_enabled,
         root=(wiki_root if wiki_root is not None else (tmp_path / "wiki")),
-        dry_run=True,
+        dry_run=wiki_dry_run,
     )
     return config
 
@@ -121,6 +122,7 @@ def _make_mock_step_results() -> dict[str, MagicMock]:
 
     summary = MagicMock()
     summary.summary = "테스트 요약"
+    summary.markdown = "## 회의록\n\n- 테스트 요약"
     summary.save_checkpoint = MagicMock()
     summary.save_markdown = MagicMock()
 
@@ -345,3 +347,58 @@ async def test_같은_meeting_id_두_번_ingest_시_log_md_두_줄(tmp_path: Pat
     assert any("eee55555" in ln for ln in ingest_lines)
     # 커밋 카운트: init_repo(+1) + ingest 1(+1) + ingest 2(+1) ≥ 3
     assert _git_commit_count(wiki_root) >= 3
+
+
+@pytest.mark.asyncio
+async def test_wiki_dry_run_false_시_summary와_utterances를_전달한다(tmp_path: Path) -> None:
+    """실제 Wiki compile 경로가 summary/utterances/date 를 잃지 않아야 한다."""
+    audio = _make_audio_file(tmp_path)
+    wav = _make_mock_wav(tmp_path)
+    wiki_root = tmp_path / "wiki"
+    config = _build_config(
+        tmp_path=tmp_path,
+        wiki_enabled=True,
+        wiki_root=wiki_root,
+        wiki_dry_run=False,
+    )
+    pipeline = PipelineManager(config, MagicMock())
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_run(
+        self: Any,
+        *,
+        meeting_id: str,
+        summary: str | None = None,
+        utterances: list[Any] | None = None,
+        meeting_date: Any = None,
+    ) -> dict[str, Any]:
+        captured["meeting_id"] = meeting_id
+        captured["summary"] = summary
+        captured["utterances"] = utterances
+        captured["meeting_date"] = meeting_date
+        return {
+            "status": "compiled",
+            "meeting_id": meeting_id,
+            "pages_created": ["decisions/test.md"],
+            "pages_updated": [],
+            "pages_pending": [],
+            "pages_rejected": [],
+        }
+
+    patches = _patched_pipeline(pipeline, wav)
+    for p in patches:
+        p.start()
+    try:
+        with patch("steps.wiki_compiler.WikiCompiler.run", new=_fake_run):
+            state = await pipeline.run(audio, meeting_id="abc12345")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert state.status == "completed"
+    assert captured["meeting_id"] == "abc12345"
+    assert captured["summary"] == "## 회의록\n\n- 테스트 요약"
+    assert captured["utterances"]
+    assert captured["utterances"][0].text == "안녕하세요"
+    assert captured["meeting_date"].isoformat() == "2026-05-21"

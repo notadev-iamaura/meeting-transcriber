@@ -23,8 +23,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any
 
+from core.wiki.decision_record import DecisionRecord
 from core.wiki.llm_client import WikiLLMClient, sanitize_utterance_text
 from core.wiki.models import Citation
 
@@ -499,7 +501,7 @@ class DecisionExtractor:
         흐름 (각 decision 별):
             1. rel_path 결정 — `decisions/{YYYY-MM-DD}-{slug}.md`.
             2. existing_store.read_page(rel_path) 시도 — 기존 페이지 컨텍스트 확보.
-            3. LLM 1회 호출로 갱신 본문 생성.
+            3. ExtractedDecision 을 canonical DecisionRecord markdown 으로 변환.
             4. 한국어 고유명사 영문 병기 후처리 제거.
             5. 기존 페이지가 있으면 created_at 보존.
 
@@ -534,44 +536,79 @@ class DecisionExtractor:
             decision: ExtractedDecision,
         ) -> tuple[str, str] | None:
             """한 decision 을 (rel_path, content) 로 변환. 실패 시 None."""
-            rel_path = f"decisions/{date_prefix}-{decision.slug}.md"
+            rel_path = self._resolve_decision_path(
+                existing_store=existing_store,
+                date_prefix=date_prefix,
+                slug=decision.slug,
+            )
 
             # 기존 페이지 확인
             existing_content: str | None = None
             existing_created_at: str | None = None
+            existing_frontmatter: dict[str, Any] = {}
             try:
-                existing_content = self._read_existing(existing_store, rel_path)
+                existing_page = self._read_existing_page(existing_store, rel_path)
+                existing_content = self._content_from_existing_page(existing_page)
+                existing_frontmatter = dict(getattr(existing_page, "frontmatter", {}) or {})
             except Exception as exc:  # noqa: BLE001 — read 실패는 신규로 처리
                 logger.debug("기존 페이지 없음 (신규 작성): %s (%r)", rel_path, exc)
                 existing_content = None
 
-            if existing_content:
+            if existing_frontmatter:
+                existing_created_at = str(existing_frontmatter.get("created_at") or "").strip()
+                if not existing_created_at:
+                    existing_created_at = None
+            elif existing_content:
                 existing_created_at = self._extract_created_at(existing_content)
 
-            # LLM 호출
-            user_prompt = self._build_render_prompt(
+            created_at = existing_created_at
+            if created_at is None and existing_content:
+                created_at = self._extract_created_at(existing_content)
+
+            existing_sources = self._frontmatter_list(existing_frontmatter.get("source_meetings"))
+            if not existing_sources and existing_frontmatter.get("meeting_id"):
+                existing_sources = [str(existing_frontmatter.get("meeting_id"))]
+            source_meetings = list(existing_sources)
+            if meeting_id not in source_meetings:
+                source_meetings.append(meeting_id)
+            record_id = str(existing_frontmatter.get("id") or "").strip() or None
+
+            record = DecisionRecord.from_extracted(
+                decision=decision,
+                meeting_id=meeting_id,
+                meeting_date=meeting_date,
+                created_at=created_at,
+                record_id=record_id,
+                source_meetings=source_meetings,
+            )
+            if not record.has_verified_candidate_citation:
+                logger.warning(
+                    "DecisionExtractor.render_pages citation 없는 decision skip: path=%s",
+                    rel_path,
+                )
+                return None
+
+            render_prompt = self._build_render_prompt(
                 decision=decision,
                 meeting_id=meeting_id,
                 meeting_date=meeting_date,
                 existing_content=existing_content,
                 rel_path=rel_path,
             )
-
             try:
-                raw = await self._llm.generate(
+                await self._llm.generate(
                     system_prompt=_RENDER_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
+                    user_prompt=render_prompt,
                 )
-            except Exception as exc:  # noqa: BLE001 — 페이지별 실패는 skip
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "DecisionExtractor.render_pages 페이지 생성 실패 — skip: path=%s, err=%r",
+                    "DecisionExtractor.render_pages LLM render 호출 실패, canonical render 사용: %s (%r)",
                     rel_path,
                     exc,
                 )
-                return None
 
             # 후처리: 한국어 고유명사 영문 병기 제거
-            content = _strip_paren_latin(raw)
+            content = _strip_paren_latin(record.to_markdown())
 
             # 기존 created_at 보존 (LLM 이 누락했을 경우 강제 주입)
             if existing_created_at and existing_created_at not in content:
@@ -601,12 +638,49 @@ class DecisionExtractor:
         return f"{h:02d}:{m:02d}:{s:02d}"
 
     @staticmethod
-    def _read_existing(store: Any, rel_path: str) -> str | None:
-        """existing_store.read_page 를 호출하여 기존 페이지 본문을 반환.
+    def _resolve_decision_path(*, existing_store: Any, date_prefix: str, slug: str) -> str:
+        """같은 slug 의 기존 decision 페이지가 있으면 그 경로를 재사용한다.
+
+        기본 dedupe 규칙: LLM 이 같은 결정을 같은 slug 로 반복 추출하면 날짜별
+        신규 파일을 계속 만들지 않고 기존 canonical decision record 를 갱신한다.
+        """
+        default_path = f"decisions/{date_prefix}-{slug}.md"
+        all_pages = getattr(existing_store, "all_pages", None)
+        if not callable(all_pages):
+            return default_path
+
+        candidates: list[str] = []
+        try:
+            for rel in all_pages():
+                path = Path(str(rel))
+                if len(path.parts) < 2 or path.parts[0] != "decisions":
+                    continue
+                if path.name.endswith(f"-{slug}.md"):
+                    candidates.append(str(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decision dedupe scan 실패: slug=%s (%r)", slug, exc)
+            return default_path
+
+        if not candidates:
+            return default_path
+        return sorted(candidates)[0]
+
+    @staticmethod
+    def _read_existing_page(store: Any, rel_path: str) -> Any:
+        """existing_store.read_page 를 Path 우선으로 호출한다."""
+        try:
+            return store.read_page(Path(rel_path))
+        except TypeError:
+            return store.read_page(rel_path)
+        except Exception:
+            return store.read_page(rel_path)
+
+    @staticmethod
+    def _content_from_existing_page(result: Any) -> str | None:
+        """read_page 결과에서 본문 문자열을 추출한다.
 
         store 가 KeyError 또는 다른 예외를 raise 하면 None 반환.
         """
-        result = store.read_page(rel_path)
         # MockWikiStore 는 str 반환, 실제 WikiStore 는 WikiPage 반환
         if isinstance(result, str):
             return result
@@ -616,6 +690,23 @@ class DecisionExtractor:
             # frontmatter 가 필요한 경우 호출자가 추가 처리.
             return getattr(result, "content", None)
         return None
+
+    @staticmethod
+    def _frontmatter_list(value: Any) -> list[str]:
+        """frontmatter scalar/list 값을 list[str] 로 정규화한다."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            inner = text[1:-1].strip()
+            if not inner:
+                return []
+            return [item.strip() for item in inner.split(",") if item.strip()]
+        return [text]
 
     @staticmethod
     def _extract_created_at(content: str) -> str | None:
