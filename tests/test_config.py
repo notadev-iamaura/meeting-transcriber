@@ -633,7 +633,7 @@ class TestLLMBackendConfig:
 
         llm = LLMConfig()
         assert llm.correction_max_tokens == 800
-        assert llm.summarize_max_tokens == 1600
+        assert llm.summarize_max_tokens == 1200
         assert llm.chat_max_tokens == 1000
 
     def test_mlx_max_tokens_범위_검증(self) -> None:

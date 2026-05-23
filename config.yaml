@@ -40,9 +40,9 @@ llm:
   mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §4). EXAONE 전환 시 "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
   mlx_max_tokens: 2000                       # MLX 기본 최대 생성 토큰 (아래 단계별 상한이 우선)
   correction_max_tokens: 800                 # 교정 단계 응답 상한 (짧은 배치 출력 폭주 방지)
-  summarize_max_tokens: 1600                 # 요약 단계 응답 상한 (회의록 품질 유지 범위)
+  summarize_max_tokens: 1200                 # 요약 단계 응답 상한 (메모리 안정성 우선)
   chat_max_tokens: 1000                      # RAG 채팅 응답 상한
-  max_context_tokens: 8192                   # 컨텍스트 윈도우
+  max_context_tokens: 6144                   # 컨텍스트 윈도우 (요약 청크 입력 약 4K 토큰)
   temperature: 0.0  # 생성 온도 (MLX 4bit 환경에서 0.0~0.5 출력 동일 관찰 → 결정성 최대, BENCHMARK.md §3)
   correction_batch_size: 5                   # 보정 시 배치 크기 (발화 수). 원문 변형 최소화 관점에서 선택 (BENCHMARK.md §3)
   request_timeout_seconds: 120               # 요청 타임아웃

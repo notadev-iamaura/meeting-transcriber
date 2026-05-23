@@ -344,7 +344,7 @@ class LLMConfig(BaseModel):
         description="전사문 교정 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
     )
     summarize_max_tokens: int = Field(
-        default=1600,
+        default=1200,
         ge=100,
         description="회의록 요약 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
     )
@@ -355,7 +355,7 @@ class LLMConfig(BaseModel):
     )
 
     # 공통 설정
-    max_context_tokens: int = Field(default=8192, ge=1024)
+    max_context_tokens: int = Field(default=6144, ge=1024)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     correction_batch_size: int = Field(default=5, ge=1, le=50)
     request_timeout_seconds: int = Field(default=120, ge=10)
