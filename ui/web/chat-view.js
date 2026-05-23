@@ -78,10 +78,10 @@
                 '<h2 class="empty-state-title">대화를 시작해 보세요</h2>' +
                 '<p class="empty-state-description">회의 내용에 대해 무엇이든 물어보세요. 화자별 요약·결정사항·다음 액션 등을 정리해 드려요.</p>' +
                 '</div>' +
-                '<div class="welcome-tips">' +
-                    '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "지난 회의에서 결정된 일정이 뭐야?"</div>' +
-                    '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "프로젝트 진행 상황을 요약해줘"</div>' +
-                    '<div class="welcome-tip"><span class="tip-arrow">&rarr;</span> "다음 마일스톤까지 해야 할 일은?"</div>' +
+                '<div class="welcome-tips" aria-label="추천 질문">' +
+                    '<button type="button" class="welcome-tip" data-prompt="지난 회의에서 결정된 일정이 뭐야?"><span class="tip-arrow" aria-hidden="true">&rarr;</span> 지난 회의에서 결정된 일정이 뭐야?</button>' +
+                    '<button type="button" class="welcome-tip" data-prompt="프로젝트 진행 상황을 요약해줘"><span class="tip-arrow" aria-hidden="true">&rarr;</span> 프로젝트 진행 상황을 요약해줘</button>' +
+                    '<button type="button" class="welcome-tip" data-prompt="다음 마일스톤까지 해야 할 일은?"><span class="tip-arrow" aria-hidden="true">&rarr;</span> 다음 마일스톤까지 해야 할 일은?</button>' +
                 '</div>' +
             '</div>';
         };
@@ -102,6 +102,7 @@
                 '    <select class="controls-select" id="chatMeetingFilter" aria-label="검색 범위 회의 선택">',
                 '      <option value="">전체 회의</option>',
                 '    </select>',
+                '    <span class="chat-scope-status" id="chatScopeStatus" aria-live="polite">전체 회의에서 검색</span>',
                 '    <div class="controls-right">',
                 '      <button class="btn-small" id="chatBtnClearChat">대화 초기화</button>',
                 '    </div>',
@@ -145,6 +146,7 @@
             // DOM 참조 캐싱
             this._els = {
                 meetingFilter: document.getElementById("chatMeetingFilter"),
+                scopeStatus: document.getElementById("chatScopeStatus"),
                 btnClearChat: document.getElementById("chatBtnClearChat"),
                 messagesArea: document.getElementById("chatMessagesArea"),
                 welcomeMessage: document.getElementById("chatWelcomeMessage"),
@@ -213,6 +215,22 @@
             els.btnClearChat.addEventListener("click", onClear);
             self._listeners.push({ el: els.btnClearChat, type: "click", fn: onClear });
 
+            var onMeetingFilterChange = function () {
+                self._updateScopeStatus();
+            };
+            els.meetingFilter.addEventListener("change", onMeetingFilterChange);
+            self._listeners.push({ el: els.meetingFilter, type: "change", fn: onMeetingFilterChange });
+
+            var onWelcomePromptClick = function (e) {
+                var btn = e.target.closest(".welcome-tip");
+                if (!btn) return;
+                els.chatInput.value = btn.getAttribute("data-prompt") || btn.textContent.trim();
+                els.chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+                els.chatInput.focus();
+            };
+            els.messagesArea.addEventListener("click", onWelcomePromptClick);
+            self._listeners.push({ el: els.messagesArea, type: "click", fn: onWelcomePromptClick });
+
             // WebSocket 이벤트: 새 회의 추가/완료 시 드롭다운 자동 갱신
             var onJobCompleted = function () {
                 self._refreshMeetingFilter();
@@ -259,8 +277,21 @@
                     option.textContent = icon + " " + meeting.meeting_id;
                     els.meetingFilter.appendChild(option);
                 });
+                self._updateScopeStatus();
             } catch (e) {
                 console.warn("회의 목록 로드 실패:", e.message);
+            }
+        };
+
+        ChatView.prototype._updateScopeStatus = function () {
+            var els = this._els;
+            if (!els.scopeStatus || !els.meetingFilter) return;
+            var selected = els.meetingFilter.options[els.meetingFilter.selectedIndex];
+            var label = selected ? selected.textContent.trim() : "";
+            if (!els.meetingFilter.value) {
+                els.scopeStatus.textContent = "전체 회의에서 검색";
+            } else {
+                els.scopeStatus.textContent = label.replace(/^[✓●•✗]\s*/, "") + " 회의만 검색";
             }
         };
 
@@ -276,6 +307,7 @@
                 if (currentValue) {
                     els.meetingFilter.value = currentValue;
                 }
+                self._updateScopeStatus();
             });
         };
 

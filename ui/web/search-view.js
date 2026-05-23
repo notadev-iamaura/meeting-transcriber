@@ -65,14 +65,14 @@
             '      </div>',
             '      <button type="submit" class="search-btn" id="searchBtn">검색</button>',
             '    </div>',
-            '    <div class="filter-row">',
+            '    <div class="filter-row" aria-label="검색 필터">',
             '      <div class="filter-group">',
-            '        <span class="filter-label">날짜</span>',
-            '        <input type="date" class="filter-input" id="searchFilterDate" />',
+            '        <label class="filter-label" for="searchFilterDate">날짜</label>',
+            '        <input type="date" class="filter-input" id="searchFilterDate" aria-label="검색 날짜 필터" />',
             '      </div>',
             '      <div class="filter-group">',
-            '        <span class="filter-label">화자</span>',
-            '        <input type="text" class="filter-input" id="searchFilterSpeaker" placeholder="예: SPEAKER_00" />',
+            '        <label class="filter-label" for="searchFilterSpeaker">화자</label>',
+            '        <input type="text" class="filter-input" id="searchFilterSpeaker" placeholder="예: SPEAKER_00" aria-label="검색 화자 필터" />',
             '      </div>',
             '      <button type="button" class="filter-clear-btn" id="searchFilterClearBtn" aria-label="검색 필터 초기화">',
             '        필터 초기화',
@@ -123,8 +123,12 @@
 
             // 검색 안내 (결과 없을 때 기본 표시)
             '  <div class="search-view-hint" id="searchHint">',
-            '    <p>회의 전사 내용을 벡터 검색 + 키워드 검색으로 찾습니다.</p>',
-            '    <p>검색어를 입력하고 Enter 또는 검색 버튼을 누르세요.</p>',
+            '    <p>회의 전사문, 요약, 결정사항을 벡터 검색과 키워드 검색으로 함께 찾습니다.</p>',
+            '    <div class="search-suggestion-row" aria-label="추천 검색어">',
+            '      <button type="button" class="suggestion-chip" data-query="결정사항">결정사항</button>',
+            '      <button type="button" class="suggestion-chip" data-query="다음 액션">다음 액션</button>',
+            '      <button type="button" class="suggestion-chip" data-query="일정">일정</button>',
+            '    </div>',
             '  </div>',
 
             '</div>',
@@ -173,6 +177,15 @@
         };
         els.filterClearBtn.addEventListener("click", onFilterClear);
         self._listeners.push({ el: els.filterClearBtn, type: "click", fn: onFilterClear });
+
+        var onSuggestionClick = function (e) {
+            var chip = e.target.closest(".suggestion-chip");
+            if (!chip) return;
+            els.searchQuery.value = chip.getAttribute("data-query") || chip.textContent.trim();
+            self._performSearch();
+        };
+        els.searchHint.addEventListener("click", onSuggestionClick);
+        self._listeners.push({ el: els.searchHint, type: "click", fn: onSuggestionClick });
 
         // 입력 필드에 포커스
         els.searchQuery.focus();

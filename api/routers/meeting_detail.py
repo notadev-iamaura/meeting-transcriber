@@ -803,8 +803,9 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
     Returns:
         PipelineState 직렬화 dict + total_elapsed_seconds (편의 필드)
 
-    Raises:
-        HTTPException: pipeline_state.json 이 없을 때 (404)
+    Notes:
+        오래된 회의나 수동 시드 데이터에는 pipeline_state.json 이 없을 수 있다.
+        이 경우 프론트엔드 콘솔에 404 노이즈를 남기지 않도록 빈 상태를 반환한다.
     """
     config = getattr(request.app.state, "config", None)
     if config is None:
@@ -812,10 +813,13 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
 
     state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
     if not state_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"파이프라인 상태 파일이 없습니다: {meeting_id}",
-        )
+        return {
+            "status": "missing",
+            "step_results": [],
+            "skipped_steps": [],
+            "warnings": [],
+            "total_elapsed_seconds": 0.0,
+        }
 
     try:
         data = cast(

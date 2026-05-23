@@ -395,6 +395,19 @@ button {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+}
+
+.brand-lockup:hover .list-title {
+  color: var(--accent);
+}
+
+.brand-lockup:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .brand-mark {
@@ -782,11 +795,11 @@ button {
    9. 녹음 상태 — 플로팅 인디케이터
    ════���═════════════════════════════════════ */
 
-/* 테마 토글 버튼: 우측 상단 고정 */
+/* 우측 상단 고정 아이콘 버튼 */
+.global-home-btn,
 .theme-toggle {
   position: fixed;
   top: 12px;
-  right: 16px;
   z-index: 1000;
   width: 36px;
   height: 36px;
@@ -803,6 +816,15 @@ button {
   box-shadow: var(--shadow-sm);
 }
 
+.global-home-btn {
+  right: 60px;
+}
+
+.theme-toggle {
+  right: 16px;
+}
+
+.global-home-btn:hover,
 .theme-toggle:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -810,6 +832,12 @@ button {
   box-shadow: var(--shadow);
 }
 
+.global-home-btn:focus-visible,
+.theme-toggle:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.global-home-btn:active,
 .theme-toggle:active {
   transform: scale(0.92);
 }
@@ -1361,10 +1389,10 @@ button {
   flex-wrap: wrap;
   gap: 12px;
   row-gap: 6px;
-  max-width: calc(100% - 80px);
+  max-width: calc(100% - 124px);
   min-width: 0;
   flex-shrink: 0;
-  margin: 8px 64px 0 16px;
+  margin: 8px 108px 0 16px;
   padding: 6px 12px;
   background: var(--bg-card);
   border: 0.5px solid var(--border);
@@ -1433,7 +1461,7 @@ button {
   .global-resource-bar {
     align-self: stretch;
     justify-content: flex-end;
-    margin: 8px 60px 0 56px;
+    margin: 8px 104px 0 56px;
     max-width: none;
   }
 }
@@ -1592,9 +1620,10 @@ button {
 /* --- 11-2. 검색 뷰 컨테이너 --- */
 
 .search-view {
-  max-width: 960px;
+  width: min(1180px, 100%);
+  max-width: none;
   margin: 0 auto;
-  padding: 0 24px;
+  padding: 0 32px;
 }
 
 .search-view-header {
@@ -1613,6 +1642,33 @@ button {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.8;
+}
+
+.search-suggestion-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.suggestion-chip {
+  padding: 6px 10px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos);
+}
+
+.suggestion-chip:hover,
+.suggestion-chip:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+  outline: none;
 }
 
 /* --- 11-3. 검색 섹션 --- */
@@ -2157,8 +2213,26 @@ button {
 .viewer-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
+}
+
+.viewer-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-right: 10px;
+  border-right: 0.5px solid var(--border);
+}
+
+.viewer-action-group:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+
+.viewer-action-group.danger {
+  margin-left: auto;
 }
 
 /* 뷰어 액션 버튼 (viewer-action-btn) */
@@ -2840,10 +2914,34 @@ button {
 }
 
 .welcome-tip {
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
   font-size: 12px;
   color: var(--text-secondary);
-  padding: 4px 0;
+  padding: 7px 10px;
   line-height: 1.4;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos);
+}
+
+.welcome-tip:hover,
+.welcome-tip:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.chat-scope-status {
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 
@@ -3810,6 +3908,24 @@ button {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
+  }
+
+  body[data-route="/app"] .global-home-btn,
+  body[data-route="/app/"] .global-home-btn {
+    display: none;
+  }
+
+  body[data-route="/app"] .theme-toggle,
+  body[data-route="/app/"] .theme-toggle {
+    right: 16px;
+  }
+
+  .viewer-action-group,
+  .viewer-action-group.danger {
+    width: 100%;
+    margin-left: 0;
+    padding-right: 0;
+    border-right: none;
   }
 }
 

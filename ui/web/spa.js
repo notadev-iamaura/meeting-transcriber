@@ -123,6 +123,21 @@
                     }
                 });
             });
+
+            var brandHomeLink = document.getElementById("brandHomeLink");
+            if (brandHomeLink) {
+                brandHomeLink.addEventListener("click", function (event) {
+                    event.preventDefault();
+                    Router.navigate("/app");
+                });
+            }
+
+            var globalHomeButton = document.getElementById("globalHomeButton");
+            if (globalHomeButton) {
+                globalHomeButton.addEventListener("click", function () {
+                    Router.navigate("/app");
+                });
+            }
             // 전역 키보드 단축키(⌘,/⌘1/⌘2/⌘3/⌘K)는 WS-3 Command Palette 모듈이 소유.
         }
 
@@ -251,6 +266,7 @@
         function resolve(path) {
             // 쿼리 문자열 분리 (순수 경로만 매칭에 사용)
             var pathname = path.split("?")[0];
+            document.body.setAttribute("data-route", pathname);
 
             // 이전 뷰가 있으면 정리 (이벤트 리스너, 타이머 해제)
             if (_currentView && typeof _currentView.destroy === "function") {
@@ -338,7 +354,12 @@
         function navigate(path) {
             // 현재 URL과 동일하면 무시 (경로 + 쿼리 스트링 모두 비교)
             var current = window.location.pathname + window.location.search;
-            if (current === path) return;
+            if (current === path) {
+                if (MobileDrawer && MobileDrawer.isOpen && MobileDrawer.isOpen()) {
+                    MobileDrawer.close({ restoreFocus: false });
+                }
+                return;
+            }
             // 편집 중 이탈 가드
             if (_currentView && typeof _currentView.canLeave === "function") {
                 if (_currentView.canLeave() === false) {
@@ -348,6 +369,9 @@
             history.pushState(null, "", path);
             _currentPath = path;
             resolve(path);
+            if (MobileDrawer && MobileDrawer.isOpen && MobileDrawer.isOpen()) {
+                MobileDrawer.close({ restoreFocus: false });
+            }
         }
 
         /**

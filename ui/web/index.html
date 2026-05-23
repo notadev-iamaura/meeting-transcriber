@@ -96,11 +96,11 @@
     <!-- 2. 리스트 패널 (280px, 회의 목록) -->
     <aside id="list-panel" aria-label="회의 목록 패널">
       <div class="list-header">
-        <div class="brand-lockup">
+        <a class="brand-lockup" id="brandHomeLink" href="/app" aria-label="홈으로 이동" title="홈으로 이동">
           <img class="brand-mark brand-mark-light" src="/static/brand/app-icon-light.svg" width="20" height="20" alt="" aria-hidden="true">
           <img class="brand-mark brand-mark-dark" src="/static/brand/app-icon-dark.svg" width="20" height="20" alt="" aria-hidden="true">
           <h1 class="list-title">Recap</h1>
-        </div>
+        </a>
         <div class="list-header-actions">
           <button type="button" id="importBtn" class="list-header-btn" aria-label="오디오 가져오기" title="오디오 가져오기">
             <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -175,6 +175,12 @@
     </div>
   </div>
 
+  <!-- 홈 로고 버튼 (우측 상단 고정) -->
+  <button class="global-home-btn" id="globalHomeButton" type="button" aria-label="홈으로 이동" title="홈으로 이동">
+    <img class="brand-mark brand-mark-light" src="/static/brand/app-icon-light.svg" width="20" height="20" alt="" aria-hidden="true">
+    <img class="brand-mark brand-mark-dark" src="/static/brand/app-icon-dark.svg" width="20" height="20" alt="" aria-hidden="true">
+  </button>
+
   <!-- 테마 토글 (우측 상단 고정) -->
   <button class="theme-toggle" id="themeToggle" aria-label="다크/라이트 모드 전환">
     <svg class="theme-icon theme-icon-light" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -187,14 +193,14 @@
   </button>
 
   <!-- 에러 배너 (토스트) -->
-  <div class="toast" id="errorBanner" role="alert" aria-live="assertive">
+  <div class="toast" id="errorBanner" role="alert" aria-live="assertive" aria-hidden="true" hidden inert>
     <span class="toast-icon" aria-hidden="true">&#x26A0;</span>
     <span class="toast-message" id="errorMessage"></span>
     <button class="toast-close" id="errorClose" aria-label="닫기">&#x2715;</button>
   </div>
 
   <!-- 녹음 상태 플로팅 pill (HUD 최소화 상태) — overlay 가 최소화되었을 때 표시 -->
-  <div id="recordingStatus" class="recording-status" role="status" aria-live="polite">
+  <div id="recordingStatus" class="recording-status" role="status" aria-live="polite" aria-hidden="true" hidden inert>
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
     <div class="recording-waveform" aria-hidden="true">
@@ -215,7 +221,7 @@
   </div>
 
   <!-- 녹음 Full-viewport HUD (레퍼런스 RecordingOverlay.jsx) — 녹음 시작 시 표시 -->
-  <div id="recordingOverlay" class="recording-overlay" role="dialog" aria-modal="true" aria-labelledby="recordingOverlayTitle" aria-hidden="true">
+  <div id="recordingOverlay" class="recording-overlay" role="dialog" aria-modal="true" aria-labelledby="recordingOverlayTitle" aria-hidden="true" hidden inert>
     <div class="recording-scrim" data-recording-action="minimize"></div>
     <div class="recording-panel" role="document">
       <div class="recording-source">
@@ -233,9 +239,9 @@
         <span id="recordingOverlayMetaLevel">실시간 음성 감지</span>
       </div>
       <div class="recording-actions">
-        <button type="button" class="rec-btn ghost" data-recording-action="minimize">최소화</button>
-        <button type="button" class="rec-btn ghost" data-recording-action="cancel" id="recordingOverlayCancelBtn">취소</button>
-        <button type="button" class="rec-btn primary" data-recording-action="stop" id="recordingOverlayStopBtn">녹음 정지 · 전사 시작</button>
+        <button type="button" class="rec-btn ghost" data-recording-action="minimize" aria-label="녹음 HUD 최소화">최소화</button>
+        <button type="button" class="rec-btn ghost" data-recording-action="cancel" id="recordingOverlayCancelBtn" aria-label="녹음 취소">취소</button>
+        <button type="button" class="rec-btn primary" data-recording-action="stop" id="recordingOverlayStopBtn" aria-label="녹음 정지 후 전사 시작">녹음 정지 · 전사 시작</button>
       </div>
     </div>
   </div>

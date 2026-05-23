@@ -1356,6 +1356,21 @@
             var els = self._els;
             var actionsEl = els.viewerActions;
             actionsEl.innerHTML = "";
+            actionsEl.setAttribute("role", "toolbar");
+            actionsEl.setAttribute("aria-label", "회의 작업");
+
+            function makeGroup(className, label) {
+                var group = document.createElement("div");
+                group.className = "viewer-action-group " + className;
+                group.setAttribute("role", "group");
+                group.setAttribute("aria-label", label);
+                actionsEl.appendChild(group);
+                return group;
+            }
+
+            var primaryGroup = makeGroup("primary", "주요 작업");
+            var secondaryGroup = makeGroup("secondary", "보조 작업");
+            var dangerGroup = makeGroup("danger", "위험 작업");
 
             // 진행 중(queued/transcribing/diarizing/merging/embedding) 시 취소 버튼
             var inProgressStates = {
@@ -1372,7 +1387,7 @@
                 cancelBtn.addEventListener("click", function () {
                     self._cancelMeeting(data.meeting_id, cancelBtn);
                 });
-                actionsEl.appendChild(cancelBtn);
+                dangerGroup.appendChild(cancelBtn);
             }
 
             // 녹음 완료 시 전사 시작 버튼
@@ -1383,7 +1398,7 @@
                 transcribeBtn.addEventListener("click", function () {
                     self._transcribeMeeting(data.meeting_id, transcribeBtn);
                 });
-                actionsEl.appendChild(transcribeBtn);
+                primaryGroup.appendChild(transcribeBtn);
             }
 
             // 실패 시 이어서 재시도 버튼
@@ -1400,7 +1415,7 @@
                 retryBtn.addEventListener("click", function () {
                     self._retryMeeting(data.meeting_id);
                 });
-                actionsEl.appendChild(retryBtn);
+                primaryGroup.appendChild(retryBtn);
             }
 
             // 재전사 버튼 (완료/실패 회의를 처음부터 다시 전사)
@@ -1417,7 +1432,7 @@
                 reBtn.addEventListener("click", function () {
                     self._reTranscribeMeeting(data.meeting_id, reBtn);
                 });
-                actionsEl.appendChild(reBtn);
+                dangerGroup.appendChild(reBtn);
             }
 
             // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
@@ -1430,7 +1445,7 @@
                 summarizeBtn.addEventListener("click", function () {
                     self._summarizeMeeting(data.meeting_id, summarizeBtn);
                 });
-                actionsEl.appendChild(summarizeBtn);
+                primaryGroup.appendChild(summarizeBtn);
             }
 
             // A/B 테스트 버튼 (완료된 회의에서만)
@@ -1442,7 +1457,7 @@
                 abTestBtn.addEventListener("click", function () {
                     Router.navigate("/app/ab-test/new?source=" + encodeURIComponent(data.meeting_id));
                 });
-                actionsEl.appendChild(abTestBtn);
+                secondaryGroup.appendChild(abTestBtn);
             }
 
             // 전사문 복사/다운로드 + 모두 바꾸기 버튼 (완료된 회의이며 전사문 로드된 경우)
@@ -1454,7 +1469,7 @@
                 copyBtn.addEventListener("click", function () {
                     self._copyTranscript(copyBtn);
                 });
-                actionsEl.appendChild(copyBtn);
+                primaryGroup.appendChild(copyBtn);
 
                 var downloadBtn = document.createElement("button");
                 downloadBtn.className = "viewer-action-btn download-txt";
@@ -1463,7 +1478,7 @@
                 downloadBtn.addEventListener("click", function () {
                     self._downloadTranscript();
                 });
-                actionsEl.appendChild(downloadBtn);
+                primaryGroup.appendChild(downloadBtn);
 
                 // 모두 바꾸기 (find/replace + 용어집 자동 등록)
                 var replaceBtn = document.createElement("button");
@@ -1478,7 +1493,7 @@
                 replaceBtn.addEventListener("click", function () {
                     self._openReplaceModal();
                 });
-                actionsEl.appendChild(replaceBtn);
+                secondaryGroup.appendChild(replaceBtn);
             }
 
             // 삭제 버튼 (완료/실패/녹음완료 시)
@@ -1489,8 +1504,14 @@
                 deleteBtn.addEventListener("click", function () {
                     self._deleteMeeting(data.meeting_id);
                 });
-                actionsEl.appendChild(deleteBtn);
+                dangerGroup.appendChild(deleteBtn);
             }
+
+            [primaryGroup, secondaryGroup, dangerGroup].forEach(function (group) {
+                if (group.children.length === 0) {
+                    group.remove();
+                }
+            });
         };
 
         /**

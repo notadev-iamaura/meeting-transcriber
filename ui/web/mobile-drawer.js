@@ -18,6 +18,7 @@
         var panel = null;
         var backdrop = null;
         var mediaQuery = null;
+        var inertTargets = [];
 
         function _isReady() {
             return Boolean(toggleBtn && panel && backdrop);
@@ -50,6 +51,26 @@
             panel.inert = hidden;
         }
 
+        function collectInertTargets() {
+            inertTargets = [
+                doc.getElementById("nav-bar"),
+                doc.getElementById("content-wrapper"),
+                doc.getElementById("globalHomeButton"),
+                doc.getElementById("themeToggle"),
+            ].filter(Boolean);
+        }
+
+        function setBackgroundInert(inert) {
+            inertTargets.forEach(function (el) {
+                el.inert = inert;
+                if (inert) {
+                    el.setAttribute("aria-hidden", "true");
+                } else {
+                    el.removeAttribute("aria-hidden");
+                }
+            });
+        }
+
         function isOpen() {
             return Boolean(
                 toggleBtn &&
@@ -62,6 +83,7 @@
             toggleBtn.setAttribute("aria-expanded", "true");
             toggleBtn.setAttribute("aria-label", "메뉴 닫기");
             setPanelHidden(false);
+            setBackgroundInert(true);
             panel.classList.add("is-open");
             backdrop.classList.add("visible");
             body.style.overflow = "hidden";
@@ -80,6 +102,7 @@
             backdrop.classList.remove("visible");
             body.style.overflow = "";
             setPanelHidden(true);
+            setBackgroundInert(false);
             if (options.restoreFocus !== false) {
                 toggleBtn.focus();
             }
@@ -94,9 +117,11 @@
                 toggleBtn.setAttribute("aria-expanded", "false");
                 toggleBtn.setAttribute("aria-label", "메뉴 열기");
                 setPanelHidden(false);
+                setBackgroundInert(false);
                 return;
             }
             setPanelHidden(!isOpen());
+            setBackgroundInert(isOpen());
         }
 
         function init() {
@@ -105,6 +130,7 @@
             backdrop = doc.getElementById(backdropId);
             if (!_isReady()) return;
             mediaQuery = (doc.defaultView || window).matchMedia("(max-width: 768px)");
+            collectInertTargets();
             syncForViewport();
 
             toggleBtn.addEventListener("click", function () {
@@ -116,6 +142,21 @@
             });
 
             backdrop.addEventListener("click", function () { close(); });
+
+            panel.addEventListener("click", function (e) {
+                var target = e.target && e.target.closest
+                    ? e.target.closest("a[href], button, [role='option'], [data-route]")
+                    : null;
+                if (!target || !panel.contains(target) || !isDrawerMode()) return;
+                var shouldClose = (
+                    target.id === "brandHomeLink" ||
+                    target.classList.contains("meeting-item") ||
+                    target.hasAttribute("data-route")
+                );
+                if (shouldClose) {
+                    setTimeout(function () { close({ restoreFocus: false }); }, 0);
+                }
+            });
 
             doc.addEventListener("keydown", function (e) {
                 if (e.key === "Escape" && isOpen()) {

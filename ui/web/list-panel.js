@@ -246,27 +246,43 @@
 
                 // 녹음 HUD 상태 제어 — overlay(기본) ↔ pill(최소화) 배타 표시.
                 // _recOverlayShown 이 true 면 pill 은 숨김, false 면 pill 표시.
+                function _setHudA11y(el, visible) {
+                    if (!el) return;
+                    el.hidden = !visible;
+                    el.inert = !visible;
+                    el.setAttribute("aria-hidden", visible ? "false" : "true");
+                }
+
                 function _showRecHUD(mode) {
                     // mode: "overlay" | "pill" | "none"
                     var pill = document.getElementById("recordingStatus");
                     var overlay = document.getElementById("recordingOverlay");
                     if (mode === "overlay") {
-                        if (pill) pill.classList.remove("visible");
+                        if (pill) {
+                            pill.classList.remove("visible");
+                            _setHudA11y(pill, false);
+                        }
                         if (overlay) {
+                            _setHudA11y(overlay, true);
                             overlay.classList.add("visible");
-                            overlay.setAttribute("aria-hidden", "false");
                         }
                     } else if (mode === "pill") {
                         if (overlay) {
                             overlay.classList.remove("visible");
-                            overlay.setAttribute("aria-hidden", "true");
+                            _setHudA11y(overlay, false);
                         }
-                        if (pill) pill.classList.add("visible");
+                        if (pill) {
+                            _setHudA11y(pill, true);
+                            pill.classList.add("visible");
+                        }
                     } else {
-                        if (pill) pill.classList.remove("visible");
+                        if (pill) {
+                            pill.classList.remove("visible");
+                            _setHudA11y(pill, false);
+                        }
                         if (overlay) {
                             overlay.classList.remove("visible");
-                            overlay.setAttribute("aria-hidden", "true");
+                            _setHudA11y(overlay, false);
                         }
                     }
                 }

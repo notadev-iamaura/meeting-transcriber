@@ -604,6 +604,7 @@
             self._host = host;
             self._els = {};
             self._listeners = [];
+            self._dirty = false;
             self._render();
             self._bind();
             self._loadSettings();
@@ -795,9 +796,9 @@
                 '    </div>',
                 '    <div class="stt-models-status" id="settingsSttStatus" role="status" aria-live="polite"></div>',
                 '  </section>',
-                '  <div class="settings-actions">',
+                '  <div class="settings-actions settings-actions-sticky" role="region" aria-label="설정 저장 상태">',
                 '    <button class="settings-save-btn" id="settingsSaveBtn">변경사항 저장</button>',
-                '    <span class="settings-save-status" id="settingsSaveStatus"></span>',
+                '    <span class="settings-save-status" id="settingsSaveStatus">변경 전</span>',
                 '  </div>',
                 '  <section class="settings-advanced">',
                 '    <h3 class="settings-advanced-title">고급 기능</h3>',
@@ -878,6 +879,25 @@
             };
             els.model.addEventListener("change", onModelChange);
             self._listeners.push({ el: els.model, type: "change", fn: onModelChange });
+
+            var markDirty = function () {
+                self._setDirty(true);
+            };
+            [
+                els.model, els.backend, els.temp, els.skipLlm, els.lang,
+                els.hfEnabled, els.hfNoSpeech, els.hfCompRatio, els.hfRepetition,
+                els.lifecycleEnabled, els.lifecycleInterval, els.lifecycleHotDays,
+                els.lifecycleWarmDays, els.lifecycleRunOnStartup,
+                els.autoProcessingEnabled, els.autoProcessingRunAt,
+                els.autoProcessingRecentHours, els.autoProcessingAction,
+                els.autoProcessingRunOnStartup,
+            ].forEach(function (el) {
+                if (!el) return;
+                var type = el.tagName === "INPUT" ? "input" : "change";
+                if (el.type === "checkbox" || el.tagName === "SELECT") type = "change";
+                el.addEventListener(type, markDirty);
+                self._listeners.push({ el: el, type: type, fn: markDirty });
+            });
 
             var onSave = function () {
                 self._saveSettings();
@@ -974,8 +994,23 @@
                 }
                 els.autoProcessingRunOnStartup.checked = !!data.auto_processing_run_on_startup_if_missed;
                 self._loadAutoProcessingStatus();
+                self._setDirty(false);
             } catch (err) {
                 errorBanner.show("설정 불러오기 실패: " + (err.message || err));
+            }
+        };
+
+        GeneralSettingsPanel.prototype._setDirty = function (dirty) {
+            this._dirty = !!dirty;
+            var els = this._els;
+            if (!els.saveStatus || !els.saveBtn) return;
+            if (this._dirty) {
+                els.saveStatus.textContent = "저장되지 않은 변경";
+                els.saveStatus.className = "settings-save-status warning";
+                els.saveBtn.disabled = false;
+            } else {
+                els.saveStatus.textContent = "변경 전";
+                els.saveStatus.className = "settings-save-status";
             }
         };
 
@@ -1034,9 +1069,10 @@
                 }
                 els.saveStatus.textContent = "저장 완료";
                 els.saveStatus.className = "settings-save-status success";
+                this._dirty = false;
                 await this._loadAutoProcessingStatus();
                 setTimeout(function () {
-                    els.saveStatus.textContent = "";
+                    els.saveStatus.textContent = "변경 전";
                     els.saveStatus.className = "settings-save-status";
                 }, 3000);
             } catch (err) {
@@ -1136,8 +1172,7 @@
         };
 
         GeneralSettingsPanel.prototype.isDirty = function () {
-            // 일반 설정은 명시적 저장 버튼 패턴이라 dirty 추적을 하지 않는다.
-            return false;
+            return this._dirty;
         };
 
         GeneralSettingsPanel.prototype.destroy = function () {

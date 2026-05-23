@@ -234,11 +234,21 @@
 
         function show(text) {
             safeText(message, text);
-            if (banner) banner.classList.add("visible");
+            if (banner) {
+                banner.hidden = false;
+                banner.inert = false;
+                banner.setAttribute("aria-hidden", "false");
+                banner.classList.add("visible");
+            }
         }
 
         function hide() {
-            if (banner) banner.classList.remove("visible");
+            if (banner) {
+                banner.classList.remove("visible");
+                banner.setAttribute("aria-hidden", "true");
+                banner.inert = true;
+                banner.hidden = true;
+            }
         }
 
         if (closeBtn) {

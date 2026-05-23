@@ -412,6 +412,19 @@ class TestMeetingDetailEndpoint:
         assert response.status_code == 404
         assert "찾을 수 없습니다" in response.json()["detail"]
 
+    def test_pipeline_state_없으면_빈_상태_200(self, tmp_path: Path) -> None:
+        """pipeline_state.json 누락은 UI 콘솔 404가 아니라 빈 로그 상태로 응답한다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_001/pipeline-state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "missing"
+        assert data["step_results"] == []
+        assert data["total_elapsed_seconds"] == 0.0
+
     def test_meeting_상세_응답_필드_검증(self, tmp_path: Path) -> None:
         """상세 조회 응답에 모든 필수 필드가 포함되는지 확인한다."""
         app = _make_test_app(tmp_path)

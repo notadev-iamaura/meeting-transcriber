@@ -2278,6 +2278,208 @@ def test_t301_route_change_updates_aria_current(browser: Browser, spa_static_ser
         assert result["home"] is None, f"#navHome 에 aria-current 잔존 (실제: {result['home']!r})"
 
 
+def test_global_logo_click_navigates_home(browser: Browser, spa_static_server: str) -> None:
+    """우측 상단 Recap 로고 클릭 시 홈(/app)으로 이동한다."""
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/settings",
+    ) as page:
+        page.wait_for_selector("#globalHomeButton")
+        assert page.locator("#brandHomeLink").get_attribute("href").endswith("/app")
+
+        page.click("#globalHomeButton")
+        page.wait_for_function("() => window.location.pathname === '/app'")
+
+        result = page.evaluate(
+            "() => ({"
+            "  path: window.location.pathname, "
+            "  homeActive: document.querySelector('#navHome')?.classList.contains('active'), "
+            "  homeCurrent: document.querySelector('#navHome')?.getAttribute('aria-current') "
+            "})"
+        )
+        assert result["path"] == "/app"
+        assert result["homeActive"] is True
+        assert result["homeCurrent"] == "page"
+
+
+def test_hidden_huds_are_removed_from_tab_order(browser: Browser, spa_static_server: str) -> None:
+    """비활성 toast/recording HUD 내부 버튼이 tab order에 남지 않는다."""
+    with _spa_page(browser, spa_static_server, {"width": 1024, "height": 768}) as page:
+        page.wait_for_selector("#errorBanner", state="attached")
+        state = page.evaluate(
+            "() => ({"
+            "  toastHidden: document.querySelector('#errorBanner').hidden,"
+            "  toastInert: document.querySelector('#errorBanner').inert,"
+            "  pillHidden: document.querySelector('#recordingStatus').hidden,"
+            "  pillInert: document.querySelector('#recordingStatus').inert,"
+            "  overlayHidden: document.querySelector('#recordingOverlay').hidden,"
+            "  overlayInert: document.querySelector('#recordingOverlay').inert"
+            "})"
+        )
+        assert state == {
+            "toastHidden": True,
+            "toastInert": True,
+            "pillHidden": True,
+            "pillInert": True,
+            "overlayHidden": True,
+            "overlayInert": True,
+        }
+
+
+def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server: str) -> None:
+    """viewer 액션바가 주요/보조/위험 작업 그룹으로 분리된다."""
+
+    def viewer_api(route: Route) -> None:
+        url = route.request.url
+        if url.endswith("/api/meetings/meeting-a"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-a",
+                        "audio_path": "/tmp/a.wav",
+                        "created_at": "2026-05-05T10:00:00",
+                        "status": "completed",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if url.endswith("/api/meetings/meeting-a/transcript"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "utterances": [
+                            {"speaker": "SPEAKER_00", "start": 0, "end": 1, "text": "안녕하세요"}
+                        ],
+                        "speakers": ["SPEAKER_00"],
+                        "num_speakers": 1,
+                        "total_utterances": 1,
+                    }
+                ),
+            )
+            return
+        if url.endswith("/api/meetings/meeting-a/pipeline-state"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"missing","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-a",
+        api_handler=viewer_api,
+    ) as page:
+        page.wait_for_selector(".viewer-action-group.primary .viewer-action-btn.copy")
+        groups = page.evaluate(
+            "() => ({"
+            "  primary: Array.from(document.querySelectorAll('.viewer-action-group.primary button')).map(b => b.textContent.trim()),"
+            "  secondary: Array.from(document.querySelectorAll('.viewer-action-group.secondary button')).map(b => b.textContent.trim()),"
+            "  danger: Array.from(document.querySelectorAll('.viewer-action-group.danger button')).map(b => b.textContent.trim())"
+            "})"
+        )
+        assert any("복사" in text for text in groups["primary"])
+        assert any("다운로드" in text for text in groups["primary"])
+        assert any("A/B" in text for text in groups["secondary"])
+        assert any("바꾸기" in text for text in groups["secondary"])
+        assert any("삭제" in text for text in groups["danger"])
+        assert any("다시 전사" in text for text in groups["danger"])
+
+
+def test_search_labels_and_suggestion_chip(browser: Browser, spa_static_server: str) -> None:
+    """검색 필터 label과 추천 chip이 실제 검색 payload에 반영된다."""
+    payloads: list[dict] = []
+
+    def search_api(route: Route) -> None:
+        if "/api/search" in route.request.url:
+            payloads.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"results": [], "vector_count": 0, "fts_count": 0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/search",
+        api_handler=search_api,
+    ) as page:
+        page.wait_for_selector(".suggestion-chip[data-query='결정사항']")
+        assert page.locator("label[for='searchFilterDate']").inner_text() == "날짜"
+        assert page.locator("#searchFilterDate").get_attribute("aria-label") == "검색 날짜 필터"
+        page.locator(".suggestion-chip[data-query='결정사항']").click()
+        page.wait_for_function("() => document.querySelector('#searchEmpty').style.display === 'block'")
+        assert payloads[-1]["query"] == "결정사항"
+
+
+def test_chat_prompt_chip_and_scope_status(browser: Browser, spa_static_server: str) -> None:
+    """채팅 추천 질문은 입력창을 채우고 선택 회의 범위를 명확히 표시한다."""
+
+    def chat_api(route: Route) -> None:
+        url = route.request.url
+        if url.endswith("/api/meetings"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meetings": [
+                            {"meeting_id": "meeting-a", "status": "completed", "created_at": "2026-05-05T10:00:00"}
+                        ]
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/chat",
+        api_handler=chat_api,
+    ) as page:
+        page.wait_for_selector("#chatMeetingFilter option[value='meeting-a']", state="attached")
+        page.locator(".welcome-tip").first.click()
+        assert "결정된 일정" in page.locator("#chatInput").input_value()
+        page.select_option("#chatMeetingFilter", "meeting-a")
+        assert "meeting-a 회의만 검색" in page.locator("#chatScopeStatus").inner_text()
+
+
+def test_settings_general_save_bar_tracks_dirty_state(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """일반 설정은 sticky 저장바와 저장되지 않은 변경 상태를 노출한다."""
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/settings",
+    ) as page:
+        page.wait_for_selector("#settingsSaveBtn")
+        position = page.evaluate(
+            "() => getComputedStyle(document.querySelector('.settings-actions-sticky')).position"
+        )
+        assert position == "sticky"
+        page.locator("#settingsTemp").fill("0.4")
+        assert "저장되지 않은 변경" in page.locator("#settingsSaveStatus").inner_text()
+
+
 # ============================================================
 # T-302 mobile-responsive
 # ============================================================
@@ -2350,3 +2552,55 @@ def test_t302_escape_closes_drawer(browser: Browser, spa_static_server: str) -> 
             f"ESC 후 aria-expanded={result['ariaExpanded']!r} (false 기대)"
         )
         assert not result["panelOpen"], "ESC 후 #list-panel.is-open 잔존"
+
+
+def test_t302_mobile_meeting_selection_closes_drawer_and_restores_background(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """모바일 drawer에서 회의 선택 시 route 이동 후 drawer가 닫히고 배경 inert가 해제된다."""
+
+    def mobile_api(route: Route) -> None:
+        url = route.request.url
+        if url.endswith("/api/meetings"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meetings": [
+                            {
+                                "meeting_id": "meeting-a",
+                                "status": "completed",
+                                "created_at": "2026-05-05T10:00:00",
+                            }
+                        ]
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 375, "height": 667},
+        api_handler=mobile_api,
+    ) as page:
+        page.wait_for_selector(".meeting-item[data-meeting-id='meeting-a']")
+        page.locator("#mobile-menu-toggle").click()
+        page.wait_for_function("() => document.querySelector('#list-panel').classList.contains('is-open')")
+        assert page.evaluate("() => document.querySelector('#content-wrapper').inert") is True
+
+        page.locator(".meeting-item[data-meeting-id='meeting-a']").click()
+        page.wait_for_url("**/app/viewer/meeting-a")
+        page.wait_for_function("() => !document.querySelector('#list-panel').classList.contains('is-open')")
+
+        state = page.evaluate(
+            "() => ({"
+            "  expanded: document.querySelector('#mobile-menu-toggle').getAttribute('aria-expanded'),"
+            "  contentInert: document.querySelector('#content-wrapper').inert,"
+            "  navInert: document.querySelector('#nav-bar').inert"
+            "})"
+        )
+        assert state == {"expanded": "false", "contentInert": False, "navInert": False}
