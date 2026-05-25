@@ -445,3 +445,53 @@ class TestIndexImmutability:
             "생성자 이후 외부 리스트 변경은 verifier 인덱스에 영향 없어야 함 "
             "— 생성자에서 defensive copy 또는 정렬·인덱스 사전 빌드 필요"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. JSON dict 입력 호환성 (2건)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDictUtteranceCompatibility:
+    """백필처럼 JSON 에서 직접 로드한 dict utterance 도 검증 가능해야 한다."""
+
+    @pytest.mark.asyncio
+    async def test_verify_exists_dict_utterance_시간_매칭_true(self) -> None:
+        """dict 발화가 들어와도 AttributeError 없이 실제 구간 매칭을 수행한다."""
+        verifier = UtterancesCitationVerifier(
+            {
+                MEETING_M1: [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "JSON 로드 발화",
+                        "start": 0.0,
+                        "end": 5.0,
+                    }
+                ]
+            },
+            tolerance_seconds=2,
+        )
+
+        result = await verifier.verify_exists(MEETING_M1, 2)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_fetch_utterance_dict_utterance_텍스트_반환(self) -> None:
+        """fetch_utterance 도 dict 발화의 text 필드를 읽을 수 있어야 한다."""
+        verifier = UtterancesCitationVerifier(
+            {
+                MEETING_M1: [
+                    {
+                        "speaker": "SPEAKER_00",
+                        "text": "JSON 로드 발화",
+                        "start": 0.0,
+                        "end": 5.0,
+                    }
+                ]
+            }
+        )
+
+        result = await verifier.fetch_utterance(MEETING_M1, 2)
+
+        assert result == "JSON 로드 발화"

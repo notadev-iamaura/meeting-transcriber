@@ -99,6 +99,31 @@ class BackfillResult:
 # ─── 회의 데이터 로딩 헬퍼 ──────────────────────────────────────────────
 
 
+def _coerce_utterance_dict(raw: Any) -> Any | None:
+    """JSON utterance dict 를 CorrectedUtterance 호환 객체로 정규화한다."""
+    if not isinstance(raw, dict):
+        return raw
+
+    from steps.corrector import CorrectedUtterance
+
+    text = str(raw.get("text") or "")
+    speaker = str(raw.get("speaker") or "")
+    try:
+        start = float(raw.get("start", 0.0))
+        end = float(raw.get("end", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+    return CorrectedUtterance(
+        text=text,
+        original_text=str(raw.get("original_text") or text),
+        speaker=speaker,
+        start=start,
+        end=end,
+        was_corrected=bool(raw.get("was_corrected", False)),
+    )
+
+
 def _load_utterances(config: Any, meeting_id: str) -> list[Any] | None:
     """회의의 보정된 utterances 를 로드한다.
 
@@ -112,7 +137,7 @@ def _load_utterances(config: Any, meeting_id: str) -> list[Any] | None:
         meeting_id: 회의 식별자.
 
     Returns:
-        utterance dict 의 리스트. 파일이 없거나 읽기 실패 시 None.
+        CorrectedUtterance 호환 객체의 리스트. 파일이 없거나 읽기 실패 시 None.
     """
     outputs_dir = config.paths.resolved_outputs_dir
     checkpoints_dir = config.paths.resolved_checkpoints_dir
@@ -132,7 +157,14 @@ def _load_utterances(config: Any, meeting_id: str) -> list[Any] | None:
             continue
         utterances = data.get("utterances", [])
         if utterances:
-            return cast(list[Any], utterances)
+            normalized = [
+                utterance
+                for raw in utterances
+                if (utterance := _coerce_utterance_dict(raw)) is not None
+            ]
+            if normalized:
+                return cast(list[Any], normalized)
+            logger.warning("백필: 유효한 utterances 가 없음 — %s", path)
     return None
 
 

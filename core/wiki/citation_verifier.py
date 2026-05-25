@@ -22,7 +22,8 @@ Phase 4 범위 (단일 회의):
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,26 @@ class Utterance(Protocol):
     text: str
     start: float
     end: float
+
+
+def _read_utterance_field(utterance: Any, field_name: str) -> Any:
+    """dict/object 양쪽 utterance 스키마에서 필드 값을 읽는다."""
+    if isinstance(utterance, Mapping):
+        return utterance.get(field_name)
+    return getattr(utterance, field_name)
+
+
+def _read_utterance_float(utterance: Any, field_name: str) -> float:
+    """utterance 필드를 float 로 읽는다."""
+    return float(_read_utterance_field(utterance, field_name))
+
+
+def _utterance_start_sort_key(utterance: Any) -> float:
+    """정렬용 start 값을 반환한다. 비정상 발화는 뒤로 보낸다."""
+    try:
+        return _read_utterance_float(utterance, "start")
+    except (TypeError, ValueError, AttributeError):
+        return float("inf")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,10 +109,10 @@ class UtterancesCitationVerifier:
             raise ValueError(f"tolerance_seconds 는 0 이상이어야 합니다: {tolerance_seconds}")
 
         # 외부 변경 영향 차단을 위해 즉시 복사 + 정렬 인덱스 빌드
-        self._utterances_by_meeting: dict[str, list[Utterance]] = {}
+        self._utterances_by_meeting: dict[str, list[Any]] = {}
         for meeting_id, utts in utterances_by_meeting.items():
             # list() 로 복사 + start 기준 오름차순 정렬
-            sorted_utts = sorted(list(utts), key=lambda u: float(u.start))
+            sorted_utts = sorted(list(utts), key=_utterance_start_sort_key)
             self._utterances_by_meeting[meeting_id] = sorted_utts
 
         self._tolerance_seconds: int = tolerance_seconds
@@ -144,9 +165,9 @@ class UtterancesCitationVerifier:
         ts = timestamp_seconds
         for utt in utts:
             try:
-                start = float(utt.start)
-                end = float(utt.end)
-            except (TypeError, ValueError):
+                start = _read_utterance_float(utt, "start")
+                end = _read_utterance_float(utt, "end")
+            except (TypeError, ValueError, AttributeError):
                 # 비정상 발화는 skip
                 continue
             # (utt.start ≤ ts + tol) AND (utt.end ≥ ts - tol)
@@ -189,9 +210,9 @@ class UtterancesCitationVerifier:
         best_distance: float = float("inf")
         for utt in utts:
             try:
-                start = float(utt.start)
-                end = float(utt.end)
-                text = str(utt.text)
+                start = _read_utterance_float(utt, "start")
+                end = _read_utterance_float(utt, "end")
+                text = str(_read_utterance_field(utt, "text"))
             except (TypeError, ValueError, AttributeError):
                 continue
             if start <= ts + tol and end >= ts - tol:

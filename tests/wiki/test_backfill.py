@@ -465,3 +465,67 @@ class TestBackfillDateFilter:
         assert "abc00000" not in processed
         assert "abc00001" not in processed
         assert "abc00004" not in processed
+
+
+# ─── 시나리오 9: utterances JSON 정규화 ────────────────────────────────
+
+
+class TestLoadUtterancesNormalization:
+    """백필 로더가 JSON dict 를 라이브 경로와 같은 객체 형태로 정규화하는지 검증."""
+
+    def test_load_utterances_corrected_json을_corrected_utterance로_변환(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """outputs/{id}/corrected.json 의 dict 발화를 CorrectedUtterance 로 반환한다."""
+        from scripts.backfill_wiki import _load_utterances
+        from steps.corrector import CorrectedUtterance
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "abc12345"
+        _seed_meeting_outputs(config, meeting_id)
+
+        utterances = _load_utterances(config, meeting_id)
+
+        assert utterances is not None
+        assert isinstance(utterances[0], CorrectedUtterance)
+        assert utterances[0].start == 0.0
+        assert utterances[0].end == 5.0
+        assert utterances[0].original_text == utterances[0].text
+
+    def test_load_utterances_merge_json_폴백도_corrected_utterance로_변환(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """보정 결과가 없고 merge 체크포인트만 있어도 verifier 호환 객체를 반환한다."""
+        from scripts.backfill_wiki import _load_utterances
+        from steps.corrector import CorrectedUtterance
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "abc12345"
+        checkpoint_dir = config.paths.resolved_checkpoints_dir / meeting_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "merge.json").write_text(
+            json.dumps(
+                {
+                    "utterances": [
+                        {
+                            "speaker": "SPEAKER_01",
+                            "text": "merge 폴백 발화",
+                            "start": 10.0,
+                            "end": 12.5,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        utterances = _load_utterances(config, meeting_id)
+
+        assert utterances is not None
+        assert isinstance(utterances[0], CorrectedUtterance)
+        assert utterances[0].text == "merge 폴백 발화"
+        assert utterances[0].original_text == "merge 폴백 발화"
+        assert utterances[0].speaker == "SPEAKER_01"
