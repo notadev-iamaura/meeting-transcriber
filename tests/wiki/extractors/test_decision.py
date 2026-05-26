@@ -505,7 +505,7 @@ async def test_render_pages_본문_4섹션_포함():
 async def test_render_pages_인용_마커_포함():
     """Arrange: 결정 텍스트에 인용이 있는 ExtractedDecision + 렌더링 mock.
     Act: render_pages() 호출.
-    Assert: 출력 페이지의 "## 결정 내용" 본문에 인용 마커 `[meeting:id@HH:MM:SS]` 가 있다.
+    Assert: 출력 페이지의 "## 결정 내용" 본문에 인용 마커 `[meeting:{회의 ID}@HH:MM:SS]` 가 있다.
 
     설계 근거: PRD §4.2 "모든 사실 진술에 인용 강제" + D1 인용 강제 통과 조건.
     """
@@ -536,7 +536,7 @@ async def test_render_pages_인용_마커_포함():
     _, content = pages[0]
     all_citations = CITATION_PATTERN.findall(content)
     assert len(all_citations) >= 1, (
-        f"출력 페이지에 인용 마커 [meeting:id@HH:MM:SS] 가 없음. 발견된 인용: {all_citations}"
+        f"출력 페이지에 인용 마커 [meeting:{{회의 ID}}@HH:MM:SS] 가 없음. 발견된 인용: {all_citations}"
     )
 
 

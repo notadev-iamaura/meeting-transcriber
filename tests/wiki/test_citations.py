@@ -179,6 +179,10 @@ class TestIsFactualStatement:
             ("---", "frontmatter 구분자 — 면제"),
             ("[../people/철수.md]", "순수 페이지 링크 — 면제"),
             ("[../../decisions/x.md]", "깊은 상대 페이지 링크 — 면제"),
+            ("- [meeting_20260522_172005](../../../app/viewer/meeting_20260522_172005)", "참고 회의 링크 — 면제"),
+            ("- 없음.", "빈 섹션 placeholder — 면제"),
+            ("_(없음)_", "빈 섹션 placeholder — 면제"),
+            ("- N/A", "영문 placeholder — 면제"),
             ("<!-- confidence: 9 -->", "HTML 주석(confidence 마커) — 면제"),
             ("|---|---|---|", "표 구분자 줄 — 면제"),
             ("```python", "코드블록 펜스 시작 — 면제"),
@@ -298,6 +302,49 @@ class TestEnforceCitationsBasic:
 
         assert rejected == []
         assert f"[meeting:{REAL_MEETING_ID}@00:00:00]" in result_content
+
+    def test_실제_decision_page_구조는_참고회의_링크_때문에_D1_거부되지_않는다(self) -> None:
+        """LLM/canonical decision 페이지 구조의 참고 회의 링크는 메타데이터로 면제한다."""
+        content = (
+            "---\n"
+            "type: decision\n"
+            f"meeting_id: {REAL_MEETING_ID}\n"
+            "---\n\n"
+            "# API 비용 검토\n\n"
+            "## 결정 내용\n"
+            f"API 호출 비용 모니터링을 도입한다. [meeting:{REAL_MEETING_ID}@00:01:00]\n\n"
+            "## 배경\n"
+            f"PII 호출 로그가 누락되고 있다. [meeting:{REAL_MEETING_ID}@00:02:00]\n\n"
+            "## 후속 액션\n"
+            f"- [ ] 김철수: 회의록 정리 [meeting:{REAL_MEETING_ID}@00:03:00]\n\n"
+            "## 참고 회의\n"
+            f"- [{REAL_MEETING_ID}](../../../app/viewer/{REAL_MEETING_ID})\n"
+        )
+
+        _cleaned, rejected = enforce_citations(content, REAL_MEETING_ID)
+
+        assert rejected == []
+
+    def test_메타_섹션의_참여자_목록은_D1_의무_대상이_아니다(self) -> None:
+        """프로젝트 페이지 참여자 섹션의 이름 목록은 사실 진술이 아닌 메타데이터다."""
+        content = (
+            "---\n"
+            "type: project\n"
+            "---\n\n"
+            "# API\n\n"
+            "## 현재 상태\n"
+            f"**in-progress** — API 검토 중이다. [meeting:{REAL_MEETING_ID}@00:01:00]\n\n"
+            "## 진행 타임라인\n"
+            f"- 2026-05-22: 검토 시작 [meeting:{REAL_MEETING_ID}@00:02:00]\n\n"
+            "## 미해결 이슈\n"
+            "- 없음.\n\n"
+            "## 참여자\n"
+            "- SPEAKER_00 (Owner), SPEAKER_01, UNKNOWN\n"
+        )
+
+        _cleaned, rejected = enforce_citations(content, REAL_MEETING_ID)
+
+        assert rejected == []
 
     def test_빈_content에_대해_빈_content와_빈_rejected를_반환한다(self) -> None:
         """입력 content 가 빈 문자열이면 ('', []) 를 반환한다."""

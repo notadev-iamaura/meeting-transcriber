@@ -116,7 +116,7 @@ class ExistingPersonState:
         first_seen_date: frontmatter 의 first_seen.
         last_seen_date: frontmatter 의 last_seen.
         meetings_count: frontmatter 의 meetings_count.
-        seen_meeting_ids: 본문에 등장한 모든 [meeting:id@HH:MM:SS] 의 id 집합.
+        seen_meeting_ids: 본문에 등장한 모든 [meeting:{회의 ID}@HH:MM:SS] 의 ID 집합.
         existing_topics: 기존 "자주 언급하는 주제" 섹션의 주제 문자열 set.
         raw_content: 페이지 전체 raw text.
     """

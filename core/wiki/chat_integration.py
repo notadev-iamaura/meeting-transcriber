@@ -47,7 +47,7 @@ class WikiAnswerSource:
         page_type: PageType enum 값 ("decision" / "person" / ...).
         title: 페이지 frontmatter 의 title 또는 첫 # 제목.
         snippet: 답변 합성에 인용된 본문 일부 (최대 200자).
-        citations: 페이지에 포함된 [meeting:id@HH:MM:SS] 마커 raw 문자열 리스트.
+        citations: 페이지에 포함된 [meeting:{회의 ID}@HH:MM:SS] 마커 raw 문자열 리스트.
     """
 
     page_path: str
@@ -443,7 +443,7 @@ class HybridChatService:
         system_prompt = (
             "당신은 회의 위키 검색 도우미다. "
             "주어진 위키 페이지 발췌를 근거로 사용자 질문에 한국어로 답하라. "
-            "인용 마커 [meeting:id@HH:MM:SS] 는 그대로 유지하라."
+            "인용 마커 [meeting:{회의 ID}@HH:MM:SS] 는 그대로 유지하라."
         )
         user_prompt = f"질문: {query}\n\n위키 페이지 발췌:\n\n" + "\n\n---\n\n".join(body_parts)
         wiki_llm = self._wiki_llm

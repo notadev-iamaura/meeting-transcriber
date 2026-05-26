@@ -34,6 +34,17 @@ CITATION_PATTERN: re.Pattern[str] = re.compile(
 # 예: "[../people/철수.md]", "[../../decisions/2026-04-15-x.md]"
 PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(r"\[(\.\./)+[a-z_]+/[^\]]+\.md\]")
 
+# 순수 마크다운 링크만 있는 줄. 예: "- [meeting_...](../../../app/viewer/meeting_...)"
+PURE_MD_LINK_PATTERN: re.Pattern[str] = re.compile(r"^-?\s*\[[^\]]+\]\([^)]+\)\s*$")
+
+# 빈 섹션 placeholder. 예: "- 없음.", "_(없음)_", "N/A"
+PLACEHOLDER_LINE_PATTERN: re.Pattern[str] = re.compile(
+    r"^(?:[-*]\s*)?(?:_?\(?\s*)?(없음|N/A|n/a|TBD|tbd|-)(?:\s*\)?_?)?\.?$"
+)
+
+# 섹션 전체가 메타데이터인 경우 D1 인용 강제에서 제외한다.
+_D1_EXEMPT_SECTION_TITLES: frozenset[str] = frozenset({"참고 회의", "관련 회의", "참여자"})
+
 # D1 거부율 임계 — 의무 대상 줄 중 거부된 줄이 30% 를 초과하면 페이지 자체 무효화
 D1_REJECTION_THRESHOLD: float = 0.30
 
@@ -104,6 +115,8 @@ def is_factual_statement(line: str) -> bool:
         - 마크다운 제목(#, ##, ...)
         - YAML frontmatter 구분자(---)
         - 순수 페이지 링크([../people/x.md])
+        - 순수 마크다운 링크(- [meeting](url))
+        - 빈 섹션 placeholder(- 없음., _(없음)_, N/A 등)
         - HTML 주석(<!-- ... -->)
         - 표 구분자 줄(|---|---|)
         - 코드블록 펜스(```)
@@ -142,6 +155,10 @@ def is_factual_statement(line: str) -> bool:
     if stripped.startswith("<!--") and stripped.endswith("-->"):
         return False
 
+    # 빈 섹션 placeholder 는 사실 진술이 아니라 구조 유지용 메타 줄이다.
+    if PLACEHOLDER_LINE_PATTERN.fullmatch(stripped):
+        return False
+
     # 표 구분자 줄 (|---|---|) — 파이프와 하이픈/공백/콜론만 구성된 줄
     # |---|---| 또는 | --- | --- | 같은 형태 (정렬 콜론 포함 가능)
     if stripped.startswith("|") and stripped.endswith("|"):
@@ -150,8 +167,20 @@ def is_factual_statement(line: str) -> bool:
         if all(ch in "-: |" for ch in inner) and "-" in inner:
             return False
 
+    # 순수 마크다운 링크만 있는 줄은 참고 회의/페이지 링크 메타데이터로 간주한다.
+    if PURE_MD_LINK_PATTERN.fullmatch(stripped):
+        return False
+
     # 순수 페이지 링크만 있는 줄 (`[../people/철수.md]`)
     return not PAGE_LINK_PATTERN.fullmatch(stripped)
+
+
+def _markdown_heading_title(line: str) -> tuple[int, str] | None:
+    """마크다운 heading 이면 (level, title) 을 반환한다."""
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line.strip())
+    if match is None:
+        return None
+    return (len(match.group(1)), match.group(2).strip())
 
 
 def _is_frontmatter_keyvalue(line: str) -> bool:
@@ -205,6 +234,7 @@ def enforce_citations(content: str, meeting_id: str) -> tuple[str, list[str]]:
 
     in_frontmatter = False
     in_code_block = False
+    current_section: str | None = None
     # frontmatter 는 **문서 첫 줄이 정확히 `---`** 일 때만 시작된다.
     # 본문 중간에 등장한 `---` (수평선 등) 을 frontmatter 시작으로 오인하지
     # 않도록 사전에 첫 줄을 확인하여 frontmatter_started_once 를 미리 결정.
@@ -251,8 +281,18 @@ def enforce_citations(content: str, meeting_id: str) -> tuple[str, list[str]]:
             continue
 
         # ── 일반 영역 — is_factual_statement 로 의무 여부 판정 ─────
+        heading = _markdown_heading_title(line_no_newline)
+        if heading is not None:
+            level, title = heading
+            if level <= 2:
+                current_section = title if level == 2 else None
+
         if not is_factual_statement(line_no_newline):
             # 면제 줄은 그대로 보존
+            kept_lines.append(raw_line)
+            continue
+
+        if current_section in _D1_EXEMPT_SECTION_TITLES:
             kept_lines.append(raw_line)
             continue
 
@@ -271,6 +311,8 @@ def enforce_citations(content: str, meeting_id: str) -> tuple[str, list[str]]:
     if mandatory_count >= _D1_MIN_SAMPLE_SIZE:
         rejection_rate = len(rejected_lines) / mandatory_count
         if rejection_rate > D1_REJECTION_THRESHOLD:
+            for rejected_line in rejected_lines[:3]:
+                logger.debug("D1 거부 샘플: %r", rejected_line[:200])
             logger.warning(
                 "D1 거부율 임계 초과: meeting_id=%s, rejected=%d/%d (%.2f%%)",
                 meeting_id,

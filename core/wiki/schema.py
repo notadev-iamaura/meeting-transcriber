@@ -55,9 +55,9 @@ def generate_schema_md() -> str:
 
 모든 사실 진술은 다음 형식의 인용 마커를 최소 1개 이상 가져야 합니다.
 
-    [meeting:{id}@HH:MM:SS]
+    [meeting:{회의 ID}@HH:MM:SS]
 
-- `id`: 8자리 소문자 hex (예: `abc12345`)
+- `회의 ID`: 입력에 제공된 meeting_id 문자열 그대로 (예: `meeting_20260522_172005`)
 - `HH:MM:SS`: 발화 시점의 시·분·초 (각 자릿수 2자리 고정)
 
 검증 정규식:
@@ -68,6 +68,9 @@ def generate_schema_md() -> str:
 - 마크다운 제목 (`#`, `##`, ...)
 - YAML frontmatter (`---` 사이)
 - 페이지 간 상대 링크 (`[../people/철수.md]`)
+- 참고 회의/관련 회의 마크다운 링크 (`- [meeting_...](...)`)
+- 빈 섹션 placeholder (`- 없음.`, `N/A`)
+- 메타데이터 섹션(`## 참고 회의`, `## 관련 회의`, `## 참여자`)
 - HTML 주석 (`<!-- confidence: 9 -->`)
 - 코드블록 (` ``` `)
 - 표 구분자 (`|---|---|`)
@@ -76,7 +79,7 @@ def generate_schema_md() -> str:
 
 ### decisions
     type: decision
-    meeting_id: <8 hex>
+    meeting_id: <제공된 회의 ID 그대로>
     date: YYYY-MM-DD
     status: confirmed | superseded
     participants: [이름, ...]

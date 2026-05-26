@@ -566,7 +566,7 @@ class TestRenderUnifiedPage:
 
     @pytest.mark.asyncio
     async def test_render_citation_marker_preserved(self):
-        """인용 마커 보존: NewActionItem.citation 의 [meeting:id@HH:MM:SS] 가 결과 마크다운에 출력.
+        """인용 마커 보존: NewActionItem.citation 의 [meeting:{회의 ID}@HH:MM:SS] 가 결과 마크다운에 출력.
 
         D1 방어를 위해 모든 사실 줄에는 인용이 포함되어야 한다.
         """

@@ -748,7 +748,7 @@ async def test_aggregate_페이지_본문_인용_마커_포함(tmp_path):
 
     Arrange: "pricing-strategy" 3회 등장 후 페이지 생성. LLM 응답에 인용 마커 포함.
     Act: 3회 aggregate_and_render() 후 결과 content 확인.
-    Assert: content 에 [meeting:{8hex}@HH:MM:SS] 형식 인용 마커가 1건 이상 포함.
+    Assert: content 에 [meeting:{회의 ID}@HH:MM:SS] 형식 인용 마커가 1건 이상 포함.
     """
     # Arrange
     store = _make_wiki_store(tmp_path)
@@ -784,7 +784,7 @@ async def test_aggregate_페이지_본문_인용_마커_포함(tmp_path):
     _, content, _ = results[0]
     citations_found = CITATION_PATTERN.findall(content)
     assert len(citations_found) >= 1, (
-        f"생성된 topics 페이지에 인용 마커 [meeting:id@HH:MM:SS] 가 없음. "
+        f"생성된 topics 페이지에 인용 마커 [meeting:{{회의 ID}}@HH:MM:SS] 가 없음. "
         f"발견된 인용: {citations_found}"
     )
 

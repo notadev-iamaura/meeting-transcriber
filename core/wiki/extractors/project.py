@@ -245,7 +245,7 @@ _EXTRACT_SYSTEM_PROMPT = """\
 - owner: 담당자 이름 (없으면 null)
 - started: 시작일 "YYYY-MM-DD" (발화에 명시된 경우만)
 - target: 목표일 "YYYY-MM-DD"
-- description: 한 줄 요약 (인용 마커 [meeting:id@HH:MM:SS] 1개 이상 포함)
+- description: 한 줄 요약 (인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 1개 이상 포함)
 - timeline_entry: {description, citation_ts} 또는 null
 - unresolved_issues: [{description, citation_ts}, ...]
 - participants: 화자 이름 배열
@@ -296,16 +296,16 @@ last_updated: YYYY-MM-DD
 # {title} ({slug})
 
 ## 현재 상태
-**{status}** — 한 줄 요약 [meeting:id@HH:MM:SS].
+**{status}** — 한 줄 요약 [meeting:{제공된 회의 ID}@HH:MM:SS].
 
 ## 최근 결정사항
 - ...
 
 ## 진행 타임라인
-- YYYY-MM-DD: ... [meeting:id@HH:MM:SS]
+- YYYY-MM-DD: ... [meeting:{제공된 회의 ID}@HH:MM:SS]
 
 ## 미해결 이슈
-- ... [meeting:id@HH:MM:SS]
+- ... [meeting:{제공된 회의 ID}@HH:MM:SS]
 
 ## 참여자
 - 이름 (역할), ...
@@ -314,10 +314,12 @@ last_updated: YYYY-MM-DD
 
 규칙:
 1. 모든 사실 진술에 인용 마커 부착.
-2. 한국어 고유명사 외국어 병기 금지.
-3. 기존 페이지가 있으면 created_at + 기존 타임라인 항목 보존, 새 항목만 추가.
-4. status 전환 시 옛 status 는 ~~취소선~~ + 인용 유지.
-5. 마지막 줄에 confidence 마커 필수.
+2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
+3. "## 참여자" 섹션은 메타데이터이므로 인용 마커가 없어도 된다.
+4. 한국어 고유명사 외국어 병기 금지.
+5. 기존 페이지가 있으면 created_at + 기존 타임라인 항목 보존, 새 항목만 추가.
+6. status 전환 시 옛 status 는 ~~취소선~~ + 인용 유지.
+7. 마지막 줄에 confidence 마커 필수.
 """
 
 

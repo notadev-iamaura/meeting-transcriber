@@ -813,7 +813,7 @@ def test_normalize_person_slug_정규화_정책():
 async def test_render_or_update_pages_인용_마커_포함():
     """render_or_update_pages 출력의 사실 문장에 인용 마커가 포함된다.
 
-    PRD §4.2 "모든 사실 진술에 인용 마커 [meeting:id@HH:MM:SS] 강제" 정책 검증.
+    PRD §4.2 "모든 사실 진술에 인용 마커 [meeting:{회의 ID}@HH:MM:SS] 강제" 정책 검증.
 
     Arrange: 신규 인물 + citation 이 있는 ExtractedPerson + LLM 응답.
     Act: render_or_update_pages() 호출.
@@ -867,6 +867,6 @@ async def test_render_or_update_pages_인용_마커_포함():
     _, content, _ = pages[0]
     all_citations = CITATION_PATTERN.findall(content)
     assert len(all_citations) >= 1, (
-        f"출력 페이지에 인용 마커 [meeting:id@HH:MM:SS] 가 없습니다. "
+        f"출력 페이지에 인용 마커 [meeting:{{회의 ID}}@HH:MM:SS] 가 없습니다. "
         f"PRD §4.2 인용 강제 정책 위반.\n내용:\n{content}"
     )

@@ -277,7 +277,7 @@ confidence: <0-10>
 # <개념 이름>
 
 ## 정의
-(개념 정의, 인용 마커 [meeting:{8hex}@HH:MM:SS] 필수)
+(개념 정의, 인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 필수)
 
 ## 관련 회의
 - [{meeting_id} — YYYY-MM-DD 회의](/app/viewer/{meeting_id})
@@ -288,9 +288,11 @@ confidence: <0-10>
 <!-- confidence: N -->
 
 규칙:
-1. 모든 사실 진술에 인용 마커 [meeting:id@HH:MM:SS] 1개 이상 필수.
-2. confidence 마커 <!-- confidence: N --> 누락 금지.
-3. 외국어 병기 금지.
+1. 모든 사실 진술에 인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 1개 이상 필수.
+2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
+3. "## 관련 회의" 의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 말 것.
+4. confidence 마커 <!-- confidence: N --> 누락 금지.
+5. 외국어 병기 금지.
 """
 
 
@@ -301,12 +303,14 @@ _UPDATE_TOPIC_SYSTEM_PROMPT = """\
 - 기존 frontmatter / 섹션 구조 유지
 - last_seen, mention_count 갱신
 - 관련 회의 섹션에 새 회의 추가
-- 새 인용 마커 [meeting:id@HH:MM:SS] 자연스럽게 본문에 반영
+- 새 인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 자연스럽게 본문에 반영
 - <!-- confidence: N --> 마커 보존
 
 규칙:
 1. 기존 사실을 임의로 수정하지 마세요.
-2. 외국어 병기 금지.
+2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
+3. 관련 회의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 마세요.
+4. 외국어 병기 금지.
 """
 
 

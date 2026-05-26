@@ -327,7 +327,7 @@ _EXTRACT_SYSTEM_PROMPT = """\
 당신은 회의록에서 결정사항(decisions) 만 추출하는 분석가입니다.
 출력은 반드시 JSON 배열이어야 하며, 각 항목은 다음 키를 포함합니다:
 - title: 한 줄 요약 (한국어)
-- decision_text: 결정 본문 (인용 마커 [meeting:id@HH:MM:SS] 필수)
+- decision_text: 결정 본문 (인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 필수)
 - background: 배경 설명 (인용 마커 필수)
 - follow_ups: [{owner, description, citation_ts}, ...] (없으면 빈 배열)
 - participants: 화자 이름 배열
@@ -347,7 +347,7 @@ _RENDER_SYSTEM_PROMPT = """\
 ---
 type: decision
 date: YYYY-MM-DD
-meeting_id: <8 hex>
+meeting_id: {제공된 회의 ID 그대로}
 status: confirmed | superseded
 participants: [이름, ...]
 projects: [slug, ...]
@@ -365,18 +365,20 @@ updated_at: ISO8601
 ...
 
 ## 후속 액션
-- [ ] 담당자: 작업 [meeting:id@HH:MM:SS]
+- [ ] 담당자: 작업 [meeting:{제공된 회의 ID}@HH:MM:SS]
 
 ## 참고 회의
-- [meeting_id](../../../app/viewer/meeting_id)
+- [{제공된 회의 ID}](../../../app/viewer/{제공된 회의 ID})
 
 <!-- confidence: N -->
 
 규칙:
 1. 모든 사실 진술에 인용 마커 부착.
-2. 한국어 고유명사 외국어 병기 금지.
-3. 기존 페이지가 있으면 frontmatter 의 created_at 보존.
-4. 마지막 줄에 confidence 마커 필수.
+2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
+3. "## 참고 회의" 의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 말 것.
+4. 한국어 고유명사 외국어 병기 금지.
+5. 기존 페이지가 있으면 frontmatter 의 created_at 보존.
+6. 마지막 줄에 confidence 마커 필수.
 """
 
 
