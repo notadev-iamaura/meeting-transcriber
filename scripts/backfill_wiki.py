@@ -277,6 +277,39 @@ def _filter_jobs(
     return filtered
 
 
+def _compile_result_attr(compile_result: Any, name: str, default: Any) -> Any:
+    """CompileResult 또는 테스트 mock 에서 명시된 속성만 안전하게 읽는다."""
+    try:
+        attrs = vars(compile_result)
+    except TypeError:
+        attrs = {}
+    if name in attrs:
+        return attrs[name]
+
+    value = getattr(compile_result, name, default)
+    if value.__class__.__module__ == "unittest.mock":
+        return default
+    return value
+
+
+def _count_compile_outputs(compile_result: Any) -> int:
+    """디스크에 남는 wiki 산출물 개수를 계산한다."""
+    total = 0
+    for attr in ("pages_created", "pages_updated", "pages_pending"):
+        pages = _compile_result_attr(compile_result, attr, [])
+        total += len(pages or [])
+    return total
+
+
+def _compile_llm_call_count(compile_result: Any) -> int:
+    """컴파일 결과의 LLM 호출 횟수를 정수로 읽는다."""
+    value = _compile_result_attr(compile_result, "llm_call_count", 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 # ─── 단일 회의 컴파일 (mock 가능) ──────────────────────────────────────
 
 
@@ -307,6 +340,7 @@ async def _compile_single_meeting(
         Exception: 컴파일 실패 — 호출자가 BackfillError 로 변환.
     """
     # Lazy import — 백필 비활성 환경에서 import 비용 0.
+    from core.model_manager import get_model_manager
     from core.wiki.store import WikiStore
     from steps.wiki_compiler import _create_wiki_compiler_v2
 
@@ -317,7 +351,7 @@ async def _compile_single_meeting(
     v2 = _create_wiki_compiler_v2(
         config=config,
         store=store,
-        model_manager=None,  # 백필은 ModelLoadManager 없이 직접 LLM 호출.
+        model_manager=get_model_manager(),
         utterances=utterances,
         meeting_id=meeting_id,
     )
@@ -478,13 +512,38 @@ async def backfill(
 
         # ── 3b. 컴파일 호출 (회의별 atomic) ──────────────────────────
         try:
-            await _compile_single_meeting(
+            compile_result = await _compile_single_meeting(
                 config=config,
                 meeting_id=meeting_id,
                 meeting_date=meeting_date,
                 summary=summary,
                 utterances=utterances,
             )
+            output_count = _count_compile_outputs(compile_result)
+            llm_call_count = _compile_llm_call_count(compile_result)
+            if output_count == 0 and llm_call_count > 0:
+                result.failed += 1
+                result.errors.append(
+                    BackfillError(
+                        meeting_id=meeting_id,
+                        error_type="empty_compile",
+                        message=(
+                            "LLM 호출 후에도 wiki 페이지가 생성/갱신/보류되지 않음 "
+                            f"(llm_call_count={llm_call_count})"
+                        ),
+                    )
+                )
+                logger.warning(
+                    "백필 빈 컴파일 결과: meeting=%s, llm_call_count=%d",
+                    meeting_id,
+                    llm_call_count,
+                )
+                if progress_callback is not None:
+                    try:
+                        progress_callback(idx, result.total, meeting_id)
+                    except Exception as cb_exc:  # noqa: BLE001
+                        logger.warning("progress_callback 실패: %r", cb_exc)
+                continue
             result.succeeded += 1
             logger.info(
                 "백필 성공: meeting=%s (%d/%d)",

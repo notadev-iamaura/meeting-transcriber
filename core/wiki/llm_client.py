@@ -165,7 +165,8 @@ class WikiLLMError(Exception):
     예시 reason:
         - "backend_unavailable": LLMConnectionError wrap.
         - "generation_failed": LLMGenerationError 또는 타임아웃 wrap.
-        - "model_load_failed": ModelLoadManager 가 EXAONE 로드 실패.
+        - "model_manager_invalid": ModelLoadManager 주입 누락 또는 잘못된 객체.
+        - "model_load_failed": ModelLoadManager 가 wiki LLM 로드 실패.
     """
 
     def __init__(self, reason: str, detail: str | None = None) -> None:
@@ -307,8 +308,14 @@ class MlxWikiClient:
             config: AppConfig 또는 WikiConfig — compiler_model 필드 참조.
             model_manager: ModelLoadManager 인스턴스 — 단일 로드 보장.
         """
+        if not callable(getattr(model_manager, "acquire", None)):
+            raise WikiLLMError(
+                reason="model_manager_invalid",
+                detail="model_manager 는 acquire() 를 제공해야 합니다.",
+            )
         self._config = config
         self._model_manager = model_manager
+        self.calls: list[dict[str, Any]] = []
         # WikiConfig 직접 또는 AppConfig.wiki 모두 지원
         wiki_cfg = getattr(config, "wiki", config)
         self._model_name: str = getattr(
@@ -372,6 +379,14 @@ class MlxWikiClient:
         Raises:
             WikiLLMError: 백엔드 초기화/생성 실패 시.
         """
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+        )
         # ModelLoadManager 의 acquire 컨텍스트로 모델 확보.
         # keep_loaded=True 면 다음 generate() 호출도 같은 인스턴스를 재사용.
         # 9단계 종료 후 호출 측(WikiCompilerV2 wrapper) 이 명시적 unload 책임.
@@ -409,10 +424,15 @@ class MlxWikiClient:
                     raise WikiLLMError(reason=reason, detail=str(gen_exc)) from gen_exc
         except WikiLLMError:
             raise
+        except AttributeError as load_exc:
+            raise WikiLLMError(
+                reason="model_manager_invalid",
+                detail=f"model_manager 인자가 비정상: {load_exc}",
+            ) from load_exc
         except Exception as load_exc:  # noqa: BLE001 — 모델 로드 자체 실패
             raise WikiLLMError(
                 reason="model_load_failed",
-                detail=f"EXAONE 모델 로드 실패: {load_exc}",
+                detail=f"wiki LLM 모델 로드 실패: {load_exc}",
             ) from load_exc
 
         # NFC 정규화 + 공백 정리 — 결정성 강화

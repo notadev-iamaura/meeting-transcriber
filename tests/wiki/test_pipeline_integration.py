@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -90,6 +92,8 @@ def _make_audio_file(tmp_path: Path) -> Path:
     """테스트용 가짜 오디오 파일."""
     audio = tmp_path / "test_meeting.m4a"
     audio.write_bytes(b"fake audio content for testing")
+    timestamp = datetime(2026, 5, 21, 12, 0, 0).timestamp()
+    os.utime(audio, (timestamp, timestamp))
     return audio
 
 

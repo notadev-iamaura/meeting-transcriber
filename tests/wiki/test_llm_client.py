@@ -220,6 +220,7 @@ async def test_generate_uses_model_load_manager_acquire(
     # 이름은 wiki-exaone / exaone-wiki / wiki_compiler 등 구현 자유 — 단지
     # load 가 발생했는지만 검증.
     assert backend.calls, "backend.chat 이 호출되지 않았습니다 (acquire 후 호출 누락)"
+    assert len(client.calls) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -267,6 +268,16 @@ def test_model_name_uses_compiler_model_field() -> None:
     mock_mgr = MagicMock()
     client = ExaoneWikiClient(config=cfg, model_manager=mock_mgr)
     assert client.model_name == "custom/exaone-wiki-bench"
+
+
+def test_model_manager_none은_model_manager_invalid로_fail_fast(
+    fake_app_config: _FakeAppConfig,
+) -> None:
+    """백필 등 호출자가 model_manager=None 을 주입하면 즉시 구성 오류로 실패한다."""
+    with pytest.raises(WikiLLMError) as exc_info:
+        ExaoneWikiClient(config=fake_app_config, model_manager=None)
+
+    assert exc_info.value.reason == "model_manager_invalid"
 
 
 # ─────────────────────────────────────────────────────────────────────────

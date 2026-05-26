@@ -180,6 +180,88 @@ class TestBackfillSuccess:
         assert result.failed == 0
         assert result.errors == []
 
+    @pytest.mark.asyncio
+    async def test_compile_single_meeting은_model_manager를_주입한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """백필 단일 컴파일 경로가 model_manager=None 으로 V2 를 만들지 않아야 한다."""
+        from scripts.backfill_wiki import _compile_single_meeting
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "abc12345"
+        manager = object()
+        seen: dict[str, Any] = {}
+
+        class _FakeCompiler:
+            async def compile_meeting(self, **kwargs: Any) -> Any:
+                return MagicMock(
+                    meeting_id=kwargs["meeting_id"],
+                    pages_created=["x.md"],
+                    pages_updated=[],
+                    pages_pending=[],
+                    pages_rejected=[],
+                    llm_call_count=1,
+                )
+
+        def fake_create_wiki_compiler_v2(**kwargs: Any) -> _FakeCompiler:
+            seen.update(kwargs)
+            return _FakeCompiler()
+
+        with (
+            patch("core.model_manager.get_model_manager", return_value=manager),
+            patch(
+                "steps.wiki_compiler._create_wiki_compiler_v2",
+                side_effect=fake_create_wiki_compiler_v2,
+            ),
+        ):
+            await _compile_single_meeting(
+                config=config,
+                meeting_id=meeting_id,
+                meeting_date=date(2026, 4, 29),
+                summary="# 요약",
+                utterances=[],
+            )
+
+        assert seen["model_manager"] is manager
+
+    @pytest.mark.asyncio
+    async def test_backfill_empty_compile은_성공으로_카운트하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """LLM 호출 후 페이지 0건이면 silent success 대신 empty_compile 실패로 보고한다."""
+        from scripts.backfill_wiki import backfill
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "abc12345"
+        _seed_meeting_outputs(config, meeting_id)
+
+        fake_queue = MagicMock()
+        fake_queue.get_all_jobs = MagicMock(return_value=[_make_fake_job(meeting_id)])
+
+        async def fake_compile(**kwargs: Any) -> Any:
+            return MagicMock(
+                meeting_id=kwargs["meeting_id"],
+                pages_created=[],
+                pages_updated=[],
+                pages_pending=[],
+                pages_rejected=[],
+                llm_call_count=5,
+            )
+
+        with patch(
+            "scripts.backfill_wiki._compile_single_meeting",
+            new=AsyncMock(side_effect=fake_compile),
+        ):
+            result = await backfill(config=config, job_queue=fake_queue)
+
+        assert result.succeeded == 0
+        assert result.failed == 1
+        assert len(result.errors) == 1
+        assert result.errors[0].meeting_id == meeting_id
+        assert result.errors[0].error_type == "empty_compile"
+
 
 # ─── 시나리오 3: 1건 실패, 다음 진행 ───────────────────────────────────
 
