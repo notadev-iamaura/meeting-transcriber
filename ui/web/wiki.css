@@ -441,7 +441,7 @@
   font-style: italic;
 }
 
-/* 인용 마커 — [meeting:abc12345@00:23:45] → 클릭 시 음성 재생 점프 */
+/* 인용 마커 — [meeting:meeting_YYYYMMDD_HHMMSS@00:23:45] → 클릭 시 음성 재생 점프 */
 .wiki-citation {
   display: inline-block;
   margin: 0 1px;

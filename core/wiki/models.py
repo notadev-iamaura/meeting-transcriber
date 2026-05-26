@@ -58,7 +58,8 @@ class Citation:
     각 Citation 의 timestamp 가 실제 발화와 일치해야 한다 (D2 실재성 검증).
 
     Attributes:
-        meeting_id: 8자리 hex 문자열 (예: "abc12345"). DB 의 meeting.id 와 일치.
+        meeting_id: 실제 회의 ID(예: "meeting_20260522_160332") 또는
+            하위 호환 8자리 hex 문자열. DB 의 meeting.id 와 일치.
         timestamp_str: 원문 그대로의 "HH:MM:SS" 문자열 (예: "00:23:45").
         timestamp_seconds: HH:MM:SS 를 초 단위 정수로 변환 (예: 1425).
             D2 검증 시 utterance.start (float seconds) 와 비교용.

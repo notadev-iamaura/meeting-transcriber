@@ -96,7 +96,7 @@ class MockCitationVerifier:
         """(meeting_id, timestamp_seconds) 가 known_citations 에 있으면 True 반환.
 
         Args:
-            meeting_id: 8자리 hex.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             timestamp_seconds: 초 단위 정수.
 
         Returns:
@@ -119,7 +119,7 @@ class MockCitationVerifier:
         """(meeting_id, timestamp_seconds) 에 해당하는 발화 텍스트 반환.
 
         Args:
-            meeting_id: 8자리 hex.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             timestamp_seconds: 초 단위 정수.
 
         Returns:

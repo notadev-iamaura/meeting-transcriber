@@ -252,7 +252,7 @@ class WikiCitationItem(BaseModel):
     spa.js WikiView 가 인용을 클릭 가능한 링크로 렌더링할 때 사용.
 
     Attributes:
-        meeting_id: 8자리 hex 문자열 (예: "abc12345").
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex 문자열.
         timestamp: 원문 그대로의 "HH:MM:SS" 문자열.
         timestamp_seconds: HH:MM:SS 를 초 단위 정수로 변환.
     """

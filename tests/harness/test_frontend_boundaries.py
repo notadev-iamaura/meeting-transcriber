@@ -163,6 +163,14 @@ def test_wiki_view_preserves_lifecycle_and_compatibility_guards() -> None:
     assert 'slug.split("/").map(encodeURIComponent).join("/")' in wiki_view
 
 
+def test_wiki_view_citation_pattern_accepts_real_meeting_ids() -> None:
+    wiki_view = Path("ui/web/wiki-view.js").read_text(encoding="utf-8")
+
+    assert "[A-Za-z0-9_]+" in wiki_view
+    assert "[a-f0-9]{8}" not in wiki_view
+    assert "meeting_YYYYMMDD_HHMMSS" in wiki_view
+
+
 def test_ab_test_view_exposes_factory_boundary() -> None:
     ab_test_view = Path("ui/web/ab-test-view.js").read_text(encoding="utf-8")
     spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")

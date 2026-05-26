@@ -328,7 +328,7 @@ async def _compile_single_meeting(
 
     Args:
         config: AppConfig.
-        meeting_id: 8자리 hex 또는 일반 회의 식별자.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         meeting_date: 회의 날짜.
         summary: 8단계 요약 마크다운.
         utterances: 5단계 보정 발화 리스트.

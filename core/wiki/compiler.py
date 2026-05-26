@@ -188,7 +188,7 @@ class WikiCompilerV2:
         실패 격리: person/project 어느 한쪽 실패해도 decisions/action_items 는 살아남음.
 
         Args:
-            meeting_id: 8자리 hex.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             meeting_date: 회의 날짜.
             summary: 8단계 요약 마크다운.
             utterances: 5단계 corrector 결과.

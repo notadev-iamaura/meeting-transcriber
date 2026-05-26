@@ -48,7 +48,7 @@ from core.wiki.extractors.person import (  # noqa: E402
 from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # PRD §4.2 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
-CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
+CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
 
 # 한국어 고유명사 뒤에 외국어 병기가 붙는 패턴 (예: "철수(Chulsoo)")
 _FOREIGN_GLOSS_PATTERN = re.compile(r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF\u3041-\u30FF]+\)")
@@ -260,7 +260,7 @@ def _build_single_person_json(
     Args:
         name: 인물 이름.
         role: 역할 (PM, Eng Lead 등).
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
         confidence: 신뢰도 0~10.
 

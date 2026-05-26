@@ -51,7 +51,7 @@ from core.wiki.extractors.project import (  # noqa: E402
 from core.wiki.models import Citation  # Phase 1 — 이미 존재
 
 # PRD §4.2 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
-CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
+CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
 
 # 한국어 고유명사 뒤 외국어 병기 패턴 (예: "철수(Chulsoo)")
 _FOREIGN_GLOSS_PATTERN = re.compile(r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF\u3041-\u30FF]+\)")
@@ -263,7 +263,7 @@ def _build_single_project_json(
         slug: filename-safe 식별자.
         status: 현재 상태 (4종 enum 중 하나).
         owner: 담당자 이름 (없으면 null).
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
         confidence: 신뢰도 0~10.
 

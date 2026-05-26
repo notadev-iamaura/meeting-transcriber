@@ -36,8 +36,9 @@ from core.wiki.citations import (  # noqa: E402
 # ──────────────────────────────────────────────────────────────────────────────
 D1_REJECTION_THRESHOLD = 0.30  # 30% 초과 시 WikiGuardError
 
-# 테스트에서 일관되게 사용할 가짜 meeting_id (8자리 소문자 hex)
+# 테스트에서 일관되게 사용할 가짜 meeting_id (하위 호환 8자리 소문자 hex)
 FAKE_MEETING_ID = "abc12345"
+REAL_MEETING_ID = "meeting_20260522_160332"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -55,6 +56,8 @@ class TestCitationPatternValid:
             "[meeting:00000000@00:00:00]",  # 최소값: 전부 0
             "[meeting:ffffffff@23:59:59]",  # 최대 hex 값 + 최대 시각
             "[meeting:a1b2c3d4@01:30:00]",  # 혼합 hex
+            "[meeting:meeting_20260522_160332@00:23:45]",  # 실제 meeting_id 형식
+            "[meeting:ABC12345@00:23:45]",  # 대문자 ID 도 허용
             "결정 [meeting:abc12345@00:23:45] 입니다.",  # 문장 중간 삽입
             "[meeting:abc12345@00:23:45], [meeting:def67890@01:00:00]",  # 두 개 연속
         ],
@@ -73,11 +76,9 @@ class TestCitationPatternInvalid:
     @pytest.mark.parametrize(
         "invalid_citation, reason",
         [
-            ("[meeting:abc@00:23:45]", "id 길이 3자리 — 8자리 미만"),
-            ("[meeting:abc1234@00:23:45]", "id 길이 7자리 — 8자리 미만"),
-            ("[meeting:ABC12345@00:23:45]", "대문자 hex — 거부 대상"),
-            ("[meeting:ABC12345@00:23:45]", "대문자 포함 — 거부 대상"),
-            ("[meeting:abc1234Z@00:23:45]", "Z는 hex 아님"),
+            ("[meeting:abc-12345@00:23:45]", "하이픈은 ID 문자로 허용하지 않음"),
+            ("[meeting:abc.12345@00:23:45]", "점은 ID 문자로 허용하지 않음"),
+            ("[meeting:abc 12345@00:23:45]", "공백은 ID 문자로 허용하지 않음"),
             ("[meeting:abc12345@0:23:45]", "시 자릿수 1자리 — 2자리 필요"),
             ("[meeting:abc12345@00:2:45]", "분 자릿수 1자리 — 2자리 필요"),
             ("[meeting:abc12345@00:23:4]", "초 자릿수 1자리 — 2자리 필요"),
@@ -120,6 +121,14 @@ class TestParseCitation:
             f"반환값이 ('abc12345', '00:23:45') 여야 하나 {result!r} 임"
         )
 
+    def test_parse_citation_실제_meeting_id_형식을_튜플로_반환한다(self) -> None:
+        """실제 녹음 meeting_id 형식도 인용 마커로 파싱한다."""
+        text = f"결정 [meeting:{REAL_MEETING_ID}@00:23:45] 참조."
+
+        result = parse_citation(text)
+
+        assert result == (REAL_MEETING_ID, "00:23:45")
+
     def test_parse_citation_여러_인용이_있으면_첫_번째를_반환한다(self) -> None:
         """re.search 기반이므로 여러 인용 중 첫 번째만 반환한다."""
         # Arrange
@@ -137,8 +146,8 @@ class TestParseCitation:
         [
             "",  # 빈 문자열
             "일반 사실 진술 문장",  # 인용 없는 일반 텍스트
-            "[meeting:ABC12345@00:23:45]",  # 대문자 hex — 거부
-            "[meeting:abc@00:23:45]",  # id 길이 부족
+            "[meeting:abc-12345@00:23:45]",  # 하이픈 포함
+            "[meeting:abc 12345@00:23:45]",  # 공백 포함
             "   \t\n",  # 공백/탭/개행만 있음
         ],
     )
@@ -271,6 +280,24 @@ class TestEnforceCitationsBasic:
         # Assert
         assert multi_cited in result_content, "여러 인용이 포함된 줄이 잘못 제거됨"
         assert len(rejected) == 0
+
+    def test_실제_meeting_id_인용_5줄은_D1에서_거부하지_않는다(self) -> None:
+        """meeting_YYYYMMDD_HHMMSS 형식 인용이 표본 4줄 이상이어도 통과해야 한다."""
+        content = (
+            "---\n"
+            "type: project\n"
+            "---\n\n"
+            + "\n".join(
+                f"- 사실 {i} [meeting:{REAL_MEETING_ID}@00:0{i}:00]"
+                for i in range(5)
+            )
+            + "\n"
+        )
+
+        result_content, rejected = enforce_citations(content, REAL_MEETING_ID)
+
+        assert rejected == []
+        assert f"[meeting:{REAL_MEETING_ID}@00:00:00]" in result_content
 
     def test_빈_content에_대해_빈_content와_빈_rejected를_반환한다(self) -> None:
         """입력 content 가 빈 문자열이면 ('', []) 를 반환한다."""

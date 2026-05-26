@@ -62,7 +62,7 @@ def generate_schema_md() -> str:
 
 검증 정규식:
 
-    \[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]
+    \[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]
 
 면제 대상 (인용 불필요):
 - 마크다운 제목 (`#`, `##`, ...)
@@ -168,7 +168,7 @@ def render_decision_template(
     시 항상 `confirmed`.
 
     Args:
-        meeting_id: 8자리 hex.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         date: ISO 날짜 문자열.
         title: 결정 제목.
         participants: 참여 화자 이름 목록. None 또는 빈 리스트 허용.

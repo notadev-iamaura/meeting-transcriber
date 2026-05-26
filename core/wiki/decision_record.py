@@ -13,7 +13,7 @@ from datetime import date, datetime
 from typing import Any
 
 _STATUS_VALUES = {"proposed", "decided", "superseded", "rejected", "pending"}
-_CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
+_CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
 
 
 def _yaml_inline_list(values: list[str]) -> str:

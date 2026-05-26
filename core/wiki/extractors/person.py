@@ -139,7 +139,7 @@ class ExistingPersonState:
 
 # 인용 마커 패턴 — citations.CITATION_PATTERN 과 동일.
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
-    r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]"
+    r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
 
 # person slug 에 허용되는 문자 — 한글/영숫자/하이픈/언더스코어.
@@ -150,7 +150,7 @@ def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     """HH:MM:SS 형태의 timestamp 를 Citation 으로 변환한다.
 
     Args:
-        meeting_id: 8자리 hex.
+        meeting_id: 실제 meeting_id 또는 하위 호환 8자리 hex.
         ts_str: "HH:MM:SS" 문자열.
 
     Returns:

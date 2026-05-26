@@ -4,7 +4,7 @@
 WikiGuard D1 단계의 인용 강제 후처리를 담당한다.
 
 주요 기능:
-    - CITATION_PATTERN: 8자리 hex meeting_id + HH:MM:SS 만 매칭
+    - CITATION_PATTERN: meeting_id + HH:MM:SS 인용 마커 매칭
     - PAGE_LINK_PATTERN: 페이지 간 상대 링크 (`[../people/철수.md]`)
     - parse_citation(text): 단일 인용 → (meeting_id, timestamp_str) 튜플 (실패 시 None)
     - is_factual_statement(line): 인용 의무 대상 판별 (제목/메타/링크 면제)
@@ -24,10 +24,10 @@ from core.wiki.models import Citation  # noqa: F401  (외부 사용용 재노출
 logger = logging.getLogger(__name__)
 
 
-# PRD §4.3 검증 정규식 — 8자리 소문자 hex meeting_id, HH:MM:SS (각 자릿수 고정 2자리).
-# 대문자 hex, 짧은 ID, 잘못된 시각 형식은 모두 거부된다.
+# PRD §4.3 검증 정규식 — 실제 meeting_id 형식(meeting_YYYYMMDD_HHMMSS)
+# 과 하위 호환 8자리 hex ID 를 모두 허용한다. 시각은 HH:MM:SS 2자리 고정.
 CITATION_PATTERN: re.Pattern[str] = re.compile(
-    r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]"
+    r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
 
 # 페이지 간 상대 링크 (frontmatter 헤더의 참고 회의, 후속 결정 링크 등).
@@ -73,7 +73,7 @@ def parse_citation(text: str) -> tuple[str, str] | None:
     """단일 인용 마커 문자열을 (meeting_id, timestamp_str) 튜플로 파싱한다.
 
     검증 범위:
-        - 형식(8 hex + HH:MM:SS) 만 검사. 시·분·초 값의 의미적 정합성
+        - 형식(meeting_id + HH:MM:SS) 만 검사. 시·분·초 값의 의미적 정합성
           (분 < 60, 초 < 60 등) 은 검사하지 않으며 D2 단계 (utterance 와의
           실제 발화 시각 비교) 에서 phantom_citation 으로 거부된다.
 

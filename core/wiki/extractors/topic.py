@@ -50,7 +50,7 @@ _TOPIC_SLUG_ALLOWED: re.Pattern[str] = re.compile(r"^[\uAC00-\uD7A3A-Za-z0-9\-_]
 
 # 페이지 인용 패턴 — citations.CITATION_PATTERN 와 동일.
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
-    r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]"
+    r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
 
 

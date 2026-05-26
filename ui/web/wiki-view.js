@@ -38,7 +38,7 @@
         //   - 카테고리 5종 (decisions/people/projects/topics/action_items) 펼침/접힘
         //   - 검색 200ms debounce + ESC 초기화
         //   - Health 배지 클릭 → HEALTH.md 모달 (ESC/외부클릭 닫힘)
-        //   - 인용 마커 [meeting:abc12345@HH:MM:SS] → /app/viewer/{id}?t=초
+        //   - 인용 마커 [meeting:meeting_YYYYMMDD_HHMMSS@HH:MM:SS] → /app/viewer/{id}?t=초
         //
         // =================================================================
 
@@ -57,9 +57,9 @@
             { id: "topics",       label: "주제",       types: ["topics", "topic"] },
         ];
 
-        // [meeting:8자리hex@HH:MM:SS] 형태 인용 마커 정규식.
+        // [meeting:{id}@HH:MM:SS] 형태 인용 마커 정규식.
         // 글로벌 플래그는 매번 새로 생성해 lastIndex 누적을 피한다.
-        var WIKI_CITATION_PATTERN = /\[meeting:([a-f0-9]{8})@(\d{2}:\d{2}:\d{2})\]/g;
+        var WIKI_CITATION_PATTERN = /\[meeting:([A-Za-z0-9_]+)@(\d{2}:\d{2}:\d{2})\]/g;
 
         function _wikiEscapeCssIdent(value) {
             if (window.CSS && typeof window.CSS.escape === "function") {

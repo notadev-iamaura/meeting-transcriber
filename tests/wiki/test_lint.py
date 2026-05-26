@@ -77,7 +77,7 @@ class MockVerifier:
         """주어진 (meeting_id, ts) 가 known_citations 에 존재하면 True 반환.
 
         Args:
-            meeting_id: 8자리 hex 회의 ID.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             ts: timestamp (초 단위 정수).
 
         Returns:
@@ -90,7 +90,7 @@ class MockVerifier:
         """매핑된 발화 텍스트를 반환한다. 없으면 None.
 
         Args:
-            meeting_id: 8자리 hex 회의 ID.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             ts: timestamp (초 단위 정수).
 
         Returns:

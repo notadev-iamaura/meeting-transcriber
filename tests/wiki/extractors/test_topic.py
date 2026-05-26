@@ -51,7 +51,7 @@ from core.wiki.models import Citation
 from core.wiki.store import WikiStore
 
 # PRD §4.3 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
-CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
+CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -168,7 +168,7 @@ def _make_single_concept_json(
         name: 개념 이름.
         slug: filename-safe 슬러그.
         confidence: LLM self-rated 신뢰도 (0~10).
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
 
     Returns:
@@ -195,7 +195,7 @@ def _make_topic_page_response(
     Args:
         name: 개념 이름.
         slug: filename-safe 슬러그.
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
         confidence: 신뢰도 정수.
 

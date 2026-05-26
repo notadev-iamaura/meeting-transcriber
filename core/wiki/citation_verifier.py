@@ -131,7 +131,7 @@ class UtterancesCitationVerifier:
                (utt.start ≤ ts + tolerance) AND (utt.end ≥ ts - tolerance).
 
         Args:
-            meeting_id: 8자리 hex.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             timestamp_seconds: 인용의 timestamp 를 초 단위로 변환한 정수.
 
         Returns:
@@ -192,7 +192,7 @@ class UtterancesCitationVerifier:
         매칭 발화가 여러 건이면 ts 와 가장 가까운 발화의 text 를 반환.
 
         Args:
-            meeting_id: 8자리 hex.
+            meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
             timestamp_seconds: 초 단위 정수.
 
         Returns:

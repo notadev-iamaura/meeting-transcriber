@@ -148,7 +148,7 @@ class ExistingProject:
 
 # 인용 마커 패턴.
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
-    r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]"
+    r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
 
 

@@ -36,7 +36,7 @@ from core.wiki.extractors.decision import (  # noqa: E402
 )
 
 # PRD §4.2 results 검증에 사용할 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
-CITATION_PATTERN = re.compile(r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]")
+CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
 
 # 한국어 고유명사 뒤에 영어/중국어 병기가 붙는 패턴 (예: "배미령(Baimilong)")
 _FOREIGN_GLOSS_PATTERN = re.compile(r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF]+\)")
@@ -168,7 +168,7 @@ def _build_single_decision_json(
     """LLM 이 결정사항 1건을 반환할 때의 JSON 문자열을 생성한다.
 
     Args:
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
 
     Returns:
@@ -194,7 +194,7 @@ def _build_rendered_page(
     """PRD §4.2 decisions 템플릿에 맞는 렌더링된 페이지 본문을 반환한다.
 
     Args:
-        meeting_id: 8자리 hex 회의 ID.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
         ts: HH:MM:SS 형식 타임스탬프.
         confidence: 신뢰도 정수 (0~10).
 

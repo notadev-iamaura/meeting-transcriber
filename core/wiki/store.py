@@ -50,7 +50,7 @@ _REQUIRED_SUBDIRS: tuple[str, ...] = (
 # 페이지 본문에서 인용 마커를 찾는 정규식 — citations 모듈을 import 하지 않기 위해
 # 동일 패턴을 store 자체에 보존. 두 위치가 어긋나면 안 되므로 변경 시 함께 갱신.
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
-    r"\[meeting:([a-f0-9]{8})@(\d{2}):(\d{2}):(\d{2})\]"
+    r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
 
 

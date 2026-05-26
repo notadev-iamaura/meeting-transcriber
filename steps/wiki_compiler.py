@@ -57,7 +57,7 @@ def _create_wiki_compiler_v2(
         store: 초기화된 WikiStore.
         model_manager: ModelLoadManager (실제 LLM 호출 시 필요).
         utterances: 5단계 보정 발화 리스트. None 이면 빈 verifier (백필 등).
-        meeting_id: 8자리 hex 회의 ID. utterances 와 함께 사용.
+        meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex. utterances 와 함께 사용.
 
     Returns:
         WikiCompilerV2 인스턴스 (또는 mock).
@@ -166,7 +166,7 @@ class WikiCompiler:
         """Phase 1 dry-run: 빈 wiki 골격 + log.md 한 줄 append.
 
         Args:
-            meeting_id: 8자리 hex 또는 PipelineManager 가 생성한 회의 ID.
+            meeting_id: 실제 회의 ID 또는 PipelineManager 가 생성한 회의 ID.
                 Phase 1 은 형식 검증을 하지 않는다 (Phase 2 D2 에서 검증).
             summary: 요약 텍스트. Phase 1 에서는 사용하지 않음.
             utterances: 발화 리스트. Phase 1 에서는 사용하지 않음.

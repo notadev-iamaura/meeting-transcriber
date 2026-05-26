@@ -180,7 +180,7 @@ class TestWikiPageDetailEndpoint:
             "---\ntitle: 결정\n---\n\n"
             "결정 1 [meeting:abc12345@00:23:45].\n"
             "결정 2 [meeting:def67890@01:15:30].\n"
-            "잘못된 형식 [meeting:XYZ@00:00:00] (대문자, 거부).\n"
+            "잘못된 형식 [meeting:bad-id@00:00:00] (하이픈 포함, 거부).\n"
         )
         _seed_wiki_page(wiki_root, "decisions/foo.md", body)
 
