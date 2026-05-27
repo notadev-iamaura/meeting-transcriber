@@ -6,6 +6,7 @@ import asyncio
 from datetime import date
 from pathlib import Path
 
+from core.wiki.citations import enforce_citations
 from core.wiki.decision_record import DecisionRecord
 from core.wiki.extractors.decision import ActionItemRef, DecisionExtractor, ExtractedDecision
 from core.wiki.models import Citation
@@ -123,6 +124,8 @@ def test_decision_record는_본문과_배경_누락_인용을_후보_citation으
 
     assert "Q3 출시일을 7월 15일로 확정했다. [meeting:1234abcd@00:01:20]" in rendered
     assert "릴리즈 리스크를 낮추기 위한 결정이다. [meeting:1234abcd@00:01:20]" in rendered
+    _cleaned, rejected = enforce_citations(rendered, "1234abcd")
+    assert rejected == []
 
 
 def test_existing_decision_slug는_기존_경로를_재사용하고_source_meetings를_누적한다(

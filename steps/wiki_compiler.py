@@ -23,6 +23,7 @@ Phase 2 부터 (dry_run=False):
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,12 @@ from core.pipeline import PipelineError
 from core.wiki.store import WikiStore, WikiStoreError
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """환경변수 플래그가 truthy 값이면 True 를 반환한다."""
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _create_wiki_compiler_v2(
@@ -94,8 +101,12 @@ def _create_wiki_compiler_v2(
     # Phase 3 — people / projects extractor
     person_extractor = PersonExtractor(llm)
     project_extractor = ProjectExtractor(llm)
-    # Phase 4 — topic extractor
-    topic_extractor = TopicExtractor(llm)
+    # Phase 4 — topic extractor. 대량 백필에서 topic 추출 비용만 선택적으로 줄일 수 있다.
+    topic_extractor = None
+    if _env_flag_enabled("MT_WIKI_DISABLE_TOPIC"):
+        logger.info("TopicExtractor 비활성화: MT_WIKI_DISABLE_TOPIC=1")
+    else:
+        topic_extractor = TopicExtractor(llm)
     # Phase 4 — linter
     linter = WikiLinter(
         store=store,

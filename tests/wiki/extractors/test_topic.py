@@ -34,6 +34,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+import core.wiki.extractors.topic as topic_module
+
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/topic.py 가 없으므로
 # 이 import 블록이 ImportError 를 일으켜 모든 테스트가 Red 상태가 된다.
@@ -52,6 +54,17 @@ from core.wiki.store import WikiStore
 
 # PRD §4.3 인용 패턴 (citations.py 의 CITATION_PATTERN 과 동일)
 CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]")
+
+
+def test_topic_prompts_00시_기본값_사용_금지_명시():
+    """TopicExtractor 프롬프트는 00:00:00 을 추정 기본값으로 쓰지 못하게 한다."""
+    for prompt in (
+        topic_module._EXTRACT_CONCEPTS_SYSTEM_PROMPT,
+        topic_module._RENDER_TOPIC_SYSTEM_PROMPT,
+        topic_module._UPDATE_TOPIC_SYSTEM_PROMPT,
+    ):
+        assert "00:00:00 은" in prompt
+        assert "추정 기본값으로 쓰지" in prompt
 
 
 # ══════════════════════════════════════════════════════════════════════════════

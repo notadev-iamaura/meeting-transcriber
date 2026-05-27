@@ -250,6 +250,7 @@ class WikiCompilerV2:
 
         # ── 1. DecisionExtractor — graceful degradation ────────────────
         decisions: list = []
+        extractor_start = time.perf_counter()
         try:
             decisions = await self._decision_extractor.extract(
                 meeting_id=meeting_id,
@@ -263,9 +264,17 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001
             logger.error("DecisionExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             decisions = []
+        logger.info(
+            "Wiki extractor timing: meeting_id=%s extractor=decision.extract "
+            "elapsed_seconds=%.3f items=%d",
+            meeting_id,
+            time.perf_counter() - extractor_start,
+            len(decisions),
+        )
 
         # ── 2. ActionItemExtractor.extract_new ────────────────────────
         new_actions: list = []
+        extractor_start = time.perf_counter()
         try:
             new_actions = await self._action_item_extractor.extract_new(
                 meeting_id=meeting_id,
@@ -279,6 +288,13 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001
             logger.error("ActionItemExtractor.extract_new 오류: %r", exc, exc_info=True)
             new_actions = []
+        logger.info(
+            "Wiki extractor timing: meeting_id=%s extractor=action_item.extract_new "
+            "elapsed_seconds=%.3f items=%d",
+            meeting_id,
+            time.perf_counter() - extractor_start,
+            len(new_actions),
+        )
 
         # ── 3. 기존 action_items.md 파싱 ──────────────────────────────
         try:
@@ -289,6 +305,7 @@ class WikiCompilerV2:
 
         # ── 4. detect_closed ─────────────────────────────────────────
         newly_closed: list = []
+        extractor_start = time.perf_counter()
         try:
             newly_closed = await self._action_item_extractor.detect_closed(
                 existing_open=existing_open,
@@ -301,6 +318,13 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001
             logger.error("detect_closed 오류: %r", exc, exc_info=True)
             newly_closed = []
+        logger.info(
+            "Wiki extractor timing: meeting_id=%s extractor=action_item.detect_closed "
+            "elapsed_seconds=%.3f items=%d",
+            meeting_id,
+            time.perf_counter() - extractor_start,
+            len(newly_closed),
+        )
 
         # ── 5. DecisionExtractor.render_pages ────────────────────────
         # PRD R3 리스크 대응: 회의당 갱신 페이지를 상한 8개로 제한.
@@ -336,6 +360,7 @@ class WikiCompilerV2:
 
         # ── 6b. PersonExtractor (Phase 3) — graceful degradation ─────
         person_pages: list[tuple[str, str, int]] = []
+        extractor_start = time.perf_counter()
         try:
             persons = await self._person_extractor.extract_speakers(
                 meeting_id=meeting_id,
@@ -359,9 +384,17 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001
             logger.error("PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             person_pages = []
+        logger.info(
+            "Wiki extractor timing: meeting_id=%s extractor=person "
+            "elapsed_seconds=%.3f pages=%d",
+            meeting_id,
+            time.perf_counter() - extractor_start,
+            len(person_pages),
+        )
 
         # ── 6c. ProjectExtractor (Phase 3) — graceful degradation ────
         project_pages: list[tuple[str, str, int]] = []
+        extractor_start = time.perf_counter()
         try:
             projects = await self._project_extractor.extract_projects(
                 meeting_id=meeting_id,
@@ -395,10 +428,18 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001
             logger.error("ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             project_pages = []
+        logger.info(
+            "Wiki extractor timing: meeting_id=%s extractor=project "
+            "elapsed_seconds=%.3f pages=%d",
+            meeting_id,
+            time.perf_counter() - extractor_start,
+            len(project_pages),
+        )
 
         # ── 6d. TopicExtractor (Phase 4) — graceful degradation ──────
         topic_pages: list[tuple[str, str, int]] = []
         if self._topic_extractor is not None:
+            extractor_start = time.perf_counter()
             try:
                 new_concepts = await self._topic_extractor.extract_concepts(
                     meeting_id=meeting_id,
@@ -419,6 +460,13 @@ class WikiCompilerV2:
             except Exception as exc:  # noqa: BLE001
                 logger.error("TopicExtractor 예상치 못한 오류: %r", exc, exc_info=True)
                 topic_pages = []
+            logger.info(
+                "Wiki extractor timing: meeting_id=%s extractor=topic "
+                "elapsed_seconds=%.3f pages=%d",
+                meeting_id,
+                time.perf_counter() - extractor_start,
+                len(topic_pages),
+            )
 
         # ── 7. 페이지별 WikiGuard.verify + write ─────────────────────
         # Phase 3: people / projects 는 (path, content, confidence) 튜플 형식이므로

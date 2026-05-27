@@ -31,6 +31,14 @@ class _SimpleUtterance:
         self.end = end
 
 
+class _DummyModelManager:
+    """MlxWikiClient 초기화 계약만 만족하는 테스트 더블."""
+
+    def acquire(self, *args: object, **kwargs: object) -> object:
+        """테스트에서는 실제 acquire 경로를 호출하지 않는다."""
+        raise AssertionError("테스트에서 모델 acquire 가 호출되면 안 됩니다.")
+
+
 def _build_app_config(
     *,
     enabled: bool,
@@ -59,6 +67,59 @@ def test_zero_timestamp_citation은_첫_실제_발화_시각으로_정규화된�
     assert replacement == "00:00:17"
     assert f"[meeting:{meeting_id}@00:00:17]" in normalized
     assert "00:00:00" not in normalized
+
+
+def test_MT_WIKI_DISABLE_TOPIC이면_topic_extractor를_주입하지_않는다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """대량 백필 속도 측정을 위해 topic 추출만 환경변수로 끌 수 있다."""
+    from core.wiki.store import WikiStore
+    from steps.wiki_compiler import _create_wiki_compiler_v2
+
+    monkeypatch.setenv("MT_WIKI_DISABLE_TOPIC", "1")
+    cfg = _build_app_config(enabled=True, root=tmp_path / "wiki", dry_run=False)
+    store = WikiStore(tmp_path / "wiki")
+
+    compiler = _create_wiki_compiler_v2(
+        config=cfg,
+        store=store,
+        model_manager=_DummyModelManager(),
+        utterances=[],
+        meeting_id="meeting_20260522_172005",
+    )
+
+    assert compiler._topic_extractor is None
+
+
+@pytest.mark.asyncio
+async def test_zero_timestamp_정규화된_citation은_D2_verifier를_통과한다() -> None:
+    """00:00:00 보정 결과가 실제 utterance verifier 에서도 phantom 이 아니어야 한다."""
+    from core.wiki.citation_verifier import UtterancesCitationVerifier
+    from core.wiki.citations import parse_citation
+    from core.wiki.compiler import _first_utterance_timestamp, _normalize_zero_timestamp_citations
+
+    meeting_id = "meeting_20260522_172005"
+    utterances = [{"speaker": "SPEAKER_00", "text": "실제 발화", "start": 17.0, "end": 21.0}]
+    replacement = _first_utterance_timestamp(utterances)
+    content = f"결정 내용 [meeting:{meeting_id}@00:00:00]"
+    normalized = _normalize_zero_timestamp_citations(
+        content,
+        meeting_id=meeting_id,
+        replacement_ts=replacement,
+    )
+    parsed = parse_citation(normalized)
+    assert parsed is not None
+    parsed_mid, parsed_ts = parsed
+    h, m, s = [int(part) for part in parsed_ts.split(":")]
+
+    verifier = UtterancesCitationVerifier(
+        utterances_by_meeting={meeting_id: utterances},
+        tolerance_seconds=2,
+    )
+
+    assert parsed_mid == meeting_id
+    assert await verifier.verify_exists(parsed_mid, h * 3600 + m * 60 + s)
 
 
 # ─────────────────────────────────────────────────────────────────────────

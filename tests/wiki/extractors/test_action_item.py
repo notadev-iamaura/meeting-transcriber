@@ -34,6 +34,7 @@ from core.wiki.extractors.action_item import (  # noqa: E402
     ClosedActionItem,
     NewActionItem,
     OpenActionItem,
+    _first_utterance_citation,
 )
 
 # Phase 1 모델은 구현되어 있으므로 import 가능 (테스트 픽스처 구성에 사용)
@@ -314,6 +315,78 @@ class TestExtractNew:
         for item in result:
             assert isinstance(item, NewActionItem)
 
+    def test_first_utterance_citation_빈_발화는_none(self):
+        """fallback citation 후보가 없으면 None 을 반환한다."""
+        assert _first_utterance_citation(FAKE_MEETING_ID, []) is None
+
+    def test_first_utterance_citation_가장_이른_정상_발화_시각(self):
+        """발화 순서와 무관하게 가장 이른 정상 start 를 fallback citation 으로 사용한다."""
+        utterances = _make_utterances(
+            [
+                ("두 번째 발화", "영희", 42.0),
+                ("첫 번째 발화", "철수", 17.0),
+            ]
+        )
+
+        citation = _first_utterance_citation(FAKE_MEETING_ID, utterances)
+
+        assert citation is not None
+        assert citation.meeting_id == FAKE_MEETING_ID
+        assert citation.timestamp_str == "00:00:17"
+        assert citation.timestamp_seconds == 17
+
+    def test_build_new_action_item_누락_citation_ts는_fallback으로_보강(self):
+        """LLM 이 citation_ts 를 누락해도 fallback 이 있으면 NewActionItem 을 만든다."""
+        fallback = Citation(
+            meeting_id=FAKE_MEETING_ID,
+            timestamp_str="00:00:17",
+            timestamp_seconds=17,
+        )
+
+        item = ActionItemExtractor._build_new_action_item(
+            {
+                "owner": "철수",
+                "description": "회의록 정리",
+                "due_date": None,
+                "project_slug": None,
+                "citation_ts": "",
+                "confidence": 8,
+            },
+            meeting_id=FAKE_MEETING_ID,
+            meeting_date=FAKE_MEETING_DATE,
+            speakers={"철수"},
+            all_text="회의록 정리할게요",
+            fallback_citation=fallback,
+        )
+
+        assert item is not None
+        assert item.citation == fallback
+
+    @pytest.mark.asyncio
+    async def test_extract_new_누락_citation_ts는_첫_발화_시각으로_fallback(self):
+        """extract_new 경로에서도 citation_ts 누락 시 첫 실제 발화 시각을 붙인다."""
+        llm_json = (
+            '[{"owner": "철수", "description": "회의록 정리",'
+            ' "due_date": null, "project_slug": null,'
+            ' "citation_ts": "", "confidence": 8}]'
+        )
+        llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
+        extractor = ActionItemExtractor(llm=llm)
+        utterances = _make_utterances(
+            [
+                ("회의록 정리할게요", "철수", 17.0),
+            ]
+        )
+
+        result = await extractor.extract_new(
+            meeting_id=FAKE_MEETING_ID,
+            meeting_date=FAKE_MEETING_DATE,
+            utterances=utterances,
+        )
+
+        assert len(result) == 1
+        assert result[0].citation.timestamp_str == "00:00:17"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. detect_closed() — 기존 액션의 완료 감지 (4건)
@@ -431,6 +504,31 @@ class TestDetectClosed:
         )
 
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_detect_closed_누락_closed_citation_ts는_첫_발화_시각으로_fallback(self):
+        """detect_closed 경로에서도 closed_citation_ts 누락 시 첫 실제 발화 시각을 붙인다."""
+        existing_open = [_make_open_item(item_id="a5", description="회의록 정리")]
+        llm_json = (
+            '[{"item_index": 0, "closed_reason": "completed",'
+            ' "closed_citation_ts": "", "confidence": 9}]'
+        )
+        llm = MockActionLLM(responses=[_MockResponse(body=llm_json)])
+        extractor = ActionItemExtractor(llm=llm)
+        utterances = _make_utterances(
+            [
+                ("회의록 정리 완료했습니다", "철수", 17.0),
+            ]
+        )
+
+        result = await extractor.detect_closed(
+            existing_open=existing_open,
+            meeting_id=FAKE_MEETING_ID,
+            utterances=utterances,
+        )
+
+        assert len(result) == 1
+        assert result[0].closed_citation.timestamp_str == "00:00:17"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

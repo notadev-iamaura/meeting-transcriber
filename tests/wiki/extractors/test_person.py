@@ -29,6 +29,7 @@ from datetime import date
 
 import pytest
 
+import core.wiki.extractors.person as person_module
 from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -52,6 +53,14 @@ CITATION_PATTERN = re.compile(r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2}
 
 # 한국어 고유명사 뒤에 외국어 병기가 붙는 패턴 (예: "철수(Chulsoo)")
 _FOREIGN_GLOSS_PATTERN = re.compile(r"([\uAC00-\uD7A3]+)\([A-Za-z\u4E00-\u9FFF\u3041-\u30FF]+\)")
+
+
+def test_person_prompts_00시_기본값_사용_금지_명시():
+    """PersonExtractor 프롬프트는 00:00:00 을 추정 기본값으로 쓰지 못하게 한다."""
+    assert "00:00:00 은" in person_module._EXTRACT_SYSTEM_PROMPT
+    assert "추정 기본값으로 쓰지 말 것" in person_module._EXTRACT_SYSTEM_PROMPT
+    assert "00:00:00 은" in person_module._ROLE_TOPIC_SYSTEM_PROMPT
+    assert "추정 기본값으로 쓰지 말 것" in person_module._ROLE_TOPIC_SYSTEM_PROMPT
 
 
 # ══════════════════════════════════════════════════════════════════════════════
