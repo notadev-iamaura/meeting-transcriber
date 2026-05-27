@@ -288,6 +288,39 @@ async def test_extract_citation_없는_decision은_첫_발화_시각으로_fallb
     assert "[meeting:meeting_20260522_172005@00:00:12]" in results[0].background
 
 
+async def test_extract_fallback은_첫_발화가_0초면_00시_인용을_허용한다():
+    """첫 실제 발화가 0초에 시작한 회의의 fallback 00:00:00 은 정상 citation 이다."""
+    raw = (
+        '[{"title": "A/B 테스트 환경 구축 결정",'
+        '"decision_text": "A/B 테스트 환경을 구축한다.",'
+        '"background": "실험 환경이 필요하다.",'
+        '"follow_ups": [],'
+        '"participants": ["SPEAKER_00"],'
+        '"projects": ["ab-test"],'
+        '"confidence": 8}]'
+    )
+    mock_llm = MockDecisionLLM(responses=[raw])
+    extractor = DecisionExtractor(llm=mock_llm)
+    utterances = _make_utterances(
+        decisions=[
+            ("A/B 테스트 환경부터 만들죠.", "SPEAKER_00", 0.0, 4.0),
+            ("동의합니다.", "SPEAKER_01", 5.0, 7.0),
+        ]
+    )
+
+    results = await extractor.extract(
+        meeting_id="meeting_20260528_100000",
+        meeting_date=date(2026, 5, 28),
+        summary="A/B 테스트 환경 구축 결정",
+        utterances=utterances,
+    )
+
+    assert len(results) == 1
+    assert results[0].citations[0].timestamp_str == "00:00:00"
+    assert "[meeting:meeting_20260528_100000@00:00:00]" in results[0].decision_text
+    assert "[meeting:meeting_20260528_100000@00:00:00]" in results[0].background
+
+
 async def test_extract_결정_없는_회의_빈_리스트_반환():
     """Arrange: 잡담만 있는 발화 + LLM 이 빈 배열 JSON 반환.
     Act: extract() 호출.

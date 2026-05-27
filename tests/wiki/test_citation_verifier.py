@@ -145,6 +145,16 @@ class TestUtterancesCitationVerifierBasic:
         )
 
     @pytest.mark.asyncio
+    async def test_첫_발화가_0초면_00시_citation도_true_반환(self) -> None:
+        """회의가 실제 0초 발화로 시작하면 [meeting:id@00:00:00] 은 phantom 이 아니다."""
+        utterances = [FakeUtterance(start=0.0, end=4.0, text="회의 시작 발화")]
+        verifier = UtterancesCitationVerifier({MEETING_M1: utterances})
+
+        result = await verifier.verify_exists(MEETING_M1, 0)
+
+        assert result is True
+
+    @pytest.mark.asyncio
     async def test_tolerance_2초_윈도우_경계값_start_마이너스_tolerance_에서_true(
         self,
     ) -> None:
