@@ -109,6 +109,22 @@ def test_follow_up_owner와_citation을_보존한다() -> None:
     assert rendered.count("[meeting:1234abcd@00:01:20]") >= 2
 
 
+def test_decision_record는_본문과_배경_누락_인용을_후보_citation으로_보강한다() -> None:
+    """LLM 이 일부 줄의 인용을 누락해도 canonical 렌더는 D1 통과 가능한 형태를 만든다."""
+    decision = _decision(citation="")
+
+    record = DecisionRecord.from_extracted(
+        decision=decision,
+        meeting_id="1234abcd",
+        meeting_date=date(2026, 5, 21),
+    )
+
+    rendered = record.to_markdown()
+
+    assert "Q3 출시일을 7월 15일로 확정했다. [meeting:1234abcd@00:01:20]" in rendered
+    assert "릴리즈 리스크를 낮추기 위한 결정이다. [meeting:1234abcd@00:01:20]" in rendered
+
+
 def test_existing_decision_slug는_기존_경로를_재사용하고_source_meetings를_누적한다(
     tmp_path: Path,
 ) -> None:

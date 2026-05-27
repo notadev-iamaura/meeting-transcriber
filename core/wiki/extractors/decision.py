@@ -197,6 +197,38 @@ def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     )
 
 
+def _first_utterance_citation(meeting_id: str, utterances: list[Any]) -> Citation | None:
+    """첫 번째 정상 발화의 시작 시각을 fallback citation 으로 반환한다."""
+    best_seconds: float | None = None
+    for utt in utterances:
+        try:
+            if isinstance(utt, dict):
+                raw_start = utt.get("start")
+                raw_end = utt.get("end")
+            else:
+                raw_start = utt.start
+                raw_end = utt.end
+            start = float(raw_start)
+            end = float(raw_end)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if start < 0 or end < start:
+            continue
+        if best_seconds is None or start < best_seconds:
+            best_seconds = start
+    if best_seconds is None:
+        return None
+    total = int(best_seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return Citation(
+        meeting_id=meeting_id,
+        timestamp_str=f"{h:02d}:{m:02d}:{s:02d}",
+        timestamp_seconds=total,
+    )
+
+
 def _extract_citations_from_text(text: str) -> list[Citation]:
     """텍스트에서 인용 마커를 모두 추출하여 Citation 리스트로 반환한다.
 
@@ -260,12 +292,17 @@ def _extract_json_array(text: str) -> list[Any] | None:
     return None
 
 
-def _build_extracted_decision(item: dict[str, Any], meeting_id: str) -> ExtractedDecision:
+def _build_extracted_decision(
+    item: dict[str, Any],
+    meeting_id: str,
+    fallback_citation: Citation | None = None,
+) -> ExtractedDecision:
     """LLM 응답의 dict 항목을 ExtractedDecision 으로 변환한다.
 
     Args:
         item: LLM JSON 배열 단일 항목.
         meeting_id: 회의 ID (Citation 변환 시 사용).
+        fallback_citation: LLM 이 citation 을 누락했을 때 사용할 첫 실제 발화 시각.
 
     Returns:
         ExtractedDecision 인스턴스.
@@ -296,6 +333,20 @@ def _build_extracted_decision(item: dict[str, Any], meeting_id: str) -> Extracte
     flat_citations = _extract_citations_from_text(decision_text) + _extract_citations_from_text(
         background
     )
+    flat_citations.extend(fu.citation for fu in follow_ups)
+
+    if not flat_citations and fallback_citation is not None:
+        marker = f"[meeting:{fallback_citation.meeting_id}@{fallback_citation.timestamp_str}]"
+        if decision_text:
+            decision_text = f"{decision_text} {marker}"
+        if background:
+            background = f"{background} {marker}"
+        flat_citations.append(fallback_citation)
+        logger.warning(
+            "DecisionExtractor: citation 없는 decision fallback 적용: title=%r, ts=%s",
+            title[:120],
+            fallback_citation.timestamp_str,
+        )
 
     # slug: title 기반 정규화. 비-ASCII 만 있으면 hex 해시로 폴백
     slug = _normalize_slug(title)
@@ -338,6 +389,8 @@ _EXTRACT_SYSTEM_PROMPT = """\
 1. 결정사항이 없으면 빈 배열 [] 만 출력.
 2. 한국어 고유명사에 영어/중국어 병기 절대 금지.
 3. 모든 사실 진술에 인용 마커 부착.
+4. citation_ts 와 인용 마커의 HH:MM:SS 는 반드시 발화 목록에 있는 실제 시각을 사용.
+5. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 """
 
 _RENDER_SYSTEM_PROMPT = """\
@@ -375,10 +428,12 @@ updated_at: ISO8601
 규칙:
 1. 모든 사실 진술에 인용 마커 부착.
 2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
-3. "## 참고 회의" 의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 말 것.
-4. 한국어 고유명사 외국어 병기 금지.
-5. 기존 페이지가 있으면 frontmatter 의 created_at 보존.
-6. 마지막 줄에 confidence 마커 필수.
+3. "## 결정 내용" 과 "## 배경" 의 본문 줄에는 각각 인용 마커를 반드시 포함.
+4. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
+5. "## 참고 회의" 의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 말 것.
+6. 한국어 고유명사 외국어 병기 금지.
+7. 기존 페이지가 있으면 frontmatter 의 created_at 보존.
+8. 마지막 줄에 confidence 마커 필수.
 """
 
 
@@ -473,12 +528,13 @@ class DecisionExtractor:
         if parsed is None:
             return []
 
+        fallback_citation = _first_utterance_citation(meeting_id, utterances)
         results: list[ExtractedDecision] = []
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             try:
-                results.append(_build_extracted_decision(item, meeting_id))
+                results.append(_build_extracted_decision(item, meeting_id, fallback_citation))
             except Exception as exc:  # noqa: BLE001 — 항목별 실패는 skip
                 logger.warning("DecisionExtractor: 항목 변환 실패 — skip: %r", exc)
                 continue
@@ -585,8 +641,12 @@ class DecisionExtractor:
             )
             if not record.has_verified_candidate_citation:
                 logger.warning(
-                    "DecisionExtractor.render_pages citation 없는 decision skip: path=%s",
+                    "DecisionExtractor.render_pages citation 없는 decision skip: "
+                    "path=%s title=%r decision_text=%r background=%r",
                     rel_path,
+                    decision.title[:120],
+                    decision.decision_text[:200],
+                    decision.background[:200],
                 )
                 return None
 

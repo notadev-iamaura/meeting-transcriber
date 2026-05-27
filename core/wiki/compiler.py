@@ -43,6 +43,50 @@ from core.wiki.store import WikiStore, WikiStoreError
 logger = logging.getLogger(__name__)
 
 
+def _first_utterance_timestamp(utterances: list[Any]) -> str | None:
+    """첫 정상 발화의 시작 시각을 HH:MM:SS 로 반환한다."""
+    best_seconds: float | None = None
+    for utt in utterances:
+        try:
+            if isinstance(utt, dict):
+                raw_start = utt.get("start")
+                raw_end = utt.get("end")
+            else:
+                raw_start = utt.start
+                raw_end = utt.end
+            start = float(raw_start)
+            end = float(raw_end)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if start < 0 or end < start:
+            continue
+        if best_seconds is None or start < best_seconds:
+            best_seconds = start
+    if best_seconds is None:
+        return None
+    total = int(best_seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _normalize_zero_timestamp_citations(
+    content: str,
+    *,
+    meeting_id: str,
+    replacement_ts: str | None,
+) -> str:
+    """현재 회의의 00:00:00 citation 을 첫 실제 발화 시각으로 정규화한다."""
+    if not replacement_ts or replacement_ts == "00:00:00":
+        return content
+    old_marker = f"[meeting:{meeting_id}@00:00:00]"
+    if old_marker not in content:
+        return content
+    new_marker = f"[meeting:{meeting_id}@{replacement_ts}]"
+    return content.replace(old_marker, new_marker)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # 5.1 결과 dataclass
 # ─────────────────────────────────────────────────────────────────────────
@@ -391,8 +435,21 @@ class WikiCompilerV2:
             + project_pages_pairs
             + topic_pages_pairs
         )
+        zero_ts_replacement = _first_utterance_timestamp(utterances)
 
         for rel_path, content in all_pages:
+            normalized_content = _normalize_zero_timestamp_citations(
+                content,
+                meeting_id=meeting_id,
+                replacement_ts=zero_ts_replacement,
+            )
+            if normalized_content != content:
+                logger.warning(
+                    "00:00:00 citation 정규화: page=%s, replacement_ts=%s",
+                    rel_path,
+                    zero_ts_replacement,
+                )
+                content = normalized_content
             verdict = await self._guard.verify(
                 page_path=rel_path,
                 new_content=content,

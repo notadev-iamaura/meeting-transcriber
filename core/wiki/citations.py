@@ -312,7 +312,7 @@ def enforce_citations(content: str, meeting_id: str) -> tuple[str, list[str]]:
         rejection_rate = len(rejected_lines) / mandatory_count
         if rejection_rate > D1_REJECTION_THRESHOLD:
             for rejected_line in rejected_lines[:3]:
-                logger.debug("D1 거부 샘플: %r", rejected_line[:200])
+                logger.warning("D1 거부 샘플: %r", rejected_line[:200])
             logger.warning(
                 "D1 거부율 임계 초과: meeting_id=%s, rejected=%d/%d (%.2f%%)",
                 meeting_id,

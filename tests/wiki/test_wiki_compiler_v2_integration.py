@@ -22,6 +22,15 @@ import pytest
 from config import AppConfig, WikiConfig
 
 
+class _SimpleUtterance:
+    """컴파일러 timestamp 정규화 테스트용 발화."""
+
+    def __init__(self, start: float, end: float) -> None:
+        """시작/종료 시각을 저장한다."""
+        self.start = start
+        self.end = end
+
+
 def _build_app_config(
     *,
     enabled: bool,
@@ -31,6 +40,25 @@ def _build_app_config(
     """테스트용 AppConfig 를 만든다."""
     wiki = WikiConfig(enabled=enabled, root=root, dry_run=dry_run)
     return AppConfig(wiki=wiki)
+
+
+def test_zero_timestamp_citation은_첫_실제_발화_시각으로_정규화된다() -> None:
+    """LLM 기본값 00:00:00 citation 은 D2 전에 첫 발화 시각으로 보정한다."""
+    from core.wiki.compiler import _first_utterance_timestamp, _normalize_zero_timestamp_citations
+
+    meeting_id = "meeting_20260522_172005"
+    replacement = _first_utterance_timestamp([_SimpleUtterance(17.0, 21.0)])
+    content = f"결정 내용 [meeting:{meeting_id}@00:00:00]"
+
+    normalized = _normalize_zero_timestamp_citations(
+        content,
+        meeting_id=meeting_id,
+        replacement_ts=replacement,
+    )
+
+    assert replacement == "00:00:17"
+    assert f"[meeting:{meeting_id}@00:00:17]" in normalized
+    assert "00:00:00" not in normalized
 
 
 # ─────────────────────────────────────────────────────────────────────────

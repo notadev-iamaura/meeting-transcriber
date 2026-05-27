@@ -50,6 +50,16 @@ def extract_citation_markers(text: str) -> list[str]:
     return [match.group(0) for match in _CITATION_PATTERN.finditer(text)]
 
 
+def _append_marker_if_missing(text: str, marker: str) -> str:
+    """본문 줄에 인용 마커가 없으면 fallback marker 를 덧붙인다."""
+    cleaned = str(text or "").strip()
+    if not cleaned or not marker or extract_citation_markers(cleaned):
+        return cleaned
+    if cleaned in {"없음", "- 없음", "_(없음)_", "N/A", "n/a"}:
+        return cleaned
+    return f"{cleaned} {marker}"
+
+
 @dataclass(frozen=True)
 class DecisionRecord:
     """Canonical Decision Wiki record.
@@ -177,11 +187,13 @@ class DecisionRecord:
         source_meetings: list[str] | None = None,
     ) -> DecisionRecord:
         """ExtractedDecision 호환 객체에서 DecisionRecord 를 만든다."""
+        decision_text = str(getattr(decision, "decision_text", "") or "")
+        background = str(getattr(decision, "background", "") or "")
         citations = extract_citation_markers(
             "\n".join(
                 [
-                    str(getattr(decision, "decision_text", "") or ""),
-                    str(getattr(decision, "background", "") or ""),
+                    decision_text,
+                    background,
                     "\n".join(
                         str(getattr(getattr(fu, "citation", ""), "marker", "") or "")
                         for fu in getattr(decision, "follow_ups", []) or []
@@ -207,6 +219,10 @@ class DecisionRecord:
             if owner and desc:
                 follow_ups.append(f"{owner}: {desc} {marker}".strip())
 
+        primary_marker = citations[0] if citations else ""
+        decision_text = _append_marker_if_missing(decision_text, primary_marker)
+        background = _append_marker_if_missing(background, primary_marker)
+
         projects = list(getattr(decision, "projects", []) or [])
         project = str(projects[0]) if projects else ""
         slug = str(getattr(decision, "slug", "") or "decision")
@@ -216,8 +232,8 @@ class DecisionRecord:
             title=str(getattr(decision, "title", "") or "결정사항"),
             status="decided",
             decision_date=meeting_date,
-            decision_text=str(getattr(decision, "decision_text", "") or ""),
-            background=str(getattr(decision, "background", "") or ""),
+            decision_text=decision_text,
+            background=background,
             project=project,
             participants=list(getattr(decision, "participants", []) or []),
             owners=owners,

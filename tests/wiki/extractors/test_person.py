@@ -185,6 +185,7 @@ def _make_extracted_decision(
         background=f"배경 설명 [meeting:{meeting_id}@00:08:00].",
         participants=participants,
         projects=["new-onboarding"],
+        citations=[_make_citation(meeting_id=meeting_id)],
         confidence=8,
     )
 

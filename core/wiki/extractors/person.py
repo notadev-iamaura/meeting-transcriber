@@ -265,6 +265,8 @@ _EXTRACT_SYSTEM_PROMPT = """\
 2. 매핑 없고 한국어 이름 추론도 불확실하면 추출하지 않음.
 3. 한국어 고유명사 외국어 병기 금지.
 4. 식별 불가하면 빈 배열 [].
+5. citation_ts 는 반드시 발화 목록에 있는 실제 시각을 사용.
+6. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 """
 
 
@@ -286,6 +288,8 @@ _ROLE_TOPIC_SYSTEM_PROMPT = """\
 1. role 은 정말 명확할 때만 변경. 모호하면 null.
 2. new_topics 는 existing_topics 에 없는 것만.
 3. 모든 topic 에는 정확한 citation_ts 필수.
+4. citation_ts 는 반드시 입력 발화에 있는 실제 시각을 사용.
+5. 00:00:00 은 입력 발화에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 """
 
 
@@ -864,12 +868,15 @@ class PersonExtractor:
         for decision in meeting_decisions:
             if person_name not in decision.participants:
                 continue
-            # 인용 마커 — 결정의 첫 citation 또는 회의 시작 시각
-            if decision.citations:
-                cit = decision.citations[0]
-                cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
-            else:
-                cit_str = f"[meeting:{meeting_id}@00:00:00]"
+            if not decision.citations:
+                logger.warning(
+                    "PersonExtractor: citation 없는 최근 결정 skip: person=%s title=%r",
+                    person_name,
+                    decision.title[:120],
+                )
+                continue
+            cit = decision.citations[0]
+            cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
             line = f"- {date_str}: {decision.title} {cit_str}"
             # 중복 방지 — 같은 slug 가 기존 페이지에 이미 있으면 skip
             if existing_raw and decision.slug in existing_raw:
@@ -1046,11 +1053,17 @@ class PersonExtractor:
         body_parts.append("")
         if merged_topics:
             for topic, cit in merged_topics:
-                if cit is not None:
-                    cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
-                else:
-                    cit_str = f"[meeting:{meeting_id}@00:00:00]"
+                if cit is None:
+                    logger.warning(
+                        "PersonExtractor: citation 없는 topic mention skip: person=%s topic=%r",
+                        name,
+                        topic[:120],
+                    )
+                    continue
+                cit_str = f"[meeting:{cit.meeting_id}@{cit.timestamp_str}]"
                 body_parts.append(f"- {topic} {cit_str}")
+            if body_parts[-1] == "":
+                body_parts.append("_(없음)_")
         else:
             body_parts.append("_(없음)_")
         body_parts.append("")

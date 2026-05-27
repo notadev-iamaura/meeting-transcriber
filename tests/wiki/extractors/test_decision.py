@@ -255,6 +255,39 @@ async def test_extract_명확한_결정_1건_반환():
     assert "5월" in results[0].title or "출시" in results[0].title
 
 
+async def test_extract_citation_없는_decision은_첫_발화_시각으로_fallback한다():
+    """LLM 이 citation 을 전부 누락해도 silent skip 대신 첫 실제 발화 citation 을 붙인다."""
+    raw = (
+        '[{"title": "API 비용 모니터링 도입",'
+        '"decision_text": "API 비용 모니터링을 도입한다.",'
+        '"background": "현재 비용 추적이 어렵다.",'
+        '"follow_ups": [],'
+        '"participants": ["SPEAKER_00"],'
+        '"projects": ["api"],'
+        '"confidence": 8}]'
+    )
+    mock_llm = MockDecisionLLM(responses=[raw])
+    extractor = DecisionExtractor(llm=mock_llm)
+    utterances = _make_utterances(
+        decisions=[
+            ("API 비용 모니터링을 넣읍시다.", "SPEAKER_00", 12.0, 16.0),
+        ]
+    )
+
+    results = await extractor.extract(
+        meeting_id="meeting_20260522_172005",
+        meeting_date=date(2026, 5, 22),
+        summary="API 비용 모니터링 결정",
+        utterances=utterances,
+    )
+
+    assert len(results) == 1
+    assert results[0].citations
+    assert results[0].citations[0].timestamp_str == "00:00:12"
+    assert "[meeting:meeting_20260522_172005@00:00:12]" in results[0].decision_text
+    assert "[meeting:meeting_20260522_172005@00:00:12]" in results[0].background
+
+
 async def test_extract_결정_없는_회의_빈_리스트_반환():
     """Arrange: 잡담만 있는 발화 + LLM 이 빈 배열 JSON 반환.
     Act: extract() 호출.

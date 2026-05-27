@@ -253,6 +253,38 @@ def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     )
 
 
+def _first_utterance_citation(meeting_id: str, utterances: list) -> Citation | None:
+    """첫 정상 발화의 시작 시각을 fallback citation 으로 반환한다."""
+    best_seconds: float | None = None
+    for utt in utterances:
+        try:
+            if isinstance(utt, dict):
+                raw_start = utt.get("start")
+                raw_end = utt.get("end")
+            else:
+                raw_start = utt.start
+                raw_end = utt.end
+            start = float(raw_start)
+            end = float(raw_end)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if start < 0 or end < start:
+            continue
+        if best_seconds is None or start < best_seconds:
+            best_seconds = start
+    if best_seconds is None:
+        return None
+    total = int(best_seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return Citation(
+        meeting_id=meeting_id,
+        timestamp_str=f"{h:02d}:{m:02d}:{s:02d}",
+        timestamp_seconds=total,
+    )
+
+
 def _extract_json_array(text: str) -> list[Any] | None:
     """LLM 응답에서 JSON 배열을 robust 하게 파싱."""
     if not text:
@@ -297,6 +329,8 @@ _EXTRACT_NEW_SYSTEM_PROMPT = """\
 1. "할 거다", "해야 한다" 류 미래형/의무 표현만 액션으로 인정.
 2. 평범한 잡담은 추출하지 말 것.
 3. 액션이 없으면 빈 배열 [] 만 출력.
+4. citation_ts 는 반드시 발화 목록에 있는 실제 시각을 사용.
+5. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 """
 
 
@@ -314,6 +348,8 @@ _DETECT_CLOSED_SYSTEM_PROMPT = """\
 2. "70% 진행 중", "거의 됐어요" 같은 부분 진행은 미감지.
 3. 모호한 "잘 됐어요", "괜찮아요" 같은 표현은 미감지.
 4. 매핑할 수 없으면 빈 배열 [].
+5. closed_citation_ts 는 반드시 발화 목록에 있는 실제 시각을 사용.
+6. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 """
 
 
@@ -361,6 +397,7 @@ class ActionItemExtractor:
         # 화자 set + utterance text 모음 (검증용)
         speakers: set[str] = {getattr(u, "speaker", "") for u in utterances}
         all_text = " ".join(getattr(u, "text", "") for u in utterances)
+        fallback_citation = _first_utterance_citation(meeting_id, utterances)
 
         # 직렬화
         lines: list[str] = []
@@ -403,6 +440,7 @@ class ActionItemExtractor:
                 speakers=speakers,
                 all_text=all_text,
                 speaker_name_map=speaker_name_map,
+                fallback_citation=fallback_citation,
             )
             if new_item is not None:
                 results.append(new_item)
@@ -481,9 +519,14 @@ class ActionItemExtractor:
             ts_str = str(item.get("closed_citation_ts", "") or "")
             cit = _citation_from_ts(meeting_id, ts_str)
             if cit is None:
-                # ts 없으면 fallback 0초
-                cit = Citation(
-                    meeting_id=meeting_id, timestamp_str="00:00:00", timestamp_seconds=0
+                cit = _first_utterance_citation(meeting_id, utterances)
+                if cit is None:
+                    continue
+                logger.warning(
+                    "ActionItemExtractor.detect_closed citation_ts fallback 적용: "
+                    "item_index=%d, ts=%s",
+                    idx,
+                    cit.timestamp_str,
                 )
             closed_reason = str(item.get("closed_reason", "completed") or "completed")
             # closed_by_speaker — 해당 timestamp 의 화자 우선, 없으면 첫 발화 화자
@@ -605,6 +648,7 @@ class ActionItemExtractor:
         speakers: set[str],
         all_text: str,
         speaker_name_map: dict[str, str] | None = None,
+        fallback_citation: Citation | None = None,
     ) -> NewActionItem | None:
         """LLM 응답 dict 를 NewActionItem 으로 변환 (환각 방지 + Phase 2.E 보강).
 
@@ -623,6 +667,7 @@ class ActionItemExtractor:
             speakers: 실제 화자 이름 집합.
             all_text: 발화 텍스트 전체 (날짜 검증용).
             speaker_name_map: SPEAKER_XX → 한국어이름 매핑 (선택).
+            fallback_citation: citation_ts 누락 시 사용할 첫 실제 발화 시각.
 
         Returns:
             NewActionItem 또는 None (필수 필드 누락 시).
@@ -671,7 +716,14 @@ class ActionItemExtractor:
         ts_str = str(item.get("citation_ts", "") or "")
         cit = _citation_from_ts(meeting_id, ts_str)
         if cit is None:
-            cit = Citation(meeting_id=meeting_id, timestamp_str="00:00:00", timestamp_seconds=0)
+            if fallback_citation is None:
+                return None
+            cit = fallback_citation
+            logger.warning(
+                "ActionItemExtractor.extract_new citation_ts fallback 적용: desc=%r, ts=%s",
+                description[:160],
+                cit.timestamp_str,
+            )
 
         # confidence
         try:
