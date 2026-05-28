@@ -133,6 +133,7 @@ server:
 zoom:
   process_name: "CptHost"                    # Zoom 미팅 프로세스명
   poll_interval_seconds: 3                   # 감지 폴링 간격 (초, PERF: 더 빠른 Zoom 감지)
+  detection_backend: "coreaudio"             # coreaudio: 실제 Zoom 오디오 I/O 기준, process: 기존 pgrep 폴백
 
 # === 폴더 감시 설정 ===
 watcher:

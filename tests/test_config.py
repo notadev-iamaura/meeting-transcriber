@@ -174,6 +174,7 @@ class TestDefaultValues:
 
         assert config.server.host == "127.0.0.1"
         assert config.zoom.process_name == "CptHost"
+        assert config.zoom.detection_backend == "coreaudio"
 
 
 class TestEnvironmentOverrides:

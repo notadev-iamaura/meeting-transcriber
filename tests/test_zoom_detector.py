@@ -37,6 +37,7 @@ def _make_config() -> MagicMock:
     config = MagicMock()
     config.zoom.process_name = "CptHost"
     config.zoom.poll_interval_seconds = 1  # 테스트에서는 빠르게 폴링
+    config.zoom.detection_backend = "process"
     return config
 
 

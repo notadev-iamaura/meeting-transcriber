@@ -546,6 +546,7 @@ class ZoomConfig(BaseModel):
 
     process_name: str = "CptHost"
     poll_interval_seconds: int = Field(default=5, ge=1, le=60)
+    detection_backend: str = Field(default="coreaudio", pattern="^(coreaudio|process)$")
 
 
 class WatcherConfig(BaseModel):

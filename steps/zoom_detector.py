@@ -21,6 +21,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 from config import AppConfig, get_config
+from steps.zoom_activity import ZoomAudioActivityChecker
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,12 @@ class ZoomDetector:
         # Zoom 설정 로드
         self._process_name: str = self._config.zoom.process_name
         self._poll_interval: int = self._config.zoom.poll_interval_seconds
+        detection_backend = getattr(self._config.zoom, "detection_backend", "coreaudio")
+        self._activity_checker = ZoomAudioActivityChecker(
+            process_name=self._process_name,
+            prefer_coreaudio=detection_backend == "coreaudio",
+            strict_process_errors=detection_backend == "process",
+        )
 
         # 상태 관리
         self._is_meeting_active: bool = False
@@ -131,45 +138,30 @@ class ZoomDetector:
         logger.debug(f"미팅 상태 변화 콜백 등록: {cb_name}")
 
     async def _check_zoom_process(self) -> bool:
-        """pgrep으로 Zoom 미팅 프로세스 존재 여부를 확인한다.
+        """Zoom 회의 오디오 활동 여부를 확인한다.
 
-        pgrep -f <process_name> 명령으로 프로세스를 검색한다.
-        반환 코드 0이면 프로세스 존재, 1이면 미존재.
+        CoreAudio process list에서 Zoom 계열 프로세스가 실제 오디오 입력/출력을
+        실행 중인지 우선 확인한다. CoreAudio 확인이 불가능하면 checker 내부에서
+        기존 pgrep 기반 감지로 폴백한다.
 
         Returns:
-            프로세스 존재 시 True, 미존재 시 False
+            Zoom 오디오 활동 감지 시 True, 아니면 False
 
         Raises:
-            ProcessCheckError: pgrep 실행 자체가 실패한 경우
+            ProcessCheckError: 감지 실행 자체가 실패한 경우
         """
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "pgrep",
-                "-f",
-                self._process_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            result = await self._activity_checker.check()
+            logger.debug(
+                f"Zoom 활동 확인: active={result.active}, "
+                f"source={result.source}, processes={result.process_count}"
             )
-            returncode = await asyncio.wait_for(proc.wait(), timeout=10.0)
-            # pgrep: 0 = 매칭 프로세스 존재, 1 = 미존재
-            return returncode == 0
-        except TimeoutError:
-            logger.warning("pgrep 명령 타임아웃 (10초 초과)")
-            # 타임아웃된 pgrep 프로세스를 강제 종료하여 고아 프로세스 방지
-            try:
-                proc.kill()
-                await proc.wait()
-            except (ProcessLookupError, OSError):
-                pass  # 이미 종료된 경우 무시
-            # 타임아웃 시 이전 상태 유지 (안전한 기본값)
-            return self._is_meeting_active
-        except FileNotFoundError as e:
+            if result.source == "pgrep-timeout":
+                return self._is_meeting_active
+            return result.active
+        except Exception as e:
             raise ProcessCheckError(
-                "pgrep 명령을 찾을 수 없습니다. macOS 환경을 확인하세요."
-            ) from e
-        except OSError as e:
-            raise ProcessCheckError(
-                f"프로세스 확인 중 OS 에러 발생: {e}",
+                f"Zoom 활동 확인 중 에러 발생: {e}",
                 original_error=e,
             ) from e
 

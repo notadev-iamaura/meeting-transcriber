@@ -15,6 +15,8 @@ import subprocess
 import time
 from typing import Protocol
 
+from steps.zoom_activity import ZoomAudioActivityChecker
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,29 +37,26 @@ class ZoomPauseGuard:
         self,
         process_name: str,
         poll_interval_seconds: float,
+        prefer_coreaudio: bool = True,
+        activity_checker: ZoomAudioActivityChecker | None = None,
     ) -> None:
         self._process_name = process_name
         self._poll_interval_seconds = poll_interval_seconds
+        self._activity_checker = activity_checker or ZoomAudioActivityChecker(
+            process_name=process_name,
+            prefer_coreaudio=prefer_coreaudio,
+        )
 
     async def is_zoom_active(self) -> bool:
-        """Zoom 회의 프로세스가 실행 중인지 확인한다."""
+        """Zoom 회의 오디오 활동이 있는지 확인한다."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "pgrep",
-                "-f",
-                self._process_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            result = await self._activity_checker.check()
+            logger.debug(
+                f"Zoom 보호 활동 확인: active={result.active}, "
+                f"source={result.source}, processes={result.process_count}"
             )
-            returncode = await asyncio.wait_for(proc.wait(), timeout=10.0)
-            return returncode == 0
-        except TimeoutError:
-            logger.warning("Zoom 상태 확인 타임아웃. 안전하게 active 로 간주합니다.")
-            return True
-        except FileNotFoundError:
-            logger.warning("pgrep 명령을 찾을 수 없어 Zoom 보호를 적용하지 않습니다.")
-            return False
-        except OSError as e:
+            return result.active
+        except Exception as e:
             logger.warning(f"Zoom 상태 확인 실패. 안전하게 active 로 간주합니다: {e}")
             return True
 

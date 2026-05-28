@@ -416,9 +416,15 @@ class Diarizer:
         """별도 worker 프로세스에서 화자분리를 실행하고 Zoom 중에는 일시정지한다."""
         self._validate_token()
         process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
+        detection_backend = getattr(
+            getattr(self._config, "zoom", None),
+            "detection_backend",
+            "coreaudio",
+        )
         guard = ZoomPauseGuard(
             process_name=process_name,
             poll_interval_seconds=self._zoom_protection_poll_seconds,
+            prefer_coreaudio=detection_backend == "coreaudio",
         )
 
         try:
