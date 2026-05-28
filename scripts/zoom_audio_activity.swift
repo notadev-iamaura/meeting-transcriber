@@ -121,7 +121,7 @@ func isZoomProcess(bundleID: String, path: String) -> Bool {
         || haystack.contains("/cpt")
 }
 
-func jsonEscape(_ value: String) -> String {
+func jsonStringLiteral(_ value: String) -> String {
     let data = try? JSONSerialization.data(withJSONObject: [value], options: [])
     guard
         let data,
@@ -131,6 +131,28 @@ func jsonEscape(_ value: String) -> String {
         return "\"\""
     }
     return String(encoded.dropFirst().dropLast())
+}
+
+func renderJSON(statuses: [AudioProcessStatus]) -> String {
+    let active = statuses.contains { $0.input || $0.output }
+    let processJSON = statuses.map { status in
+        """
+        {"pid":\(status.pid),"bundle_id":\(jsonStringLiteral(status.bundleID)),"path":\(jsonStringLiteral(status.path)),"input":\(status.input),"output":\(status.output)}
+        """
+    }.joined(separator: ",")
+    return "{\"ok\":true,\"active\":\(active),\"processes\":[\(processJSON)]}"
+}
+
+if CommandLine.arguments.contains("--self-test-json") {
+    let status = AudioProcessStatus(
+        pid: 12345,
+        bundleID: "us.zoom.caphost",
+        path: "/Applications/zoom.us.app/Contents/Frameworks/CptHost.app/Contents/MacOS/CptHost",
+        input: false,
+        output: true
+    )
+    print(renderJSON(statuses: [status]))
+    exit(0)
 }
 
 do {
@@ -151,14 +173,8 @@ do {
         )
     }
 
-    let active = statuses.contains { $0.input || $0.output }
-    let processJSON = statuses.map { status in
-        """
-        {"pid":\(status.pid),"bundle_id":"\(jsonEscape(status.bundleID))","path":"\(jsonEscape(status.path))","input":\(status.input),"output":\(status.output)}
-        """
-    }.joined(separator: ",")
-    print("{\"ok\":true,\"active\":\(active),\"processes\":[\(processJSON)]}")
+    print(renderJSON(statuses: statuses))
 } catch {
-    fputs("{\"ok\":false,\"active\":false,\"error\":\"\(jsonEscape(String(describing: error)))\"}\n", stderr)
+    fputs("{\"ok\":false,\"active\":false,\"error\":\(jsonStringLiteral(String(describing: error)))}\n", stderr)
     exit(2)
 }
