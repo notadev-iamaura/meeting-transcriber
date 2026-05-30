@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from config import HallucinationFilterConfig
 from core.stt_quality_metrics import (
     TimeInterval,
     calculate_temporal_coverage,
@@ -37,17 +38,6 @@ class _MockSegment:
     avg_logprob: float = -0.5
     no_speech_prob: float = 0.1
     compression_ratio: float = 1.0
-
-
-@dataclass
-class _MockFilterConfig:
-    """환각 필터 eval용 설정."""
-
-    enabled: bool = True
-    compression_ratio_threshold: float = 2.4
-    logprob_threshold: float = -1.0
-    no_speech_threshold: float = 0.6
-    repetition_threshold: int = 3
 
 
 def _load_cases() -> dict[str, Any]:
@@ -85,8 +75,10 @@ def test_temporal_coverage_golden_cases(case: dict[str, Any]) -> None:
 def test_hallucination_filter_golden_cases(case: dict[str, Any]) -> None:
     """무음 반복 환각 세그먼트가 제거되는지 검증한다."""
     segments = [_MockSegment(**segment) for segment in case["segments"]]
+    # 프로덕션 기본 임계값(no_speech_threshold=0.9 등)을 그대로 사용해
+    # 임계값 drift 없이 실제 필터 경로를 검증한다.
     config = MagicMock()
-    config.hallucination_filter = _MockFilterConfig()
+    config.hallucination_filter = HallucinationFilterConfig()
 
     _, removed = filter_hallucinations(segments, config)
 

@@ -23,11 +23,13 @@ def _wait_for_server(base_url: str, timeout: float) -> None:
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(f"{base_url}/api/status", timeout=2) as response:
-                if response.status == 200:
+                # 2xx 성공 응답이면 준비 완료로 간주 (202/204 등도 포함)
+                if 200 <= response.status < 300:
                     return
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
-            time.sleep(0.5)
+        # 성공 분기/예외 분기 모두 동일하게 폴링 간격을 둔다 (busy-loop 방지)
+        time.sleep(0.5)
     raise RuntimeError(f"{base_url} 서버가 {timeout:.0f}초 안에 응답하지 않았습니다: {last_error}")
 
 
@@ -67,7 +69,10 @@ def _run_probe(base_url: str, output_dir: Path, headed: bool) -> dict[str, Any]:
                 for route_name, route_path in routes:
                     url = f"{base_url}{route_path}"
                     page.goto(url, wait_until="domcontentloaded")
-                    page.wait_for_selector("#app, .app-shell, body", timeout=10_000)
+                    # SPA 라우터가 #content 를 비운 뒤 뷰를 렌더링하므로(ui/web/spa.js),
+                    # 정적 마크업으로 항상 존재하는 #app/body 가 아니라 "#content 의 자식"을
+                    # 기다려야 실제 하이드레이션 완료를 보장한다. 빈 렌더링 회귀를 잡는 핵심 게이트.
+                    page.wait_for_selector("#content > *", timeout=10_000)
                     screenshot = output_dir / f"{viewport_name}-{route_name}.png"
                     page.screenshot(path=str(screenshot), full_page=True)
                     report["routes"].append(
