@@ -1,0 +1,67 @@
+{
+  "stt_text_cases": [
+    {
+      "id": "punctuation_and_spacing_normalization",
+      "reference": "안녕하세요, 회의 시작합니다. 오늘 안건은 RAG 검색 품질입니다.",
+      "hypothesis": "안녕하세요 회의 시작합니다 오늘 안건은 RAG 검색 품질입니다",
+      "max_cer": 0.0,
+      "max_wer": 0.0
+    },
+    {
+      "id": "proper_noun_regression_guard",
+      "reference": "배미령 님은 Gemma 4 모델의 한국어 병기 문제를 검토합니다.",
+      "hypothesis": "배미령 님은 Gemma 4 모델의 한국어 병기 문제를 검토합니다.",
+      "max_cer": 0.0,
+      "max_wer": 0.0
+    }
+  ],
+  "temporal_cases": [
+    {
+      "id": "vad_coverage_and_hallucination_budget",
+      "reference_intervals": [[0.0, 10.0], [20.0, 30.0]],
+      "transcript_intervals": [[0.0, 9.5], [20.0, 29.0], [45.0, 46.0]],
+      "min_coverage_rate": 0.9,
+      "max_hallucination_time_rate": 0.06
+    }
+  ],
+  "hallucination_cases": [
+    {
+      "id": "silent_repetition_is_removed",
+      "segments": [
+        {"text": "오늘 안건은 검색 품질입니다.", "avg_logprob": -0.2, "no_speech_prob": 0.05, "compression_ratio": 1.1},
+        {"text": "네 네 네 네", "avg_logprob": -0.2, "no_speech_prob": 0.95, "compression_ratio": 3.2}
+      ],
+      "expected_removed": 1
+    }
+  ],
+  "summary_contract_cases": [
+    {
+      "id": "fallback_preserves_speaker_labels_and_source_text",
+      "speakers": ["SPEAKER_00", "SPEAKER_01"],
+      "utterances": [
+        {"speaker": "SPEAKER_00", "text": "오늘은 수동 다운로드 경로를 점검하겠습니다."},
+        {"speaker": "SPEAKER_01", "text": "HuggingFace 토큰 우회는 하지 않겠습니다."}
+      ],
+      "must_contain": ["## 회의 개요", "## 전사문", "SPEAKER_00", "수동 다운로드", "토큰 우회"]
+    }
+  ],
+  "rag_prompt_cases": [
+    {
+      "id": "rag_prompt_keeps_reference_metadata",
+      "query": "누가 수동 다운로드 경로를 점검하나요?",
+      "result": {
+        "chunk_id": "chunk-1",
+        "text": "SPEAKER_00이 수동 다운로드 경로를 점검한다고 말했습니다.",
+        "score": 0.01,
+        "meeting_id": "meeting_eval_001",
+        "date": "2026-05-29",
+        "speakers": ["SPEAKER_00"],
+        "start_time": 60.0,
+        "end_time": 75.0,
+        "chunk_index": 0,
+        "source": "both"
+      },
+      "must_contain": ["[참조 1]", "meeting_eval_001", "SPEAKER_00", "01:00~01:15", "수동 다운로드"]
+    }
+  ]
+}
