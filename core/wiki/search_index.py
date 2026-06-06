@@ -231,7 +231,9 @@ class _Candidate:
     last_updated: str
     confidence: int
     citations: list[str]
-    citation_count: int  # 메타 citations 컬럼 기준 인용 마커 수(본문 아님). _string_list 통합과 무관
+    citation_count: (
+        int  # 메타 citations 컬럼 기준 인용 마커 수(본문 아님). _string_list 통합과 무관
+    )
     metadata: dict[str, Any]
 
 
@@ -301,9 +303,7 @@ def _rerank(
     ('역전 0%' 구조적 보장). 비-superseded 점수는 [0, Σw] 범위이고, superseded 는
     `positive − Σw − superseded_penalty` 로 항상 음수가 되어 두 집합이 분리된다.
     """
-    weight_sum = (
-        ranking.w_bm25 + ranking.w_recency + ranking.w_confidence + ranking.w_citation
-    )
+    weight_sum = ranking.w_bm25 + ranking.w_recency + ranking.w_confidence + ranking.w_citation
     bm25_norm = _minmax([c.bm25 for c in candidates])
     cite_norm = _minmax([float(c.citation_count) for c in candidates])
     scored: list[tuple[_Candidate, float]] = []
@@ -342,8 +342,7 @@ def _mmr_rerank(
         return scored
     rel_norm = _minmax([s for _, s in scored])
     tokens = [
-        _tokens(_CITATION_MARKER_RE.sub(" ", (c.title or "") + " " + c.snippet))
-        for c, _ in scored
+        _tokens(_CITATION_MARKER_RE.sub(" ", (c.title or "") + " " + c.snippet)) for c, _ in scored
     ]
     lam = ranking.mmr_lambda
     remaining = list(range(len(scored)))
