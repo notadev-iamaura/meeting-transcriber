@@ -256,7 +256,8 @@ def _recency_score(date_str: str | None, now: date, half_life_days: float) -> fl
     age_days = (now - parsed).days
     if age_days < 0:
         age_days = 0
-    return 0.5 ** (age_days / half_life_days)
+    # float ** float 의 mypy 추론이 Any 이므로 명시적 float 캐스트.
+    return float(0.5 ** (age_days / half_life_days))
 
 
 def _minmax(values: list[float]) -> list[float]:
@@ -650,7 +651,7 @@ class WikiSearchIndex:
                 " ".join(citations),
             ),
         )
-        rowid = int(cursor.lastrowid)
+        rowid = int(cursor.lastrowid or 0)  # lastrowid 는 INSERT 후 항상 int (mypy int|None 해소)
         conn.execute(
             f"""
             INSERT INTO {_META_TABLE}
