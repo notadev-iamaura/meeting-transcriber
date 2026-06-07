@@ -353,6 +353,9 @@ llm:
 또는 환경변수: `export MT_LLM_MODEL=mlx-community/gemma-4-12B-it-4bit`
 
 **전제·주의:**
+- **추가 pip 패키지 불필요** — 이미 설치된 `mlx-vlm` 이 12B 를 그대로 로드한다(모델만 첫 실행 시 자동
+  다운로드). MLX 경로는 의존성 추가가 없다. (16GB GGUF 경로만 `llama-cpp-python` 이 별도로 필요한데,
+  이는 현재 미배선이므로 24GB 사용자는 무관.)
 - **mlx-vlm 은 반드시 `0.6.1`** 이어야 한다 (E4B·12B 둘 다 로드). **`0.6.2` 로 올리면 기본 E4B 가 깨진다**
   (회귀: `ValueError: Received 126 parameters not in model`). 확인: `pip show mlx-vlm`.
 - **UI 로는 전환 불가** — `api/routers/settings.py` 의 `_ALLOWED_MLX_MODELS` 에 12B 를 **의도적으로 미포함**
