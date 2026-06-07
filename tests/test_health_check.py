@@ -648,7 +648,9 @@ class TestRunAsync:
         )
 
         with patch.object(checker, "run", return_value=mock_report):
-            result = asyncio.get_event_loop().run_until_complete(checker.run_async())
+            # asyncio.run(): 버전 무관 표준 API. 구버전 get_event_loop()는 신 Python 3.12.x
+            # CI 에서 "no current event loop" RuntimeError 로 실패한다.
+            result = asyncio.run(checker.run_async())
 
         assert result.all_passed is True
         assert len(result.results) == 1

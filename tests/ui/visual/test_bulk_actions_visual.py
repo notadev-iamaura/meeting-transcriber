@@ -141,12 +141,17 @@ def _mask_dynamic_regions(page: Page, source: Path, variant: str, label: str) ->
     return masked
 
 
-def _capture_and_compare(page: Page, variant: str, *, max_diff_pixel_ratio: float = 0.001) -> None:
-    """fixture 페이지를 캡처해 baseline 과 픽셀 비교 (기본 max diff 0.1%).
+def _capture_and_compare(page: Page, variant: str, *, max_diff_pixel_ratio: float = 0.005) -> None:
+    """fixture 페이지를 캡처해 baseline 과 픽셀 비교 (기본 max diff 0.5%).
+
+    임계 0.5%: chromium 버전 업(예: playwright 1.60/chromium 148)에 따른 균일한
+    sub-pixel 안티앨리어싱/폰트 힌팅 드리프트(실측 최대 0.25%)를 흡수한다. 레이아웃/
+    색상 변경 같은 실제 회귀는 이를 크게 초과하므로 여전히 감지된다. (V5 는 이미
+    0.005 를 명시 사용해 통과 중이었음.)
 
     Args:
-        max_diff_pixel_ratio: variant 별 임계 오버라이드. 기본 0.1% (0.001).
-            sub-pixel 노이즈가 큰 variant 에 한해 호출자가 완화 가능.
+        max_diff_pixel_ratio: variant 별 임계 오버라이드. 기본 0.5% (0.005).
+            sub-pixel 노이즈가 더 큰 variant 에 한해 호출자가 추가 완화 가능.
     """
     ACTUAL_DIR.mkdir(parents=True, exist_ok=True)
     actual = ACTUAL_DIR / f"bulk-actions-{variant}.png"

@@ -63,7 +63,12 @@ def _run_probe(base_url: str, output_dir: Path, headed: bool) -> dict[str, Any]:
             for viewport_name, viewport in viewports:
                 context = browser.new_context(viewport=viewport)
                 page = context.new_page()
-                page.on("console", lambda msg: report["console_errors"].append(msg.text) if msg.type == "error" else None)
+                page.on(
+                    "console",
+                    lambda msg: (
+                        report["console_errors"].append(msg.text) if msg.type == "error" else None
+                    ),
+                )
                 page.on("pageerror", lambda exc: report["page_errors"].append(str(exc)))
 
                 for route_name, route_path in routes:
@@ -112,7 +117,9 @@ def main() -> int:
     _wait_for_server(base_url, args.timeout)
     report = _run_probe(base_url, args.output_dir, args.headed)
     report_path = args.output_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["console_errors"] or report["page_errors"]:

@@ -170,9 +170,7 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         auto_processing_run_at=config.auto_processing.run_at,
         auto_processing_recent_hours=config.auto_processing.recent_hours,
         auto_processing_action=config.auto_processing.action,
-        auto_processing_run_on_startup_if_missed=(
-            config.auto_processing.run_on_startup_if_missed
-        ),
+        auto_processing_run_on_startup_if_missed=(config.auto_processing.run_on_startup_if_missed),
         available_models=_AVAILABLE_MODELS,
     )
 

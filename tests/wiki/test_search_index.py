@@ -58,9 +58,7 @@ def test_rebuild_upsert_delete가_검색_DB_상태를_반영한다(tmp_path: Pat
         _page(title="예산 확정", body="예산을 1억원으로 확정했다. [meeting:1234abcd@00:02:00]"),
     )
     index.upsert_page(store.read_page(Path("decisions/budget.md")))
-    assert [r.page_path for r in index.search("예산 확정", top_k=1)] == [
-        "decisions/budget.md"
-    ]
+    assert [r.page_path for r in index.search("예산 확정", top_k=1)] == ["decisions/budget.md"]
 
     index.delete_page("decisions/budget.md")
     assert index.search("1억원") == []

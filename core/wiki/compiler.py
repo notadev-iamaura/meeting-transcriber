@@ -54,8 +54,8 @@ def _first_utterance_timestamp(utterances: list[Any]) -> str | None:
             else:
                 raw_start = utt.start
                 raw_end = utt.end
-            start = float(raw_start)
-            end = float(raw_end)
+            start = float(raw_start)  # type: ignore[arg-type]  # None/이상치는 아래 except 에서 skip
+            end = float(raw_end)  # type: ignore[arg-type]
         except (TypeError, ValueError, AttributeError):
             continue
         if start < 0 or end < start:
@@ -385,8 +385,7 @@ class WikiCompilerV2:
             logger.error("PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             person_pages = []
         logger.info(
-            "Wiki extractor timing: meeting_id=%s extractor=person "
-            "elapsed_seconds=%.3f pages=%d",
+            "Wiki extractor timing: meeting_id=%s extractor=person elapsed_seconds=%.3f pages=%d",
             meeting_id,
             time.perf_counter() - extractor_start,
             len(person_pages),
@@ -429,8 +428,7 @@ class WikiCompilerV2:
             logger.error("ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             project_pages = []
         logger.info(
-            "Wiki extractor timing: meeting_id=%s extractor=project "
-            "elapsed_seconds=%.3f pages=%d",
+            "Wiki extractor timing: meeting_id=%s extractor=project elapsed_seconds=%.3f pages=%d",
             meeting_id,
             time.perf_counter() - extractor_start,
             len(project_pages),

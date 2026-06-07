@@ -15,7 +15,7 @@ async def get_auto_processing_status(request: Request) -> dict[str, Any]:
     scheduler = getattr(request.app.state, "auto_processing_scheduler", None)
     config = getattr(request.app.state, "config", None)
     if scheduler is not None:
-        return scheduler.get_status()
+        return scheduler.get_status()  # type: ignore[no-any-return]  # 동적 scheduler(Any) 반환
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
     return {

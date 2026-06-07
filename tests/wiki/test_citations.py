@@ -179,7 +179,10 @@ class TestIsFactualStatement:
             ("---", "frontmatter 구분자 — 면제"),
             ("[../people/철수.md]", "순수 페이지 링크 — 면제"),
             ("[../../decisions/x.md]", "깊은 상대 페이지 링크 — 면제"),
-            ("- [meeting_20260522_172005](../../../app/viewer/meeting_20260522_172005)", "참고 회의 링크 — 면제"),
+            (
+                "- [meeting_20260522_172005](../../../app/viewer/meeting_20260522_172005)",
+                "참고 회의 링크 — 면제",
+            ),
             ("- 없음.", "빈 섹션 placeholder — 면제"),
             ("_(없음)_", "빈 섹션 placeholder — 면제"),
             ("- N/A", "영문 placeholder — 면제"),
@@ -291,10 +294,7 @@ class TestEnforceCitationsBasic:
             "---\n"
             "type: project\n"
             "---\n\n"
-            + "\n".join(
-                f"- 사실 {i} [meeting:{REAL_MEETING_ID}@00:0{i}:00]"
-                for i in range(5)
-            )
+            + "\n".join(f"- 사실 {i} [meeting:{REAL_MEETING_ID}@00:0{i}:00]" for i in range(5))
             + "\n"
         )
 
