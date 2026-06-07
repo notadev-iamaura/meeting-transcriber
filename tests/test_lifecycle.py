@@ -779,7 +779,9 @@ class TestRunAsync:
         """비동기 실행이 정상적으로 결과를 반환한다."""
         _create_meeting(outputs_dir, "async-test", now - timedelta(days=5))
 
-        result = asyncio.get_event_loop().run_until_complete(manager.run_async())
+        # asyncio.run(): 버전 무관 표준 API. 구버전 get_event_loop()는 신 Python 3.12.x
+        # CI 에서 "no current event loop" RuntimeError 로 실패한다(실행 순서 의존).
+        result = asyncio.run(manager.run_async())
         assert isinstance(result, LifecycleResult)
         assert result.total_scanned == 1
 

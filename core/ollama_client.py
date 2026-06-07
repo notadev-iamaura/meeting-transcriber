@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from typing import Any
 
 from core.llm_backend import (
     LLMBackendError,
@@ -136,7 +137,7 @@ def chat(
         OllamaResponseError: 응답 파싱 실패 시
     """
     url = f"{host}/api/chat"
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "stream": False,
@@ -209,7 +210,7 @@ def chat_stream(
         OllamaTimeoutError: 타임아웃 시
     """
     url = f"{host}/api/chat"
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "stream": True,

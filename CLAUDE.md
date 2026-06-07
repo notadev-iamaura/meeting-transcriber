@@ -313,6 +313,7 @@ export MT_LLM_MODEL=mlx-community/gemma-4-e4b-it-4bit
 | M1/M2 + 16GB 이상 | **Gemma 4 E4B** (기본) | 동일 |
 | 한국어 고유명사 정확도 우선 | EXAONE 3.5 (수동 전환) | 한국어 특화 — 영어/중국어 병기 회피 |
 | M1/M2 + 8GB | Gemma 4 E2B (수동 전환) | ~3GB 로 메모리 절약 |
+| M3/M4 + 24GB 이상 (고품질 요약/wiki 필요 시) | Gemma 4 12B (수동 전환·선택) | in-process MLX, ~4배 느림. **16GB 불가** |
 
 > ℹ️ **Gemma 계열 한국어 특이사항**
 > Gemma 4 는 다국어 모델이라 한국어 고유명사를 만나면 `배미령(Baimilong)` 같은
@@ -337,6 +338,31 @@ llm:
   mlx_model_name: "mlx-community/gemma-4-e2b-it-4bit"
 ```
 또는 환경변수: `export MT_LLM_MODEL=mlx-community/gemma-4-e2b-it-4bit`
+
+**24GB 이상 환경에서 Gemma 4 12B 로 수동 전환 (선택 — 고품질 요약/wiki):**
+
+> ⚠️ **24GB 이상 전용.** 12B 4bit 는 MLX 피크 RAM 이 ~11.25GB 라 **16GB 에서는 적재 불가(스왑)**.
+> 평소엔 **E4B 로 충분**하다 — 다중 TC 실측에서 교정·요약·wiki 모두 E4B 가 12B 와 동급
+> ([`docs/GEMMA4_12B_ADOPTION.md`](docs/GEMMA4_12B_ADOPTION.md) §0.6). 12B 는 "필요할 때만" 켜는 전문가 옵션.
+
+```yaml
+# config.yaml
+llm:
+  mlx_model_name: "mlx-community/gemma-4-12B-it-4bit"   # 첫 실행 시 ~10GB 자동 다운로드
+```
+또는 환경변수: `export MT_LLM_MODEL=mlx-community/gemma-4-12B-it-4bit`
+
+**전제·주의:**
+- **추가 pip 패키지 불필요** — 이미 설치된 `mlx-vlm` 이 12B 를 그대로 로드한다(모델만 첫 실행 시 자동
+  다운로드). MLX 경로는 의존성 추가가 없다. (16GB GGUF 경로만 `llama-cpp-python` 이 별도로 필요한데,
+  이는 현재 미배선이므로 24GB 사용자는 무관.)
+- **mlx-vlm 은 반드시 `0.6.1`** 이어야 한다 (E4B·12B 둘 다 로드). **`0.6.2` 로 올리면 기본 E4B 가 깨진다**
+  (회귀: `ValueError: Received 126 parameters not in model`). 확인: `pip show mlx-vlm`.
+- **UI 로는 전환 불가** — `api/routers/settings.py` 의 `_ALLOWED_MLX_MODELS` 에 12B 를 **의도적으로 미포함**
+  (16GB 사용자 오설정 방지). config.yaml / 환경변수로만 전환한다.
+- **속도 ~4배 느림** (약 6 tok/s vs E4B 22 tok/s). 요약·wiki(저빈도)엔 무방하나 교정(고빈도)엔 느리다.
+- **16GB 에서 12B 를 원하면** MLX 가 아니라 GGUF in-process(`llama-cpp-python`) 경로가 필요하다
+  ([`docs/GEMMA4_12B_ADOPTION.md`](docs/GEMMA4_12B_ADOPTION.md) §0.6 — RSS 7.63GB, 서버 불필요).
 
 **Ollama 백엔드 (선택, 별도 서버 필요):**
 

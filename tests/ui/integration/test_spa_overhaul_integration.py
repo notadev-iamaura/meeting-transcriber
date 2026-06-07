@@ -2422,7 +2422,9 @@ def test_search_labels_and_suggestion_chip(browser: Browser, spa_static_server: 
         assert page.locator("label[for='searchFilterDate']").inner_text() == "날짜"
         assert page.locator("#searchFilterDate").get_attribute("aria-label") == "검색 날짜 필터"
         page.locator(".suggestion-chip[data-query='결정사항']").click()
-        page.wait_for_function("() => document.querySelector('#searchEmpty').style.display === 'block'")
+        page.wait_for_function(
+            "() => document.querySelector('#searchEmpty').style.display === 'block'"
+        )
         assert payloads[-1]["query"] == "결정사항"
 
 
@@ -2438,7 +2440,11 @@ def test_chat_prompt_chip_and_scope_status(browser: Browser, spa_static_server: 
                 body=json.dumps(
                     {
                         "meetings": [
-                            {"meeting_id": "meeting-a", "status": "completed", "created_at": "2026-05-05T10:00:00"}
+                            {
+                                "meeting_id": "meeting-a",
+                                "status": "completed",
+                                "created_at": "2026-05-05T10:00:00",
+                            }
                         ]
                     }
                 ),
@@ -2589,12 +2595,16 @@ def test_t302_mobile_meeting_selection_closes_drawer_and_restores_background(
     ) as page:
         page.wait_for_selector(".meeting-item[data-meeting-id='meeting-a']")
         page.locator("#mobile-menu-toggle").click()
-        page.wait_for_function("() => document.querySelector('#list-panel').classList.contains('is-open')")
+        page.wait_for_function(
+            "() => document.querySelector('#list-panel').classList.contains('is-open')"
+        )
         assert page.evaluate("() => document.querySelector('#content-wrapper').inert") is True
 
         page.locator(".meeting-item[data-meeting-id='meeting-a']").click()
         page.wait_for_url("**/app/viewer/meeting-a")
-        page.wait_for_function("() => !document.querySelector('#list-panel').classList.contains('is-open')")
+        page.wait_for_function(
+            "() => !document.querySelector('#list-panel').classList.contains('is-open')"
+        )
 
         state = page.evaluate(
             "() => ({"

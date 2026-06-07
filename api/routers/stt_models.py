@@ -150,9 +150,7 @@ async def list_stt_models(request: Request) -> STTModelsResponse:
             try:
                 from core.stt_model_status import get_effective_model_path
 
-                actual_size = get_actual_size_mb(
-                    get_effective_model_path(spec, base_dir=base_dir)
-                )
+                actual_size = get_actual_size_mb(get_effective_model_path(spec, base_dir=base_dir))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("실제 모델 크기 계산 실패 (%s): %s", spec.id, exc)
 
