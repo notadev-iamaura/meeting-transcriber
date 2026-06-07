@@ -124,14 +124,12 @@ class ZoomPauseGuard:
 
             if not paused and active_elapsed > timeout_seconds:
                 process.kill()
-                raise TimeoutError(
-                    f"화자분리 worker 시간이 초과되었습니다 ({timeout_seconds}초)."
-                )
+                raise TimeoutError(f"화자분리 worker 시간이 초과되었습니다 ({timeout_seconds}초).")
 
             await asyncio.sleep(self._poll_interval_seconds)
 
 
-def terminate_process(process: subprocess.Popen[object]) -> None:
+def terminate_process(process: subprocess.Popen[str]) -> None:
     """남아 있는 worker 프로세스를 정리한다."""
     if process.poll() is not None:
         return

@@ -208,8 +208,8 @@ def _first_utterance_citation(meeting_id: str, utterances: list[Any]) -> Citatio
             else:
                 raw_start = utt.start
                 raw_end = utt.end
-            start = float(raw_start)
-            end = float(raw_end)
+            start = float(raw_start)  # type: ignore[arg-type]  # None/이상치는 아래 except 에서 skip
+            end = float(raw_end)  # type: ignore[arg-type]
         except (TypeError, ValueError, AttributeError):
             continue
         if start < 0 or end < start:

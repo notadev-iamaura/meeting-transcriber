@@ -402,7 +402,7 @@ class WikiSearchIndex:
                 " ".join(citations),
             ),
         )
-        rowid = int(cursor.lastrowid)
+        rowid = int(cursor.lastrowid or 0)  # lastrowid 는 INSERT 후 항상 int (mypy int|None 해소)
         conn.execute(
             f"""
             INSERT INTO {_META_TABLE}
