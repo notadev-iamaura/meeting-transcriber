@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.wiki.search_index import (
     WikiSearchResult,
@@ -23,7 +23,9 @@ from core.wiki.search_index import (
 )
 
 if TYPE_CHECKING:
-    from config import WikiRankingConfig, WikiSemanticConfig
+    from collections.abc import Awaitable, Callable
+
+    from config import AppConfig, WikiRankingConfig, WikiSemanticConfig
     from core.wiki.search_index import WikiSearchIndex
     from core.wiki.semantic_index import WikiSemanticIndex
 
@@ -181,4 +183,101 @@ def fuse_hybrid(
         ranking=ranking,
         now=now or date.today(),
         top_k=top_k,
+    )
+
+
+def _make_default_embed_query(
+    config: AppConfig, model_manager: Any | None
+) -> Callable[[str], Awaitable[list[float]]]:
+    """e5-small 로 쿼리를 임베딩하는 async 콜백을 만든다(ModelLoadManager 뮤텍스).
+
+    `query:` 접두사 + NFC + normalize (search/hybrid_search 와 동일 규약). 모델 로드는
+    뮤텍스로 직렬화 → 파이프라인(대형 모델)과 경합 방지(불변식 #7). 실패는 호출자가
+    잡아 BM25-only 폴백.
+    """
+
+    async def _embed(query: str) -> list[float]:
+        import asyncio
+        import unicodedata
+
+        from core.model_manager import get_model_manager
+
+        emb = config.embedding
+        manager = model_manager or get_model_manager()
+
+        def _load() -> Any:
+            from sentence_transformers import SentenceTransformer
+
+            return SentenceTransformer(emb.model_name, device=emb.device)
+
+        def _encode(model: Any) -> list[float]:
+            prefixed = unicodedata.normalize("NFC", f"{emb.query_prefix}{query}")
+            vec = model.encode([prefixed], show_progress_bar=False, normalize_embeddings=True)
+            return [float(v) for v in vec[0].tolist()]
+
+        async with manager.acquire("e5_search", _load) as model:
+            return await asyncio.to_thread(_encode, model)
+
+    return _embed
+
+
+async def wiki_hybrid_search(
+    query: str,
+    *,
+    search_index: WikiSearchIndex,
+    semantic_index: WikiSemanticIndex,
+    config: AppConfig,
+    now: date | None = None,
+    top_k: int = 20,
+    model_manager: Any | None = None,
+    embed_query: Callable[[str], Awaitable[list[float]]] | None = None,
+    page_types: list[str] | None = None,
+    status: str | None = None,
+    project: str | None = None,
+    participant: str | None = None,
+    owner: str | None = None,
+    person: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_confidence: int | None = None,
+) -> list[WikiSearchResult]:
+    """async 하이브리드 검색 — 쿼리 임베딩(e5) 후 `fuse_hybrid` 위임.
+
+    semantic.enabled 이면 쿼리를 임베딩(graceful: 실패 시 None)하여 벡터+BM25 RRF
+    융합 검색. 비활성/임베딩 실패 시 BM25-only. embed_query 를 주입하면(테스트)
+    실제 모델 없이 검증할 수 있다. 공개 API 응답 스키마(WikiSearchResult)는 불변.
+    """
+    semantic = config.wiki.semantic
+    ranking = config.wiki.ranking
+    query = query.strip()
+    if not query:
+        return []
+
+    query_embedding: list[float] | None = None
+    if semantic.enabled:
+        embedder = embed_query or _make_default_embed_query(config, model_manager)
+        try:
+            query_embedding = await embedder(query)
+        except Exception as exc:  # noqa: BLE001 — 임베딩 실패는 BM25-only 폴백(graceful)
+            logger.warning("위키 쿼리 임베딩 실패, BM25-only 폴백: %s", exc)
+            query_embedding = None
+
+    return fuse_hybrid(
+        query,
+        search_index=search_index,
+        semantic_index=semantic_index,
+        query_embedding=query_embedding,
+        semantic=semantic,
+        ranking=ranking,
+        now=now,
+        top_k=top_k,
+        page_types=page_types,
+        status=status,
+        project=project,
+        participant=participant,
+        owner=owner,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        min_confidence=min_confidence,
     )

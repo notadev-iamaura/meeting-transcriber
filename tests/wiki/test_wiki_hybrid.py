@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from pathlib import Path
 
-from config import WikiRankingConfig, WikiSemanticConfig
+from config import WikiRankingConfig, WikiSemanticConfig, get_config
 from core.wiki.search_index import WikiSearchIndex
-from core.wiki.semantic_search import fuse_hybrid
+from core.wiki.semantic_search import fuse_hybrid, wiki_hybrid_search
 from core.wiki.store import WikiStore
 
 _NOW = date(2026, 6, 1)
@@ -139,3 +140,50 @@ def test_필터는_BM25_후보에_적용된다(tmp_path: Path) -> None:
     )
 
     assert results == []
+
+
+def test_async_래퍼는_주입_embed로_벡터전용_매치를_유입한다(tmp_path: Path) -> None:
+    """wiki_hybrid_search: 주입된 embed_query 로 실모델 없이 벡터 유입 검증."""
+    index = _build_index(tmp_path)
+    semantic_index = _FakeSemantic([("decisions/b.md", 1)])
+
+    async def _fake_embed(_q: str) -> list[float]:
+        return [1.0, 0.0]
+
+    results = asyncio.run(
+        wiki_hybrid_search(
+            "예산",
+            search_index=index,
+            semantic_index=semantic_index,
+            config=get_config(),
+            now=_NOW,
+            embed_query=_fake_embed,
+        )
+    )
+
+    paths = [r.page_path for r in results]
+    assert "decisions/a.md" in paths
+    assert "decisions/b.md" in paths  # 벡터 전용 매치 유입
+
+
+def test_async_래퍼는_임베딩_실패시_BM25_only_폴백한다(tmp_path: Path) -> None:
+    """embed_query 가 예외를 던지면(임베더 불가) graceful BM25-only 폴백."""
+    index = _build_index(tmp_path)
+    semantic_index = _FakeSemantic([("decisions/b.md", 1)])
+
+    async def _raise_embed(_q: str) -> list[float]:
+        raise RuntimeError("임베더 로드 불가")
+
+    results = asyncio.run(
+        wiki_hybrid_search(
+            "예산",
+            search_index=index,
+            semantic_index=semantic_index,
+            config=get_config(),
+            now=_NOW,
+            embed_query=_raise_embed,
+        )
+    )
+
+    # 임베딩 실패 → 벡터 무시 → BM25 결과만(b.md 유입 안 됨)
+    assert [r.page_path for r in results] == ["decisions/a.md"]
