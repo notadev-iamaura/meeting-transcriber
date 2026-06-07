@@ -179,7 +179,9 @@ class TestSTTModelDownloader:
         with pytest.raises(ValueError, match="알 수 없는 STT 모델"):
             await downloader.start_download("does-not-exist")
 
-    async def test_task_registry에_다운로드_태스크_등록_후_완료시_제거(self, tmp_models_dir, monkeypatch):
+    async def test_task_registry에_다운로드_태스크_등록_후_완료시_제거(
+        self, tmp_models_dir, monkeypatch
+    ):
         """다운로드 태스크는 서버 shutdown registry에 등록되고 완료 후 제거된다."""
         from core.stt_model_downloader import STTModelDownloader
 

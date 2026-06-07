@@ -206,7 +206,9 @@ def server(test_base_dir: Path, seeded_meeting_id: str):
     env = os.environ.copy()
     env["MT_BASE_DIR"] = str(test_base_dir)
     test_config = test_base_dir / "config.yaml"
-    test_config.write_text((REPO_ROOT / "config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    test_config.write_text(
+        (REPO_ROOT / "config.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     env["MT_CONFIG_PATH"] = str(test_config)
     env["MT_SERVER_PORT"] = str(TEST_PORT)
     env["MT_LOG_LEVEL"] = "warning"  # 테스트 로그 노이즈 감소

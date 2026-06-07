@@ -218,6 +218,7 @@ def test_manual_download_info_uses_configured_base_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """수동 다운로드 안내 경로는 app config의 base_dir를 사용해야 한다."""
+
     def _manual_dir(spec, base_dir=None):
         root = Path(base_dir).expanduser() if base_dir else tmp_path / "default-data"
         return str(root / "stt_models" / f"{spec.id}-manual")

@@ -208,8 +208,8 @@ def _first_utterance_citation(meeting_id: str, utterances: list[Any]) -> Citatio
             else:
                 raw_start = utt.start
                 raw_end = utt.end
-            start = float(raw_start)
-            end = float(raw_end)
+            start = float(raw_start)  # type: ignore[arg-type]  # None/이상치는 아래 except 에서 skip
+            end = float(raw_end)  # type: ignore[arg-type]
         except (TypeError, ValueError, AttributeError):
             continue
         if start < 0 or end < start:
@@ -380,7 +380,7 @@ _EXTRACT_SYSTEM_PROMPT = """\
 - title: 한 줄 요약 (한국어)
 - decision_text: 결정 본문 (인용 마커 [meeting:{제공된 회의 ID}@HH:MM:SS] 필수)
 - background: 배경 설명 (직접 근거가 있으면 인용 마커 필수, 추론만 가능하면 빈 문자열)
-- follow_ups: [{owner, description, citation_ts}, ...] (없으면 빈 배열)
+- follow_ups: [{owner, description, citation_ts}, ...] (없으면 빈 배열). 한 결정에 딸린 업무 분담은 별도 결정이 아니라 반드시 이 follow_ups 에 넣는다.
 - participants: 화자 이름 배열
 - projects: 프로젝트 slug 배열
 - confidence: 0~10 정수
@@ -392,6 +392,12 @@ _EXTRACT_SYSTEM_PROMPT = """\
 4. citation_ts 와 인용 마커의 HH:MM:SS 는 반드시 발화 목록에 있는 실제 시각을 사용.
 5. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
 6. 배경은 발화에서 직접 근거를 찾을 수 있을 때만 작성하고, 추론만 가능하면 빈 문자열로 둘 것.
+7. 결정사항은 회의에서 **확정된 구체적 결론**만 추출한다. 다음은 결정이 아니므로 제외:
+   - 결정 자체를 미루는 경우("나중에 정하자", "추후에 결론내자", "다음 회의로 넘기자", "자료를 더 모아 다시 논의하자")
+   - 확정되지 않은 의견·아이디어·제안·브레인스토밍·질문
+   ※ 단, "출시를 보류하기로 함", "채용을 동결하기로 함"처럼 행동 방침 자체가 확정된 경우는 결정이다.
+8. 하나의 안건에서 나온 결론은 1건의 결정으로 묶고, 세부 업무 분담은 별도 결정이 아니라 follow_ups 로 넣는다(과분할 금지).
+9. 결정인지 애매하면 제외하라(과추출보다 누락이 낫다).
 """
 
 _RENDER_SYSTEM_PROMPT = """\

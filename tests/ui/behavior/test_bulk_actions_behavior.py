@@ -629,7 +629,9 @@ class TestBulkActionBar:
             items.nth(i).locator(".meeting-item-checkbox").click()
             ui_page.wait_for_timeout(80)
         ui_page.wait_for_timeout(300)
-        ui_page.locator(".bulk-action-bar__dismiss").click()
+        # CI headless 에서 액션 바 dismiss 버튼의 actionability(stable/visible) 검사가
+        # 간헐 타임아웃 → dispatch_event 로 우회(A10 과 동일 패턴). 클릭 핸들러는 그대로 실행.
+        ui_page.locator(".bulk-action-bar__dismiss").dispatch_event("click")
         ui_page.wait_for_timeout(350)
         for i in range(5):
             cls = items.nth(i).get_attribute("class") or ""

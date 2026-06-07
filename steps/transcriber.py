@@ -233,8 +233,7 @@ class Transcriber:
             ) from e
         except RuntimeError as e:
             raise ModelNotAvailableError(
-                "mlx-whisper 초기화 중 MLX/Metal 런타임 오류가 발생했습니다. "
-                f"{e}"
+                f"mlx-whisper 초기화 중 MLX/Metal 런타임 오류가 발생했습니다. {e}"
             ) from e
 
     def _validate_audio(self, audio_path: Path) -> None:
