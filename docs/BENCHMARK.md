@@ -4,6 +4,13 @@
 > 환경: Apple M4 + 16GB RAM, macOS 14, Python 3.12, MLX 백엔드
 > 재현 스크립트: `scripts/benchmark_*.py`, `scripts/validate_settings.py`
 
+> 2026-06-05 추가: Gemma 4 12B(2026-06-03 공개)는 커뮤니티 양자화 모델이 공개되어
+> 16GB 실험 후보가 됐지만, **기본값은 계속 Gemma 4 E4B 실측에 기반한다.** 12B는
+> MLX 4bit가 ≈11GB로 가드(9.5GB)를 넘어 **옵트인 한정**이며(16GB 실측 1순위는
+> Ollama `gemma4:12b` 7.6GB), thinking 태그 제거·메모리·한국어 검증 게이트 통과가
+> 선행 조건이다. 상세 판단·실행 계획은
+> [`docs/GEMMA4_12B_ADOPTION.md`](GEMMA4_12B_ADOPTION.md)를 참고한다.
+
 이 문서는 프로젝트의 기본 설정값(STT 모델, VAD, LLM, 필터 임계값 등)이
 어떤 실험 근거로 선택되었는지를 정리한 리포트이다. 현 단계에서는 제한적인
 범위의 실험이므로, 먼저 [한계](#한계) 섹션을 함께 읽기를 권장한다.

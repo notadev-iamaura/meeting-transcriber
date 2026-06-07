@@ -1,0 +1,46 @@
+{
+  "model": "gemma4:12b-it-qat",
+  "mem_before": {
+    "used_gb": 11.49,
+    "available_gb": 8.61,
+    "total_gb": 24.0,
+    "swap_used_gb": 4.59
+  },
+  "summary": {
+    "task": "요약",
+    "tok_per_sec": 6.6,
+    "tokens": 385,
+    "wall_s": 80.71,
+    "thinking_tags": [],
+    "gloss_count": 1,
+    "output_clean": "## 회의 개요\n- 참석자: SPEAKER_00, SPEAKER_01(배미령), SPEAKER_02\n- 주요 주제 한 줄 요약: Gemma 4 12B 모델 도입 검토 및 성능/기술적 이슈 논의\n\n## 주요 안건\n1. Gemma 4 12B 모델 메모리 및 속도 분석\n   - MLX 4bit 버전(11GB)은 16GB 맥 환경에서 부족하며, 올라마 GGUF(7.6GB)가 상대적으로 유리함.\n   - 12B 모델은 E4B 대비 약 2~3배 느릴 것으로 추정되며 실측 벤치마크 필요.\n2. 태스크별 활용 방안\n   - 교정 태스크는 현재 E4B(정답지 유사도 92.9%)로 충분함.\n   - 12B 모델은 요약 작업에서 큰 이득이 있을 것으로 예상됨.\n3. 기술적 이슈 및 라이선스\n   - thinking 태그 제거 시 채널 태그가 출력되어 파서(교정, 위키 JSON) 오류 가능성 존재 (백엔드 제거 처리 선행 필요).\n   - 라이선스는 Apache 2.0으로 로컬 사용 제약 없음.\n\n## 결정 사항\n- 기본 모델은 E4B를 유지함.\n- 12B 모델은 옵트인(Opt-in) 방식으로만 추가 도입함.\n\n## 액션 아이템\n- [ ] 담당자: SPEAKER_01 (배미령) - 다음 주까지 한국어 고유명사 병기율 측정\n- [ ] 담당자: SPEAKER_02 - 메모리 스왑 발생 여부 실측\n\n## 기타 논의\n- 없음"
+  },
+  "correction": {
+    "task": "교정",
+    "tok_per_sec": 6.9,
+    "tokens": 80,
+    "wall_s": 16.56,
+    "thinking_tags": [],
+    "gloss_count": 0,
+    "output_clean": "네, 지금부터 준 녹음 테스트를 진행하도록 하겠습니다. 화자 분리는 별도로 없이 한 사람에 대한 목소리만 녹음을 하게 될 거고요. 이전 세션에서 모든 검증이 완료된 상태입니다. 현재 커버되지 않은 변경 사항을 정리하면, 수정된 파일은 기존 콜파이 부분에서 유브이이 점 파일로 바뀌었습니다."
+  },
+  "proper_noun": {
+    "task": "고유명사",
+    "tok_per_sec": 6.7,
+    "tokens": 200,
+    "wall_s": 32.51,
+    "thinking_tags": [],
+    "gloss_count": 0,
+    "output_clean": "문맥에 따라 가장 자연스러운 표현으로 선택해 보세요.\n\n**1. 가장 일반적이고 매끄러운 표현 (추천)**\n> 배미령 님은 Gemma 4 모델의 한국어 표기 문제를 검토하며, 김도현 책임과 함께 회의록 품질을 점검합니다.\n\n**2. 업무 보고나 공적인 문서에 적합한 표현**\n> 배미령 님은 Gemma 4 모델의 한국어 병기 사항을 검토하고, 김도현 책임과 협력하여 회의록 품질을 점검합니다.\n\n**3. 문장을 나누어 명확하게 전달할 때**\n> 배미령 님은 Gemma 4 모델의 한국어 표기 문제를 검토합니다. 또한 김도현 책임과 함께 회의록 품질을 점검할 예정입니다.\n\n**수정 포인트:**\n*   **병기 → 표기/표기 사항:** '병"
+  },
+  "peak_sys_used_gb": 14.84,
+  "sys_used_delta_gb": 3.35,
+  "min_sys_avail_gb": 3.88,
+  "peak_swap_used_gb": 4.59,
+  "swap_used_delta_gb": 0.0,
+  "peak_ollama_rss_gb": 0.18,
+  "ollama_ps": "NAME                 ID              SIZE      PROCESSOR    CONTEXT    UNTIL              \ngemma4:12b-it-qat    38044be4f923    7.6 GB    100% GPU     4096       4 minutes from now",
+  "avg_tok_per_sec": 6.7,
+  "emits_thinking_tags": false,
+  "total_gloss_count": 1
+}
