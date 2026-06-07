@@ -24,6 +24,8 @@ from core.wiki.search_index import (
 
 if TYPE_CHECKING:
     from config import WikiRankingConfig, WikiSemanticConfig
+    from core.wiki.search_index import WikiSearchIndex
+    from core.wiki.semantic_index import WikiSemanticIndex
 
 logger = logging.getLogger(__name__)
 
@@ -113,3 +115,70 @@ def fuse_and_rerank(
         )
         for c, score in ordered
     ]
+
+
+def fuse_hybrid(
+    query: str,
+    *,
+    search_index: WikiSearchIndex,
+    semantic_index: WikiSemanticIndex,
+    query_embedding: list[float] | None,
+    semantic: WikiSemanticConfig,
+    ranking: WikiRankingConfig,
+    now: date | None = None,
+    top_k: int = 20,
+    page_types: list[str] | None = None,
+    status: str | None = None,
+    project: str | None = None,
+    participant: str | None = None,
+    owner: str | None = None,
+    person: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_confidence: int | None = None,
+) -> list[WikiSearchResult]:
+    """동기 하이브리드 검색 — BM25(search_index) + 벡터(주입된 query_embedding) RRF 융합.
+
+    query_embedding 이 None(임베더 불가) 이거나 semantic.enabled=False 면 벡터 없이
+    BM25-only 폴백(RRF 가 FTS 항만 남아 BM25 순서 보존). 쿼리 임베딩(모델 로드)은
+    호출자(async 래퍼)가 수행하므로 이 함수 자체는 모델 비의존 → 결정적 검증 가능.
+    """
+    if ranking.enabled:
+        candidate_limit = max(1, int(top_k), ranking.candidate_pool)
+    else:
+        candidate_limit = max(1, min(int(top_k), 100))
+    bm25_cands = search_index.bm25_candidates(
+        query,
+        page_types=page_types,
+        status=status,
+        project=project,
+        participant=participant,
+        owner=owner,
+        person=person,
+        date_from=date_from,
+        date_to=date_to,
+        min_confidence=min_confidence,
+        limit=candidate_limit,
+    )
+    bm25_ranked = [(c.page_path, i + 1) for i, c in enumerate(bm25_cands)]
+    cand_map = {c.page_path: c for c in bm25_cands}
+
+    if semantic.enabled and query_embedding is not None:
+        vector_ranked = semantic_index.query(query_embedding, semantic.top_k_vector)
+    else:
+        vector_ranked = []
+
+    # 벡터가 찾았으나 BM25 후보에 없는(어휘 비매칭) 페이지의 메타 보강.
+    missing = [path for path, _ in vector_ranked if path not in cand_map]
+    if missing:
+        cand_map.update(search_index.fetch_candidates(missing, query))
+
+    return fuse_and_rerank(
+        bm25_ranked,
+        vector_ranked,
+        cand_map,
+        semantic=semantic,
+        ranking=ranking,
+        now=now or date.today(),
+        top_k=top_k,
+    )

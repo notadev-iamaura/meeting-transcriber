@@ -237,6 +237,48 @@ class _Candidate:
     metadata: dict[str, Any]
 
 
+def _row_to_candidate(row: sqlite3.Row, query: str, *, bm25: float) -> _Candidate:
+    """SQL row(meta + body 포함)를 재랭킹 후보 _Candidate 로 변환한다.
+
+    bm25 는 호출자가 명시한다 — BM25 검색은 -rank_score, 벡터 전용 보강은 0.0
+    placeholder(하이브리드 융합에서 RRF 로 대체).
+    """
+    citations = _string_list(row["citations"])
+    metadata = {
+        "status": row["status"],
+        "project": row["project"],
+        "decision_date": row["decision_date"],
+        "confidence": row["confidence"],
+        "participants": _string_list(row["participants"]),
+        "owners": _string_list(row["owners"]),
+        "source_meetings": _string_list(row["source_meetings"]),
+        "last_updated": row["last_updated"],
+    }
+    try:
+        confidence = int(row["confidence"]) if row["confidence"] is not None else 0
+    except (TypeError, ValueError):
+        logger.warning(
+            "재랭킹: confidence 파싱 실패 page=%s raw=%r → 0 폴백",
+            row["page_path"],
+            row["confidence"],
+        )
+        confidence = 0
+    return _Candidate(
+        page_path=row["page_path"],
+        page_type=row["page_type"],
+        title=row["title"],
+        snippet=_snippet(row["body"], query),
+        bm25=bm25,
+        status=row["status"] or "",
+        decision_date=row["decision_date"] or "",
+        last_updated=row["last_updated"] or "",
+        confidence=confidence,
+        citations=citations,
+        citation_count=str(row["citations"] or "").count("[meeting:"),
+        metadata=metadata,
+    )
+
+
 def _parse_date(value: str | None) -> date | None:
     """'YYYY-MM-DD' 또는 ISO datetime 문자열의 날짜부를 date 로 파싱한다."""
     if not value:
@@ -470,6 +512,73 @@ class WikiSearchIndex:
         query = query.strip()
         if not query:
             return []
+
+        ranking = self._resolve_ranking()
+        # 재랭킹 시 BM25 상위 후보 풀(candidate_pool)을 가져온 뒤 후처리로 top_k 선별.
+        if ranking.enabled:
+            candidate_limit = max(1, int(top_k), ranking.candidate_pool)
+        else:
+            candidate_limit = max(1, min(int(top_k), 100))
+        candidates = self.bm25_candidates(
+            query,
+            page_types=page_types,
+            status=status,
+            project=project,
+            participant=participant,
+            owner=owner,
+            person=person,
+            date_from=date_from,
+            date_to=date_to,
+            min_confidence=min_confidence,
+            limit=candidate_limit,
+        )
+
+        limit = max(1, int(top_k))
+        if ranking.enabled:
+            scored = _rerank(candidates, ranking, now or date.today())
+            if ranking.mmr_enabled:
+                scored = _mmr_rerank(scored, ranking, limit)
+            ordered = scored[:limit]
+        else:
+            # escape hatch: 순수 BM25 정렬(기존 동작). 점수는 -rank_score(=bm25).
+            ordered = [(c, c.bm25) for c in candidates[:limit]]
+
+        return [
+            WikiSearchResult(
+                page_path=c.page_path,
+                page_type=c.page_type,
+                title=c.title,
+                snippet=c.snippet,
+                score=score,
+                citations=c.citations,
+                metadata=c.metadata,
+            )
+            for c, score in ordered
+        ]
+
+    def bm25_candidates(
+        self,
+        query: str,
+        *,
+        page_types: list[str] | None = None,
+        status: str | None = None,
+        project: str | None = None,
+        participant: str | None = None,
+        owner: str | None = None,
+        person: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        min_confidence: int | None = None,
+        limit: int = 50,
+    ) -> list[_Candidate]:
+        """필터 적용 BM25 검색 결과를 BM25 순(_Candidate)으로 반환한다(재랭킹 전).
+
+        `search()` 와 G1 하이브리드 경로가 공유하는 BM25 후보 추출. bm25 점수는
+        -rank_score(높을수록 관련도 높음).
+        """
+        query = query.strip()
+        if not query:
+            return []
         fts_query = _build_fts_query(query)
         if not fts_query:
             return []
@@ -478,7 +587,6 @@ class WikiSearchIndex:
             _ensure_schema(conn)
             sql = f"""
                 SELECT
-                    f.rowid AS fts_rowid,
                     f.page_path,
                     f.page_type,
                     f.title,
@@ -527,79 +635,48 @@ class WikiSearchIndex:
             if min_confidence is not None:
                 sql += " AND m.confidence >= ?"
                 params.append(int(min_confidence))
-            ranking = self._resolve_ranking()
-            # 재랭킹 시 BM25 상위 후보 풀(candidate_pool)을 가져온 뒤 후처리로 top_k 선별.
-            if ranking.enabled:
-                candidate_limit = max(1, int(top_k), ranking.candidate_pool)
-            else:
-                candidate_limit = max(1, min(int(top_k), 100))
             sql += " ORDER BY rank_score LIMIT ?"
-            params.append(candidate_limit)
+            params.append(max(1, int(limit)))
 
             rows = conn.execute(sql, params).fetchall()
 
-        candidates: list[_Candidate] = []
-        for row in rows:
-            citations = _string_list(row["citations"])
-            metadata = {
-                "status": row["status"],
-                "project": row["project"],
-                "decision_date": row["decision_date"],
-                "confidence": row["confidence"],
-                "participants": _string_list(row["participants"]),
-                "owners": _string_list(row["owners"]),
-                "source_meetings": _string_list(row["source_meetings"]),
-                "last_updated": row["last_updated"],
-            }
-            try:
-                confidence = int(row["confidence"]) if row["confidence"] is not None else 0
-            except (TypeError, ValueError):
-                logger.warning(
-                    "재랭킹: confidence 파싱 실패 page=%s raw=%r → 0 폴백",
-                    row["page_path"],
-                    row["confidence"],
-                )
-                confidence = 0
-            candidates.append(
-                _Candidate(
-                    page_path=row["page_path"],
-                    page_type=row["page_type"],
-                    title=row["title"],
-                    snippet=_snippet(row["body"], query),
-                    # FTS5 bm25() 는 낮을수록 관련도 높음 → 부호 반전(높을수록 좋음).
-                    bm25=-float(row["rank_score"]),
-                    status=row["status"] or "",
-                    decision_date=row["decision_date"] or "",
-                    last_updated=row["last_updated"] or "",
-                    confidence=confidence,
-                    citations=citations,
-                    citation_count=str(row["citations"] or "").count("[meeting:"),
-                    metadata=metadata,
-                )
-            )
+        return [_row_to_candidate(row, query, bm25=-float(row["rank_score"])) for row in rows]
 
-        limit = max(1, int(top_k))
-        if ranking.enabled:
-            scored = _rerank(candidates, ranking, now or date.today())
-            if ranking.mmr_enabled:
-                scored = _mmr_rerank(scored, ranking, limit)
-            ordered = scored[:limit]
-        else:
-            # escape hatch: 순수 BM25 정렬(기존 동작). 점수는 -rank_score(=bm25).
-            ordered = [(c, c.bm25) for c in candidates[:limit]]
+    def fetch_candidates(self, page_paths: list[str], query: str) -> dict[str, _Candidate]:
+        """주어진 page_path 들의 메타+본문을 _Candidate 로 조회한다.
 
-        return [
-            WikiSearchResult(
-                page_path=c.page_path,
-                page_type=c.page_type,
-                title=c.title,
-                snippet=c.snippet,
-                score=score,
-                citations=c.citations,
-                metadata=c.metadata,
-            )
-            for c, score in ordered
-        ]
+        G1 하이브리드에서 벡터가 찾았으나 BM25 후보에 없는(어휘 비매칭) 페이지의
+        메타를 보강한다. bm25 는 0.0 placeholder(융합에서 RRF 로 대체).
+        """
+        paths = [str(p) for p in page_paths if p]
+        if not paths:
+            return {}
+        placeholders = ",".join("?" for _ in paths)
+        with _connect(self._db_path) as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    m.page_path,
+                    m.page_type,
+                    m.title,
+                    m.status,
+                    m.project,
+                    m.decision_date,
+                    m.confidence,
+                    m.participants,
+                    m.owners,
+                    m.source_meetings,
+                    m.citations,
+                    m.last_updated,
+                    f.body
+                FROM {_META_TABLE} m
+                JOIN {_FTS_TABLE} f ON f.rowid = m.rowid
+                WHERE m.page_path IN ({placeholders})
+                """,
+                paths,
+            ).fetchall()
+        return {row["page_path"]: _row_to_candidate(row, query, bm25=0.0) for row in rows}
 
     @staticmethod
     def _upsert_page_conn(conn: sqlite3.Connection, page: WikiPage) -> None:
