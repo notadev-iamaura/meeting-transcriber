@@ -140,3 +140,46 @@ class WikiSemanticIndex:
             return int(coll.count())
         except Exception:  # noqa: BLE001
             return 0
+
+
+def _page_embed_text(page: Any) -> str:
+    """페이지 임베딩 입력 텍스트. 본문(content)이 H1 제목을 포함하므로 그대로 사용."""
+    return str(page.content)
+
+
+def rebuild_semantic_index(
+    store: Any,
+    *,
+    semantic_index: WikiSemanticIndex,
+    embed_documents: Callable[[list[str]], list[list[float]]],
+) -> int:
+    """스토어의 모든 위키 페이지를 임베딩해 벡터 스토어를 재구축한다.
+
+    embed_documents(texts)->vectors 를 주입한다(테스트는 목, 운영은 e5). 페이지
+    읽기/임베딩 실패는 graceful skip → 검색은 BM25 폴백. ChromaDB/임베더 불가면
+    semantic_index.upsert 가 0 을 반환한다.
+
+    Returns:
+        색인된 페이지 수(불가/실패 시 0).
+    """
+    page_paths: list[str] = []
+    texts: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+    for rel_path in store.all_pages():
+        try:
+            page = store.read_page(rel_path)
+        except Exception as exc:  # noqa: BLE001 — 깨진 페이지 1건이 전체를 막지 않게 skip
+            logger.warning("위키 벡터 재구축: 페이지 읽기 skip %s (%s)", rel_path, exc)
+            continue
+        page_paths.append(str(rel_path))
+        texts.append(_page_embed_text(page))
+        metadatas.append({"page_type": str(page.page_type.value)})
+
+    if not page_paths:
+        return 0
+    try:
+        embeddings = embed_documents(texts)
+    except Exception as exc:  # noqa: BLE001 — 임베딩 실패는 무시(검색은 BM25 폴백)
+        logger.warning("위키 벡터 재구축 임베딩 실패(무시): %s", exc)
+        return 0
+    return semantic_index.upsert(page_paths=page_paths, embeddings=embeddings, metadatas=metadatas)

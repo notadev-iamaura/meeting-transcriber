@@ -11,7 +11,28 @@ import math
 from pathlib import Path
 from typing import Any
 
-from core.wiki.semantic_index import WikiSemanticIndex
+from core.wiki.semantic_index import WikiSemanticIndex, rebuild_semantic_index
+from core.wiki.store import WikiStore
+
+
+def _md(title: str, body: str) -> str:
+    return f"""---
+type: decision
+title: {title}
+status: decided
+decision_date: 2026-05-21
+project: Apollo
+participants: [민수]
+owners: [민수]
+confidence: 9
+source_meetings: [1234abcd]
+last_updated: 2026-05-21T10:00:00
+---
+
+# {title}
+
+{body}
+"""
 
 
 def _cos(a: list[float], b: list[float]) -> float:
@@ -113,4 +134,41 @@ def test_컬렉션_불가시_graceful_no_op(tmp_path: Path) -> None:
     index = WikiSemanticIndex(tmp_path / "chroma", collection_factory=lambda: None)
     assert index.upsert(page_paths=["decisions/a.md"], embeddings=[[1.0]], metadatas=[{}]) == 0
     assert index.query([1.0], top_k=5) == []
+    assert index.count() == 0
+
+
+def test_rebuild_semantic_index_모든_페이지를_임베딩_upsert(tmp_path: Path) -> None:
+    """스토어의 모든 페이지를 주입 임베딩으로 벡터 스토어에 upsert한다."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(Path("decisions/a.md"), _md("결정 A", "예산 합의"))
+    store.write_page(Path("decisions/b.md"), _md("결정 B", "다른 안건"))
+    index = _index(tmp_path, _FakeCollection())
+
+    calls: list[list[str]] = []
+
+    def _fake_embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[float(len(t)), 0.0] for t in texts]
+
+    n = rebuild_semantic_index(store, semantic_index=index, embed_documents=_fake_embed)
+
+    assert n == 2
+    assert index.count() == 2
+    assert len(calls) == 1 and len(calls[0]) == 2  # 두 페이지 텍스트 1회 배치 임베딩
+
+
+def test_rebuild_semantic_index_임베딩_실패시_0(tmp_path: Path) -> None:
+    """임베딩(e5)이 실패하면 graceful 0 반환(검색은 BM25 폴백)."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(Path("decisions/a.md"), _md("결정 A", "예산 합의"))
+    index = _index(tmp_path, _FakeCollection())
+
+    def _raise_embed(texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("e5 로드 불가")
+
+    n = rebuild_semantic_index(store, semantic_index=index, embed_documents=_raise_embed)
+
+    assert n == 0
     assert index.count() == 0
