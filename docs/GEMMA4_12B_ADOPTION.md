@@ -47,9 +47,9 @@ UI 노출(옵션 C)·기본 교체(옵션 D)를 재검토한다.
 
 ## 0.5. 실측 결과 (2026-06-06, Apple M4 / 24GB / macOS 26.5.1)
 
-> 측정 하네스: [`scripts/benchmark_llm_12b.py`](../scripts/benchmark_llm_12b.py) (MLX 메모리 카운터
+> 측정 하네스: MLX 측정 하네스(검증용 1회성, 저장소 미수록) (MLX 메모리 카운터
 > `mx.get_peak_memory()` 사용 — psutil RSS 는 MLX 통합메모리를 과소측정하므로 신뢰 불가).
-> 결과 원본: `scripts/benchmark_llm_12b_results.json`. 입력: §측정 동일 한국어 회의 전사문 + 실제
+> 결과 원본: (측정 결과 원본, 미수록). 입력: §측정 동일 한국어 회의 전사문 + 실제
 > summarizer 시스템 프롬프트. **주의: 이 머신은 16GB 가 아니라 24GB 다**(16GB 결론은 더 보수적으로 적용).
 > E4B 는 mlx-vlm 0.5.0, 12B 는 0.6.2 에서 측정(버전 공유 불가 — §7).
 
@@ -83,7 +83,7 @@ UI 노출(옵션 C)·기본 교체(옵션 D)를 재검토한다.
 5. **[G4 고유명사] 12B 가 병기 1건 생성(E4B 0건).** 표본은 작지만 Gemma 병기 경향이 12B 에서도
    나타남 확인 → 회의록 고유명사 정확도 관점에서 이득이 아니라 소폭 위험.
 6. **[버전 호환 — 해결됨] mlx-vlm 0.6.1 이 E4B 와 12B 를 모두 지원한다.** 버전별 로드/생성 실측
-   ([`scripts/test_mlx_vlm_compat.py`](../scripts/test_mlx_vlm_compat.py)):
+   (버전 호환 확인 스크립트(1회성, 미수록)):
 
    | mlx-vlm | E4B | 12B | 비고 |
    |---------|-----|-----|------|
@@ -98,8 +98,8 @@ UI 노출(옵션 C)·기본 교체(옵션 D)를 재검토한다.
 
 ### 0.5.1 Ollama gemma4:12b 실측 + 3자 비교 (2026-06-06, M4/24GB)
 
-> 측정: [`scripts/benchmark_ollama_12b.py`](../scripts/benchmark_ollama_12b.py) (Ollama `/api/chat` + `ollama ps`).
-> 결과 원본: `scripts/benchmark_ollama_12b_results.json`. 동일 프롬프트/입력.
+> 측정: Ollama 측정 하네스(1회성, 미수록) (Ollama `/api/chat` + `ollama ps`).
+> 결과 원본: (측정 결과 원본, 미수록). 동일 프롬프트/입력.
 
 | 지표 | E4B (MLX 0.6.1) | **MLX 12B** (0.6.1) | **Ollama 12B** (GGUF q4_K_M) |
 |------|-----------------|---------------------|------------------------------|
@@ -178,7 +178,7 @@ UI 노출(옵션 C)·기본 교체(옵션 D)를 재검토한다.
 
 ### Wiki 결정사항 추출 — E4B vs 12B (실측)
 
-> 평가: [`scripts/eval_wiki_extraction.py`](../scripts/eval_wiki_extraction.py), 실제 추출 프롬프트
+> 평가: wiki 추출 평가 하네스(1회성, 미수록), 실제 추출 프롬프트
 > ([`core/wiki/extractors/decision.py`](../core/wiki/extractors/decision.py)), 어려운 TC(다중·없음·번복·잡음·병기·액션).
 
 - **1차 6 TC**: E4B 5/6 ≈ 12B 5/6 (**동점**). 인용 환각은 양쪽 0. 앞서 보고된 "12B 병기 우세"는
@@ -210,7 +210,7 @@ UI 노출(옵션 C)·기본 교체(옵션 D)를 재검토한다.
 ### (참고) 나중에 12B 가 필요해지면 — llama-cpp-python
 
 "16GB + 서버없음 + 12B" 셋을 동시에 푸는 유일한 길은 **llama-cpp-python**(GGUF in-process). 실측
-([`scripts/benchmark_llamacpp_12b.py`](../scripts/benchmark_llamacpp_12b.py)): QAT GGUF 디스크 6.26GB /
+(llama-cpp 측정 하네스(1회성, 미수록)): QAT GGUF 디스크 6.26GB /
 **RSS 7.63GB < 예산 9.5GB** / 7 tok/s / **wiki JSON 정상**(인용·엔티티 정확). MLX 12B(11GB)는 16GB 불가
 (sub-4bit MLX 12B 미존재). 단 위 결론상 **현재는 불필요**.
 
