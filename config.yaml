@@ -71,6 +71,22 @@ search:
   top_k: 5                                   # 반환할 최상위 결과 수
   fts_tokenizer: "unicode61"                 # FTS5 토크나이저
 
+# === Decision Wiki 설정 ===
+# wiki.enabled / root / dry_run 등은 코드 기본값(config.py WikiConfig) 사용.
+# 아래는 위키 검색(BM25) 후처리 다중신호 재랭킹 가중치 (Memorable Wiki C1).
+wiki:
+  ranking:
+    enabled: true                            # 다중신호 재랭킹 on/off (false=순수 BM25 정렬)
+    candidate_pool: 50                       # 재랭킹 입력 후보 풀(BM25 상위 N). 광매칭 쿼리 많으면 상향 (C4 측정)
+    w_bm25: 1.0                              # 정규화 BM25 관련도 가중치
+    w_recency: 0.5                           # 최신성(반감기 감쇠) 가중치
+    w_confidence: 0.3                        # confidence(0~10 정규화) 가중치
+    w_citation: 0.2                          # 정규화 인용 개수 가중치
+    superseded_penalty: 0.5                  # status=superseded 페이지 감점
+    recency_half_life_days: 90               # 최신성 반감기(일)
+    mmr_enabled: false                       # MMR 다양성 재정렬 (C1c, C4 검증 전까지 OFF)
+    mmr_lambda: 0.7                          # MMR 관련도/다양성 (1.0=관련도만, 0.0=다양성만)
+
 # === AI Chat 설정 ===
 chat:
   max_history_pairs: 3                       # 대화 이력 유지 쌍 수 (슬라이딩 윈도우)

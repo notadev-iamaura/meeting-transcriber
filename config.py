@@ -668,6 +668,44 @@ class AutoProcessingConfig(BaseModel):
     )
 
 
+class WikiRankingConfig(BaseModel):
+    """Decision Wiki 검색 다중신호 재랭킹 설정 (Memorable Wiki C1).
+
+    BM25 단일 점수를 recency·confidence·인용빈도·superseded 패널티(+선택적 MMR
+    다양성)와 결합해 검색 순위를 보정한다. 원문은 변경하지 않고 검색 점수만
+    조정한다(불변식 #2 — 점수만 조정). enabled=False 면 순수 BM25 정렬(기존
+    동작)로 폴백하는 escape hatch 를 제공한다.
+
+    필드:
+        enabled: 다중신호 재랭킹 활성화. False 면 BM25 단일 정렬을 그대로 사용.
+        candidate_pool: 재랭킹 입력 후보 풀 크기. 검색 시 BM25 상위 N건을 가져와
+            그 안에서만 재랭킹한다. N 을 초과해 한 쿼리에 매칭되는 페이지가 많은
+            경우(흔한 토큰·광범위 동의어), BM25 하위지만 최신/고신뢰인 결정이
+            재랭킹 전에 누락될 수 있다. corpus·쿼리 매칭 폭이 커지면 상향 조정(C4 측정).
+        w_bm25: 정규화된 BM25 관련도 가중치.
+        w_recency: 최신성(반감기 감쇠) 가중치.
+        w_confidence: 페이지 confidence(0~10 정규화) 가중치.
+        w_citation: 정규화된 인용 개수 가중치.
+        superseded_penalty: status=superseded 페이지를 live 결정 점수대 아래로 추가로
+            내리는 간격. 재랭킹은 superseded 를 구조적으로 모든 비-superseded 아래로
+            강제하므로(가중치와 무관하게 '역전 0%' 보장), 이 값은 그 아래에서의 여유.
+        recency_half_life_days: 최신성 점수 반감기(일). 작을수록 오래된 결정이 빠르게 감쇠.
+        mmr_enabled: MMR 다양성 재정렬 활성화(C1c, 기본 OFF — C4 검증 전까지 보류).
+        mmr_lambda: MMR 관련도/다양성 트레이드오프. 1.0=관련도만, 0.0=다양성만.
+    """
+
+    enabled: bool = True
+    candidate_pool: int = Field(default=50, ge=1)
+    w_bm25: float = Field(default=1.0, ge=0.0)
+    w_recency: float = Field(default=0.5, ge=0.0)
+    w_confidence: float = Field(default=0.3, ge=0.0)
+    w_citation: float = Field(default=0.2, ge=0.0)
+    superseded_penalty: float = Field(default=0.5, ge=0.0)
+    recency_half_life_days: float = Field(default=90.0, gt=0.0)
+    mmr_enabled: bool = False
+    mmr_lambda: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
 class WikiConfig(BaseModel):
     """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
 
@@ -720,6 +758,11 @@ class WikiConfig(BaseModel):
 
     환경변수: MT_WIKI_ROUTER_LLM_FALLBACK=true|false
     """
+
+    # ─── Memorable Wiki C1 — 검색 다중신호 재랭킹 ───────────────────────
+    ranking: WikiRankingConfig = Field(default_factory=WikiRankingConfig)
+    """Decision Wiki 검색(BM25) 후처리 재랭킹 설정. config.yaml `wiki.ranking`
+    하위에서 가중치/반감기/MMR 을 조정한다. 누락 시 코드 기본값(enabled=True)."""
 
     @property
     def resolved_root(self) -> Path:
