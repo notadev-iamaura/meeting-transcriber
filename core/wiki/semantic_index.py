@@ -190,9 +190,13 @@ def make_default_embed_documents(
 ) -> Callable[[list[str]], list[list[float]]]:
     """e5-small 로 문서 배치를 임베딩하는 동기 콜백을 만든다(운영용).
 
-    `passage:` 접두사 + NFC + normalize (steps/embedder 와 동일 규약). 페이지 색인은
-    쓰기/백필 시점의 배치 작업이라 동기 로드로 충분하다. 호출자가 실패를 잡아
-    graceful 처리(rebuild_semantic_index 가 0 반환).
+    `passage:` 접두사 + NFC + normalize (steps/embedder 와 동일 규약).
+
+    뮤텍스 주의: 쿼리 임베더(_make_default_embed_query)는 ModelLoadManager.acquire 로
+    직렬화하나, 이 문서 임베더는 직접 로드한다. 정당화 — compiler._reindex_semantic 은
+    파이프라인 메인 시퀀스(STT~EMBED) 완료 후 WIKI_COMPILE 단계에서 호출되어 다른 대형
+    모델이 언로드된 상태이므로 동시 적재 위험이 낮다(불변식 #7, 설계문서 §8). 호출자가
+    실패를 잡아 graceful 처리(rebuild_semantic_index 가 0 반환).
     """
 
     def _embed(texts: list[str]) -> list[list[float]]:

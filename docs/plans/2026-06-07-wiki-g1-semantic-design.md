@@ -85,3 +85,23 @@ async def wiki_hybrid_search(query, *, search_index, semantic_index, ranking, se
 - C1 재랭킹 신호(superseded/recency) 융합 후 보존.
 - 가중치·임계 전부 config. `tests/wiki/` 비회귀. 공개 API 계약 보존.
 - 검증은 목 임베더로 로컬·결정적. 실모델은 마킹 분리.
+
+## 8. 적대 리뷰 반영 (2026-06-07, 4-렌즈)
+
+리뷰 결과 blocker 0. correctness=pass, 나머지 concerns. 반영/판단:
+
+- **수정됨**:
+  - `fuse_and_rerank`에 `ranking.enabled=False` escape hatch 추가 → BM25-only 경로(`search()`)와 동작 일치(재랭킹 OFF면 융합점수 순서만).
+  - 테스트 격리: `tests/conftest.py`에 `_isolate_chroma_db` autouse fixture — chat_integration의 `get_config()` 싱글톤이 실 `~/.meeting-transcriber/chroma_db`를 오염시키던 회귀 차단(tmp 강제).
+  - 인용 보존 단언(벡터 전용 페이지의 `citations`) + escape hatch 단위테스트 추가.
+  - 명세 정합: 계획서 §8 `semantic.enabled` false→true + G1 게이트 오버라이드 명문화.
+
+- **정당화(설계 결정)**:
+  - **문서 임베더 뮤텍스 우회**: `make_default_embed_documents`는 ModelLoadManager 없이 e5를 직접 로드한다(쿼리 임베더는 뮤텍스 사용). 정당한 이유 — compiler `_reindex_semantic`은 `core/pipeline.py`에서 메인 시퀀스(STT~EMBED) **완료 후** WIKI_COMPILE 단계에서 호출되므로 다른 대형 모델이 언로드된 상태다. 즉 동시 적재 위험이 구조적으로 낮다. (향후 wiki compile이 다른 모델과 병렬화되면 뮤텍스 경유로 통일 필요.)
+  - **매 ingest 전체 재임베딩**: `rebuild_semantic_index`가 전체 페이지를 재임베딩(BM25 rebuild와 동일 패턴). 소규모 corpus(<1000) 가정에서 수용. e5 인코딩 비용이 FTS보다 크므로, 코퍼스 증가 시 **변경 페이지만 증분 upsert**(이미 있는 `WikiSemanticIndex.upsert`)로 전환은 C4 측정 후 검토.
+  - **"비용 0" 단락은 e5 한정**: `count()==0` 단락은 e5(470MB) 로드만 막고, ChromaDB PersistentClient 인스턴스화 비용은 검색당 발생(소규모에선 무시). 벡터 미색인 환경에서 순수 BM25와 완전 동일 비용을 원하면 운영상 `semantic.enabled: false` 유지.
+
+- **남은 갭(후속 TODO)**:
+  - compiler `_reindex_semantic`/chat 하이브리드 wiring의 **단위 테스트 부재** — 현재 native e2e(`test_semantic_real_e5.py`)가 색인+검색 전 경로를 실증하고 기존 통합 테스트가 BM25 폴백 경로를 커버하나, "임베더 주입 시 _reindex_semantic 호출"·"chat semantic 분기"를 가짜 주입으로 단언하는 단위테스트를 추가하면 회귀 안전망이 강해진다.
+  - **RSS/발열 자동 단언**: native 테스트에 psutil RSS 상한 soft-assert + 파이프라인 점유 중 e5 acquire 직렬화 동시성 가드.
+  - **C4 recall@5 정량화**: 게이트 오버라이드의 비용-대비-이득 근거를 골든셋으로 측정.

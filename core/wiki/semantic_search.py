@@ -99,11 +99,18 @@ def fuse_and_rerank(
     if not candidates:
         return []
 
-    scored = _rerank(candidates, ranking, now)
     limit = max(1, int(top_k))
-    if ranking.mmr_enabled:
-        scored = _mmr_rerank(scored, ranking, limit)
-    ordered = scored[:limit]
+    if not ranking.enabled:
+        # escape hatch: 재랭킹 OFF 면 search()의 BM25-only 경로와 동작 일치 —
+        # C1 재랭킹 없이 융합 검색점수(=replace 한 bm25=RRF) 내림차순만.
+        ordered = sorted(((c, c.bm25) for c in candidates), key=lambda t: (-t[1], t[0].page_path))[
+            :limit
+        ]
+    else:
+        scored = _rerank(candidates, ranking, now)
+        if ranking.mmr_enabled:
+            scored = _mmr_rerank(scored, ranking, limit)
+        ordered = scored[:limit]
 
     return [
         WikiSearchResult(
@@ -253,8 +260,9 @@ async def wiki_hybrid_search(
     if not query:
         return []
 
-    # 벡터가 하나도 없으면(미색인/ChromaDB 불가) e5 로드 자체를 생략 → 비용 0,
+    # 벡터가 하나도 없으면(미색인/ChromaDB 불가) e5(470MB) 로드 자체를 생략 → e5 비용 0,
     # 동작 불변(BM25-only). 팬리스 RAM·발열 경합 회피(불변식 #7).
+    # (단 count() 는 ChromaDB PersistentClient 1회 인스턴스화 — 소규모에선 무시.)
     query_embedding: list[float] | None = None
     if semantic.enabled and semantic_index.count() > 0:
         embedder = embed_query or _make_default_embed_query(config, model_manager)

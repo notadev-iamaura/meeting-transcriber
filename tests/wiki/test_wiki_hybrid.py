@@ -87,6 +87,9 @@ def test_벡터_전용_매치가_실제_fetch_candidates로_유입된다(tmp_pat
     paths = [r.page_path for r in results]
     assert "decisions/a.md" in paths  # BM25 매치
     assert "decisions/b.md" in paths  # 벡터 전용 매치 유입(fetch_candidates 보강)
+    # 불변식 #1 — 벡터 전용 페이지도 인용이 보존됨(fetch_candidates 메타 경유)
+    b_result = next(r for r in results if r.page_path == "decisions/b.md")
+    assert b_result.citations == ["[meeting:1234abcd@00:02:00]"]
 
 
 def test_query_embedding_None이면_BM25_only_폴백(tmp_path: Path) -> None:

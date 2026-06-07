@@ -143,6 +143,23 @@ def test_빈_입력은_빈_결과를_반환한다() -> None:
     assert _fuse(bm25_ranked=[], vector_ranked=[], cands=[]) == []
 
 
+def test_ranking_enabled_False면_재랭킹없이_융합점수순_escape_hatch() -> None:
+    """재랭킹 OFF: superseded 구조적 floor 미적용, 융합점수(=BM25 순위) 순서 유지."""
+    cands = [
+        _cand("decisions/super.md", status="superseded"),
+        _cand("decisions/live.md"),
+    ]
+    results = _fuse(
+        bm25_ranked=[("decisions/super.md", 1), ("decisions/live.md", 2)],
+        vector_ranked=[],
+        cands=cands,
+        ranking=WikiRankingConfig(enabled=False),
+    )
+
+    # enabled=False → floor 강등 없음 → BM25 1위인 superseded 가 그대로 1위
+    assert results[0].page_path == "decisions/super.md"
+
+
 def test_top_k_절단이_적용된다() -> None:
     """top_k 로 결과 수를 제한한다."""
     cands = [_cand(f"decisions/{i}.md") for i in range(5)]
