@@ -183,3 +183,27 @@ def rebuild_semantic_index(
         logger.warning("위키 벡터 재구축 임베딩 실패(무시): %s", exc)
         return 0
     return semantic_index.upsert(page_paths=page_paths, embeddings=embeddings, metadatas=metadatas)
+
+
+def make_default_embed_documents(
+    config: Any,
+) -> Callable[[list[str]], list[list[float]]]:
+    """e5-small 로 문서 배치를 임베딩하는 동기 콜백을 만든다(운영용).
+
+    `passage:` 접두사 + NFC + normalize (steps/embedder 와 동일 규약). 페이지 색인은
+    쓰기/백필 시점의 배치 작업이라 동기 로드로 충분하다. 호출자가 실패를 잡아
+    graceful 처리(rebuild_semantic_index 가 0 반환).
+    """
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        import unicodedata
+
+        from sentence_transformers import SentenceTransformer
+
+        emb = config.embedding
+        model = SentenceTransformer(emb.model_name, device=emb.device)
+        prefixed = [unicodedata.normalize("NFC", f"{emb.passage_prefix}{t}") for t in texts]
+        vecs = model.encode(prefixed, normalize_embeddings=True, show_progress_bar=False)
+        return [[float(v) for v in row.tolist()] for row in vecs]
+
+    return _embed
