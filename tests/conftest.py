@@ -56,24 +56,3 @@ def _isolate_stt_manual_import_dir(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         "core.stt_model_downloader.get_manual_import_dir", _isolated, raising=False
     )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_chroma_db(tmp_path_factory, monkeypatch):
-    """ChromaDB 디렉토리를 tmp 로 격리한다 (hermeticity).
-
-    위키 하이브리드 검색(G1)·transcript RAG 는 config.paths.resolved_chroma_db_dir
-    (기본 `~/.meeting-transcriber/chroma_db`) 에 PersistentClient/컬렉션을 생성한다.
-    chat_integration 처럼 get_config() 싱글톤을 쓰는 경로가 사용자 실 디렉토리를
-    오염(빈 wiki_pages 컬렉션 생성·권한 약화)시킬 수 있어, 모든 테스트에서 tmp 로
-    강제 치환한다. 개별 테스트는 chroma_dir 를 명시 인자로 전달하면 그대로 우선한다.
-    """
-    from config import PathsConfig
-
-    fake_chroma = tmp_path_factory.mktemp("isolated-chroma") / "chroma_db"
-    monkeypatch.setattr(
-        PathsConfig,
-        "resolved_chroma_db_dir",
-        property(lambda self: fake_chroma),
-        raising=True,
-    )

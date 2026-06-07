@@ -166,6 +166,7 @@ class HybridChatService:
         router: QueryRouter | None = None,
         wiki_store: Any | None = None,
         wiki_llm: Any | None = None,
+        config: Any | None = None,
     ) -> None:
         """HybridChatService 인스턴스를 생성한다.
 
@@ -174,11 +175,15 @@ class HybridChatService:
             router: QueryRouter 인스턴스 또는 None.
             wiki_store: WikiStore 인스턴스 또는 None.
             wiki_llm: WikiLLMClient 인스턴스 또는 None.
+            config: AppConfig (G1 시맨틱 검색용). None 이면 위키 검색은 BM25-only
+                — get_config() 싱글톤을 쓰지 않아 테스트가 실 ChromaDB 를 오염시키지 않는다.
+                운영(api/routers/search_chat)은 app config 를 주입한다.
         """
         self._chat_service = chat_service
         self._router = router
         self._wiki_store = wiki_store
         self._wiki_llm = wiki_llm
+        self._config = config
 
     async def respond(
         self,
@@ -345,12 +350,11 @@ class HybridChatService:
         try:
             index = WikiSearchIndex(self._wiki_store.root)
             index.rebuild(self._wiki_store)
-            # G1 — semantic 활성 시 하이브리드(벡터+BM25). 벡터 미색인이면 내부에서
-            # e5 로드 없이 BM25 폴백 → 응답 동일. config 는 싱글톤에서 해석.
-            from config import get_config  # noqa: PLC0415
-
-            cfg = get_config()
-            if cfg.wiki.semantic.enabled:
+            # G1 — config 주입 + semantic 활성 시 하이브리드(벡터+BM25). config 미주입
+            # (예: 단위 테스트)이면 BM25-only — 실 ChromaDB 접근/오염 없음. 벡터 미색인이면
+            # 내부에서 e5 로드 없이 BM25 폴백 → 응답 동일.
+            cfg = self._config
+            if cfg is not None and cfg.wiki.semantic.enabled:
                 from core.wiki.semantic_index import WikiSemanticIndex  # noqa: PLC0415
                 from core.wiki.semantic_search import wiki_hybrid_search  # noqa: PLC0415
 
