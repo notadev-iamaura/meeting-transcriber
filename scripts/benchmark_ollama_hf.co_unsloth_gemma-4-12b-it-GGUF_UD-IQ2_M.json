@@ -1,0 +1,46 @@
+{
+  "model": "hf.co/unsloth/gemma-4-12b-it-GGUF:UD-IQ2_M",
+  "mem_before": {
+    "used_gb": 13.15,
+    "available_gb": 3.76,
+    "total_gb": 24.0,
+    "swap_used_gb": 4.55
+  },
+  "summary": {
+    "task": "요약",
+    "tok_per_sec": 6.1,
+    "tokens": 314,
+    "wall_s": 85.81,
+    "thinking_tags": [],
+    "gloss_count": 0,
+    "output_clean": "## 회의 개요\n- 참석자: SPEAKER_00, SPEAKER_01 (배미령), SPEAKER_02\n- 주요 주제: Gemma 4 12B 모델 도입 검토 및 한국어 품질 분석\n\n## 주요 안건\n1. Gemma 4 12B 모델 도입 검토\n   - MLX 4bit 버전(11G)은 16GB 맥에서 부족하며, Ollama GGU_F(7.6G)가 더 나은 옵션임.\n   - 12B 모델은 요약 작업에서 이득이 클 것으로 예상됨.\n   - 12B 모델의 thinking 태그 이슈로 인해 백엔드에서 제거 처리가 선행되어야 함.\n\n2. 성능 및 속도 분석\n   - 12B 모델은 E4B 대비 2~3배 느릴 것으로 추정되며, 팬리스 맥북 에어 환경에서의 발열 등 성능 실측 필요.\n\n## 결정 사항\n- 기본값은 E4B를 유지하고, 12B 모델은 옵션으로만 추가하기로 함.\n\n## 액션 아이템\n- [ ] SPEAKER_01: 한국어 고유명사 병기율 측정 (다음 주까지)\n- [ ] SPEAKER_02: 메모리 스왑 발생 여부 실측\n\n## 기타 논의\n- 라이선스는 Apache 2.0이며 로컬 사용 제약은 없음."
+  },
+  "correction": {
+    "task": "교정",
+    "tok_per_sec": 6.2,
+    "tokens": 96,
+    "wall_s": 19.91,
+    "thinking_tags": [],
+    "gloss_count": 2,
+    "output_clean": "교정된 내용은 다음과 같습니다.\n\n**[교정본]**\n네, 지금부터 녹음 테스트를 진행하도록 하겠습니다. 화자 분리는 별도로 없이 한 사람에 대한 보이스만 녹음하게 될 거고요, 이전 세션에서 모든 검증이 완료된 상태입니다. 현재 커버되지 않은 변경 사항을 정리하면, 수정된 파일는 기존 코파일(Copy) 부분에서 유비(UV) 파일로 바뀌었습니다."
+  },
+  "proper_noun": {
+    "task": "고유명사",
+    "tok_per_sec": 6.3,
+    "tokens": 182,
+    "wall_s": 31.96,
+    "thinking_tags": [],
+    "gloss_count": 0,
+    "output_clean": "제시해주신 문장을 자연스럽게 다듬면 다음과 같습니다.\n\n**\"배미령 님은 Gemma 4 모델의 한국어 표기 문제를 검토하며, 김도현 책임와 함께 회의록의 품질을 점검합니다.\"**\n\n또는 상황에 따라 아래와 같이 표현할 수도 있습니다:\n\n1. **조금 더 격식 있는 표현 (보고서/공식 문서용):**\n   \"배미령 님은 Gemma 4 모델의 한국어 표기 문제를 검토하고, 김도현 책임와 협력하여 회의록 품질를 점검합니다.\"\n2. **동사형을 강조한 표현:**\n   \"배미령 님은 Gemma 4 모델의 한국어 표기 문제를 검토하며, 김도현 책임와 함께 회의록 품질 점검를 수행합니다.\""
+  },
+  "peak_sys_used_gb": 16.39,
+  "sys_used_delta_gb": 3.24,
+  "min_sys_avail_gb": 1.76,
+  "peak_swap_used_gb": 5.73,
+  "swap_used_delta_gb": 1.18,
+  "peak_ollama_rss_gb": 0.14,
+  "ollama_ps": "NAME                                          ID              SIZE      PROCESSOR    CONTEXT    UNTIL              \nhf.co/unsloth/gemma-4-12b-it-GGUF:UD-IQ2_M    28469aee407d    4.9 GB    100% GPU     4096       4 minutes from now",
+  "avg_tok_per_sec": 6.2,
+  "emits_thinking_tags": false,
+  "total_gloss_count": 2
+}
