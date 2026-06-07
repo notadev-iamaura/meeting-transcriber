@@ -229,12 +229,14 @@ async def get_meetings(
             pipeline_state = None
             status_detail = ""
             if config is not None:
-                job, pipeline_state, status_detail = (
-                    await _meeting_detail_router.reconcile_job_state_for_response(
-                        raw_queue,
-                        config,
-                        job,
-                    )
+                (
+                    job,
+                    pipeline_state,
+                    status_detail,
+                ) = await _meeting_detail_router.reconcile_job_state_for_response(
+                    raw_queue,
+                    config,
+                    job,
                 )
             meetings.append(
                 _meeting_detail_router._build_meeting_item(

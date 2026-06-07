@@ -268,8 +268,7 @@ class JobProcessor:
         force_set_status = getattr(raw_queue, "force_set_status", None)
         if raw_queue is None or not callable(force_set_status):
             logger.error(
-                "작업 완료 상태 복구 불가: force_set_status 없음 "
-                "job_id=%s, meeting_id=%s",
+                "작업 완료 상태 복구 불가: force_set_status 없음 job_id=%s, meeting_id=%s",
                 job_id,
                 meeting_id,
             )

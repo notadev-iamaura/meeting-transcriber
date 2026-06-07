@@ -444,7 +444,9 @@ async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> W
     from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
 
     rel_path_str = slug if slug.endswith(".md") else f"{slug}.md"
-    rel_path = Path("pending") / rel_path_str if dirname == "pending" else Path(dirname) / rel_path_str
+    rel_path = (
+        Path("pending") / rel_path_str if dirname == "pending" else Path(dirname) / rel_path_str
+    )
 
     store = WikiStore(wiki_root)
     try:
@@ -575,8 +577,7 @@ async def search_wiki(
             type=(
                 "pending"
                 if item.page_path.startswith("pending/")
-                else
-                f"{item.page_type}s"
+                else f"{item.page_type}s"
                 if item.page_type in {"decision", "person", "project", "topic"}
                 else item.page_type
             ),

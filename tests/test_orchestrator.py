@@ -554,9 +554,7 @@ class TestProcessJobFailure:
         with pytest.raises(asyncio.CancelledError):
             await processor._process_job(job)
 
-        assert calls == [
-            (9, JobStatus.QUEUED, "앱 종료로 작업이 중단되어 재시도 대기 중입니다.")
-        ]
+        assert calls == [(9, JobStatus.QUEUED, "앱 종료로 작업이 중단되어 재시도 대기 중입니다.")]
         assert all(status != JobStatus.RECORDED for _job_id, status, _msg in calls)
         mock_thermal.notify_job_completed.assert_called_once()
 
