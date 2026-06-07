@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -177,6 +178,7 @@ class WikiCompilerV2:
         project_extractor: ProjectExtractor,
         topic_extractor: TopicExtractor | None = None,
         linter: WikiLinter | None = None,
+        semantic_doc_embedder: Callable[[list[str]], list[list[float]]] | None = None,
     ) -> None:
         """모든 의존성을 주입받는다 — DI 로 테스트 격리.
 
@@ -203,8 +205,43 @@ class WikiCompilerV2:
         # Phase 4 신규
         self._topic_extractor: TopicExtractor | None = topic_extractor
         self._linter: WikiLinter | None = linter
+        # G1 — 페이지 쓰기 시 벡터 색인용 문서 임베더. 주입 시에만 시맨틱 색인 활성
+        # (미주입=색인 skip → 테스트는 e5 미로드). prod 팩토리가 e5 임베더 주입.
+        self._semantic_doc_embedder = semantic_doc_embedder
         # lint 트리거용 카운터 — 매 compile_meeting 직후 +1
         self._meeting_count: int = 0
+
+    async def _reindex_semantic(self) -> None:
+        """G1 — 페이지 벡터 색인 갱신(graceful). 임베더 미주입/비활성/실패 시 무영향.
+
+        문서 임베딩(e5)은 별도 스레드에서 수행하며, 실패해도 ingest 는 유지되고
+        검색은 BM25 로 폴백한다. config 가 AppConfig 가 아니면(paths 부재) skip.
+        """
+        if self._semantic_doc_embedder is None:
+            return
+        wiki_cfg = getattr(self._config, "wiki", self._config)
+        sem_cfg = getattr(wiki_cfg, "semantic", None)
+        paths_cfg = getattr(self._config, "paths", None)
+        if sem_cfg is None or not getattr(sem_cfg, "enabled", False) or paths_cfg is None:
+            return
+        try:
+            import asyncio
+
+            from core.wiki.semantic_index import WikiSemanticIndex, rebuild_semantic_index
+
+            semantic_index = WikiSemanticIndex(
+                paths_cfg.resolved_chroma_db_dir,
+                collection_name=sem_cfg.collection_name,
+            )
+            count = await asyncio.to_thread(
+                rebuild_semantic_index,
+                self._store,
+                semantic_index=semantic_index,
+                embed_documents=self._semantic_doc_embedder,
+            )
+            logger.info("wiki 벡터 색인 갱신: %d 페이지", count)
+        except Exception as exc:  # noqa: BLE001 — 색인 실패는 ingest/검색에 무영향
+            logger.warning("wiki 벡터 색인 rebuild 실패 — ingest 유지: %r", exc)
 
     async def compile_meeting(
         self,
@@ -385,8 +422,7 @@ class WikiCompilerV2:
             logger.error("PersonExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             person_pages = []
         logger.info(
-            "Wiki extractor timing: meeting_id=%s extractor=person "
-            "elapsed_seconds=%.3f pages=%d",
+            "Wiki extractor timing: meeting_id=%s extractor=person elapsed_seconds=%.3f pages=%d",
             meeting_id,
             time.perf_counter() - extractor_start,
             len(person_pages),
@@ -429,8 +465,7 @@ class WikiCompilerV2:
             logger.error("ProjectExtractor 예상치 못한 오류: %r", exc, exc_info=True)
             project_pages = []
         logger.info(
-            "Wiki extractor timing: meeting_id=%s extractor=project "
-            "elapsed_seconds=%.3f pages=%d",
+            "Wiki extractor timing: meeting_id=%s extractor=project elapsed_seconds=%.3f pages=%d",
             meeting_id,
             time.perf_counter() - extractor_start,
             len(project_pages),
@@ -527,6 +562,8 @@ class WikiCompilerV2:
                 WikiSearchIndex(self._store.root).rebuild(self._store)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("wiki 검색 색인 rebuild 실패 — ingest 는 유지: %r", exc)
+            # G1 — 시맨틱(벡터) 색인 갱신(임베더 주입 시에만 활성, graceful).
+            await self._reindex_semantic()
 
         # ── 9. lint 트리거 (Phase 4 신규) ────────────────────────────
         # 매 compile_meeting 후 카운터 +1. lint_interval 도달 시 lint_all 실행.
