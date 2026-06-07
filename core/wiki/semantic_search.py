@@ -253,8 +253,10 @@ async def wiki_hybrid_search(
     if not query:
         return []
 
+    # 벡터가 하나도 없으면(미색인/ChromaDB 불가) e5 로드 자체를 생략 → 비용 0,
+    # 동작 불변(BM25-only). 팬리스 RAM·발열 경합 회피(불변식 #7).
     query_embedding: list[float] | None = None
-    if semantic.enabled:
+    if semantic.enabled and semantic_index.count() > 0:
         embedder = embed_query or _make_default_embed_query(config, model_manager)
         try:
             query_embedding = await embedder(query)

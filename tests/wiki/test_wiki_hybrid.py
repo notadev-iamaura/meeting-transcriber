@@ -48,6 +48,9 @@ class _FakeSemantic:
     def query(self, embedding: list[float], top_k: int) -> list[tuple[str, int]]:
         return list(self._ranked[:top_k])
 
+    def count(self) -> int:
+        return len(self._ranked)
+
 
 def _build_index(tmp_path: Path) -> WikiSearchIndex:
     """a.md(예산 매칭), b.md(예산 비매칭) 로 BM25 인덱스를 만든다."""
@@ -187,3 +190,28 @@ def test_async_래퍼는_임베딩_실패시_BM25_only_폴백한다(tmp_path: Pa
 
     # 임베딩 실패 → 벡터 무시 → BM25 결과만(b.md 유입 안 됨)
     assert [r.page_path for r in results] == ["decisions/a.md"]
+
+
+def test_async_래퍼는_벡터_0건이면_e5를_로드하지_않는다(tmp_path: Path) -> None:
+    """비용 0 단락: semantic_index.count()==0 면 임베딩(=e5 로드) 자체를 생략."""
+    index = _build_index(tmp_path)
+    empty_semantic = _FakeSemantic([])  # count()==0
+    called: list[str] = []
+
+    async def _embed(q: str) -> list[float]:
+        called.append(q)
+        return [1.0, 0.0]
+
+    results = asyncio.run(
+        wiki_hybrid_search(
+            "예산",
+            search_index=index,
+            semantic_index=empty_semantic,
+            config=get_config(),
+            now=_NOW,
+            embed_query=_embed,
+        )
+    )
+
+    assert called == []  # 임베딩 콜백(=e5 로드) 미호출
+    assert [r.page_path for r in results] == ["decisions/a.md"]  # BM25-only
