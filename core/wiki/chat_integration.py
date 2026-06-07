@@ -345,11 +345,29 @@ class HybridChatService:
         try:
             index = WikiSearchIndex(self._wiki_store.root)
             index.rebuild(self._wiki_store)
-            search_results = index.search(
-                query,
-                top_k=5,
-                page_types=["decision"],
-            )
+            # G1 — semantic 활성 시 하이브리드(벡터+BM25). 벡터 미색인이면 내부에서
+            # e5 로드 없이 BM25 폴백 → 응답 동일. config 는 싱글톤에서 해석.
+            from config import get_config  # noqa: PLC0415
+
+            cfg = get_config()
+            if cfg.wiki.semantic.enabled:
+                from core.wiki.semantic_index import WikiSemanticIndex  # noqa: PLC0415
+                from core.wiki.semantic_search import wiki_hybrid_search  # noqa: PLC0415
+
+                semantic_index = WikiSemanticIndex(
+                    cfg.paths.resolved_chroma_db_dir,
+                    collection_name=cfg.wiki.semantic.collection_name,
+                )
+                search_results = await wiki_hybrid_search(
+                    query,
+                    search_index=index,
+                    semantic_index=semantic_index,
+                    config=cfg,
+                    top_k=5,
+                    page_types=["decision"],
+                )
+            else:
+                search_results = index.search(query, top_k=5, page_types=["decision"])
         except Exception as exc:  # noqa: BLE001 — 검색 실패는 호출자에서 폴백
             raise RuntimeError(f"wiki_search_failed: {exc}") from exc
 
