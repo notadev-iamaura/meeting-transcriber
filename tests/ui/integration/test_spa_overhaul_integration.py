@@ -1103,6 +1103,8 @@ def test_wiki_route_renders_shell_tree_and_public_api(
         api_handler=wiki_api,
     ) as page:
         page.wait_for_selector(".wiki-tree__item", state="attached")
+        # C3: /app/wiki 기본 탭이 '현황'이므로 검색 탭으로 전환해 트리/검색/미리보기 노출.
+        page.locator("#wikiTabSearch").click()
 
         for selector in (
             ".wiki-view",
@@ -1216,6 +1218,8 @@ def test_wiki_search_detail_citation_and_unicode_slug_contract(
         api_handler=wiki_api,
     ) as page:
         page.wait_for_selector(".wiki-tree__item", state="attached")
+        # C3: 검색 탭으로 전환해 검색 input 노출(기본 탭=현황).
+        page.locator("#wikiTabSearch").click()
         page.locator("#wikiSearchInput").fill("출시")
         page.wait_for_timeout(450)
 
@@ -1224,7 +1228,8 @@ def test_wiki_search_detail_citation_and_unicode_slug_contract(
         assert "limit=50" in search_urls[0]
         assert "page_type=decision" in search_urls[0]
 
-        page.locator(".wiki-tree__item", has_text="철수 상세").click()
+        # C3: 검색 결과는 카드(.wiki-result-card)로 승격됨.
+        page.locator(".wiki-result-card", has_text="철수 상세").click()
         page.wait_for_selector(".wiki-preview-page-title", state="attached")
 
         detail_url = captured_detail["url"]
@@ -1331,6 +1336,8 @@ def test_wiki_decision_filters_and_pending_category_contract(
         api_handler=wiki_api,
     ) as page:
         page.wait_for_selector(".wiki-tree__item", state="attached")
+        # C3: 검색 탭으로 전환해 트리/필터 노출(기본 탭=현황).
+        page.locator("#wikiTabSearch").click()
         pending = page.locator('.wiki-tree__category[data-cat="pending"]')
         assert "검토 필요" in pending.inner_text()
 

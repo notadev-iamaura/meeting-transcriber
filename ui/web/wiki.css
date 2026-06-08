@@ -504,7 +504,8 @@
 
 .wiki-empty-state-desc {
   font-size: 13px;
-  color: var(--text-muted);
+  /* --text-secondary: WCAG AA (캔버스/사이드바 위 ≥4.5:1). --text-muted 는 3.26 미달. */
+  color: var(--text-secondary);
   margin: 0;
   max-width: 360px;
   line-height: 1.5;
@@ -601,10 +602,491 @@
   text-align: center;
 }
 
+/* =================================================================
+ * T-303 wiki-overview-search — 탭 바 + 현황 패널 + 검색 결과 카드
+ * 디자인 토큰만 사용(하드코딩 0). radius 는 실제 정의 토큰
+ * (--radius 6px / --radius-lg 10px) 만 사용 — --radius-md/sm 은 미정의이므로 회피.
+ * 상태 배지는 dot=상태색 / 텍스트=--text-secondary 로 WCAG AA 보장.
+ * ================================================================= */
+
+/* 검색 input wrapper 는 현황 탭에서 숨김([hidden] 명시 — flex 컨텍스트 안전) */
+.wiki-search-wrapper[hidden] {
+  display: none;
+}
+
+/* ── ARIA 탭 바 (현황/검색) ───────────────────────────────────── */
+.wiki-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 20px;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--bg-canvas);
+  flex-shrink: 0;
+}
+
+.wiki-tab {
+  padding: 10px 14px;
+  font-size: var(--fs-13);
+  font-family: inherit;
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.wiki-tab[aria-selected="true"] {
+  color: var(--accent-text);
+  border-bottom-color: var(--accent);
+  font-weight: var(--fw-semibold);
+}
+
+.wiki-tab:focus-visible,
+.wiki-tab:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ── 검색 패널 — 기존 헤더/필터/트리/미리보기 컨테이너 ─────────── */
+.wiki-search-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wiki-search-panel[hidden] {
+  display: none;
+}
+
+/* ── 현황(Overview) 패널 ──────────────────────────────────────── */
+.wiki-overview {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.wiki-overview[hidden] {
+  display: none;
+}
+
+.wiki-overview-inner {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 32px;
+}
+
+.wiki-overview__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.wiki-overview__title {
+  font-size: var(--fs-22);
+  font-weight: var(--fw-bold);
+  letter-spacing: var(--ls-tight);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.wiki-overview__date {
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-overview__lede {
+  font-size: var(--fs-13);
+  color: var(--text-secondary);
+  margin: 0 0 24px;
+}
+
+.wiki-overview__lede strong {
+  color: var(--text-primary);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 섹션 (미해결 액션 / 최근 결정 / 프로젝트 현황) */
+.wiki-ov-section {
+  margin-bottom: 32px;
+}
+
+.wiki-ov-section__title {
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+}
+
+.wiki-ov-empty {
+  font-size: var(--fs-13);
+  font-style: italic;
+  color: var(--text-muted);
+  margin: 0;
+  padding: 8px 0;
+}
+
+/* 현황 카드 (owner 그룹 / 결정 / 프로젝트) */
+.wiki-ov-card {
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  transition: box-shadow var(--duration-base) var(--ease-macos),
+    border-color var(--duration-base) var(--ease-macos),
+    transform var(--duration-base) var(--ease-macos);
+}
+
+.wiki-ov-card--clickable {
+  cursor: pointer;
+}
+
+.wiki-ov-card--clickable:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+  border-color: var(--accent);
+}
+
+.wiki-ov-card--clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wiki-ov-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wiki-ov-card__owner,
+.wiki-ov-card__project-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-14);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+
+.wiki-ov-card__owner::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.wiki-ov-card__title {
+  font-size: var(--fs-14);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.wiki-ov-count {
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.wiki-ov-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+.wiki-ov-card__date {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-ov-card__project {
+  color: var(--text-secondary);
+}
+
+.wiki-ov-card__last {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+/* 미해결 액션 항목 리스트 */
+.wiki-ov-item-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.wiki-ov-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  font-size: var(--fs-13);
+  color: var(--text-primary);
+  border-top: 0.5px solid var(--border-light);
+}
+
+.wiki-ov-item:first-child {
+  border-top: none;
+}
+
+.wiki-ov-item__desc {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.wiki-ov-item__due {
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.wiki-ov-item__due--none {
+  font-style: italic;
+}
+
+/* 현황 인용 컨테이너 */
+.wiki-ov-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+/* 현황 로딩 스켈레톤 (shimmer) */
+.wiki-ov-skeleton {
+  height: 72px;
+  margin-bottom: 12px;
+  border-radius: var(--radius);
+  background: linear-gradient(
+    90deg,
+    var(--bg-secondary) 25%,
+    var(--bg-hover) 50%,
+    var(--bg-secondary) 75%
+  );
+  background-size: 200% 100%;
+  animation: wiki-ov-shimmer 1.5s ease-in-out infinite;
+}
+
+.wiki-ov-skeleton:nth-child(2) { animation-delay: 0.15s; }
+.wiki-ov-skeleton:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes wiki-ov-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wiki-ov-skeleton { animation: none; }
+}
+
+/* ── 상태 배지 (현황 결정/프로젝트 + 검색 카드 공용) ──────────── */
+/* dot=상태색 / 텍스트=--text-secondary → WCAG AA (디자인 리뷰 blocker 2 해소) */
+.wiki-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 1px 8px;
+  flex-shrink: 0;
+}
+
+.wiki-status-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.wiki-status-badge--decided .wiki-status-badge__dot { background: var(--success); }
+.wiki-status-badge--pending .wiki-status-badge__dot { background: var(--warning); }
+.wiki-status-badge--rejected .wiki-status-badge__dot { background: var(--error); }
+.wiki-status-badge--superseded .wiki-status-badge__dot { background: var(--text-muted); }
+
+/* ── 검색 결과 카드 ───────────────────────────────────────────── */
+/* 검색 모드에서 트리 배경을 캔버스로 전환 → 카드(--bg-card)가 떠 보이게.
+   다크 모드에서 카드(#2C2C2E)가 캔버스(#1C1C1E) 위에 뜬다
+   (디자인 리뷰 concern 1: 다크 톤 격차 확보). */
+.wiki-tree:has(.wiki-search-results) {
+  background: var(--bg-canvas);
+}
+
+.wiki-search-results__header {
+  padding: 10px 14px 6px;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-wide);
+  color: var(--text-secondary);
+}
+
+/* 검색 헤더 내 카운트 — 캔버스 배경 위 AA (기본 --text-muted 는 미달) */
+.wiki-search-results__header .wiki-tree__category-count {
+  color: var(--text-secondary);
+}
+
+.wiki-search-results__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.wiki-result-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: box-shadow var(--duration-base) var(--ease-macos),
+    border-color var(--duration-base) var(--ease-macos),
+    transform var(--duration-base) var(--ease-macos);
+}
+
+.wiki-result-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+  border-color: var(--accent);
+}
+
+.wiki-result-card:focus-visible,
+.wiki-result-card:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wiki-result-card--active {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.wiki-result-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wiki-result-card__title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+  word-break: break-word;
+  /* 네이티브 button reset — 카드 제목 클릭 타겟 */
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.wiki-result-card__title:hover {
+  color: var(--accent-text);
+}
+
+.wiki-result-card__title:focus-visible,
+.wiki-result-card__title:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+.wiki-result-card__score {
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.wiki-result-card__snippet {
+  margin: 6px 0 0;
+  font-size: var(--fs-12);
+  line-height: var(--lh-base);
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.wiki-result-card__citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
 /* WikiView 반응형 — 모바일에서 트리 축소 */
 @media (max-width: 640px) {
+  .wiki-tabs {
+    padding: 0 12px;
+  }
+  .wiki-tab {
+    flex: 1;
+    text-align: center;
+  }
+  .wiki-overview-inner {
+    max-width: 100%;
+    padding: 16px;
+  }
+  .wiki-ov-item {
+    flex-wrap: wrap;
+  }
+  /* 검색 탭 — 트리+미리보기를 세로 스택해 가로 스크롤 방지
+     (디자인 리뷰 concern 2: 모바일 2단 overflow-x 해소) */
+  .wiki-body {
+    flex-direction: column;
+  }
   .wiki-tree {
-    width: 200px;
+    width: 100%;
+    max-height: 45%;
+    border-right: none;
+    border-bottom: 0.5px solid var(--border);
   }
   .wiki-preview {
     padding: 16px 20px;
