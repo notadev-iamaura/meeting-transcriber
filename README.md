@@ -10,9 +10,6 @@ Recap은 Apple Silicon Mac에서 회의 녹음 → 전사 → 화자 분리 → 
 
 모든 데이터는 로컬에서만 처리되며, 외부 서버로 전송되지 않습니다.
 
-> **About the name** — 앱은 UI (앱 아이콘·윈도우 타이틀·메뉴바) 에서 **Recap** 으로 브랜딩되어 있습니다.
-> 저장소 슬러그와 Python 패키지는 연속성을 위해 `meeting-transcriber` 그대로 유지됩니다.
-
 > **⚠️ Apple Silicon Mac 전용** — 이 프로젝트는 MLX 프레임워크를 사용하며, Apple Silicon(M1/M2/M3/M4) Mac에서만 동작합니다.
 > Intel Mac, Linux, Windows에서는 MLX 기반 STT가 지원되지 않습니다.
 
@@ -38,7 +35,7 @@ Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반
 ## 주요 기능
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
-- **STT 모델 선택기**: 기본 모델은 `whisper-large-v3-turbo` (회의 벤치 1위). 웹 UI에서 한국어 fine-tune 3종(komixv2 / seastar / ghost613)도 다운로드/활성화 가능
+- **STT 모델 선택기**: 웹 UI에서 사용할 음성 인식 모델을 관리
 - **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
 - **AI 교정**: Gemma 4 (기본) 또는 EXAONE 3.5 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
