@@ -105,5 +105,5 @@ async def wiki_hybrid_search(query, *, search_index, semantic_index, ranking, se
 
 - ✅ **① wiring 단위테스트 + RAM 자동측정** (2026-06-08): `tests/wiki/test_g1_wiring.py`(compiler `_reindex_semantic` 임베더 주입/미주입/비활성 분기 + chat config 주입/미주입 분기, 가짜 주입 5건). `test_semantic_real_e5.py`에 피크 RSS < 3GB soft-assert(불변식 #7 회귀 가드).
 - ✅ **② C4 recall@5 정량화** (2026-06-08): `tests/wiki/test_g1_recall_eval.py`(native). 8개 패러프레이즈 골든셋(어휘 비매칭 쿼리↔결정) 실측 — **BM25 recall@5 = 0% (0/8), HYBRID = 100% (8/8), Δ=+100%**. 게이트 오버라이드(벡터 켜기)의 가치를 수치로 고정: BM25가 원천적으로 못 하는 시맨틱 회상을 e5가 전부 해냄. `hybrid ≥ bm25` 회귀 가드 포함.
-- ⏳ **③ 증분 upsert**: `rebuild_semantic_index` 전체 재임베딩 → 변경 페이지만 upsert(코퍼스 증가 시). 소규모(<1000)에선 무해.
-- ⏳ **④ 발열/동시성 가드**: 파이프라인 점유 중 e5 acquire 직렬화 검증(model_manager 단일 lock은 구조적으로 보장됨, 테스트만 미작성).
+- ✅ **③ 증분 upsert** (2026-06-08): `reindex_incremental` — content_hash(sha256) 를 ChromaDB 메타에 저장해 신규/변경 페이지만 재임베딩(전체 재임베딩 회피 → 발열·시간 절감), 스토어에서 사라진 페이지(거부/이동)는 orphan 으로 삭제해 stale 벡터 방지(일관성). compiler `_reindex_semantic` 이 사용. `rebuild_semantic_index` 는 백필용으로 유지(hash 저장). 단위 4건(최초 전체·무변경 0·변경분만·orphan 삭제) + native 1건(실 chroma 메타 라운드트립).
+- ⏳ **④ 발열/동시성 가드**: 파이프라인 점유 중 e5 acquire 직렬화 검증(model_manager 단일 lock은 구조적으로 보장됨, 테스트만 미작성 — 우선순위 낮음).
