@@ -247,3 +247,69 @@ class TestWikiHealthEndpoint:
 
         assert response.status_code == 200
         assert "application/json" in response.headers["content-type"]
+
+
+# ─── GET /api/wiki/digest 테스트 (C2/C3 현황 다이제스트) ──────────────────
+
+
+def _seed_digest_wiki(wiki_root: Path) -> None:
+    """digest 테스트용 위키(미해결 액션 2건 + 오늘자 결정 1건)를 디스크에 만든다."""
+    from datetime import date
+
+    today = date.today().isoformat()
+    (wiki_root / "decisions").mkdir(parents=True, exist_ok=True)
+    (wiki_root / "action_items.md").write_text(
+        "---\ntype: action_items\n---\n\n# Action Items\n\n"
+        "## Open (2)\n\n"
+        "- [ ] 민수: API 설계 [meeting:abcd1234@00:01:20]\n"
+        "- [ ] 지영: 디자인 [meeting:efgh5678@00:05:00]\n\n"
+        "## Closed (0)\n\n_(없음)_\n",
+        encoding="utf-8",
+    )
+    (wiki_root / "decisions" / "budget.md").write_text(
+        "---\ntype: decision\ntitle: 예산 확정\nstatus: decided\n"
+        f"decision_date: {today}\nproject: Apollo\n---\n\n"
+        "# 예산 확정\n\n예산을 1억으로 확정 [meeting:abcd1234@00:02:00]\n",
+        encoding="utf-8",
+    )
+
+
+class TestWikiDigestEndpoint:
+    """GET /api/wiki/digest 엔드포인트 테스트."""
+
+    def test_digest_disabled_시_빈_다이제스트(self, tmp_path: Path) -> None:
+        """wiki.enabled=False 면 빈 다이제스트(200)를 반환한다."""
+        config = _make_test_config(tmp_path, wiki_enabled=False)
+        app = _make_test_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/api/wiki/digest")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total_open_actions"] == 0
+        assert body["open_actions"] == []
+        assert body["recent_decisions"] == []
+
+    def test_digest_owner별_액션_최근결정_프로젝트_집계(self, tmp_path: Path) -> None:
+        """미해결 액션(owner별)·최근 결정·프로젝트 상태를 인용과 함께 집계한다."""
+        wiki_root = tmp_path / "wiki"
+        wiki_root.mkdir(parents=True, exist_ok=True)
+        _seed_digest_wiki(wiki_root)
+        config = _make_test_config(tmp_path, wiki_enabled=True, wiki_root=wiki_root)
+        app = _make_test_app(config)
+
+        with TestClient(app) as client:
+            response = client.get("/api/wiki/digest")
+
+        assert response.status_code == 200
+        body = response.json()
+        # 미해결 액션 — owner 2명, 총 2건, 인용 보존
+        assert body["total_open_actions"] == 2
+        owners = {g["owner"]: g for g in body["open_actions"]}
+        assert set(owners) == {"민수", "지영"}
+        assert owners["민수"]["items"][0]["citations"] == ["[meeting:abcd1234@00:01:20]"]
+        # 최근 결정(오늘자) + 프로젝트 현황
+        assert [d["title"] for d in body["recent_decisions"]] == ["예산 확정"]
+        assert body["recent_decisions"][0]["citations"] == ["[meeting:abcd1234@00:02:00]"]
+        assert [p["project"] for p in body["project_status"]] == ["Apollo"]
