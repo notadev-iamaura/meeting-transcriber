@@ -320,6 +320,63 @@ class WikiSearchResponse(BaseModel):
     query: str
 
 
+# ─── C2/C3 현황 다이제스트 응답 스키마 ───────────────────────────────────
+
+
+class DigestActionItem(BaseModel):
+    """미해결 액션 한 건 (인용 보존)."""
+
+    description: str
+    citations: list[str] = Field(default_factory=list)
+    due_date: str | None = None
+
+
+class DigestOwnerGroup(BaseModel):
+    """owner 별 미해결 액션 묶음."""
+
+    owner: str
+    items: list[DigestActionItem]
+
+
+class DigestDecisionItem(BaseModel):
+    """최근 결정 한 건 (인용 보존)."""
+
+    page_path: str
+    title: str
+    decision_date: str
+    status: str = ""
+    project: str | None = None
+    citations: list[str] = Field(default_factory=list)
+
+
+class DigestProjectItem(BaseModel):
+    """프로젝트별 현재 상태(가장 최근 결정)."""
+
+    project: str
+    last_title: str
+    last_date: str
+    status: str = ""
+    page_path: str
+
+
+class WikiDigestResponse(BaseModel):
+    """GET /api/wiki/digest 응답 스키마 (C2 집계 결과, LLM 0).
+
+    Attributes:
+        generated_for: 집계 기준일(ISO date). wiki 비활성/부재 시 빈 문자열.
+        total_open_actions: 미해결 액션 총수(표시 상한과 무관한 실제 전체).
+        open_actions: owner 별 미해결 액션 그룹(owner 오름차순).
+        recent_decisions: 최근 N일 결정(날짜 내림차순).
+        project_status: 프로젝트별 현재 상태(프로젝트명 오름차순).
+    """
+
+    generated_for: str = ""
+    total_open_actions: int = 0
+    open_actions: list[DigestOwnerGroup] = Field(default_factory=list)
+    recent_decisions: list[DigestDecisionItem] = Field(default_factory=list)
+    project_status: list[DigestProjectItem] = Field(default_factory=list)
+
+
 def _extract_title_from_markdown(frontmatter: dict[str, Any], content: str) -> str | None:
     """페이지 제목을 frontmatter → 첫 H1 → None 순으로 결정한다.
 
@@ -619,6 +676,85 @@ async def search_wiki(
     ]
 
     return WikiSearchResponse(results=results, total=len(results), query=q)
+
+
+@router.get(
+    "/wiki/digest",
+    response_model=WikiDigestResponse,
+    summary="위키 현황 다이제스트 (집계, LLM 0)",
+    description=(
+        "Memorable Wiki C2 — 미해결 액션(owner별)·최근 결정·프로젝트별 현재 상태를 "
+        "LLM 없이 집계해 반환한다. 모든 항목은 원본 인용을 보존한다. "
+        "wiki.enabled=False / 디렉토리 부재 시 빈 다이제스트."
+    ),
+)
+async def get_wiki_digest(request: Request) -> WikiDigestResponse:
+    """위키 현황 다이제스트를 집계해 반환한다 (C2, 모델 로드 0).
+
+    Args:
+        request: FastAPI Request 객체.
+
+    Returns:
+        WikiDigestResponse — 미해결 액션/최근 결정/프로젝트 상태. wiki 비활성/부재 또는
+        집계 실패 시 빈 다이제스트(graceful, 현황 조회는 ingest 와 무관).
+    """
+    wiki_root = _resolve_wiki_root(request)
+    if wiki_root is None:
+        return WikiDigestResponse()
+
+    from datetime import date  # noqa: PLC0415
+
+    from core.wiki.digest import build_digest  # noqa: PLC0415
+    from core.wiki.store import WikiStore  # noqa: PLC0415
+
+    config = _get_config(request)
+    digest_cfg = config.wiki.digest
+    try:
+        store = WikiStore(wiki_root)
+        digest = build_digest(store, digest_config=digest_cfg, now=date.today())
+    except Exception as exc:  # noqa: BLE001 — 집계 실패는 빈 다이제스트(graceful)
+        logger.warning("wiki 다이제스트 집계 실패: %r", exc, exc_info=True)
+        return WikiDigestResponse()
+
+    return WikiDigestResponse(
+        generated_for=digest.generated_for,
+        total_open_actions=digest.total_open_actions,
+        open_actions=[
+            DigestOwnerGroup(
+                owner=owner,
+                items=[
+                    DigestActionItem(
+                        description=a.description,
+                        citations=a.citations,
+                        due_date=a.due_date,
+                    )
+                    for a in digest.open_actions_by_owner[owner]
+                ],
+            )
+            for owner in sorted(digest.open_actions_by_owner)
+        ],
+        recent_decisions=[
+            DigestDecisionItem(
+                page_path=d.page_path,
+                title=d.title,
+                decision_date=d.decision_date,
+                status=d.status,
+                project=d.project,
+                citations=d.citations,
+            )
+            for d in digest.recent_decisions
+        ],
+        project_status=[
+            DigestProjectItem(
+                project=p.project,
+                last_title=p.last_title,
+                last_date=p.last_date,
+                status=p.status,
+                page_path=p.page_path,
+            )
+            for p in digest.project_status
+        ],
+    )
 
 
 # === LLM Wiki Phase 4.E 엔드포인트 — 백필 (PRD §7.1, §9 Phase 4) =========
