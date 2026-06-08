@@ -94,6 +94,12 @@ wiki:
     rrf_k: 60                                # RRF 파라미터 (순위 차 완화)
     top_k_vector: 20                         # 벡터 검색 후보 수
     collection_name: "wiki_pages"            # 위키 전용 ChromaDB 컬렉션 (transcript 와 분리)
+  # 현황 다이제스트 (C2). 결정/액션을 LLM 없이 집계해 digest.md 현황판 생성. 모델 로드 0.
+  digest:
+    enabled: true                            # digest.md 생성 on/off
+    recent_days: 14                          # "최근 결정" 윈도(now 기준 일수)
+    max_recent: 50                           # 최근 결정 표시 안전 상한(폭주 방지)
+    max_per_owner: 50                        # owner 당 미해결 액션 표시 상한
 
 # === AI Chat 설정 ===
 chat:
