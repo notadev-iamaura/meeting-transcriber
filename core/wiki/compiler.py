@@ -588,8 +588,12 @@ class WikiCompilerV2:
                 logger.warning("wiki 검색 색인 rebuild 실패 — ingest 는 유지: %r", exc)
             # G1 — 시맨틱(벡터) 색인 갱신(임베더 주입 시에만 활성, graceful).
             await self._reindex_semantic()
-            # C2 — 현황 다이제스트(digest.md) 재생성(집계만, 모델 0, graceful).
-            self._regenerate_digest()
+
+        # ── 7c. 현황 다이제스트 재생성 (C2) ──────────────────────────────
+        # 변경 가드 밖에서 매 compile 재생성한다 — 집계는 모델 0(저렴)이고, 이렇게
+        # 해야 action 렌더 실패 등으로 페이지 변경이 0건인 회의에서도 digest 가
+        # stale 되지 않는다(현황판은 항상 최신이 핵심). 실패는 graceful(ingest 유지).
+        self._regenerate_digest()
 
         # ── 9. lint 트리거 (Phase 4 신규) ────────────────────────────
         # 매 compile_meeting 후 카운터 +1. lint_interval 도달 시 lint_all 실행.

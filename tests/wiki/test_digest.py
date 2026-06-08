@@ -79,10 +79,10 @@ def test_parse_open_actions_owner별_인용_due_보존() -> None:
     assert actions[0].owner == "민수"
     assert actions[0].description == "API 설계 마무리"
     assert actions[0].due_date == "2026-05-30"
-    assert actions[0].citation == "[meeting:abcd1234@00:01:20]"
+    assert actions[0].citations == ["[meeting:abcd1234@00:01:20]"]
     assert actions[1].owner == "지영"
     assert actions[1].due_date is None
-    assert actions[1].citation == "[meeting:efgh5678@00:05:00]"
+    assert actions[1].citations == ["[meeting:efgh5678@00:05:00]"]
 
 
 def test_parse_open_actions_closed_섹션_제외() -> None:
@@ -106,7 +106,36 @@ def test_parse_open_actions_콜론없는_라인도_미지정으로_보존한다(
     actions = parse_open_actions(content)
     assert len(actions) == 1
     assert actions[0].owner == "미지정"
-    assert actions[0].citation == "[meeting:abcd1234@00:03:00]"
+    assert actions[0].citations == ["[meeting:abcd1234@00:03:00]"]
+
+
+def test_parse_open_actions_멀티라인_description_인용보존() -> None:
+    """개행 포함 description(LLM 산출)도 한 논리 항목으로 병합 — 둘째 줄 인용 손실 0."""
+    content = (
+        "## Open (1)\n"
+        "- [ ] 민수: 첫 줄 작업\n"
+        "둘째 줄 상세 [meeting:abcd1234@00:04:00]\n"
+        "\n"
+        "## Closed (0)\n"
+    )
+    actions = parse_open_actions(content)
+    assert len(actions) == 1
+    assert actions[0].owner == "민수"
+    # 둘째 줄에만 있던 인용이 보존된다(C-1 회귀 가드).
+    assert actions[0].citations == ["[meeting:abcd1234@00:04:00]"]
+    assert "둘째 줄 상세" in actions[0].description
+
+
+def test_parse_open_actions_한라인_다중인용_전부보존() -> None:
+    """한 액션 라인에 인용이 둘이면 둘 다 보존한다(C-2 회귀 가드)."""
+    content = _action_items_md(
+        ["- [ ] 민수: 근거 둘 [meeting:abcd1234@00:01:20] 추가 [meeting:efgh5678@00:09:00]"]
+    )
+    actions = parse_open_actions(content)
+    assert actions[0].citations == [
+        "[meeting:abcd1234@00:01:20]",
+        "[meeting:efgh5678@00:09:00]",
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -238,6 +267,33 @@ def test_collect_project_status_project없는_결정_제외(tmp_path: Path) -> N
     assert collect_project_status(store) == []
 
 
+def test_collect_project_status_동일날짜_tie는_결정적이다(tmp_path: Path) -> None:
+    """같은 날짜 결정이 둘이면 page_path 2차 키로 결정적으로 하나를 고른다(C-3)."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(
+        Path("decisions/aaa.md"),
+        _decision_md("먼저", decision_date="2026-06-01", project="Apollo"),
+    )
+    store.write_page(
+        Path("decisions/zzz.md"),
+        _decision_md("나중 경로", decision_date="2026-06-01", project="Apollo"),
+    )
+    # 여러 번 호출해도 항상 같은 결과(page_path 큰 zzz.md 선택).
+    picks = {collect_project_status(store)[0].page_path for _ in range(3)}
+    assert picks == {"decisions/zzz.md"}
+
+
+def test_collect_recent_decisions_미래_결정_제외(tmp_path: Path) -> None:
+    """now 이후(미래) decision_date 는 최근 목록에서 제외한다(경계 가드)."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(Path("decisions/now.md"), _decision_md("오늘", decision_date="2026-06-08"))
+    store.write_page(Path("decisions/fut.md"), _decision_md("미래", decision_date="2026-06-20"))
+    recent = collect_recent_decisions(store, now=date(2026, 6, 8), recent_days=14, max_recent=50)
+    assert [d.title for d in recent] == ["오늘"]
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # build_digest + render — 통합(누락 0, 인용 보존, LLM 0)
 # ─────────────────────────────────────────────────────────────────────────
@@ -309,6 +365,29 @@ def test_render_digest_markdown_3섹션_인용보존(tmp_path: Path) -> None:
         assert cit in md, f"인용 누락: {cit}"
 
 
+def test_render_digest_제목의_대괄호를_이스케이프한다(tmp_path: Path) -> None:
+    """제목에 `[`/`]` 가 있어도 링크(C3 deep link)가 깨지지 않게 이스케이프한다(C-4)."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(
+        Path("decisions/a.md"),
+        _decision_md("결정 [중요] 확정", decision_date="2026-06-07", project="Apollo"),
+    )
+    digest = build_digest(store, digest_config=WikiDigestConfig(), now=date(2026, 6, 8))
+    md = render_digest_markdown(digest)
+    # 링크 텍스트의 대괄호가 escape 되어 원시 `]` 가 링크를 조기 종료하지 않는다.
+    assert "결정 \\[중요\\] 확정" in md
+
+
+def test_parse_open_actions_description의_due문자열에_속지않는다() -> None:
+    """description 에 `(due: 협의)` 가 있고 실제 due 가 뒤면 마지막(실제) due 를 쓴다(C-5)."""
+    content = _action_items_md(
+        ["- [ ] 민수: 일정 (due: 협의) 재조정 (due: 2026-05-30) [meeting:abcd1234@00:01:20]"]
+    )
+    actions = parse_open_actions(content)
+    assert actions[0].due_date == "2026-05-30"
+
+
 def test_build_digest_액션없음_빈_다이제스트(tmp_path: Path) -> None:
     """action_items.md 가 없어도(빈 위키) graceful 하게 빈 다이제스트를 만든다."""
     store = WikiStore(tmp_path / "wiki")
@@ -329,7 +408,7 @@ def test_digest_모듈은_llm_모델매니저에_의존하지_않는다() -> Non
     assert "model_manager" not in src
     assert "SentenceTransformer" not in src
     # 공개 데이터클래스가 frozen 인지 가벼운 확인
-    assert OpenAction("o", "d", "[meeting:x@00:00:00]", None, "raw").owner == "o"
+    assert OpenAction("o", "d", ["[meeting:x@00:00:00]"], None, "raw").owner == "o"
 
 
 # ─────────────────────────────────────────────────────────────────────────

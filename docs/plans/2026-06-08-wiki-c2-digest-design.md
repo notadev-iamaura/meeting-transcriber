@@ -77,3 +77,17 @@ wiki:
 - UI/`/app/wiki` 현황 탭·API 엔드포인트 → **C3**.
 - owner별 액션을 프로젝트와 교차집계, due 임박 경고, 통계 차트 → 과설계, 제외.
 - digest 의 LLM 요약(자연어 브리핑) → 계획서가 명시적으로 배제(LLM 0).
+
+## 8. 적대 리뷰 반영 (2026-06-08, code-reviewer)
+
+리뷰 결과 blocker 0. 1순위 불변식(인용 무결성)·누락 0 직결 concern 을 전부 수정:
+
+- **C-1 (수정)**: 멀티라인 description(LLM 이 개행 포함 반환)에서 둘째 줄 인용이 손실되던 문제 — `parse_open_actions` 가 다음 `- [ ]`/`##`/빈 줄 전까지를 **하나의 논리 항목으로 병합**하도록 변경. 인용/설명 누락 0.
+- **C-2 (수정)**: 한 액션 라인의 인용이 여럿일 때 첫 1개만 보존되던 문제 — `OpenAction.citation: str` → `citations: list[str]`(`findall`)로 전부 보존, 렌더도 전부 노출.
+- **C-3 (수정)**: `collect_project_status` 동일 날짜 tie 가 rglob 순서에 의존해 비결정적이던 문제 — `(파싱날짜, page_path)` 2차 키로 안정화. 불량 날짜 강등(`_date_key`)도 함께.
+- **C-4 (수정)**: 제목의 `[`/`]` 가 마크다운 링크/ C3 deep link 를 깨뜨리던 문제 — `_escape_link_text` 로 링크 텍스트 대괄호 이스케이프.
+- **C-5 (수정)**: description 에 `(due: ...)` 문자열이 있으면 첫 매치를 마감일로 오추출 — 인용 직전(끝)에 가까운 **마지막** 매치를 사용.
+- **stale digest (수정)**: `_regenerate_digest` 를 페이지 변경 가드(`if pages_created...`) **밖**으로 이동 — action 렌더 실패 등으로 변경 0건인 회의에서도 현황판이 stale 되지 않게 매 compile 재생성(집계는 모델 0이라 저렴, graceful).
+- 회귀 가드 테스트 6건 추가(멀티라인·다중인용·tie 결정성·제목 이스케이프·due 오추출·미래 결정 제외). 전체 26건.
+
+- **남은 nit(판단·보류)**: `## Open Issues` 오인(실제 포맷 `## Open (N)` 고정이라 무해), `_ALWAYS_VISIBLE_PAGES` digest.md 는 index.md 일관성용, 결정 페이지 디스크 2회 스캔(<1000 페이지 가정에서 무시). owner 마크다운 인젝션은 `_resolve_owner` 가 화자명/미지정으로 제한.

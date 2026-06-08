@@ -40,13 +40,13 @@ _UNASSIGNED = "미지정"
 
 @dataclass(frozen=True)
 class OpenAction:
-    """미해결(open) 액션 한 건. 원본 인용/라인을 보존한다."""
+    """미해결(open) 액션 한 건. 원본 인용/라인을 모두 보존한다."""
 
     owner: str
     description: str
-    citation: str  # "[meeting:id@HH:MM:SS]" 원문 그대로(없으면 "")
+    citations: list[str]  # 라인의 모든 "[meeting:id@HH:MM:SS]"(없으면 빈 리스트)
     due_date: str | None
-    raw_line: str  # 파싱 손실 방지를 위한 원본 라인(누락 0 보증)
+    raw_line: str  # 파싱 손실 방지를 위한 원본(누락 0 보증)
 
 
 @dataclass(frozen=True)
@@ -91,9 +91,11 @@ def _citation_str(c: Citation) -> str:
 def parse_open_actions(action_items_content: str) -> list[OpenAction]:
     """action_items.md 본문의 `## Open` 섹션을 OpenAction 목록으로 파싱한다.
 
-    `## Open` 헤더부터 다음 `##` 섹션 전까지의 모든 `- [ ]` 라인을 집계한다.
-    owner 구분(`:`)이 없거나 인용이 없는 비정형 라인도 드롭하지 않고 owner="미지정"
-    또는 citation="" 로 보존한다 — **누락 0**(불변식 §C2 완료 기준).
+    `## Open` 헤더부터 다음 `##` 섹션 전까지의 모든 `- [ ]` 항목을 집계한다.
+    한 항목이 여러 물리 라인에 걸쳐 있어도(LLM 이 개행 포함 description 반환 시)
+    다음 `- [ ]`/`##`/빈 줄 전까지를 **하나의 논리 항목으로 병합**해 인용·설명을
+    잃지 않는다(인용 무결성·누락 0). owner 구분(`:`)이나 인용이 없는 비정형 항목도
+    드롭하지 않고 owner="미지정"/citations=[] 로 보존한다.
 
     Args:
         action_items_content: action_items.md 전체 본문.
@@ -103,30 +105,48 @@ def parse_open_actions(action_items_content: str) -> list[OpenAction]:
     """
     actions: list[OpenAction] = []
     in_open = False
+    buffer: list[str] = []  # 현재 논리 항목을 이루는 물리 라인들
+
+    def _flush() -> None:
+        if buffer:
+            actions.append(_parse_open_item(list(buffer)))
+            buffer.clear()
+
     for raw in action_items_content.splitlines():
         line = raw.rstrip()
         if _SECTION_RE.match(line):
-            # 섹션 헤더 — Open 진입/이탈 판정
+            _flush()
             in_open = bool(_OPEN_SECTION_RE.match(line))
             continue
         if not in_open:
             continue
-        item = _OPEN_ITEM_RE.match(line)
-        if item is None:
-            continue  # placeholder("_(없음)_") 등 비항목 라인
-        actions.append(_parse_open_line(line, item.group("rest")))
+        if not line.strip():
+            _flush()  # 빈 줄 = 항목 경계
+            continue
+        if _OPEN_ITEM_RE.match(line):
+            _flush()  # 새 `- [ ]` 항목 시작
+            buffer.append(line)
+        elif buffer:
+            buffer.append(line)  # 직전 항목의 연속(continuation) 라인
+        # buffer 가 비었고 항목도 아니면 placeholder("_(없음)_") 등 → 무시
+    _flush()
     return actions
 
 
-def _parse_open_line(raw_line: str, rest: str) -> OpenAction:
-    """`- [ ]` 라인의 본문(rest)에서 owner·desc·due·citation 을 추출한다(드롭 없음)."""
-    citation_match = _CITATION_RE.search(rest)
-    citation = citation_match.group(0) if citation_match else ""
+def _parse_open_item(lines: list[str]) -> OpenAction:
+    """논리 항목(1+ 물리 라인)에서 owner·desc·due·citations 을 추출한다(드롭 없음)."""
+    raw_line = "\n".join(s.strip() for s in lines).strip()
+    head_match = _OPEN_ITEM_RE.match(lines[0])
+    head = head_match.group("rest") if head_match else lines[0].strip()
+    merged = " ".join([head.strip(), *(s.strip() for s in lines[1:])]).strip()
 
-    # 인용/ due 를 제거해 owner+desc 본문만 남긴다.
-    body = _CITATION_RE.sub("", rest)
-    due_match = _DUE_RE.search(body)
-    due_date = due_match.group("due").strip() if due_match else None
+    # 라인의 모든 인용을 보존(다중 인용 손실 방지 — 불변식 #1).
+    citations = _CITATION_RE.findall(merged)
+
+    body = _CITATION_RE.sub("", merged)
+    # due 가 여러 번 등장하면 인용 직전(끝)에 가까운 마지막 매치를 마감일로 본다.
+    due_matches = _DUE_RE.findall(body)
+    due_date = due_matches[-1].strip() if due_matches else None
     body = _DUE_RE.sub("", body).strip()
 
     # "owner: desc" 분해(콜론 없으면 전체를 desc, owner=미지정 — 누락 0).
@@ -140,9 +160,9 @@ def _parse_open_line(raw_line: str, rest: str) -> OpenAction:
     return OpenAction(
         owner=owner,
         description=description,
-        citation=citation,
+        citations=citations,
         due_date=due_date,
-        raw_line=raw_line.strip(),
+        raw_line=raw_line,
     )
 
 
@@ -233,17 +253,20 @@ def collect_project_status(store: WikiStore) -> list[ProjectStatus]:
         date_str = _fm_str(fm, "decision_date", "date")
         title = _fm_str(fm, "title") or "(제목 없음)"
         status = _fm_str(fm, "status")
+        page_path = str(page.path)
         for project in _projects_of(fm):
             current = latest.get(project)
-            # 파싱한 날짜로 비교한다 — 문자열 비교는 불량 날짜("없음" 등)가 한글>숫자로
-            # '최신'을 가로채는 버그를 만든다. 파싱 가능한 날짜가 항상 우선.
-            if current is None or _date_key(date_str) > _date_key(current.last_date):
+            # (파싱날짜, page_path) 안정 비교 — 문자열 날짜 비교는 불량 날짜("없음" 등)가
+            # 한글>숫자로 '최신'을 가로채고, 동일 날짜 tie 는 rglob 순서에 의존해
+            # 비결정적이 된다. 파싱 날짜 우선 + page_path 2차 키로 결정성 확보.
+            new_key = (_date_key(date_str), page_path)
+            if current is None or new_key > (_date_key(current.last_date), current.page_path):
                 latest[project] = ProjectStatus(
                     project=project,
                     last_title=title,
                     last_date=date_str,
                     status=status,
-                    page_path=str(page.path),
+                    page_path=page_path,
                 )
     return [latest[p] for p in sorted(latest)]
 
@@ -322,7 +345,7 @@ def render_digest_markdown(digest: WikiDigest) -> str:
             parts.append(f"### {owner} ({len(items)})")
             for action in items:
                 due = f" (due: {action.due_date})" if action.due_date else ""
-                cit = f" {action.citation}" if action.citation else ""
+                cit = (" " + " ".join(action.citations)) if action.citations else ""
                 parts.append(f"- {action.description}{due}{cit}")
             parts.append("")
 
@@ -338,7 +361,8 @@ def render_digest_markdown(digest: WikiDigest) -> str:
             status = f" · {dec.status}" if dec.status else ""
             cits = (" " + " ".join(dec.citations)) if dec.citations else ""
             parts.append(
-                f"- [{dec.title}]({dec.page_path}) ({dec.decision_date}{proj}{status}){cits}"
+                f"- [{_escape_link_text(dec.title)}]({dec.page_path}) "
+                f"({dec.decision_date}{proj}{status}){cits}"
             )
         parts.append("")
 
@@ -352,11 +376,18 @@ def render_digest_markdown(digest: WikiDigest) -> str:
         for ps in digest.project_status:
             status = f" — {ps.status}" if ps.status else ""
             parts.append(
-                f"- **{ps.project}**: [{ps.last_title}]({ps.page_path}) ({ps.last_date}){status}"
+                f"- **{ps.project}**: [{_escape_link_text(ps.last_title)}]({ps.page_path}) "
+                f"({ps.last_date}){status}"
             )
         parts.append("")
 
     return "\n".join(parts) + "\n"
+
+
+def _escape_link_text(text: str) -> str:
+    """마크다운 링크 텍스트(`[...]`)용 대괄호 이스케이프 — 제목의 `[`/`]` 가 링크를
+    깨거나 C3 deep link 파싱을 망가뜨리지 않게 한다(인용 텍스트는 영향 없음)."""
+    return text.replace("[", "\\[").replace("]", "\\]")
 
 
 def _parse_iso_date(value: str) -> date | None:
