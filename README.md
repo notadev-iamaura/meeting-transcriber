@@ -1,11 +1,13 @@
 # Recap
 
-> **한국어 로컬 AI 회의 전사·요약·지식화 도구**
-> _Local meeting recorder, transcriber, and knowledge base for Apple Silicon._
+> **한국어 회의를 로컬에서 녹음하고, 검색 가능한 Decision Wiki로 남기는 도구**
+> _Local Korean meeting recorder and cited Decision Wiki for Apple Silicon._
 
 [![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11~3.12](https://img.shields.io/badge/python-3.11~3.12-blue.svg)](https://www.python.org/downloads/)
 
-100% 오프라인, Apple Silicon 최적화. 회의 녹음 → 전사 → 화자 분리 → AI 요약 → 검색·채팅 지식화를 한 곳에서.
+Recap은 Apple Silicon Mac에서 회의 녹음 → 전사 → 화자 분리 → AI 교정·요약 → 검색·채팅 → Decision Wiki 정리 흐름까지 로컬로 처리하는 프로젝트입니다.
+회의가 끝난 뒤 사라지는 대화를 결정사항, 액션아이템, 원문 timestamp 근거와 함께 다시 찾을 수 있게 만드는 것이 목표입니다.
+
 모든 데이터는 로컬에서만 처리되며, 외부 서버로 전송되지 않습니다.
 
 > **About the name** — 앱은 UI (앱 아이콘·윈도우 타이틀·메뉴바) 에서 **Recap** 으로 브랜딩되어 있습니다.
@@ -14,18 +16,38 @@
 > **⚠️ Apple Silicon Mac 전용** — 이 프로젝트는 MLX 프레임워크를 사용하며, Apple Silicon(M1/M2/M3/M4) Mac에서만 동작합니다.
 > Intel Mac, Linux, Windows에서는 MLX 기반 STT가 지원되지 않습니다.
 
+![Recap Decision Wiki demo](docs/assets/launch/recap-wiki-demo.gif)
+
+## 스크린샷
+
+| Decision Wiki 현황 | Wiki 검색 |
+|---|---|
+| ![Decision Wiki overview](docs/assets/launch/wiki-overview-light.png) | ![Decision Wiki search detail](docs/assets/launch/wiki-search-detail-light.png) |
+
+## 왜 Decision Wiki인가
+
+긴 전사문은 남겨도 다시 찾기 어렵습니다. Recap은 원문 전사와 RAG 검색을 유지하면서, 회의에서 나온 결정사항과 액션아이템을 별도의 Markdown Wiki 레이어로 정리하는 흐름을 제공합니다.
+
+- **원문 보존**: 전체 전사문과 회의별 RAG 인덱스는 그대로 유지합니다.
+- **근거 인용**: Wiki에 승격되는 결정사항은 `[meeting:{id}@HH:MM:SS]` 형식의 원문 timestamp 근거를 갖도록 설계했습니다.
+- **하이브리드 검색**: Wiki 검색은 BM25/FTS5 키워드 검색과 e5-small 벡터 검색을 함께 사용해, 표현이 조금 달라도 관련 결정을 찾을 수 있게 합니다.
+- **업무 현황 다이제스트**: 미해결 액션, 최근 결정, 프로젝트별 현재 상태를 LLM 호출 없이 집계합니다.
+
+Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반 컴파일러와 검색 인덱스를 사용합니다. 자동 생성 결과는 보수적으로 다루며, 원문 근거와 함께 확인할 수 있는 방향을 우선합니다.
+
 ## 주요 기능
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
 - **STT 모델 선택기**: 기본 모델은 `whisper-large-v3-turbo` (회의 벤치 1위). 웹 UI에서 한국어 fine-tune 3종(komixv2 / seastar / ghost613)도 다운로드/활성화 가능
 - **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
 - **AI 교정**: Gemma 4 (기본) 또는 EXAONE 3.5 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
-- **시맨틱 검색**: ChromaDB + SQLite FTS5 하이브리드 검색
-- **AI 채팅**: 회의 내용 기반 질의응답
+- **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
+- **하이브리드 검색**: 전사문은 ChromaDB + SQLite FTS5 RAG로, Wiki는 BM25/FTS5 + e5-small 벡터 검색으로 탐색
+- **AI 채팅**: 회의 원문과 Wiki 지식을 기반으로 질의응답
 - **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
 - **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
-- **macOS 메뉴바 앱**: rumps 기반 시스템 트레이 상주, 녹음 상태 실시간 표시
-- **웹 UI**: macOS 네이티브 스타일 3-Column SPA (회의 목록 + 뷰어 + 검색 + AI 채팅 + 설정)
+- **macOS 메뉴바 앱**: rumps 기반 메뉴바 상주, 녹음 상태 실시간 표시
+- **웹 UI**: macOS 네이티브 스타일 SPA (회의 목록 + 뷰어 + 검색 + Wiki + AI 채팅 + 설정)
 - **설정 UI**: 웹에서 STT 모델/LLM 모델/Temperature/전사 언어 등 실시간 변경
 - **Zoom 감지**: Zoom 회의 시작/종료 자동 감지 (CptHost 프로세스 모니터링)
 - **폴더 감시**: 지정 폴더에 파일 추가 시 자동 처리
