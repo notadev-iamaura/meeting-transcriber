@@ -86,6 +86,14 @@ wiki:
     recency_half_life_days: 90               # 최신성 반감기(일)
     mmr_enabled: false                       # MMR 다양성 재정렬 (C1c, C4 검증 전까지 OFF)
     mmr_lambda: 0.7                          # MMR 관련도/다양성 (1.0=관련도만, 0.0=다양성만)
+  # 시맨틱(벡터) 하이브리드 검색 (G1). 임베더/ChromaDB 불가 시 BM25-only 폴백.
+  semantic:
+    enabled: true                            # 하이브리드(벡터+BM25 RRF) on/off (false=순수 BM25)
+    vector_weight: 0.6                       # RRF 벡터 가중치
+    fts_weight: 0.4                          # RRF FTS(BM25) 가중치
+    rrf_k: 60                                # RRF 파라미터 (순위 차 완화)
+    top_k_vector: 20                         # 벡터 검색 후보 수
+    collection_name: "wiki_pages"            # 위키 전용 ChromaDB 컬렉션 (transcript 와 분리)
 
 # === AI Chat 설정 ===
 chat:

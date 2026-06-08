@@ -706,6 +706,30 @@ class WikiRankingConfig(BaseModel):
     mmr_lambda: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
+class WikiSemanticConfig(BaseModel):
+    """Decision Wiki 시맨틱(벡터) 검색 설정 (Memorable Wiki G1).
+
+    위키 페이지를 e5-small 로 임베딩해 ChromaDB 별도 컬렉션에 저장하고, 검색 시
+    벡터 결과와 BM25 결과를 RRF 로 융합한 뒤 C1 다중신호 재랭킹을 적용한다.
+    임베더/ChromaDB 로드 불가 시 BM25-only 로 graceful 폴백한다(불변식 #4·#7).
+
+    필드:
+        enabled: 하이브리드(벡터+BM25) 활성화. False 면 순수 BM25(현재 동작).
+        vector_weight: RRF 벡터 가중치.
+        fts_weight: RRF FTS(BM25) 가중치.
+        rrf_k: RRF 파라미터(순위 차 완화).
+        top_k_vector: 벡터 검색에서 가져올 후보 수.
+        collection_name: 위키 전용 ChromaDB 컬렉션 이름(transcript 컬렉션과 분리).
+    """
+
+    enabled: bool = True
+    vector_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    fts_weight: float = Field(default=0.4, ge=0.0, le=1.0)
+    rrf_k: int = Field(default=60, ge=1)
+    top_k_vector: int = Field(default=20, ge=1, le=100)
+    collection_name: str = "wiki_pages"
+
+
 class WikiConfig(BaseModel):
     """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
 
@@ -763,6 +787,11 @@ class WikiConfig(BaseModel):
     ranking: WikiRankingConfig = Field(default_factory=WikiRankingConfig)
     """Decision Wiki 검색(BM25) 후처리 재랭킹 설정. config.yaml `wiki.ranking`
     하위에서 가중치/반감기/MMR 을 조정한다. 누락 시 코드 기본값(enabled=True)."""
+
+    # ─── Memorable Wiki G1 — 시맨틱(벡터) 하이브리드 검색 ─────────────────
+    semantic: WikiSemanticConfig = Field(default_factory=WikiSemanticConfig)
+    """Decision Wiki 하이브리드(벡터+BM25 RRF) 검색 설정. config.yaml
+    `wiki.semantic` 하위. 누락 시 코드 기본값(enabled=True, graceful 폴백)."""
 
     @property
     def resolved_root(self) -> Path:

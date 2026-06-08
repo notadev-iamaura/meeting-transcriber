@@ -80,6 +80,7 @@ def _create_wiki_compiler_v2(
     from core.wiki.guard import WikiGuard
     from core.wiki.lint import WikiLinter
     from core.wiki.llm_client import MlxWikiClient
+    from core.wiki.semantic_index import make_default_embed_documents
 
     llm = MlxWikiClient(config=config, model_manager=model_manager)
 
@@ -126,6 +127,14 @@ def _create_wiki_compiler_v2(
         project_extractor=project_extractor,
         topic_extractor=topic_extractor,
         linter=linter,
+        # G1 — semantic 활성 시 e5 문서 임베더 주입(쓰기 시 벡터 자동 색인).
+        # 임베더는 호출 시점에만 e5 를 로드하므로 생성 자체는 비용 0.
+        semantic_doc_embedder=(
+            make_default_embed_documents(config)
+            if getattr(getattr(config, "wiki", None), "semantic", None)
+            and config.wiki.semantic.enabled
+            else None
+        ),
     )
 
 

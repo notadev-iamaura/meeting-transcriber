@@ -389,6 +389,7 @@ def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
         router=router_obj,
         wiki_store=wiki_store,
         wiki_llm=wiki_llm,
+        config=config,  # G1 — 위키-챗 하이브리드 시맨틱 검색(미주입 시 BM25-only)
     )
 
 

@@ -110,8 +110,10 @@ final = positive                              (비-superseded)
 
 ## 6. 게이트 항목 (측정 후 결정 — 기본 OFF)
 
-### G1. 위키 벡터 시맨틱 회상 (격차 ④) — 조건: C4에서 **BM25 recall@5 < 목표**일 때만
-위키 페이지를 전용 ChromaDB `wiki_pages`에 e5-small 임베딩(`embedder.py` 재사용), `hybrid_search.py` RRF 패턴 차용. 실패 시 BM25-only graceful degradation. **쿼리당 e5 로드 비용**을 감수할 만한 recall 이득이 증명될 때만.
+### G1. 위키 벡터 시맨틱 회상 (격차 ④) — ✅ **2026-06-07 사용자 지시로 활성(게이트 오버라이드)**
+위키 페이지를 전용 ChromaDB `wiki_pages`에 e5-small 임베딩(`embedder.py` 재사용), `hybrid_search.py` RRF 패턴 차용. 실패 시 BM25-only graceful degradation.
+
+> **게이트 오버라이드 기록(2026-06-07)**: 원래 조건은 "C4에서 BM25 recall@5 < 목표일 때만". 사용자가 "임베딩도 써"라고 직접 지시해 활성화했다. 즉 **off→on 결정은 오버라이드됐고, C4 recall@5 측정은 착수 전제에서 후속 측정(deferred)으로 변경**됐다. 실측 검증(`tests/wiki/test_semantic_real_e5.py`, native): 어휘 비매칭 쿼리가 의미로 회상(BM25=∅, 하이브리드=정답 1위), RSS 피크 ~1.35GB(9.5GB 한도 안전). **남은 측정 TODO**: C4 골든셋에서 recall@5 이득(비용 대비) 정량화 + RSS 자동 단언. 상세 설계: `docs/plans/2026-06-07-wiki-g1-semantic-design.md`.
 
 ### G2. LLM consolidation (격차 ①) — 조건: 아카이브가 실제로 검색/UX를 해칠 때만
 오래된 결정 롤업 요약. **전제**: 원본 영구 보존 + 인용 100% 전이 + 자동반영 금지(pending 제안) + summarization drift 회귀 테스트. 검색 기반 시스템에선 필요성이 낮으므로 **증거 우선**.
@@ -140,11 +142,13 @@ wiki:
     recency_half_life_days: 90
     mmr_enabled: false        # 선택 — C4 검증 전까지 off
     mmr_lambda: 0.7           # 선택
-  semantic:                   # G1 — 기본 off
-    enabled: false
+  semantic:                   # G1 — 2026-06-07 사용자 오버라이드로 활성(enabled: true)
+    enabled: true             # (원래 기본 off → 사용자 지시로 on. C4 recall 측정은 후속)
     vector_weight: 0.6
     fts_weight: 0.4
     rrf_k: 60
+    top_k_vector: 20
+    collection_name: "wiki_pages"
   consolidation:              # G2 — 기본 off
     enabled: false
 ```

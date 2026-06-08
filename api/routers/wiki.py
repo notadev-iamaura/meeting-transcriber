@@ -554,21 +554,49 @@ async def search_wiki(
     index = WikiSearchIndex(wiki_root)
     try:
         index.rebuild(store)
-        raw_results = index.search(
-            query,
-            top_k=limit,
-            page_types=[page_type] if page_type else None,
-            status=status,
-            project=project,
-            participant=participant,
-            owner=owner,
-            person=person,
-            date_from=date_from,
-            date_to=date_to,
-            min_confidence=min_confidence,
-        )
+        config = getattr(request.app.state, "config", None)
+        if config is not None and config.wiki.semantic.enabled:
+            # G1 하이브리드(벡터+BM25). 벡터 미색인 시 내부에서 BM25-only 로 폴백
+            # (e5 로드 없이) — 응답 스키마는 BM25 경로와 동일.
+            from core.wiki.semantic_index import WikiSemanticIndex  # noqa: PLC0415
+            from core.wiki.semantic_search import wiki_hybrid_search  # noqa: PLC0415
+
+            semantic_index = WikiSemanticIndex(
+                config.paths.resolved_chroma_db_dir,
+                collection_name=config.wiki.semantic.collection_name,
+            )
+            raw_results = await wiki_hybrid_search(
+                query,
+                search_index=index,
+                semantic_index=semantic_index,
+                config=config,
+                top_k=limit,
+                page_types=[page_type] if page_type else None,
+                status=status,
+                project=project,
+                participant=participant,
+                owner=owner,
+                person=person,
+                date_from=date_from,
+                date_to=date_to,
+                min_confidence=min_confidence,
+            )
+        else:
+            raw_results = index.search(
+                query,
+                top_k=limit,
+                page_types=[page_type] if page_type else None,
+                status=status,
+                project=project,
+                participant=participant,
+                owner=owner,
+                person=person,
+                date_from=date_from,
+                date_to=date_to,
+                min_confidence=min_confidence,
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("wiki BM25 검색 실패: %r", exc, exc_info=True)
+        logger.warning("wiki 검색 실패: %r", exc, exc_info=True)
         return WikiSearchResponse(results=[], total=0, query=q)
 
     results = [
