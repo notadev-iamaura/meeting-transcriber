@@ -227,19 +227,25 @@ class WikiCompilerV2:
         try:
             import asyncio
 
-            from core.wiki.semantic_index import WikiSemanticIndex, rebuild_semantic_index
+            from core.wiki.semantic_index import WikiSemanticIndex, reindex_incremental
 
             semantic_index = WikiSemanticIndex(
                 paths_cfg.resolved_chroma_db_dir,
                 collection_name=sem_cfg.collection_name,
             )
-            count = await asyncio.to_thread(
-                rebuild_semantic_index,
+            # 증분: 변경 페이지만 재임베딩 + orphan(거부/이동) 벡터 삭제(일관성·발열 절감).
+            stats = await asyncio.to_thread(
+                reindex_incremental,
                 self._store,
                 semantic_index=semantic_index,
                 embed_documents=self._semantic_doc_embedder,
             )
-            logger.info("wiki 벡터 색인 갱신: %d 페이지", count)
+            logger.info(
+                "wiki 벡터 색인 갱신: embedded=%d deleted=%d total=%d",
+                stats["embedded"],
+                stats["deleted"],
+                stats["total"],
+            )
         except Exception as exc:  # noqa: BLE001 — 색인 실패는 ingest/검색에 무영향
             logger.warning("wiki 벡터 색인 rebuild 실패 — ingest 유지: %r", exc)
 

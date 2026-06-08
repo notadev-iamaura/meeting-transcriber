@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import resource
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,21 @@ from core.wiki.semantic_index import (
     WikiSemanticIndex,
     make_default_embed_documents,
     rebuild_semantic_index,
+    reindex_incremental,
 )
 from core.wiki.semantic_search import wiki_hybrid_search
 from core.wiki.store import WikiStore
 
 pytestmark = pytest.mark.native
+
+# e5(470MB) + ChromaDB 로드 후에도 피크 RSS 상한(불변식 #7: ≤9.5GB). 실측 ~1.35GB 기준
+# 넉넉한 3GB soft-ceiling — 모델 누수/이중적재 같은 gross 회귀를 자동 감지한다.
+_RSS_PEAK_CEILING_MB = 3072.0
+
+
+def _peak_rss_mb() -> float:
+    """프로세스 피크 RSS(MB). macOS 는 ru_maxrss 가 바이트 단위."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
 
 def _md(title: str, body: str) -> str:
@@ -90,3 +101,34 @@ def test_실_e5_어휘비매칭_시맨틱_회상(tmp_path: Path) -> None:
     paths = [r.page_path for r in hybrid]
     assert "decisions/budget.md" in paths, f"시맨틱 회상 실패: {paths}"
     assert paths[0] == "decisions/budget.md", f"budget 이 1위가 아님: {paths}"
+
+    # RAM 회귀 자동 감지: e5 문서 임베딩 + 쿼리 임베딩 + ChromaDB 후 피크 RSS 상한.
+    peak_mb = _peak_rss_mb()
+    assert peak_mb < _RSS_PEAK_CEILING_MB, (
+        f"e5 하이브리드 피크 RSS {peak_mb:.0f}MB > {_RSS_PEAK_CEILING_MB:.0f}MB "
+        f"— RAM 회귀(모델 누수/이중적재) 의심"
+    )
+
+
+def test_실_e5_증분색인_변경분만_재임베딩한다(tmp_path: Path) -> None:
+    """content_hash 가 실 ChromaDB 메타를 라운드트립해 변경분만 재임베딩됨을 검증."""
+    cfg = get_config()
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(Path("decisions/budget.md"), _md("예산 확정", "예산을 1억원으로 확정했다."))
+    store.write_page(Path("decisions/schedule.md"), _md("일정 확정", "출시를 7월로 잡았다."))
+    semantic_index = WikiSemanticIndex(tmp_path / "chroma")
+    embed = make_default_embed_documents(cfg)
+
+    s1 = reindex_incremental(store, semantic_index=semantic_index, embed_documents=embed)
+    assert s1["embedded"] == 2 and s1["deleted"] == 0
+
+    # 무변경 재색인 → 재임베딩 0 (실 chroma 메타의 content_hash 비교)
+    s2 = reindex_incremental(store, semantic_index=semantic_index, embed_documents=embed)
+    assert s2["embedded"] == 0, f"무변경인데 재임베딩됨: {s2}"
+
+    # 1개 변경 → 그 페이지만 재임베딩
+    store.write_page(Path("decisions/budget.md"), _md("예산 확정", "예산을 2억원으로 상향했다."))
+    s3 = reindex_incremental(store, semantic_index=semantic_index, embed_documents=embed)
+    assert s3["embedded"] == 1, f"변경분만 임베딩 아님: {s3}"
+    assert semantic_index.count() == 2

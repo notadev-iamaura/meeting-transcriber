@@ -11,7 +11,11 @@ import math
 from pathlib import Path
 from typing import Any
 
-from core.wiki.semantic_index import WikiSemanticIndex, rebuild_semantic_index
+from core.wiki.semantic_index import (
+    WikiSemanticIndex,
+    rebuild_semantic_index,
+    reindex_incremental,
+)
 from core.wiki.store import WikiStore
 
 
@@ -48,17 +52,32 @@ class _FakeCollection:
 
     def __init__(self) -> None:
         self._emb: dict[str, list[float]] = {}
+        self._meta: dict[str, dict[str, Any]] = {}
 
-    def upsert(self, *, ids: list[str], embeddings: list[list[float]], **_: Any) -> None:
-        for i, e in zip(ids, embeddings, strict=False):
+    def upsert(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        metadatas: list[dict[str, Any]] | None = None,
+        **_: Any,
+    ) -> None:
+        metas = metadatas if metadatas is not None else [{} for _ in ids]
+        for i, e, m in zip(ids, embeddings, metas, strict=False):
             self._emb[i] = e
+            self._meta[i] = m
 
     def delete(self, *, ids: list[str]) -> None:
         for i in ids:
             self._emb.pop(i, None)
+            self._meta.pop(i, None)
 
     def count(self) -> int:
         return len(self._emb)
+
+    def get(self, **_: Any) -> dict[str, Any]:
+        ids = list(self._emb)
+        return {"ids": ids, "metadatas": [self._meta.get(i, {}) for i in ids]}
 
     def query(
         self, *, query_embeddings: list[list[float]], n_results: int, **_: Any
@@ -172,3 +191,59 @@ def test_rebuild_semantic_index_임베딩_실패시_0(tmp_path: Path) -> None:
 
     assert n == 0
     assert index.count() == 0
+
+
+def _inc_setup(tmp_path: Path) -> tuple[WikiStore, WikiSemanticIndex, Any, list[list[str]]]:
+    """증분 테스트용 store(2페이지) + index + (호출 기록하는)임베더."""
+    store = WikiStore(tmp_path / "wiki")
+    store.init_repo()
+    store.write_page(Path("decisions/a.md"), _md("결정 A", "예산 합의"))
+    store.write_page(Path("decisions/b.md"), _md("결정 B", "일정 합의"))
+    index = _index(tmp_path, _FakeCollection())
+    calls: list[list[str]] = []
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[float(len(t)), 0.0] for t in texts]
+
+    return store, index, _embed, calls
+
+
+def test_reindex_incremental_최초는_전체_임베딩(tmp_path: Path) -> None:
+    """빈 인덱스 → 모든 페이지 임베딩(embedded=total)."""
+    store, index, embed, _calls = _inc_setup(tmp_path)
+    stats = reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    assert stats == {"embedded": 2, "deleted": 0, "total": 2}
+    assert index.count() == 2
+
+
+def test_reindex_incremental_무변경시_재임베딩_안한다(tmp_path: Path) -> None:
+    """content_hash 동일 → 임베더 미호출, embedded=0(전체 재임베딩 회피)."""
+    store, index, embed, calls = _inc_setup(tmp_path)
+    reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    calls.clear()
+    stats = reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    assert stats["embedded"] == 0
+    assert calls == []  # 임베더(=e5 로드) 미호출
+
+
+def test_reindex_incremental_변경된_페이지만_임베딩한다(tmp_path: Path) -> None:
+    """1개 페이지 본문 변경 → 그 페이지만 재임베딩(embedded=1)."""
+    store, index, embed, calls = _inc_setup(tmp_path)
+    reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    calls.clear()
+    store.write_page(Path("decisions/a.md"), _md("결정 A", "예산을 2억으로 상향"))  # a 변경
+    stats = reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    assert stats["embedded"] == 1
+    assert len(calls) == 1 and len(calls[0]) == 1  # 변경된 a 한 건만 임베딩
+
+
+def test_reindex_incremental_삭제된_페이지의_벡터를_제거한다(tmp_path: Path) -> None:
+    """스토어에서 사라진 페이지(거부/이동)는 orphan 으로 삭제 — stale 벡터 방지."""
+    store, index, embed, _calls = _inc_setup(tmp_path)
+    reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    store.delete_page(Path("decisions/b.md"))  # b 제거
+    stats = reindex_incremental(store, semantic_index=index, embed_documents=embed)
+    assert stats["deleted"] == 1
+    assert stats["total"] == 1
+    assert index.count() == 1  # b 벡터 제거됨
