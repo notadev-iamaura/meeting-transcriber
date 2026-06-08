@@ -157,8 +157,7 @@ class WikiSemanticIndex:
         ids = res.get("ids") or []
         metas = res.get("metadatas") or []
         return {
-            str(ids[i]): str((metas[i] or {}).get("content_hash", ""))
-            for i in range(len(ids))
+            str(ids[i]): str((metas[i] or {}).get("content_hash", "")) for i in range(len(ids))
         }
 
 
