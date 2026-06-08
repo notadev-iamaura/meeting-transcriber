@@ -101,7 +101,9 @@ async def wiki_hybrid_search(query, *, search_index, semantic_index, ranking, se
   - **매 ingest 전체 재임베딩**: `rebuild_semantic_index`가 전체 페이지를 재임베딩(BM25 rebuild와 동일 패턴). 소규모 corpus(<1000) 가정에서 수용. e5 인코딩 비용이 FTS보다 크므로, 코퍼스 증가 시 **변경 페이지만 증분 upsert**(이미 있는 `WikiSemanticIndex.upsert`)로 전환은 C4 측정 후 검토.
   - **"비용 0" 단락은 e5 한정**: `count()==0` 단락은 e5(470MB) 로드만 막고, ChromaDB PersistentClient 인스턴스화 비용은 검색당 발생(소규모에선 무시). 벡터 미색인 환경에서 순수 BM25와 완전 동일 비용을 원하면 운영상 `semantic.enabled: false` 유지.
 
-- **남은 갭(후속 TODO)**:
-  - compiler `_reindex_semantic`/chat 하이브리드 wiring의 **단위 테스트 부재** — 현재 native e2e(`test_semantic_real_e5.py`)가 색인+검색 전 경로를 실증하고 기존 통합 테스트가 BM25 폴백 경로를 커버하나, "임베더 주입 시 _reindex_semantic 호출"·"chat semantic 분기"를 가짜 주입으로 단언하는 단위테스트를 추가하면 회귀 안전망이 강해진다.
-  - **RSS/발열 자동 단언**: native 테스트에 psutil RSS 상한 soft-assert + 파이프라인 점유 중 e5 acquire 직렬화 동시성 가드.
-  - **C4 recall@5 정량화**: 게이트 오버라이드의 비용-대비-이득 근거를 골든셋으로 측정.
+## 9. 후속 TODO 처리 현황 (우선순위 순)
+
+- ✅ **① wiring 단위테스트 + RAM 자동측정** (2026-06-08): `tests/wiki/test_g1_wiring.py`(compiler `_reindex_semantic` 임베더 주입/미주입/비활성 분기 + chat config 주입/미주입 분기, 가짜 주입 5건). `test_semantic_real_e5.py`에 피크 RSS < 3GB soft-assert(불변식 #7 회귀 가드).
+- ✅ **② C4 recall@5 정량화** (2026-06-08): `tests/wiki/test_g1_recall_eval.py`(native). 8개 패러프레이즈 골든셋(어휘 비매칭 쿼리↔결정) 실측 — **BM25 recall@5 = 0% (0/8), HYBRID = 100% (8/8), Δ=+100%**. 게이트 오버라이드(벡터 켜기)의 가치를 수치로 고정: BM25가 원천적으로 못 하는 시맨틱 회상을 e5가 전부 해냄. `hybrid ≥ bm25` 회귀 가드 포함.
+- ⏳ **③ 증분 upsert**: `rebuild_semantic_index` 전체 재임베딩 → 변경 페이지만 upsert(코퍼스 증가 시). 소규모(<1000)에선 무해.
+- ⏳ **④ 발열/동시성 가드**: 파이프라인 점유 중 e5 acquire 직렬화 검증(model_manager 단일 lock은 구조적으로 보장됨, 테스트만 미작성).
