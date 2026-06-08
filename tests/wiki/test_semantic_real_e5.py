@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import resource
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,15 @@ from core.wiki.semantic_search import wiki_hybrid_search
 from core.wiki.store import WikiStore
 
 pytestmark = pytest.mark.native
+
+# e5(470MB) + ChromaDB 로드 후에도 피크 RSS 상한(불변식 #7: ≤9.5GB). 실측 ~1.35GB 기준
+# 넉넉한 3GB soft-ceiling — 모델 누수/이중적재 같은 gross 회귀를 자동 감지한다.
+_RSS_PEAK_CEILING_MB = 3072.0
+
+
+def _peak_rss_mb() -> float:
+    """프로세스 피크 RSS(MB). macOS 는 ru_maxrss 가 바이트 단위."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
 
 def _md(title: str, body: str) -> str:
@@ -90,3 +100,10 @@ def test_실_e5_어휘비매칭_시맨틱_회상(tmp_path: Path) -> None:
     paths = [r.page_path for r in hybrid]
     assert "decisions/budget.md" in paths, f"시맨틱 회상 실패: {paths}"
     assert paths[0] == "decisions/budget.md", f"budget 이 1위가 아님: {paths}"
+
+    # RAM 회귀 자동 감지: e5 문서 임베딩 + 쿼리 임베딩 + ChromaDB 후 피크 RSS 상한.
+    peak_mb = _peak_rss_mb()
+    assert peak_mb < _RSS_PEAK_CEILING_MB, (
+        f"e5 하이브리드 피크 RSS {peak_mb:.0f}MB > {_RSS_PEAK_CEILING_MB:.0f}MB "
+        f"— RAM 회귀(모델 누수/이중적재) 의심"
+    )
