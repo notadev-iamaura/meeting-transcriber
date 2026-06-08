@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # action_items.md 는 init_repo() 가 자동 생성하며 일반 페이지 수와 분리해 카운트해야
 # 하므로 all_pages() 결과에서 제외한다.
 SPECIAL_FILES: frozenset[str] = frozenset(
-    {"CLAUDE.md", "index.md", "log.md", "HEALTH.md", "action_items.md"}
+    {"CLAUDE.md", "index.md", "log.md", "HEALTH.md", "action_items.md", "digest.md"}
 )
 
 # init_repo() 가 보장하는 서브디렉토리 — PRD §4.1 디렉토리 레이아웃과 일치

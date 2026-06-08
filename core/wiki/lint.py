@@ -53,7 +53,7 @@ _MAX_CONTRADICTION_PAGES: int = 50
 
 # 항상 노출되는 특수 페이지 — 고아 검사에서 면제.
 _ALWAYS_VISIBLE_PAGES: frozenset[str] = frozenset(
-    {"action_items.md", "index.md", "log.md", "HEALTH.md", "CLAUDE.md"}
+    {"action_items.md", "index.md", "log.md", "HEALTH.md", "CLAUDE.md", "digest.md"}
 )
 
 # 페이지 본문에서 다른 페이지를 가리키는 마크다운 링크 패턴.

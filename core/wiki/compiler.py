@@ -249,6 +249,30 @@ class WikiCompilerV2:
         except Exception as exc:  # noqa: BLE001 — 색인 실패는 ingest/검색에 무영향
             logger.warning("wiki 벡터 색인 rebuild 실패 — ingest 유지: %r", exc)
 
+    def _regenerate_digest(self) -> None:
+        """C2 — 현황 다이제스트(digest.md) 재생성(graceful, LLM/모델 0).
+
+        결정/액션을 순수 집계(`core.wiki.digest`)해 digest.md 를 갱신한다. 모델 로드
+        0(불변식 #4)이며, 비활성(`wiki.digest.enabled=false`)/실패 시 ingest 무영향.
+        """
+        wiki_cfg = getattr(self._config, "wiki", self._config)
+        digest_cfg = getattr(wiki_cfg, "digest", None)
+        if digest_cfg is None or not getattr(digest_cfg, "enabled", False):
+            return
+        try:
+            from core.wiki.digest import build_digest, render_digest_markdown
+
+            digest = build_digest(self._store, digest_config=digest_cfg, now=date.today())
+            self._store.write_page(Path("digest.md"), render_digest_markdown(digest))
+            logger.info(
+                "wiki 현황 다이제스트 갱신: 미해결 %d · 최근결정 %d · 프로젝트 %d",
+                digest.total_open_actions,
+                len(digest.recent_decisions),
+                len(digest.project_status),
+            )
+        except Exception as exc:  # noqa: BLE001 — 다이제스트 실패는 ingest 무영향(graceful)
+            logger.warning("wiki 현황 다이제스트 생성 실패 — ingest 유지: %r", exc)
+
     async def compile_meeting(
         self,
         *,
@@ -570,6 +594,12 @@ class WikiCompilerV2:
                 logger.warning("wiki 검색 색인 rebuild 실패 — ingest 는 유지: %r", exc)
             # G1 — 시맨틱(벡터) 색인 갱신(임베더 주입 시에만 활성, graceful).
             await self._reindex_semantic()
+
+        # ── 7c. 현황 다이제스트 재생성 (C2) ──────────────────────────────
+        # 변경 가드 밖에서 매 compile 재생성한다 — 집계는 모델 0(저렴)이고, 이렇게
+        # 해야 action 렌더 실패 등으로 페이지 변경이 0건인 회의에서도 digest 가
+        # stale 되지 않는다(현황판은 항상 최신이 핵심). 실패는 graceful(ingest 유지).
+        self._regenerate_digest()
 
         # ── 9. lint 트리거 (Phase 4 신규) ────────────────────────────
         # 매 compile_meeting 후 카운터 +1. lint_interval 도달 시 lint_all 실행.

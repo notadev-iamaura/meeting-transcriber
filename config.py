@@ -730,6 +730,26 @@ class WikiSemanticConfig(BaseModel):
     collection_name: str = "wiki_pages"
 
 
+class WikiDigestConfig(BaseModel):
+    """Decision Wiki 현황 다이제스트 설정 (Memorable Wiki C2).
+
+    위키에 쌓인 결정/액션을 LLM 없이 순수 집계해 `digest.md` 현황판을 만든다.
+    "지금 내 미해결 액션 / 최근 결정 / 프로젝트별 현재 상태" 를 항상 최신으로
+    노출한다(코어 불변식 #4: 모델 로드 0). 모든 줄은 원본 인용을 보존한다.
+
+    필드:
+        enabled: 다이제스트 생성 활성화. False 면 `digest.md` 를 만들지 않는다.
+        recent_days: "최근 결정" 윈도(now 기준 일수).
+        max_recent: "최근 결정" 표시 안전 상한(폭주 방지).
+        max_per_owner: owner 당 미해결 액션 표시 상한.
+    """
+
+    enabled: bool = True
+    recent_days: int = Field(default=14, ge=1)
+    max_recent: int = Field(default=50, ge=1)
+    max_per_owner: int = Field(default=50, ge=1)
+
+
 class WikiConfig(BaseModel):
     """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
 
@@ -792,6 +812,11 @@ class WikiConfig(BaseModel):
     semantic: WikiSemanticConfig = Field(default_factory=WikiSemanticConfig)
     """Decision Wiki 하이브리드(벡터+BM25 RRF) 검색 설정. config.yaml
     `wiki.semantic` 하위. 누락 시 코드 기본값(enabled=True, graceful 폴백)."""
+
+    # ─── Memorable Wiki C2 — 현황 다이제스트(집계, LLM 0) ──────────────────
+    digest: WikiDigestConfig = Field(default_factory=WikiDigestConfig)
+    """Decision Wiki 현황 다이제스트 설정. config.yaml `wiki.digest` 하위에서
+    최근 윈도/상한을 조정한다. 누락 시 코드 기본값(enabled=True)."""
 
     @property
     def resolved_root(self) -> Path:
