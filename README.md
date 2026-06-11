@@ -1,5 +1,7 @@
 # Recap
 
+[English](README.en.md) | 한국어
+
 > **한국어 회의를 로컬에서 녹음하고, 검색 가능한 Decision Wiki로 남기는 도구**
 > _Local Korean meeting recorder and cited Decision Wiki for Apple Silicon._
 
