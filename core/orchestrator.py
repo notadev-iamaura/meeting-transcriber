@@ -368,6 +368,14 @@ class JobProcessor:
         job_id = job.id
         meeting_id = job.meeting_id
         audio_path = job.audio_path
+        requested_action = str(getattr(job, "requested_action", "") or "")
+        skip_llm_steps_override: bool | None
+        if requested_action == "transcribe":
+            skip_llm_steps_override = True
+        elif requested_action == "full":
+            skip_llm_steps_override = False
+        else:
+            skip_llm_steps_override = None
 
         logger.info(f"작업 처리 시작: job_id={job_id}, meeting_id={meeting_id}")
 
@@ -458,15 +466,14 @@ class JobProcessor:
                 logger.debug(f"step_progress 처리 실패 (무시): {e}")
 
         try:
-            # 파이프라인 실행: skip_llm_steps=None 으로 전달하면
-            # pipeline.run 내부에서 config.pipeline.skip_llm_steps 값을 사용한다.
-            # (orchestrator 가 강제 오버라이드하지 않고 사용자 설정을 존중)
+            # 파이프라인 실행: batch 가 명시한 실행 의도는 우선하고,
+            # 빈 값이면 pipeline.run 내부에서 config.pipeline.skip_llm_steps 를 사용한다.
             await self._pipeline.run(
                 Path(audio_path),
                 meeting_id=meeting_id,
                 on_step_start=on_step_start,
                 on_step_progress=on_step_progress,
-                skip_llm_steps=None,
+                skip_llm_steps=skip_llm_steps_override,
             )
 
             # 완료 상태 업데이트. 실패 시 복구 경로를 통해 pipeline_state 와 DB 상태를 맞춘다.

@@ -440,7 +440,7 @@ class TestWebSocketServerIntegration:
 
             from api.server import create_app
 
-            app = create_app()
+            app = create_app(runtime_profile="api-test")
 
             with TestClient(app) as _client:
                 # ws_manager가 app.state에 존재하는지 확인
@@ -465,7 +465,7 @@ class TestWebSocketServerIntegration:
 
             from api.server import create_app
 
-            app = create_app()
+            app = create_app(runtime_profile="api-test")
 
             with (
                 TestClient(app) as client,

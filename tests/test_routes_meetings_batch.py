@@ -7,7 +7,7 @@
     - 대상 필터링: action 별 merge·summary 상태에 따른 자동 분류
     - scope 정책: all / recent (hours 윈도우) / selected (명시 ID)
     - 응답 형식: matched / queued / skipped 카운트 + status="no_targets"
-    - 백그라운드 실행: pipeline.run / pipeline.run_llm_steps mock 호출 검증
+    - 백그라운드 실행: JobQueue 큐잉 / pipeline.run_llm_steps mock 호출 검증
     - 보안: path traversal 차단
 
 의존성: pytest, fastapi (TestClient), unittest.mock
@@ -70,7 +70,7 @@ def _make_test_app(tmp_path: Path) -> Any:
             return_value=MagicMock(),
         ),
     ):
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
     return app
 
@@ -88,6 +88,7 @@ class MockJob:
     created_at: str = "2026-04-01T10:00:00"
     updated_at: str = "2026-04-01T10:30:00"
     title: str = ""
+    requested_action: str = ""
 
 
 def _make_meeting_dirs(
@@ -271,9 +272,11 @@ class TestBatchActionFilter:
                     1,
                     "meeting_without_merge",
                     str(tmp_path / "fake.wav"),
+                    status="recorded",
                 ),
             )
-            # audio_path 가 실제로 존재해야 pipeline.run 이 호출된다
+            app.state.job_queue._queue.queue_job = MagicMock()
+            # audio_path 가 실제로 존재해야 JobQueue 큐잉 후보가 된다.
             (tmp_path / "fake.wav").write_bytes(b"\x00" * 16)
 
             response = client.post(
@@ -289,8 +292,9 @@ class TestBatchActionFilter:
         assert data["meeting_ids"] == ["meeting_without_merge"]
         # merge 완료 회의는 skipped
         assert "meeting_with_merge" not in data["meeting_ids"]
-        # mock_pipeline.run 이 호출되었음
-        assert mock_pipeline.run.called
+        # transcribe 항목은 직접 실행하지 않고 JobProcessor 큐에 들어간다.
+        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "transcribe")
+        mock_pipeline.run.assert_not_called()
 
     def test_batch_summarize_all_filters_summary_done(self, tmp_path: Path) -> None:
         """action=summarize + scope=all: summary.md 있는 회의는 제외된다."""
@@ -355,8 +359,10 @@ class TestBatchActionFilter:
                     1,
                     "m_no_merge",
                     str(tmp_path / "fake.wav"),
+                    status="recorded",
                 ),
             )
+            app.state.job_queue._queue.queue_job = MagicMock()
             (tmp_path / "fake.wav").write_bytes(b"\x00" * 16)
 
             response = client.post(
@@ -371,6 +377,7 @@ class TestBatchActionFilter:
         assert set(data["meeting_ids"]) == {"m_no_merge", "m_no_summary"}
         assert data["matched"] == 3
         assert data["skipped"] == 1
+        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "full")
 
     def test_batch_full_skips_already_summarized(self, tmp_path: Path) -> None:
         """action=full: merge + summary 둘 다 있는 회의는 skip."""
@@ -506,6 +513,70 @@ class TestBatchScope:
         # 기본 24h 윈도우 → m_out_24h(48시간 전) 제외
         assert data["queued"] == 1
         assert data["meeting_ids"] == ["m_in_24h"]
+
+    def test_batch_scope_recent_skips_in_progress_jobs(self, tmp_path: Path) -> None:
+        """scope=recent: 이미 큐잉/처리 중인 회의는 일괄 처리 대상에서 제외된다."""
+        app = _make_test_app(tmp_path)
+
+        recent_iso = (datetime.now() - timedelta(hours=1)).isoformat()
+        jobs = [
+            MockJob(
+                1,
+                "m_recorded",
+                str(tmp_path / "recorded.wav"),
+                "recorded",
+                created_at=recent_iso,
+            ),
+            MockJob(
+                2,
+                "m_queued",
+                str(tmp_path / "queued.wav"),
+                "queued",
+                created_at=recent_iso,
+            ),
+            MockJob(
+                3,
+                "m_transcribing",
+                str(tmp_path / "transcribing.wav"),
+                "transcribing",
+                created_at=recent_iso,
+            ),
+            MockJob(
+                4,
+                "m_failed",
+                str(tmp_path / "failed.wav"),
+                "failed",
+                created_at=recent_iso,
+            ),
+        ]
+
+        for job in jobs:
+            _make_meeting_dirs(tmp_path, job.meeting_id, has_merge=False)
+            Path(job.audio_path).write_bytes(b"\x00" * 16)
+
+        job_by_id = {job.meeting_id: job for job in jobs}
+
+        with TestClient(app) as client:
+            mock_pipeline = _setup_pipeline_mock(app)
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=jobs)
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                side_effect=lambda mid: job_by_id.get(mid)
+            )
+            app.state.job_queue._queue.queue_job = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "recent", "hours": 24},
+            )
+            _drain_background_tasks(client, app)
+
+        data = response.json()
+        assert data["matched"] == 4
+        assert data["queued"] == 1
+        assert data["skipped"] == 3
+        assert data["meeting_ids"] == ["m_recorded"]
+        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "transcribe")
+        mock_pipeline.run.assert_not_called()
 
     def test_batch_scope_selected_uses_provided_ids(self, tmp_path: Path) -> None:
         """scope=selected: meeting_ids 명시 시 그것만 처리.
@@ -669,9 +740,9 @@ class TestBatchBackgroundExecution:
         assert not mock_pipeline.run.called
 
     def test_batch_full_routes_to_correct_pipeline_method(self, tmp_path: Path) -> None:
-        """action=full: 분류에 따라 회의별로 다른 메서드를 호출한다.
+        """action=full: 분류에 따라 큐잉 또는 LLM 단계 실행을 선택한다.
 
-        - merge 없는 회의 → pipeline.run(skip_llm_steps=True)
+        - merge 없는 회의 → JobQueue.queue_job(requested_action="full")
         - merge 있고 summary 없는 회의 → pipeline.run_llm_steps()
         """
         app = _make_test_app(tmp_path)
@@ -685,8 +756,9 @@ class TestBatchBackgroundExecution:
             audio = tmp_path / "input.wav"
             audio.write_bytes(b"\x00" * 16)
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
-                return_value=MockJob(1, "m_no_merge", str(audio)),
+                return_value=MockJob(1, "m_no_merge", str(audio), status="recorded"),
             )
+            app.state.job_queue._queue.queue_job = MagicMock()
 
             response = client.post(
                 "/api/meetings/batch",
@@ -696,14 +768,9 @@ class TestBatchBackgroundExecution:
 
         assert response.status_code == 200
 
-        # m_no_merge → pipeline.run 호출 (skip_llm_steps=True)
-        assert mock_pipeline.run.called
-        run_call = mock_pipeline.run.call_args
-        # 첫 번째 위치 인자가 audio_path
-        assert run_call.args[0] == audio
-        # meeting_id, skip_llm_steps 키워드 인자
-        assert run_call.kwargs.get("meeting_id") == "m_no_merge"
-        assert run_call.kwargs.get("skip_llm_steps") is True
+        # m_no_merge → JobProcessor 큐에 full 의도로 등록
+        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "full")
+        mock_pipeline.run.assert_not_called()
 
         # m_no_summary → run_llm_steps 호출
         mock_pipeline.run_llm_steps.assert_called_once_with("m_no_summary")
@@ -870,7 +937,7 @@ class TestBatchIntegration:
         with TestClient(app) as client:
             mock_pipeline = _setup_pipeline_mock(app)
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
-                return_value=MockJob(1, "m_evil_path", str(outside))
+                return_value=MockJob(1, "m_evil_path", str(outside), status="recorded"),
             )
 
             try:

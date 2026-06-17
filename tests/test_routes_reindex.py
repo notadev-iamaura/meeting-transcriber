@@ -46,7 +46,7 @@ def _make_test_app(tmp_path: Path) -> Any:
         patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
         patch("search.chat.ChatEngine", return_value=MagicMock()),
     ):
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
     return app
 
 
@@ -284,6 +284,7 @@ class TestReindexSingleEndpoint:
             app.state.job_queue.queue.get_job_by_meeting_id = MagicMock(
                 return_value=_MockJob(id=1, meeting_id=meeting_id),
             )
+            app.state.pipeline_manager = MagicMock(_model_manager=MagicMock())
             with (
                 patch(
                     "api.routers.reindex._reindex_meeting",

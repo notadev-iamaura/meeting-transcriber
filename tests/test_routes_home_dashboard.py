@@ -44,7 +44,7 @@ def _make_test_app(tmp_path: Path) -> Any:
         patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
         patch("search.chat.ChatEngine", return_value=MagicMock()),
     ):
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
     return app
 

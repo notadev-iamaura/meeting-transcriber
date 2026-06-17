@@ -84,6 +84,7 @@ def _make_job(
     job.meeting_id = meeting_id
     job.audio_path = audio_path
     job.status = status
+    job.requested_action = ""
     return job
 
 
@@ -809,6 +810,30 @@ class TestProcessJobSkipLlm:
 
         # 서멀 매니저 정상 호출 확인
         mock_thermal.notify_job_completed.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("requested_action", "expected_skip"),
+        [
+            ("transcribe", True),
+            ("full", False),
+        ],
+    )
+    async def test_process_job은_batch_requested_action을_skip_llm으로_변환(
+        self,
+        requested_action: str,
+        expected_skip: bool,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+    ) -> None:
+        """일괄 큐잉된 작업은 저장된 실행 의도를 pipeline.run 에 명시 전달한다."""
+        job = _make_job(job_id=3, meeting_id=f"batch_{requested_action}")
+        job.requested_action = requested_action
+        mock_pipeline.run.return_value = MagicMock(status="completed")
+
+        await processor._process_job(job)
+
+        call_kwargs = mock_pipeline.run.call_args
+        assert call_kwargs.kwargs.get("skip_llm_steps") is expected_skip
 
 
 # === Cycle 11: Pydantic 기본값 및 config 통합 ===

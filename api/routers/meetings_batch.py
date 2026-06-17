@@ -30,6 +30,16 @@ router = APIRouter()
 
 # meeting_id 유효성 검증 정규식 (path traversal 방지)
 _MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
+_IN_PROGRESS_STATUSES: frozenset[str] = frozenset(
+    {
+        "queued",
+        "recording",
+        "transcribing",
+        "diarizing",
+        "merging",
+        "embedding",
+    }
+)
 
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
@@ -64,6 +74,11 @@ def _validate_meeting_id(meeting_id: str) -> None:
         )
 
 
+def _get_sync_job_queue(queue: Any) -> Any | None:
+    """AsyncJobQueue 또는 테스트 double 에서 동기 JobQueue 핸들을 반환한다."""
+    return getattr(queue, "_queue", None) or getattr(queue, "queue", None)
+
+
 class BatchActionRequest(BaseModel):
     """일괄 처리 요청 스키마.
 
@@ -92,9 +107,9 @@ class BatchActionResponse(BaseModel):
         action: 요청한 action 값 (echo)
         scope: 요청한 scope 값 (echo)
         matched: 후보로 식별된 회의 수 (필터 적용 전)
-        queued: 실제 백그라운드 큐에 들어간 회의 수
+        queued: 실제 백그라운드 처리 대상으로 확정된 회의 수
         skipped: matched - queued (분류 불일치, audio 부재, 권한 등)
-        meeting_ids: 큐잉된 회의 ID 목록
+        meeting_ids: 실제 처리 대상 회의 ID 목록
     """
 
     status: Literal["ok", "no_targets"]
@@ -227,36 +242,78 @@ def _is_meeting_eligible(
     return False
 
 
+async def _get_job_for_batch(queue: Any, meeting_id: str) -> Any | None:
+    """일괄 처리용 JobQueue row 를 조회한다.
+
+    Args:
+        queue: AsyncJobQueue 인스턴스
+        meeting_id: 회의 ID
+
+    Returns:
+        Job row. 조회 불가 또는 미존재 시 None.
+    """
+    sync_queue = _get_sync_job_queue(queue)
+    if sync_queue is None:
+        logger.warning(f"일괄 처리: JobQueue 핸들을 얻을 수 없음 ({meeting_id})")
+        return None
+    try:
+        return await asyncio.to_thread(sync_queue.get_job_by_meeting_id, meeting_id)
+    except Exception as exc:
+        logger.warning(f"일괄 처리: Job 조회 실패 — {meeting_id}: {exc}")
+        return None
+
+
+def _is_job_status_safe_for_batch(job: Any | None, classification: str) -> bool:
+    """현재 작업 상태 기준으로 일괄 처리 대상에 포함해도 안전한지 판단한다.
+
+    전사는 아직 큐에 들어가지 않은 recorded 작업만 허용한다. 요약은 merge
+    체크포인트만 있으면 실행 가능하므로 레거시 데이터처럼 JobQueue row 가 없는
+    경우도 허용하되, 명시적으로 진행 중이거나 failed 인 row 는 제외한다.
+    """
+    if job is None:
+        return classification == "summarize"
+
+    status = str(getattr(job, "status", "") or "")
+    if status in _IN_PROGRESS_STATUSES:
+        return False
+    if status == "failed":
+        return False
+    if classification == "transcribe":
+        return status == "recorded"
+    if classification == "summarize":
+        return status in {"completed", "recorded", ""}
+    return False
+
+
 async def _resolve_audio_path(
     queue: Any,
     meeting_id: str,
     base_dir_resolved: Path,
 ) -> Path | None:
-    """JobQueue 에서 audio_path 를 조회하고 base_dir 내부인지 검증한다.
+    """JobQueue 에서 audio_path 를 조회해 검증한다.
+
+    api.routes 의 기존 private re-export 호환을 유지하기 위한 wrapper 이다.
+    신규 일괄 처리 경로는 이미 조회한 Job row 를 재사용하는
+    _resolve_audio_path_from_job() 를 직접 호출한다.
+    """
+    job = await _get_job_for_batch(queue, meeting_id)
+    if job is None:
+        return None
+    return _resolve_audio_path_from_job(job, meeting_id, base_dir_resolved)
+
+
+def _resolve_audio_path_from_job(
+    job: Any,
+    meeting_id: str,
+    base_dir_resolved: Path,
+) -> Path | None:
+    """Job row 의 audio_path 를 base_dir 내부 실재 파일로 검증한다.
 
     보안 (Phase 6 Medium-02): SQLite 직접 편집이나 심링크 공격으로 base_dir
     외부 경로가 들어와도 파이프라인에 도달하지 못하도록 strict resolve 후
     base_dir 하위 여부를 검증한다.
-
-    성능 (Phase 6 perf M-1): base_dir 의 resolve() 결과는 호출자가 사전 1회
-    계산해 전달한다. 회의별로 반복 resolve() 호출하지 않는다.
-
-    Args:
-        queue: AsyncJobQueue 인스턴스
-        meeting_id: 회의 ID
-        base_dir_resolved: 사전 resolve 된 base_dir 절대 경로
-
-    Returns:
-        검증을 통과한 audio_path 절대 경로. 부재·미존재·외부 경로면 None.
     """
-    # AsyncJobQueue 의 내부 동기 핸들 (테스트 mock 호환)
-    sync_queue = getattr(queue, "_queue", None) or getattr(queue, "queue", None)
-    if sync_queue is None:
-        logger.warning(f"일괄 처리: JobQueue 핸들을 얻을 수 없음 ({meeting_id})")
-        return None
-
-    job = await asyncio.to_thread(sync_queue.get_job_by_meeting_id, meeting_id)
-    if job is None or not getattr(job, "audio_path", None):
+    if not getattr(job, "audio_path", None):
         return None
 
     try:
@@ -438,8 +495,17 @@ async def _prepare_batch(
 
     final_items: list[tuple[str, str, Path | None]] = []
     for mid, classification in eligible_pairs:
+        job = await _get_job_for_batch(queue, mid)
+        if not _is_job_status_safe_for_batch(job, classification):
+            logger.info(
+                "일괄 처리: 현재 작업 상태 때문에 건너뜀 (%s: %s, %s)",
+                mid,
+                getattr(job, "status", None) if job is not None else None,
+                classification,
+            )
+            continue
         if classification == "transcribe":
-            audio_path = await _resolve_audio_path(queue, mid, base_dir_resolved)
+            audio_path = _resolve_audio_path_from_job(job, mid, base_dir_resolved)
             if audio_path is None:
                 continue
             final_items.append((mid, classification, audio_path))
@@ -452,6 +518,39 @@ async def _prepare_batch(
         skipped=matched - queued,
         items=final_items,
     )
+
+
+async def _queue_transcribe_item(
+    queue: Any,
+    meeting_id: str,
+    requested_action: str,
+) -> bool:
+    """전사 대상 회의를 JobProcessor 큐에 넣는다.
+
+    대상 산정 이후 상태가 바뀐 race 를 한 번 더 방어한다.
+    """
+    from core.job_queue import JobQueueError
+
+    job = await _get_job_for_batch(queue, meeting_id)
+    if not _is_job_status_safe_for_batch(job, "transcribe"):
+        logger.info(
+            "일괄 처리 큐잉 건너뜀: 현재 작업 상태 부적합 (%s: %s)",
+            meeting_id,
+            getattr(job, "status", None) if job is not None else None,
+        )
+        return False
+
+    sync_queue = _get_sync_job_queue(queue)
+    if sync_queue is None or job is None:
+        logger.warning("일괄 처리 큐잉 실패: JobQueue 핸들 또는 job 없음 (%s)", meeting_id)
+        return False
+
+    try:
+        await asyncio.to_thread(sync_queue.queue_job, job.id, requested_action)
+        return True
+    except JobQueueError as exc:
+        logger.warning("일괄 처리 큐잉 실패: %s (%s)", meeting_id, exc)
+        return False
 
 
 @router.post("/meetings/batch/preview", response_model=BatchPreviewResponse)
@@ -504,9 +603,9 @@ async def batch_action(
         4. 후보 ID 수집 — asyncio.to_thread (Phase 6 perf C-1)
         5. matched = len(candidate_ids)
         6. 분류·eligibility 검사 — asyncio.to_thread
-        7. transcribe 분류 항목은 audio_path 사전 검증 (Phase 3 Major #2)
+        7. transcribe 분류 항목은 audio_path 사전 검증 후 JobProcessor 큐에 등록
         8. queued == 0 이면 status="no_targets" 응답
-        9. 백그라운드 task 로 회의별 순차 실행 (한 건 실패해도 다음 진행)
+        9. summarize 분류 항목만 백그라운드 task 로 순차 실행
 
     Args:
         request: FastAPI Request 객체 (app.state 접근용)
@@ -520,12 +619,24 @@ async def batch_action(
     """
     # === 1. 의존성 로딩 ===
     pipeline = _get_pipeline_manager(request)
+    queue = _get_job_queue(request)
     prepared = await _prepare_batch(request, body)
     matched = prepared.matched
-    queued = prepared.queued
     skipped = prepared.skipped
-    final_items = prepared.items
-    queued_ids = prepared.meeting_ids
+
+    background_items: list[tuple[str, str, Path | None]] = []
+    queued_ids: list[str] = []
+    for mid, classification, audio_path in prepared.items:
+        if classification == "transcribe":
+            if await _queue_transcribe_item(queue, mid, body.action):
+                queued_ids.append(mid)
+            else:
+                skipped += 1
+            continue
+        background_items.append((mid, classification, audio_path))
+        queued_ids.append(mid)
+
+    queued = len(queued_ids)
 
     # === 6. 후보 0 건이면 즉시 종료 ===
     if queued == 0:
@@ -556,20 +667,8 @@ async def batch_action(
         for mid, classification, audio_path in items:
             try:
                 if classification == "transcribe":
-                    if audio_path is None:
-                        # 사전 검증을 통과했으므로 이 경로는 정상적으로 도달
-                        # 불가능. 안전망으로 logger.warning 후 건너뜀.
-                        logger.warning(
-                            f"일괄 처리: transcribe 단계인데 audio_path 가 None — 건너뜀 ({mid})"
-                        )
-                        continue
-                    logger.info(f"일괄 처리[{action}] 전사 시작: {mid} ({audio_path})")
-                    await pipeline.run(
-                        audio_path,
-                        meeting_id=mid,
-                        skip_llm_steps=True,
-                    )
-                    logger.info(f"일괄 처리[{action}] 전사 완료: {mid}")
+                    # 전사 항목은 위에서 JobProcessor 큐에 넣었으므로 직접 실행하지 않는다.
+                    continue
                 elif classification == "summarize":
                     logger.info(f"일괄 처리[{action}] 요약 시작: {mid}")
                     await pipeline.run_llm_steps(mid)
@@ -580,17 +679,18 @@ async def batch_action(
                 # 한 건 실패가 나머지 회의를 막지 않는다
                 logger.exception(f"일괄 처리[{action}] 회의 실패: {mid}")
 
-    task = asyncio.create_task(
-        _run_batch(final_items, body.action),
-        name=f"batch-action-{body.action}",
-    )
-    running_tasks = getattr(request.app.state, "running_tasks", None)
-    if running_tasks is not None:
-        running_tasks.add(task)
-        task.add_done_callback(_log_task_exception)
-        task.add_done_callback(running_tasks.discard)
-    else:
-        task.add_done_callback(_log_task_exception)
+    if background_items:
+        task = asyncio.create_task(
+            _run_batch(background_items, body.action),
+            name=f"batch-action-{body.action}",
+        )
+        running_tasks = getattr(request.app.state, "running_tasks", None)
+        if running_tasks is not None:
+            running_tasks.add(task)
+            task.add_done_callback(_log_task_exception)
+            task.add_done_callback(running_tasks.discard)
+        else:
+            task.add_done_callback(_log_task_exception)
 
     logger.info(
         f"일괄 처리 시작: action={body.action}, scope={body.scope}, "

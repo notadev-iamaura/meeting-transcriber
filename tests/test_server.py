@@ -283,9 +283,13 @@ class TestHealthEndpoint:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
-        with TestClient(app) as client:
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+            TestClient(app) as client,
+        ):
             response = client.get("/api/health")
 
         assert response.status_code == 200
@@ -299,9 +303,13 @@ class TestHealthEndpoint:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
-        with TestClient(app) as client:
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+            TestClient(app) as client,
+        ):
             response = client.get("/api/health")
 
         data = response.json()
@@ -312,9 +320,13 @@ class TestHealthEndpoint:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
-        with TestClient(app) as client:
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+            TestClient(app) as client,
+        ):
             response = client.get("/api/health")
 
         assert "application/json" in response.headers["content-type"]
@@ -331,7 +343,7 @@ class TestCORS:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.options(
@@ -351,7 +363,7 @@ class TestCORS:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.options(
@@ -370,7 +382,7 @@ class TestCORS:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.options(
@@ -389,7 +401,7 @@ class TestCORS:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.options(
@@ -430,7 +442,7 @@ class TestStaticFiles:
             (test_static / "test.txt").write_text("hello", encoding="utf-8")
 
             with patch("api.server._STATIC_DIR", test_static):
-                app = create_app(config)
+                app = create_app(config, runtime_profile="api-test")
 
             with TestClient(app) as client:
                 response = client.get("/static/test.txt")
@@ -439,7 +451,7 @@ class TestStaticFiles:
             assert response.text == "hello"
         else:
             # 실제 ui/web/ 존재 시 마운트 확인
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
             # 마운트 확인 (라우트 목록에 /static 존재)
             route_paths = [route.path for route in app.routes if hasattr(route, "path")]
             assert any("/static" in p for p in route_paths)
@@ -457,7 +469,7 @@ class TestStaticFiles:
         nonexistent = tmp_path / "nonexistent_static"
 
         with patch("api.server._STATIC_DIR", nonexistent):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         # /static 라우트가 마운트되지 않아야 함
         route_paths = [getattr(route, "path", "") for route in app.routes]
@@ -479,7 +491,7 @@ class TestStaticFiles:
         )
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/static/index.html")
@@ -499,7 +511,7 @@ class TestLifespan:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as _client:
             # lifespan startup 완료 후 state 확인
@@ -511,7 +523,7 @@ class TestLifespan:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         before = time.time()
 
@@ -524,7 +536,7 @@ class TestLifespan:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app):
             queue = app.state.job_queue
@@ -541,7 +553,7 @@ class TestLifespan:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app):
             db_path = config.paths.resolved_pipeline_db
@@ -562,7 +574,7 @@ class TestLifespanPartialFailure:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with (
             patch(
@@ -583,7 +595,7 @@ class TestLifespanPartialFailure:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with (
             patch(
@@ -604,7 +616,7 @@ class TestLifespanPartialFailure:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with (
             patch(
@@ -635,7 +647,7 @@ class TestExceptionHandler:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         # 의도적으로 예외를 발생시키는 엔드포인트 추가
         @app.get("/api/test-error")
@@ -656,7 +668,7 @@ class TestExceptionHandler:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         @app.get("/api/test-error-detail")
         async def raise_error() -> None:
@@ -678,7 +690,7 @@ class TestExceptionHandler:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         @app.get("/api/test-error-json")
         async def raise_error() -> None:
@@ -736,7 +748,7 @@ class TestNotFoundRoute:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/api/nonexistent")
@@ -767,7 +779,7 @@ class TestSPARouting:
         )
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app")
@@ -785,7 +797,7 @@ class TestSPARouting:
         (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app/viewer/meeting-123")
@@ -803,7 +815,7 @@ class TestSPARouting:
         (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app/chat")
@@ -821,7 +833,7 @@ class TestSPARouting:
         (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app/a/b/c")
@@ -839,7 +851,7 @@ class TestSPARouting:
         (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app")
@@ -857,7 +869,7 @@ class TestSPARouting:
         (test_static / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/api/health")
@@ -876,7 +888,7 @@ class TestSPARouting:
         test_static.mkdir()
 
         with patch("api.server._STATIC_DIR", test_static):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app) as client:
             response = client.get("/app")
@@ -942,6 +954,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -972,6 +985,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -1003,6 +1017,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -1033,6 +1048,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -1064,6 +1080,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -1095,6 +1112,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 
@@ -1126,6 +1144,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
 
         with (
@@ -1156,6 +1175,7 @@ class TestLifespanOrchestration:
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
+        config.recording.enabled = False
         app = create_app(config)
         mocks = self._get_orchestration_patches()
 

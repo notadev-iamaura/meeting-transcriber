@@ -5,7 +5,7 @@ SQLite 작업 큐 테스트 모듈 (Job Queue Test Module)
 주요 검증:
     - DB 초기화 (WAL 모드, 테이블 생성, 인덱스)
     - 작업 등록 (add_job) 및 조회 (get_job)
-    - 상태 머신 기반 전이 (update_status)
+    - 상태 머신 기반 전이 (update_status, queue_job)
     - 재시도 로직 (retry_job, retry_all_failed)
     - 에러 처리 (중복 등록, 유효하지 않은 전이, 존재하지 않는 작업)
     - 비동기 래퍼 (AsyncJobQueue)
@@ -241,6 +241,31 @@ class TestGetJobsByStatus:
         meeting_ids = {j.meeting_id for j in pending}
         assert meeting_ids == {"m1", "m2"}
 
+    def test_get_pending_jobs_orders_by_queue_entry_time(
+        self,
+        queue: JobQueue,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """recorded 회의는 전사 시작을 누른 순서대로 대기열에서 조회된다."""
+        older_recording_id = queue.add_job(
+            "older_recording",
+            "/path/older.m4a",
+            initial_status=JobStatus.RECORDED.value,
+        )
+        newer_recording_id = queue.add_job(
+            "newer_recording",
+            "/path/newer.m4a",
+            initial_status=JobStatus.RECORDED.value,
+        )
+
+        monkeypatch.setattr(queue, "_now_iso", lambda: "2026-01-01T10:00:01")
+        queue.update_status(newer_recording_id, JobStatus.QUEUED)
+        monkeypatch.setattr(queue, "_now_iso", lambda: "2026-01-01T10:00:02")
+        queue.update_status(older_recording_id, JobStatus.QUEUED)
+
+        pending = queue.get_pending_jobs()
+        assert [j.meeting_id for j in pending] == ["newer_recording", "older_recording"]
+
     def test_get_jobs_by_status(self, queue: JobQueue) -> None:
         """특정 상태의 작업만 반환하는지 확인한다."""
         id1 = queue.add_job("m1", "/path/a.m4a")
@@ -414,6 +439,55 @@ class TestUpdateStatus:
         job_after = queue.get_job(job_id)
 
         assert job_after.updated_at >= job_before.updated_at
+
+
+class TestQueueJob:
+    """queue_job() 전용 큐잉 의도 저장 테스트."""
+
+    def test_queue_job_sets_requested_action(self, queue: JobQueue) -> None:
+        """recorded 작업을 queued 로 바꾸며 실행 의도를 저장한다."""
+        job_id = queue.add_job(
+            "m_batch_full",
+            "/path/audio.m4a",
+            initial_status=JobStatus.RECORDED.value,
+        )
+
+        job = queue.queue_job(job_id, requested_action="full")
+
+        assert job.status == JobStatus.QUEUED.value
+        assert job.requested_action == "full"
+        assert job.error_message == ""
+
+    def test_queue_job_rejects_invalid_requested_action(self, queue: JobQueue) -> None:
+        """정의되지 않은 action 값은 저장하지 않는다."""
+        job_id = queue.add_job(
+            "m_invalid_action",
+            "/path/audio.m4a",
+            initial_status=JobStatus.RECORDED.value,
+        )
+
+        with pytest.raises(JobQueueError):
+            queue.queue_job(job_id, requested_action="summarize")
+
+    def test_queue_job_uses_pending_order_timestamp(
+        self,
+        queue: JobQueue,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """queue_job 으로 들어간 일괄 작업도 큐 진입 순서를 따른다."""
+        first = queue.add_job("m_first", "/path/first.m4a", initial_status="recorded")
+        second = queue.add_job("m_second", "/path/second.m4a", initial_status="recorded")
+
+        monkeypatch.setattr(queue, "_now_iso", lambda: "2026-01-01T10:00:01")
+        queue.queue_job(second, requested_action="transcribe")
+        monkeypatch.setattr(queue, "_now_iso", lambda: "2026-01-01T10:00:02")
+        queue.queue_job(first, requested_action="full")
+
+        pending = queue.get_pending_jobs()
+        assert [(j.meeting_id, j.requested_action) for j in pending] == [
+            ("m_second", "transcribe"),
+            ("m_first", "full"),
+        ]
 
 
 # === 재시도 테스트 ===
@@ -639,6 +713,22 @@ class TestAsyncJobQueue:
         job_id = await async_queue.add_job("m1", "/path/audio.m4a")
         job = await async_queue.update_status(job_id, JobStatus.RECORDING)
         assert job.status == JobStatus.RECORDING.value
+
+    async def test_async_queue_job(
+        self,
+        async_queue: AsyncJobQueue,
+    ) -> None:
+        """비동기로 queue_job 실행 의도를 저장할 수 있다."""
+        job_id = await async_queue.add_job(
+            "m_batch",
+            "/path/audio.m4a",
+            initial_status=JobStatus.RECORDED.value,
+        )
+
+        job = await async_queue.queue_job(job_id, requested_action="transcribe")
+
+        assert job.status == JobStatus.QUEUED.value
+        assert job.requested_action == "transcribe"
 
     async def test_async_get_pending_jobs(
         self,

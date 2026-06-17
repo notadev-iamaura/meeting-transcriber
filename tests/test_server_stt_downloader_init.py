@@ -38,7 +38,7 @@ class TestSTTDownloaderInit:
             ),
             patch("search.chat.ChatEngine", return_value=MagicMock()),
         ):
-            app = create_app(config)
+            app = create_app(config, runtime_profile="api-test")
 
         with TestClient(app):
             assert hasattr(app.state, "stt_downloader")

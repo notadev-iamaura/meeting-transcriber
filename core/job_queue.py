@@ -83,6 +83,7 @@ class Job:
         error_message: 마지막 에러 메시지
         created_at: 작업 생성 시각 (ISO 형식)
         updated_at: 마지막 업데이트 시각 (ISO 형식)
+        requested_action: 작업 실행 의도 ("", "transcribe", "full")
     """
 
     id: int
@@ -96,6 +97,7 @@ class Job:
     updated_at: str = ""
     # 사용자 정의 제목 (빈 문자열이면 프론트엔드가 meeting_id 기반 타임스탬프 폴백 사용)
     title: str = ""
+    requested_action: str = ""
 
 
 # === 에러 계층 ===
@@ -194,7 +196,8 @@ class JobQueue:
         error_message TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        title TEXT NOT NULL DEFAULT ''
+        title TEXT NOT NULL DEFAULT '',
+        requested_action TEXT NOT NULL DEFAULT ''
     )
     """
 
@@ -348,6 +351,7 @@ class JobQueue:
 
         마이그레이션 목록:
             - v1: title TEXT NOT NULL DEFAULT '' (사용자 정의 회의 제목)
+            - v2: requested_action TEXT NOT NULL DEFAULT '' (전사만/full 큐 실행 의도)
         """
         if conn is None:
             conn = self._ensure_connection()
@@ -357,6 +361,9 @@ class JobQueue:
         if "title" not in existing_columns:
             logger.info("JobQueue 마이그레이션: jobs.title 컬럼 추가")
             conn.execute("ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        if "requested_action" not in existing_columns:
+            logger.info("JobQueue 마이그레이션: jobs.requested_action 컬럼 추가")
+            conn.execute("ALTER TABLE jobs ADD COLUMN requested_action TEXT NOT NULL DEFAULT ''")
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
@@ -372,6 +379,10 @@ class JobQueue:
             title = row["title"]
         except (KeyError, IndexError):
             title = ""
+        try:
+            requested_action = row["requested_action"]
+        except (KeyError, IndexError):
+            requested_action = ""
 
         return Job(
             id=row["id"],
@@ -384,6 +395,7 @@ class JobQueue:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             title=title or "",
+            requested_action=requested_action or "",
         )
 
     def add_job(
@@ -498,9 +510,19 @@ class JobQueue:
         """대기 중(queued) 작업 목록을 조회한다.
 
         Returns:
-            queued 상태의 Job 리스트 (created_at 오름차순)
+            queued 상태의 Job 리스트 (큐 진입 시각 오름차순)
         """
-        return self.get_jobs_by_status(JobStatus.QUEUED)
+        conn = self._ensure_connection()
+        rows = conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status = ?
+            ORDER BY updated_at ASC, id ASC
+            """,
+            (JobStatus.QUEUED.value,),
+        ).fetchall()
+
+        return [self._row_to_job(row) for row in rows]
 
     def get_all_jobs(self) -> list[Job]:
         """모든 작업을 조회한다.
@@ -617,19 +639,88 @@ class JobQueue:
                     (new_status.value, error_message, now, job_id),
                 )
             else:
-                conn.execute(
-                    """
-                    UPDATE jobs
-                    SET status = ?, error_message = '', updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (new_status.value, now, job_id),
-                )
+                if new_status == JobStatus.QUEUED:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?,
+                            requested_action = '',
+                            error_message = '',
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (new_status.value, now, job_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?, error_message = '', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (new_status.value, now, job_id),
+                    )
 
             conn.commit()
 
         logger.info(f"작업 상태 변경: id={job_id}, {current_status.value} → {new_status.value}")
 
+        return self.get_job(job_id)
+
+    def queue_job(
+        self,
+        job_id: int,
+        requested_action: str = "",
+    ) -> Job:
+        """작업을 queued 상태로 전환하면서 실행 의도를 저장한다.
+
+        Args:
+            job_id: 대상 작업 ID
+            requested_action: "", "transcribe", "full" 중 하나. 빈 문자열은
+                JobProcessor 가 config.pipeline.skip_llm_steps 를 따르게 한다.
+
+        Returns:
+            업데이트된 Job 인스턴스
+
+        Raises:
+            JobQueueError: requested_action 이 유효하지 않을 때
+            InvalidTransitionError: 현재 상태에서 queued 전이가 불가능할 때
+        """
+        allowed_actions = {"", "transcribe", "full"}
+        if requested_action not in allowed_actions:
+            raise JobQueueError(f"유효하지 않은 requested_action: {requested_action}")
+
+        conn = self._ensure_connection()
+        job = self.get_job(job_id)
+        current_status = JobStatus(job.status)
+        if JobStatus.QUEUED not in VALID_TRANSITIONS.get(current_status, set()):
+            raise InvalidTransitionError(
+                job_id,
+                current_status.value,
+                JobStatus.QUEUED.value,
+            )
+
+        now = self._now_iso()
+        with self._write_lock:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    requested_action = ?,
+                    error_message = '',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (JobStatus.QUEUED.value, requested_action, now, job_id),
+            )
+            conn.commit()
+
+        logger.info(
+            "작업 큐잉: id=%s, %s → queued, requested_action=%r",
+            job_id,
+            current_status.value,
+            requested_action,
+        )
         return self.get_job(job_id)
 
     def retry_job(self, job_id: int) -> Job:
@@ -716,14 +807,27 @@ class JobQueue:
 
         now = self._now_iso()
         with self._write_lock:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (new_status.value, error_message, now, job_id),
-            )
+            if new_status == JobStatus.RECORDED:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?,
+                        requested_action = '',
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_status.value, error_message, now, job_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, error_message = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_status.value, error_message, now, job_id),
+                )
             conn.commit()
 
         logger.info(
@@ -767,7 +871,11 @@ class JobQueue:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, retry_count = 0, error_message = '', updated_at = ?
+                SET status = ?,
+                    retry_count = 0,
+                    requested_action = '',
+                    error_message = '',
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (JobStatus.QUEUED.value, now, job_id),
@@ -1005,6 +1113,20 @@ class AsyncJobQueue:
             job_id,
             new_status,
             error_message,
+        )
+
+    async def queue_job(
+        self,
+        job_id: int,
+        requested_action: str = "",
+    ) -> Job:
+        """비동기로 작업을 queued 상태로 전환하면서 실행 의도를 저장한다."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._queue.queue_job,
+            job_id,
+            requested_action,
         )
 
     async def retry_job(self, job_id: int) -> Job:

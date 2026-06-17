@@ -162,7 +162,7 @@ def _make_app_with_chat_engine(
             return_value=chat_engine_mock,
         ),
     ):
-        app = create_app(config)
+        app = create_app(config, runtime_profile="api-test")
 
     # app.state.chat_engine 을 mock 으로 보장 (lifespan 이 None 으로 셋팅했을 수도)
     app.state.chat_engine = chat_engine_mock
