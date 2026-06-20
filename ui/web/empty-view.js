@@ -468,6 +468,26 @@
             '    </div>',
             '  </section>',
             '',
+            '  <section class="home-onboarding" id="homeOnboarding" aria-label="첫 회의 시작">',
+            '    <div class="home-onboarding-copy">',
+            '      <h2>첫 회의를 만들어 보세요</h2>',
+            '      <p>녹음하거나 기존 오디오를 가져오면 전사·요약·검색 준비가 순서대로 진행됩니다.</p>',
+            '    </div>',
+            '    <div class="home-onboarding-actions">',
+            '      <button class="home-primary-action" id="homeActionStartRecording" type="button">',
+            '        <span>녹음 시작</span>',
+            '      </button>',
+            '      <button class="home-action-btn" id="homeActionImportPrimary" type="button">',
+            '        <span>오디오 가져오기</span>',
+            '      </button>',
+            '    </div>',
+            '    <ul class="home-readiness-list" aria-label="처리 준비 상태">',
+            '      <li><span class="home-readiness-dot"></span>로컬 저장소에 회의 데이터를 보관합니다.</li>',
+            '      <li><span class="home-readiness-dot"></span>모델과 오디오 권한은 설정에서 확인할 수 있습니다.</li>',
+            '      <li><span class="home-readiness-dot"></span>완료 후 전사문, 요약, 검색 준비 상태를 확인합니다.</li>',
+            '    </ul>',
+            '  </section>',
+            '',
             '  <section class="home-actions" aria-label="홈 빠른 작업">',
             '    <button class="home-action-btn" id="homeActionOpenFolder" type="button">',
             '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
@@ -475,7 +495,7 @@
             '      </svg>',
             '      <span>전사 폴더 열기</span>',
             '    </button>',
-            '    <button class="home-action-btn" id="homeActionImport" type="button">',
+            '    <button class="home-action-btn home-bulk-action" id="homeActionImport" type="button" hidden>',
             '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
             '        <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/>',
             '        <polyline points="6,7 10,3 14,7"/>',
@@ -489,7 +509,7 @@
             // 메뉴 항목은 lazy-render — 처음 열릴 때만 DOM 에 삽입, 닫힐 때 제거.
             //   사유: Playwright strict mode 에서 `.home-action-dropdown [role='menuitemradio'][data-option='X']`
             //   selector 가 두 메뉴 (각 항목 3 개씩) 를 동시에 매칭하는 것을 방지.
-            '    <div class="home-action-dropdown-wrapper" data-component="bulk-actions">',
+            '    <div class="home-action-dropdown-wrapper home-bulk-action" data-component="bulk-actions" hidden>',
             '      <button class="home-action-btn home-action-btn--dropdown"',
             '              type="button"',
             '              data-dropdown="all-bulk"',
@@ -502,7 +522,7 @@
             '      </button>',
             '      <div class="home-action-dropdown" role="menu" aria-label="전체 일괄 옵션" hidden></div>',
             '    </div>',
-            '    <div class="home-action-dropdown-wrapper" data-component="bulk-actions">',
+            '    <div class="home-action-dropdown-wrapper home-bulk-action" data-component="bulk-actions" hidden>',
             '      <button class="home-action-btn home-action-btn--dropdown"',
             '              type="button"',
             '              data-dropdown="recent-24h"',
@@ -521,8 +541,8 @@
             '',
             '  <div class="empty-view">',
             '    <div class="empty-view-icon">' + Icons.clipboard + '</div>',
-            '    <h2 class="empty-view-title">회의를 선택하세요</h2>',
-            '    <p class="empty-view-desc">왼쪽 목록에서 회의를 선택하면 전사 내용을 볼 수 있습니다.</p>',
+            '    <h2 class="empty-view-title">아직 선택된 회의가 없습니다</h2>',
+            '    <p class="empty-view-desc">회의가 생기면 여기에서 전사문과 요약을 바로 열 수 있습니다.</p>',
             '    <div class="empty-view-shortcuts">',
             '      <div class="empty-view-shortcut">\u2318K 검색</div>',
             '    </div>',
@@ -551,13 +571,21 @@
         var importBtn = document.getElementById("homeActionImport");
         if (importBtn) {
             importBtn.addEventListener("click", function () {
-                if (self._destroyed) return;
-                var modal = document.getElementById("importModal");
-                if (modal) {
-                    modal.classList.remove("hidden");
-                    var dz = document.getElementById("importDropzone");
-                    if (dz) dz.focus();
-                }
+                self._openImportModal();
+            });
+        }
+
+        var importPrimaryBtn = document.getElementById("homeActionImportPrimary");
+        if (importPrimaryBtn) {
+            importPrimaryBtn.addEventListener("click", function () {
+                self._openImportModal();
+            });
+        }
+
+        var recordingBtn = document.getElementById("homeActionStartRecording");
+        if (recordingBtn) {
+            recordingBtn.addEventListener("click", function () {
+                self._startRecording(recordingBtn);
             });
         }
     };
@@ -577,6 +605,7 @@
                 if (!data) return;
                 _setStatCard("homeStatThisWeek", data.this_week_meetings);
                 _setStatCard("homeStatTotal", data.total_meetings);
+                self._syncHomeEmptyState(Number(data.total_meetings) || 0);
                 // 대기열 카드: 메인 값은 자동 처리 대기(queued), sub 라인은 미전사 녹음(recorded).
                 // 미전사가 0 이면 기본 안내 문구로 폴백 — 시각 노이즈 최소화.
                 _setStatCard("homeStatQueue", data.queue_pending);
@@ -601,6 +630,53 @@
             })
             .catch(function () {
                 // 통계 실패는 무시 — 헤더 status indicator 가 별도로 알림 책임.
+            });
+    };
+
+    EmptyView.prototype._openImportModal = function () {
+        if (this._destroyed) return;
+        var modal = document.getElementById("importModal");
+        if (modal) {
+            modal.classList.remove("hidden");
+            var dz = document.getElementById("importDropzone");
+            if (dz) dz.focus();
+        }
+    };
+
+    EmptyView.prototype._syncHomeEmptyState = function (totalMeetings) {
+        var onboarding = document.getElementById("homeOnboarding");
+        var bulkActions = document.querySelectorAll(".home-bulk-action");
+        var hasMeetings = totalMeetings > 0;
+        if (onboarding) {
+            onboarding.hidden = hasMeetings;
+        }
+        bulkActions.forEach(function (el) {
+            el.hidden = !hasMeetings;
+        });
+    };
+
+    EmptyView.prototype._startRecording = function (btn) {
+        var self = this;
+        if (self._destroyed || !btn) return;
+        var msgEl = document.getElementById("homeStatusMessage");
+        var original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "녹음 시작 중...";
+        App.apiRequest("/recording/start", { method: "POST" })
+            .then(function () {
+                if (self._destroyed) return;
+                if (msgEl) msgEl.textContent = "녹음이 시작되었습니다. 상단 녹음 상태에서 정지할 수 있습니다.";
+            })
+            .catch(function (err) {
+                if (self._destroyed) return;
+                if (msgEl) {
+                    msgEl.textContent = "녹음 시작 실패: " + (err && err.message ? err.message : "오디오 입력 상태를 확인해 주세요.");
+                }
+            })
+            .finally(function () {
+                if (self._destroyed) return;
+                btn.disabled = false;
+                btn.textContent = original;
             });
     };
 

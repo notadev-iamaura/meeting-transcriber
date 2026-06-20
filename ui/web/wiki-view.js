@@ -478,6 +478,11 @@
 
             // 미리보기 위임 클릭 — 인용 마커
             var onPreviewClick = function (e) {
+                var emptyAction = e.target.closest("[data-wiki-empty-action]");
+                if (emptyAction) {
+                    self._handleEmptyAction(emptyAction.getAttribute("data-wiki-empty-action"));
+                    return;
+                }
                 var citation = e.target.closest(".wiki-citation");
                 if (!citation) return;
                 e.preventDefault();
@@ -538,6 +543,11 @@
 
             // 현황 패널 위임 클릭 — 인용 마커(deep link) + 카드(페이지 미리보기)
             var onOverviewClick = function (e) {
+                var emptyAction = e.target.closest("[data-wiki-empty-action]");
+                if (emptyAction) {
+                    self._handleEmptyAction(emptyAction.getAttribute("data-wiki-empty-action"));
+                    return;
+                }
                 var citation = e.target.closest(".wiki-citation");
                 if (citation) {
                     e.preventDefault();
@@ -563,6 +573,20 @@
             };
             els.overviewPanel.addEventListener("click", onOverviewClick);
             self._listeners.push({ el: els.overviewPanel, type: "click", fn: onOverviewClick });
+        };
+
+        WikiView.prototype._handleEmptyAction = function (action) {
+            if (action === "record") {
+                App.apiRequest("/recording/start", { method: "POST" }).catch(function () {
+                    Router.navigate("/app");
+                });
+            } else if (action === "reindex") {
+                Router.navigate("/app/settings/reindex");
+            } else if (action === "settings") {
+                Router.navigate("/app/settings/wiki-backfill");
+            } else {
+                Router.navigate("/app");
+            }
         };
 
         /**
@@ -701,7 +725,11 @@
                     '      <path d="M22 18H40M22 26H38M22 34H34"/>',
                     '    </svg>',
                     '    <h2 class="wiki-empty-state-title">아직 정리된 현황이 없습니다</h2>',
-                    '    <p class="wiki-empty-state-desc">회의를 처리하면 미해결 액션·결정·프로젝트 현황이 자동으로 모입니다.</p>',
+                    '    <p class="wiki-empty-state-desc">회의를 처리하면 결정사항, 열린 액션, 프로젝트 현황이 원문 근거와 함께 모입니다.</p>',
+                    '    <div class="wiki-empty-actions">',
+                    '      <button type="button" class="wiki-empty-action" data-wiki-empty-action="record">첫 회의 녹음</button>',
+                    '      <button type="button" class="wiki-empty-action" data-wiki-empty-action="reindex">기존 회의 백필</button>',
+                    '    </div>',
                     "  </div>",
                     "</div>",
                 ].join("");
@@ -1303,7 +1331,11 @@
                 '    <path d="M22 18H40M22 26H38M22 34H34"/>',
                 '  </svg>',
                 '  <h2 class="wiki-empty-state-title">아직 위키 페이지가 없습니다</h2>',
-                '  <p class="wiki-empty-state-desc">회의를 처리하면 결정사항·인물·프로젝트·주제 페이지가 자동으로 만들어집니다.</p>',
+                '  <p class="wiki-empty-state-desc">회의를 처리하거나 기존 회의를 백필하면 결정사항과 액션 페이지가 만들어집니다.</p>',
+                '  <div class="wiki-empty-actions">',
+                '    <button type="button" class="wiki-empty-action" data-wiki-empty-action="reindex">기존 회의 백필</button>',
+                '    <button type="button" class="wiki-empty-action" data-wiki-empty-action="settings">Decision Wiki 설정</button>',
+                '  </div>',
                 "</div>",
             ].join("\n");
         };

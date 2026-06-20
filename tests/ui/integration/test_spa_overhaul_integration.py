@@ -308,6 +308,52 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
     ]
 
 
+def test_home_zero_meetings_prioritizes_first_meeting_cta(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """회의 0건 홈에서는 첫 회의 CTA만 보이고 일괄 작업은 숨긴다."""
+
+    def home_zero_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/dashboard/stats" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "this_week_meetings": 0,
+                        "total_meetings": 0,
+                        "queue_pending": 0,
+                        "untranscribed_recordings": 0,
+                        "active_processing": 0,
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app",
+        api_handler=home_zero_api,
+    ) as page:
+        page.wait_for_selector(".home-view", state="attached")
+        page.wait_for_function(
+            "() => document.querySelector('#homeStatTotal').textContent === '0'"
+        )
+
+        assert page.locator("#homeOnboarding").is_visible()
+        assert page.locator("#homeActionStartRecording").is_visible()
+        assert page.locator("#homeActionImportPrimary").is_visible()
+
+        assert page.locator("#homeActionImport").is_hidden()
+        assert page.locator(".home-action-btn--dropdown[data-dropdown='all-bulk']").is_hidden()
+        assert page.locator(".home-action-btn--dropdown[data-dropdown='recent-24h']").is_hidden()
+
+
 def test_home_stale_async_does_not_mutate_after_destroy(
     browser: Browser,
     spa_static_server: str,
@@ -651,7 +697,7 @@ def test_search_route_renders_public_module_boundary(
     browser: Browser,
     spa_static_server: str,
 ) -> None:
-    """SearchView 모듈 분리 후 /app/search shell 과 공개 API 계약을 검증."""
+    """SearchView 모듈 분리 후 /app/search shell 과 0건 가드 계약을 검증."""
     with _spa_page(
         browser,
         spa_static_server,
@@ -664,10 +710,82 @@ def test_search_route_renders_public_module_boundary(
         assert page.locator(".search-view").count() == 1
         assert page.locator("#navSearch").get_attribute("aria-current") == "page"
         assert "active" in (page.locator("#navSearch").get_attribute("class") or "")
-        assert page.evaluate("() => document.activeElement.id") == "searchQuery"
+        assert page.locator("#searchQuery").is_disabled()
+        assert page.locator("#searchFilterDate").is_disabled()
+        assert "회의를 추가하면 검색할 수 있습니다." in (
+            page.locator("#searchQuery").get_attribute("placeholder") or ""
+        )
+        assert "검색할 회의가 아직 없습니다" in page.locator("#searchHint").inner_text()
         assert page.evaluate(
             "() => Boolean(window.SPA && window.SPA.SearchView && window.MeetingSearchView)"
         )
+
+
+def test_search_with_meetings_but_no_index_shows_recovery_cta(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """회의는 있으나 검색 인덱스가 0건이면 검색 입력 대신 복구 CTA를 노출한다."""
+    search_calls: list[dict] = []
+
+    def no_index_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
+        if "/api/reindex/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "total": 1,
+                        "indexed": 0,
+                        "missing": 1,
+                        "missing_meeting_ids": ["meeting-a"],
+                    }
+                ),
+            )
+            return
+        if "/api/search" in url:
+            search_calls.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"detail": "search should be gated"}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/search",
+        api_handler=no_index_api,
+    ) as page:
+        page.wait_for_function(
+            "() => document.querySelector('#searchQuery')"
+            "  ?.getAttribute('placeholder')"
+            "  ?.includes('검색 인덱스를 준비')"
+        )
+
+        assert page.locator("#searchQuery").is_disabled()
+        assert page.locator("#searchBtn").is_disabled()
+        assert "검색 인덱스가 아직 준비되지 않았습니다" in page.locator("#searchHint").inner_text()
+
+        page.locator("#searchQuery").evaluate("(el) => el.value = '결정사항'")
+        page.locator("#searchForm").evaluate(
+            "(form) => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))"
+        )
+        assert search_calls == []
+
+        page.locator("[data-search-empty-action='go-reindex']").click()
+        page.wait_for_url("**/app/settings/reindex")
 
 
 def test_search_submit_payload_empty_state_and_error_banner(
@@ -680,6 +798,13 @@ def test_search_submit_payload_empty_state_and_error_banner(
 
     def search_api(route: Route) -> None:
         url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
         if "/api/search" in url:
             payloads.append(json.loads(route.request.post_data or "{}"))
             if respond_503["enabled"]:
@@ -728,10 +853,12 @@ def test_search_submit_payload_empty_state_and_error_banner(
         page.locator("#searchFilterClearBtn").click()
         assert page.locator("#searchFilterDate").input_value() == ""
         assert page.locator("#searchFilterSpeaker").input_value() == ""
+        page.wait_for_timeout(150)
+        assert payloads[1] == {"query": "출시 일정"}
         page.locator("#searchQuery").fill("   ")
         page.keyboard.press("Enter")
         page.wait_for_timeout(150)
-        assert len(payloads) == 1
+        assert len(payloads) == 2
 
         respond_503["enabled"] = True
         page.locator("#searchQuery").fill("검색 장애")
@@ -753,6 +880,13 @@ def test_search_results_are_safe_and_navigate_to_viewer(
 
     def result_api(route: Route) -> None:
         url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
         if "/api/search" in url:
             captured_payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
@@ -794,12 +928,13 @@ def test_search_results_are_safe_and_navigate_to_viewer(
         page.wait_for_selector(".result-item", state="attached")
 
         assert captured_payloads[0] == {"query": "프로젝트 일정"}
-        assert "1건 검색됨" in page.locator("#searchStats").inner_text()
-        assert "점수 0.9877" in page.locator(".result-score").inner_text()
+        assert "관련 결과 1건" in page.locator("#searchStats").inner_text()
+        assert page.locator(".result-score").count() == 0
         assert page.locator(".result-item img").count() == 0
         assert page.evaluate("() => window.__xss") == 0
-        assert "bad" in page.locator(".result-source-tag").inner_text().lower()
-        assert "both" in (page.locator(".result-source-tag").get_attribute("class") or "")
+        assert page.locator(".result-source-tag").count() == 0
+        assert "검색 세부 정보" in page.locator(".search-result-details").inner_text()
+        assert "bad" in (page.locator(".search-result-details").text_content() or "").lower()
 
         page.locator(".result-item").press("Enter")
         page.wait_for_url("**/app/viewer/**")
@@ -813,11 +948,23 @@ def test_search_stale_requests_do_not_mutate_after_newer_search_or_destroy(
     spa_static_server: str,
 ) -> None:
     """느린 이전 검색과 destroy 이후 실패가 현재 뷰를 오염시키지 않는지 검증."""
+
+    def search_ready_api(route: Route) -> None:
+        if "/api/meetings" in route.request.url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
+        _mock_api(route)
+
     with _spa_page(
         browser,
         spa_static_server,
         {"width": 1024, "height": 768},
         path="/app/search",
+        api_handler=search_ready_api,
     ) as page:
         page.wait_for_selector("#searchQuery", state="attached")
         page.evaluate(
@@ -989,6 +1136,14 @@ def test_chat_send_preserves_payload_session_and_filter(
             )
             return
 
+        if "/api/reindex/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"indexed": 2}',
+            )
+            return
+
         if "/api/chat" in url:
             captured_payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
@@ -1052,6 +1207,135 @@ def test_chat_send_preserves_payload_session_and_filter(
         assert captured_payloads[2]["query"] == "새 질문"
         assert captured_payloads[2]["session_id"] != captured_payloads[0]["session_id"]
         assert captured_payloads[2]["meeting_id_filter"] == "meeting-b"
+
+
+def test_chat_selected_missing_meeting_disables_input(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """선택한 회의만 미색인이면 해당 범위 질문을 막고 복구 CTA를 노출한다."""
+    chat_calls: list[dict] = []
+
+    def chat_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meetings": [
+                            {"meeting_id": "meeting-a", "status": "completed"},
+                            {"meeting_id": "meeting-b", "status": "completed"},
+                        ]
+                    }
+                ),
+            )
+            return
+        if "/api/reindex/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "total": 2,
+                        "indexed": 1,
+                        "missing": 1,
+                        "missing_meeting_ids": ["meeting-b"],
+                    }
+                ),
+            )
+            return
+        if "/api/chat" in url:
+            chat_calls.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"detail": "chat should be gated"}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/chat",
+        api_handler=chat_api,
+    ) as page:
+        page.wait_for_selector("#chatMeetingFilter option[value='meeting-b']", state="attached")
+
+        page.select_option("#chatMeetingFilter", "meeting-b")
+        assert page.locator("#chatInput").is_disabled()
+        assert "검색 준비 필요" in page.locator("#chatScopeStatus").inner_text()
+        assert (
+            "선택한 회의의 검색 준비가 필요합니다"
+            in page.locator("#chatMessagesArea").inner_text()
+        )
+        assert chat_calls == []
+
+        page.select_option("#chatMeetingFilter", "meeting-a")
+        assert not page.locator("#chatInput").is_disabled()
+        assert "meeting-a 회의만 검색" in page.locator("#chatScopeStatus").inner_text()
+
+
+def test_chat_no_grounding_preserves_repair_actions(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """근거 없음 응답은 백엔드 안내문과 복구 액션을 UI에 보존한다."""
+
+    def chat_api(route: Route) -> None:
+        url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
+        if "/api/reindex/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"total": 1, "indexed": 1, "missing": 0, "missing_meeting_ids": []}',
+            )
+            return
+        if "/api/chat" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "answer": "관련 회의 내용을 찾지 못해 답변을 생성하지 않았습니다.",
+                        "references": [],
+                        "query": "없는 안건",
+                        "has_context": False,
+                        "llm_used": False,
+                        "llm_called": False,
+                        "grounding_status": "no_results",
+                        "repair_actions": ["clear_filters", "reindex"],
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/chat",
+        api_handler=chat_api,
+    ) as page:
+        page.wait_for_selector("#chatMeetingFilter option[value='meeting-a']", state="attached")
+        page.locator("#chatInput").fill("없는 안건")
+        page.locator("#chatSendBtn").click()
+        page.wait_for_selector(".message.assistant", state="attached")
+
+        assert "관련 회의 내용을 찾지 못해" in page.locator(".message.assistant").inner_text()
+        assert page.locator(".chat-repair-btn", has_text="범위 초기화").count() == 1
+        assert page.locator(".chat-repair-btn", has_text="검색 인덱스 복구").count() == 1
 
 
 def test_wiki_route_renders_shell_tree_and_public_api(
@@ -2408,7 +2692,15 @@ def test_search_labels_and_suggestion_chip(browser: Browser, spa_static_server: 
     payloads: list[dict] = []
 
     def search_api(route: Route) -> None:
-        if "/api/search" in route.request.url:
+        url = route.request.url
+        if "/api/meetings" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"meetings": [{"meeting_id": "meeting-a", "status": "completed"}]}',
+            )
+            return
+        if "/api/search" in url:
             payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
                 status=200,
@@ -2455,6 +2747,13 @@ def test_chat_prompt_chip_and_scope_status(browser: Browser, spa_static_server: 
                         ]
                     }
                 ),
+            )
+            return
+        if "/api/reindex/status" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"indexed": 1}',
             )
             return
         _mock_api(route)
@@ -2532,6 +2831,30 @@ def test_t302_hamburger_click_opens_drawer(browser: Browser, spa_static_server: 
             f"햄버거 클릭 후 aria-expanded={result['ariaExpanded']!r} (true 기대)"
         )
         assert result["panelOpen"], "햄버거 클릭 후 #list-panel.is-open 미적용"
+
+
+def test_t302_hamburger_opens_drawer_on_chat_mode_route(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """chat-mode route에서도 모바일 drawer가 display:none에 막히지 않는다."""
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 375, "height": 667},
+        path="/app/chat",
+    ) as page:
+        page.wait_for_selector("#list-panel.chat-mode", state="attached")
+        display = page.evaluate(
+            "() => getComputedStyle(document.querySelector('#list-panel')).display"
+        )
+        assert display != "none", "chat-mode 모바일 drawer 가 display:none 으로 숨겨짐"
+
+        page.locator("#mobile-menu-toggle").click()
+        page.wait_for_function(
+            "() => document.querySelector('#list-panel')  ?.classList.contains('is-open')"
+        )
+        assert page.locator("#mobile-menu-toggle").get_attribute("aria-expanded") == "true"
 
 
 def test_t302_escape_closes_drawer(browser: Browser, spa_static_server: str) -> None:

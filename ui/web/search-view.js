@@ -18,6 +18,67 @@
             throw new Error("MeetingSearchView requires App and Router");
         }
 
+        function _displaySpeakerLabel(label) {
+            var raw = String(label || "");
+            var match = raw.match(/^SPEAKER_(\d+)$/i);
+            if (!match) return raw;
+            return "화자 " + (Number(match[1]) + 1);
+        }
+
+        function _normalizeIndexStatus(status) {
+            if (!status || typeof status !== "object") return null;
+            var total = Number(status.total);
+            var indexed = Number(status.indexed);
+            if (!isFinite(total) || !isFinite(indexed)) return null;
+            var missing = Number(status.missing);
+            return {
+                total: total,
+                indexed: indexed,
+                missing: isFinite(missing) ? missing : 0,
+                missingMeetingIds: Array.isArray(status.missing_meeting_ids)
+                    ? status.missing_meeting_ids.slice()
+                    : [],
+            };
+        }
+
+        function _defaultSearchHintHtml() {
+            return [
+                '<p>회의 전사문, 요약, 결정사항에서 의미가 비슷한 표현과 정확한 키워드를 함께 찾습니다.</p>',
+                '<div class="search-suggestion-row" aria-label="추천 검색어">',
+                '  <button type="button" class="suggestion-chip" data-query="결정사항">결정사항</button>',
+                '  <button type="button" class="suggestion-chip" data-query="다음 액션">다음 액션</button>',
+                '  <button type="button" class="suggestion-chip" data-query="일정">일정</button>',
+                '</div>',
+            ].join("");
+        }
+
+        function _emptyMeetingsHintHtml() {
+            return [
+                '<p>검색할 회의가 아직 없습니다. 녹음하거나 오디오를 가져오면 전사문과 결정사항을 찾을 수 있습니다.</p>',
+                '<div class="search-suggestion-row" aria-label="첫 회의 작업">',
+                '  <button type="button" class="suggestion-chip" data-search-empty-action="record">녹음 시작</button>',
+                '  <button type="button" class="suggestion-chip" data-search-empty-action="import">오디오 가져오기</button>',
+                '</div>',
+            ].join("");
+        }
+
+        function _notReadyHintHtml(state) {
+            if (state === "no_completed") {
+                return [
+                    '<p>검색하려면 전사가 완료된 회의가 필요합니다. 진행 중인 전사가 끝나면 검색할 수 있습니다.</p>',
+                    '<div class="search-suggestion-row" aria-label="검색 준비 작업">',
+                    '  <button type="button" class="suggestion-chip" data-search-empty-action="go-home">홈으로 이동</button>',
+                    '</div>',
+                ].join("");
+            }
+            return [
+                '<p>회의는 있지만 검색 인덱스가 아직 준비되지 않았습니다. 누락분을 복구한 뒤 다시 검색해 주세요.</p>',
+                '<div class="search-suggestion-row" aria-label="검색 준비 작업">',
+                '  <button type="button" class="suggestion-chip" data-search-empty-action="go-reindex">검색 인덱스 복구</button>',
+                '</div>',
+            ].join("");
+        }
+
     // =================================================================
     // === SearchView (검색 전용 뷰, /app/search) ===
     // =================================================================
@@ -33,9 +94,12 @@
         self._els = {};
         self._destroyed = false;
         self._searchSeq = 0;
+        self._hasMeetings = null;
+        self._indexStatus = null;
 
         self._render();
         self._bind();
+        self._loadMeetingState();
     }
 
     /**
@@ -72,7 +136,7 @@
             '      </div>',
             '      <div class="filter-group">',
             '        <label class="filter-label" for="searchFilterSpeaker">화자</label>',
-            '        <input type="text" class="filter-input" id="searchFilterSpeaker" placeholder="예: SPEAKER_00" aria-label="검색 화자 필터" />',
+            '        <input type="text" class="filter-input" id="searchFilterSpeaker" placeholder="예: 화자 1 또는 참석자 이름" aria-label="검색 화자 필터" />',
             '      </div>',
             '      <button type="button" class="filter-clear-btn" id="searchFilterClearBtn" aria-label="검색 필터 초기화">',
             '        필터 초기화',
@@ -123,12 +187,7 @@
 
             // 검색 안내 (결과 없을 때 기본 표시)
             '  <div class="search-view-hint" id="searchHint">',
-            '    <p>회의 전사문, 요약, 결정사항을 벡터 검색과 키워드 검색으로 함께 찾습니다.</p>',
-            '    <div class="search-suggestion-row" aria-label="추천 검색어">',
-            '      <button type="button" class="suggestion-chip" data-query="결정사항">결정사항</button>',
-            '      <button type="button" class="suggestion-chip" data-query="다음 액션">다음 액션</button>',
-            '      <button type="button" class="suggestion-chip" data-query="일정">일정</button>',
-            '    </div>',
+            _defaultSearchHintHtml(),
             '  </div>',
 
             '</div>',
@@ -174,11 +233,39 @@
         var onFilterClear = function () {
             els.filterDate.value = "";
             els.filterSpeaker.value = "";
+            if (els.searchQuery.value.trim() && !els.searchQuery.disabled) {
+                self._performSearch();
+            } else {
+                els.searchResults.classList.remove("visible");
+                els.searchEmpty.style.display = "none";
+                els.searchHint.style.display = "block";
+            }
         };
         els.filterClearBtn.addEventListener("click", onFilterClear);
         self._listeners.push({ el: els.filterClearBtn, type: "click", fn: onFilterClear });
 
         var onSuggestionClick = function (e) {
+            var emptyAction = e.target.closest("[data-search-empty-action]");
+            if (emptyAction) {
+                var action = emptyAction.getAttribute("data-search-empty-action");
+                if (action === "import") {
+                    var modal = document.getElementById("importModal");
+                    if (modal) {
+                        modal.classList.remove("hidden");
+                        var dz = document.getElementById("importDropzone");
+                        if (dz) dz.focus();
+                    }
+                } else if (action === "record") {
+                    App.apiRequest("/recording/start", { method: "POST" }).catch(function (err) {
+                        errorBanner.show("녹음 시작 실패: " + (err.message || "오디오 입력 상태를 확인해 주세요."));
+                    });
+                } else if (action === "go-reindex") {
+                    Router.navigate("/app/settings/reindex");
+                } else if (action === "go-home") {
+                    Router.navigate("/app");
+                }
+                return;
+            }
             var chip = e.target.closest(".suggestion-chip");
             if (!chip) return;
             els.searchQuery.value = chip.getAttribute("data-query") || chip.textContent.trim();
@@ -191,6 +278,84 @@
         els.searchQuery.focus();
     };
 
+    SearchView.prototype._loadMeetingState = function () {
+        var self = this;
+        App.apiRequest("/meetings")
+            .then(function (data) {
+                if (self._destroyed) return;
+                var meetings = data && data.meetings ? data.meetings : [];
+                self._hasMeetings = meetings.length > 0;
+                if (!self._hasMeetings) {
+                    self._indexStatus = { total: 0, indexed: 0, missing: 0, missingMeetingIds: [] };
+                    self._syncSearchAvailability();
+                    return;
+                }
+                App.apiRequest("/reindex/status")
+                    .then(function (status) {
+                        if (self._destroyed) return;
+                        self._indexStatus = _normalizeIndexStatus(status);
+                        self._syncSearchAvailability();
+                    })
+                    .catch(function () {
+                        if (self._destroyed) return;
+                        self._indexStatus = null;
+                        self._syncSearchAvailability();
+                    });
+            })
+            .catch(function () {
+                if (self._destroyed) return;
+                self._hasMeetings = null;
+                self._indexStatus = null;
+                self._syncSearchAvailability();
+            });
+    };
+
+    SearchView.prototype._getReadinessState = function () {
+        if (this._hasMeetings === false) return "no_meetings";
+        if (this._hasMeetings !== true) return "unknown";
+        if (!this._indexStatus) return "ready";
+        if (this._indexStatus.total === 0) return "no_completed";
+        if (this._indexStatus.indexed === 0) return "no_index";
+        return "ready";
+    };
+
+    SearchView.prototype._syncSearchAvailability = function () {
+        var els = this._els;
+        var state = this._getReadinessState();
+        var disabled = state === "no_meetings" || state === "no_completed" || state === "no_index";
+        els.searchQuery.disabled = disabled;
+        els.searchBtn.disabled = disabled;
+        els.filterDate.disabled = disabled;
+        els.filterSpeaker.disabled = disabled;
+        els.filterClearBtn.disabled = disabled;
+
+        if (state === "no_meetings") {
+            els.searchQuery.placeholder = "회의를 추가하면 검색할 수 있습니다.";
+            els.searchHint.innerHTML = _emptyMeetingsHintHtml();
+            els.searchHint.setAttribute("data-state", state);
+        } else if (state === "no_completed" || state === "no_index") {
+            els.searchQuery.placeholder = state === "no_completed"
+                ? "전사가 완료되면 검색할 수 있습니다."
+                : "검색 인덱스를 준비하면 검색할 수 있습니다.";
+            els.searchHint.innerHTML = _notReadyHintHtml(state);
+            els.searchHint.setAttribute("data-state", state);
+        } else {
+            els.searchQuery.placeholder = "검색어를 입력하세요 (예: 프로젝트 일정, 결정사항...)";
+            if (els.searchHint.getAttribute("data-state") !== "default" &&
+                    !els.searchResults.classList.contains("visible")) {
+                els.searchHint.innerHTML = _defaultSearchHintHtml();
+            }
+            els.searchHint.setAttribute("data-state", "default");
+            return;
+        }
+
+        els.searchResults.classList.remove("visible");
+        els.searchLoading.classList.remove("visible");
+        els.searchResultsList.innerHTML = "";
+        els.searchEmpty.style.display = "none";
+        els.searchHint.style.display = "block";
+    };
+
     /**
      * 검색을 수행한다.
      */
@@ -200,6 +365,11 @@
         if (self._destroyed) return;
         var query = els.searchQuery.value.trim();
         if (!query) return;
+        var readinessState = self._getReadinessState();
+        if (readinessState !== "ready" && readinessState !== "unknown") {
+            self._syncSearchAvailability();
+            return;
+        }
         var seq = self._searchSeq + 1;
         self._searchSeq = seq;
 
@@ -247,13 +417,8 @@
         var results = data.results || [];
         els.searchResultsList.innerHTML = "";
 
-        // 통계
-        App.safeText(
-            els.searchStats,
-            results.length + "건 검색됨 (벡터: " +
-                (data.vector_count || 0) + ", FTS: " +
-                (data.fts_count || 0) + ")"
-        );
+        // 통계 — 기본 화면은 업무 언어만 노출하고, 알고리즘 세부는 결과 카드 안에 접어둔다.
+        App.safeText(els.searchStats, "관련 결과 " + results.length + "건");
 
         if (results.length === 0) {
             var emptyText = document.getElementById("searchEmptyText");
@@ -268,7 +433,7 @@
                     "날짜/화자 필터를 해제하거나 다른 검색어를 시도해 보세요");
             } else {
                 App.safeText(emptySub,
-                    "다른 키워드를 사용하거나, 채팅에서 자연어로 질문해 보세요");
+                    "다른 키워드를 사용하거나 검색 범위를 넓혀 보세요");
             }
 
             els.searchEmpty.style.display = "block";
@@ -287,7 +452,7 @@
                 App.formatTime(item.start_time) + " ~ " +
                 App.formatTime(item.end_time));
 
-            // 헤더: 회의 ID + 점수
+            // 헤더: 회의 ID
             var header = document.createElement("div");
             header.className = "result-header";
 
@@ -295,12 +460,7 @@
             meetingId.className = "result-meeting-id";
             meetingId.textContent = item.meeting_id;
 
-            var score = document.createElement("span");
-            score.className = "result-score";
-            score.textContent = "점수 " + item.score.toFixed(4);
-
             header.appendChild(meetingId);
-            header.appendChild(score);
 
             // 본문 텍스트
             var text = document.createElement("div");
@@ -319,7 +479,8 @@
             if (item.speakers && item.speakers.length > 0) {
                 var speakerItem = document.createElement("span");
                 speakerItem.className = "result-meta-item";
-                speakerItem.innerHTML = Icons.person + ' <span>' + App.escapeHtml(item.speakers.join(", ")) + '</span>';
+                var speakerLabels = item.speakers.map(_displaySpeakerLabel);
+                speakerItem.innerHTML = Icons.person + ' <span>' + App.escapeHtml(speakerLabels.join(", ")) + '</span>';
                 meta.appendChild(speakerItem);
             }
 
@@ -329,21 +490,36 @@
                 " ~ " + App.formatTime(item.end_time)) + '</span>';
             meta.appendChild(timeItem);
 
-            // 검색 소스 태그
-            var sourceTag = document.createElement("span");
             var sourceLabels = {
-                vector: "벡터",
+                vector: "의미 기반",
                 fts: "키워드",
                 both: "복합",
             };
             var source = sourceLabels[item.source] ? item.source : "both";
-            sourceTag.className = "result-source-tag " + source;
-            sourceTag.textContent = sourceLabels[item.source] || item.source || "복합";
-            meta.appendChild(sourceTag);
 
             el.appendChild(header);
             el.appendChild(text);
             el.appendChild(meta);
+
+            var details = document.createElement("details");
+            details.className = "search-result-details";
+            details.addEventListener("click", function (e) {
+                e.stopPropagation();
+            });
+            details.addEventListener("keydown", function (e) {
+                e.stopPropagation();
+            });
+            var summary = document.createElement("summary");
+            summary.textContent = "검색 세부 정보";
+            var debug = document.createElement("div");
+            debug.className = "search-result-debug";
+            debug.textContent =
+                "방식 " + (sourceLabels[item.source] || item.source || "복합") +
+                " · 점수 " + item.score.toFixed(4) +
+                " · 청크 " + item.chunk_index;
+            details.appendChild(summary);
+            details.appendChild(debug);
+            el.appendChild(details);
 
             // 클릭 → ViewerView로 이동 (검색어 + 타임스탬프 전달)
             el.addEventListener("click", function () {

@@ -2147,14 +2147,15 @@
 
             self._stopPipelinePolling();
 
-            // 파이프라인 6단계 정의
+            // 산출물 기준 진행 단계. 내부 CHUNK/EMBED/WIKI_COMPILE은 사용자에게
+            // "검색/결정사항 준비"로 묶어 보여준다.
             var pipelineSteps = [
-                { key: "convert", label: "변환" },
+                { key: "convert", label: "오디오 준비" },
                 { key: "transcribe", label: "전사" },
-                { key: "diarize", label: "화자분리" },
-                { key: "merge", label: "병합" },
-                { key: "correct", label: "보정" },
+                { key: "diarize", label: "화자 구분" },
                 { key: "summarize", label: "요약" },
+                { key: "embed", label: "검색 준비" },
+                { key: "wiki_compile", label: "결정사항 반영" },
             ];
 
             // 진행 중 상태 목록
@@ -2167,8 +2168,8 @@
             var statusToStep = {
                 transcribing: "transcribe",
                 diarizing: "diarize",
-                merging: "merge",
-                embedding: "correct",
+                merging: "diarize",
+                embedding: "embed",
             };
 
             function renderProgress(currentStep, completedSteps) {
@@ -2201,7 +2202,7 @@
             // 빈 상태 텍스트 업데이트
             App.safeText(document.getElementById("viewerEmptyText"), "파이프라인 처리 중");
             var subEl = document.getElementById("viewerEmptySub");
-            if (subEl) subEl.innerHTML = "완료되면 전사문이 자동으로 표시됩니다.";
+            if (subEl) subEl.innerHTML = "완료되면 전사문, 요약, 검색 준비 상태가 자동으로 표시됩니다.";
 
             async function poll() {
                 try {

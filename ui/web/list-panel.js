@@ -422,9 +422,7 @@
                     });
                 }
 
-                // 가져오기 모달 (#importModal) — 레퍼런스 ImportPanel.jsx 기준 dropzone + 큐.
-                // 실제 업로드 엔드포인트는 아직 없음 → 선택된 파일 큐만 시각화하고
-                // "파이프라인 시작" 버튼은 안내 메시지를 노출한다.
+                // 가져오기 모달 (#importModal) — dropzone + 큐 + /api/uploads 업로드.
                 var _importModalEl = document.getElementById("importModal");
                 var _importDropzone = document.getElementById("importDropzone");
                 var _importFileInput = document.getElementById("importFileInput");
@@ -477,7 +475,13 @@
 
                     if (_importQueue) _importQueue.hidden = _importFiles.length === 0;
                     if (_importStartBtn) _importStartBtn.disabled = _importFiles.length === 0;
-                    if (_importNotice) _importNotice.hidden = _importFiles.length === 0;
+                    if (_importNotice) {
+                        _importNotice.hidden = _importFiles.length === 0;
+                        if (_importFiles.length > 0) {
+                            _importNotice.textContent =
+                                _importFiles.length + "개 파일이 준비되었습니다. 업로드하면 전사 대기열에 추가됩니다.";
+                        }
+                    }
                 }
 
                 function _addImportFiles(fileList) {
@@ -577,12 +581,12 @@
                                     } catch (_e) {
                                         errText = String(resp.status);
                                     }
-                                    failed.push({ name: file.name, reason: errText });
+                                    failed.push({ file: file, name: file.name, reason: errText });
                                 } else {
                                     succeeded++;
                                 }
                             } catch (e) {
-                                failed.push({ name: file.name, reason: e.message || String(e) });
+                                failed.push({ file: file, name: file.name, reason: e.message || String(e) });
                             }
                         }
 
@@ -590,12 +594,13 @@
                         _importStartBtn.textContent = originalLabel;
 
                         if (failed.length === 0) {
-                            if (_importNotice) {
-                                _importNotice.textContent =
-                                    succeeded + "건 업로드 완료. 자동 감지 후 큐에 등록됩니다.";
-                            }
                             _importFiles = [];
                             _renderImportQueue();
+                            if (_importNotice) {
+                                _importNotice.hidden = false;
+                                _importNotice.textContent =
+                                    succeeded + "건 업로드 완료. 전사 대기열에 추가되었습니다.";
+                            }
                             // 업로드 직후 사이드바 + 대시보드를 즉시 한 번 갱신.
                             if (window.ListPanel && ListPanel.loadMeetings) {
                                 try { ListPanel.loadMeetings(); } catch (_) {}
@@ -604,14 +609,17 @@
                             // 사용자가 결과를 인지할 수 있게 짧게 노출 후 닫기.
                             setTimeout(_closeImportModal, 800);
                         } else {
+                            _importFiles = failed.map(function (f) { return f.file; });
+                            _renderImportQueue();
                             if (_importNotice) {
-                                var summary =
-                                    succeeded + "건 성공, " + failed.length + "건 실패";
-                                var detail = failed
-                                    .slice(0, 3)
-                                    .map(function (f) { return f.name + ": " + (f.reason || "오류"); })
-                                    .join(" · ");
-                                _importNotice.textContent = summary + " — " + detail;
+                                _importNotice.hidden = false;
+                                var lines = failed
+                                    .slice(0, 5)
+                                    .map(function (f) { return "• " + f.name + ": " + (f.reason || "오류"); })
+                                    .join("\n");
+                                _importNotice.textContent =
+                                    succeeded + "건 성공, " + failed.length +
+                                    "건 실패. 실패한 파일만 큐에 남겼습니다.\n" + lines;
                             }
                         }
                     });
@@ -885,17 +893,27 @@
                         '  </svg>' +
                         '  <h2 class="empty-state-title">아직 회의가 없어요</h2>' +
                         '  <p class="empty-state-description">첫 회의를 녹음하면 자동으로 전사·요약돼요.</p>' +
-                        '  <button class="empty-state-cta" type="button" data-action="start-recording">녹음 시작</button>' +
+                        '  <div class="empty-state-actions">' +
+                        '    <button class="empty-state-cta" type="button" data-action="start-recording">녹음 시작</button>' +
+                        '    <button class="empty-state-cta secondary" type="button" data-action="import-audio">오디오 가져오기</button>' +
+                        '  </div>' +
                         '</div>';
                     _listEl.appendChild(empty);
                     // CTA → /api/recording/start 호출 (메뉴바 _on_start_recording 과 동일 엔드포인트)
                     var cta = empty.querySelector('[data-action="start-recording"]');
                     if (cta) {
                         cta.addEventListener("click", function () {
+                            cta.disabled = true;
                             App.apiRequest("/recording/start", { method: "POST" }).catch(function (err) {
-                                console.error("녹음 시작 실패:", err);
+                                errorBanner.show("녹음 시작 실패: " + (err.message || "오디오 입력 상태를 확인해 주세요."));
+                            }).finally(function () {
+                                cta.disabled = false;
                             });
                         });
+                    }
+                    var importCta = empty.querySelector('[data-action="import-audio"]');
+                    if (importCta) {
+                        importCta.addEventListener("click", _openImportModal);
                     }
                     return;
                 }

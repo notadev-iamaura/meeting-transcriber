@@ -511,6 +511,41 @@
   line-height: 1.5;
 }
 
+.wiki-empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.wiki-empty-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+    border-color var(--duration-fast) var(--ease-macos);
+}
+
+.wiki-empty-action:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.wiki-empty-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 /* Health 모달 — 백드롭 + 카드 (기존 .modal-overlay 패턴 참고) */
 .wiki-health-modal {
   position: fixed;

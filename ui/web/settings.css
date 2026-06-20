@@ -1017,6 +1017,7 @@
   font-size: var(--fs-12);
   color: var(--text-secondary);
   line-height: var(--lh-snug);
+  white-space: pre-line;
 }
 
 /* ============================================================

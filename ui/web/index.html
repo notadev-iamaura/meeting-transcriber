@@ -253,7 +253,7 @@
       <p class="modal-message">
         파일을 끌어다 놓거나 클릭해 선택하세요.
         선택된 파일은 <code class="mono-inline">~/.meeting-transcriber/audio_input</code>
-        폴더에 배치되어 파이프라인이 자동으로 시작됩니다.
+        폴더로 안전하게 업로드되고 전사 대기열에 추가됩니다.
       </p>
       <div class="import-dropzone" id="importDropzone" tabindex="0" role="button" aria-label="오디오 파일 드롭존">
         <svg width="28" height="28" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -270,11 +270,11 @@
         <div class="import-queue-list" id="importQueueList"></div>
       </div>
       <div class="import-notice" id="importNotice" hidden role="status" aria-live="polite">
-        업로드 API 는 아직 준비 중입니다. 현재는 위 폴더에 직접 배치해 주세요.
+        파일을 선택하면 업로드 상태가 여기에 표시됩니다.
       </div>
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="importModalCancel">닫기</button>
-        <button type="button" class="settings-save-btn" id="importModalStart" disabled>파이프라인 시작</button>
+        <button type="button" class="settings-save-btn" id="importModalStart" disabled>업로드하고 처리 대기열에 추가</button>
       </div>
     </div>
   </div>

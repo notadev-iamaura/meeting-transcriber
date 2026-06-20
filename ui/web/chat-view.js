@@ -21,6 +21,22 @@
             throw new Error("MeetingChatView requires App and Router");
         }
 
+        function _normalizeIndexStatus(status) {
+            if (!status || typeof status !== "object") return null;
+            var total = Number(status.total);
+            var indexed = Number(status.indexed);
+            if (!isFinite(total) || !isFinite(indexed)) return null;
+            var missing = Number(status.missing);
+            return {
+                total: total,
+                indexed: indexed,
+                missing: isFinite(missing) ? missing : 0,
+                missingMeetingIds: Array.isArray(status.missing_meeting_ids)
+                    ? status.missing_meeting_ids.slice()
+                    : [],
+            };
+        }
+
         // =================================================================
         // === ChatView (AI 채팅) ===
         // =================================================================
@@ -36,6 +52,10 @@
             self._els = {};
             self._isSending = false;
             self._messageCount = 0;
+            self._hasMeetings = null;
+            self._indexReady = null;
+            self._indexStatus = null;
+            self._missingMeetingIds = [];
             self._currentAbortController = null;
 
             // 세션 ID 생성 (대화 컨텍스트 유지)
@@ -69,6 +89,37 @@
         ChatView.prototype._createWelcomeHtml = function () {
             // 채팅 빈 상태 (mockup §5.3) — empty-state 패턴 + 기존 welcome-tips 보존
             // Hidden AI 원칙(design.md §5.1)에 따라 'AI' 단어 사용 금지
+            var readinessState = this._getReadinessState ? this._getReadinessState() : "loading";
+            if (readinessState === "no_meetings") {
+                return '<div class="empty-state-container" id="chatWelcomeMessage" data-empty="chat">' +
+                    '<div class="empty-state" role="status">' +
+                    '<svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                    '<path d="M8 38h32"/><path d="M12 34V12a2 2 0 012-2h20a2 2 0 012 2v22"/><path d="M17 17h14M17 23h14M17 29h10"/>' +
+                    '</svg>' +
+                    '<h2 class="empty-state-title">회의를 먼저 추가하세요</h2>' +
+                    '<p class="empty-state-description">질문은 전사문과 결정사항을 근거로 답합니다. 녹음하거나 오디오를 가져온 뒤 다시 시도해 주세요.</p>' +
+                    '<button type="button" class="home-action-btn chat-empty-cta" data-action="go-home">첫 회의 만들기</button>' +
+                    '</div>' +
+                '</div>';
+            }
+            if (readinessState === "no_index" || readinessState === "no_completed" || readinessState === "selected_missing") {
+                var title = readinessState === "selected_missing"
+                    ? "선택한 회의의 검색 준비가 필요합니다"
+                    : "검색 준비가 필요합니다";
+                var description = readinessState === "no_completed"
+                    ? "질문하려면 전사가 완료된 회의가 필요합니다. 진행 중인 처리가 끝나면 다시 시도해 주세요."
+                    : "회의는 있지만 질문에 사용할 검색 인덱스가 아직 없습니다. 인덱스를 복구한 뒤 다시 질문해 주세요.";
+                return '<div class="empty-state-container" id="chatWelcomeMessage" data-empty="chat">' +
+                    '<div class="empty-state" role="status">' +
+                    '<svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                    '<circle cx="24" cy="24" r="18"/><path d="M16 25l5 5 11-13"/>' +
+                    '</svg>' +
+                    '<h2 class="empty-state-title">' + App.escapeHtml(title) + '</h2>' +
+                    '<p class="empty-state-description">' + App.escapeHtml(description) + '</p>' +
+                    '<button type="button" class="home-action-btn chat-empty-cta" data-action="go-reindex">검색 인덱스 복구</button>' +
+                    '</div>' +
+                '</div>';
+            }
             return '<div class="empty-state-container" id="chatWelcomeMessage" data-empty="chat">' +
                 '<div class="empty-state" role="status">' +
                 '<svg class="empty-state-icon" width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -130,6 +181,7 @@
                 '        <textarea class="chat-input" id="chatInput"',
                 '                  placeholder="회의 내용에 대해 질문하세요..."',
                 '                  aria-label="회의 내용 질문 입력"',
+                '                  disabled',
                 '                  rows="1"></textarea>',
                 '      </div>',
                 '      <button class="send-btn" id="chatSendBtn" disabled aria-label="메시지 전송">전송</button>',
@@ -169,7 +221,7 @@
 
             // 입력 필드 값 변경 → 전송 버튼 활성화 제어 + 자동 높이 조정
             var onInput = function () {
-                els.sendBtn.disabled = self._isSending || !els.chatInput.value.trim();
+                els.sendBtn.disabled = !self._canAsk() || self._isSending || !els.chatInput.value.trim();
                 els.chatInput.style.height = "auto";
                 els.chatInput.style.height = Math.min(els.chatInput.scrollHeight, 120) + "px";
             };
@@ -222,8 +274,15 @@
             self._listeners.push({ el: els.meetingFilter, type: "change", fn: onMeetingFilterChange });
 
             var onWelcomePromptClick = function (e) {
+                var cta = e.target.closest(".chat-empty-cta");
+                if (cta) {
+                    var action = cta.getAttribute("data-action");
+                    Router.navigate(action === "go-reindex" ? "/app/settings/reindex" : "/app");
+                    return;
+                }
                 var btn = e.target.closest(".welcome-tip");
                 if (!btn) return;
+                if (!self._canAsk()) return;
                 els.chatInput.value = btn.getAttribute("data-prompt") || btn.textContent.trim();
                 els.chatInput.dispatchEvent(new Event("input", { bubbles: true }));
                 els.chatInput.focus();
@@ -257,6 +316,25 @@
             try {
                 var data = await App.apiRequest("/meetings");
                 var meetings = data.meetings || [];
+                self._hasMeetings = meetings.length > 0;
+                if (self._hasMeetings) {
+                    try {
+                        var status = await App.apiRequest("/reindex/status");
+                        self._indexStatus = _normalizeIndexStatus(status);
+                        self._missingMeetingIds = self._indexStatus
+                            ? self._indexStatus.missingMeetingIds
+                            : [];
+                        self._indexReady = !self._indexStatus || self._indexStatus.indexed > 0;
+                    } catch (_) {
+                        self._indexStatus = null;
+                        self._missingMeetingIds = [];
+                        self._indexReady = null;
+                    }
+                } else {
+                    self._indexStatus = { total: 0, indexed: 0, missing: 0, missingMeetingIds: [] };
+                    self._missingMeetingIds = [];
+                    self._indexReady = false;
+                }
 
                 meetings.forEach(function (meeting) {
                     var option = document.createElement("option");
@@ -278,8 +356,63 @@
                     els.meetingFilter.appendChild(option);
                 });
                 self._updateScopeStatus();
+                self._syncChatAvailability();
             } catch (e) {
                 console.warn("회의 목록 로드 실패:", e.message);
+                self._hasMeetings = false;
+                self._indexStatus = null;
+                self._missingMeetingIds = [];
+                self._syncChatAvailability("회의 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+            }
+        };
+
+        ChatView.prototype._getSelectedMeetingId = function () {
+            var els = this._els;
+            return els.meetingFilter ? els.meetingFilter.value : "";
+        };
+
+        ChatView.prototype._isSelectedMeetingMissing = function () {
+            var selected = this._getSelectedMeetingId();
+            return Boolean(selected && this._missingMeetingIds.indexOf(selected) !== -1);
+        };
+
+        ChatView.prototype._getReadinessState = function () {
+            if (this._hasMeetings === false) return "no_meetings";
+            if (this._hasMeetings !== true) return "loading";
+            if (!this._indexStatus) return "ready";
+            if (this._isSelectedMeetingMissing()) return "selected_missing";
+            if (this._indexStatus.total === 0) return "no_completed";
+            if (this._indexStatus.indexed === 0) return "no_index";
+            return "ready";
+        };
+
+        ChatView.prototype._canAsk = function () {
+            return this._getReadinessState() === "ready";
+        };
+
+        ChatView.prototype._syncChatAvailability = function (errorMessage) {
+            var els = this._els;
+            var canAsk = this._canAsk();
+            var readinessState = this._getReadinessState();
+            els.chatInput.disabled = !canAsk || this._isSending;
+            if (canAsk) {
+                els.chatInput.placeholder = "회의 내용에 대해 질문하세요...";
+            } else if (readinessState === "no_meetings") {
+                els.chatInput.placeholder = "회의를 추가하면 질문할 수 있습니다.";
+            } else if (readinessState === "no_completed") {
+                els.chatInput.placeholder = "전사가 완료되면 질문할 수 있습니다.";
+            } else if (readinessState === "selected_missing") {
+                els.chatInput.placeholder = "선택한 회의의 검색 인덱스를 준비하면 질문할 수 있습니다.";
+            } else {
+                els.chatInput.placeholder = "검색 인덱스를 준비하면 질문할 수 있습니다.";
+            }
+            els.sendBtn.disabled = !canAsk || this._isSending || !els.chatInput.value.trim();
+            if (this._messageCount === 0) {
+                els.messagesArea.innerHTML = this._createWelcomeHtml();
+                els.welcomeMessage = document.getElementById("chatWelcomeMessage");
+            }
+            if (errorMessage) {
+                errorBanner.show(errorMessage);
             }
         };
 
@@ -290,9 +423,12 @@
             var label = selected ? selected.textContent.trim() : "";
             if (!els.meetingFilter.value) {
                 els.scopeStatus.textContent = "전체 회의에서 검색";
+            } else if (this._isSelectedMeetingMissing()) {
+                els.scopeStatus.textContent = label.replace(/^[✓●•✗]\s*/, "") + " 회의 검색 준비 필요";
             } else {
                 els.scopeStatus.textContent = label.replace(/^[✓●•✗]\s*/, "") + " 회의만 검색";
             }
+            this._syncChatAvailability();
         };
 
         /**
@@ -462,6 +598,44 @@
                 body.appendChild(notice);
             }
 
+            if (data.no_source && data.repair_actions && data.repair_actions.length > 0) {
+                var actionLabels = {
+                    retry: "다시 시도",
+                    clear_filters: "범위 초기화",
+                    reindex: "검색 인덱스 복구",
+                };
+                var repairs = document.createElement("div");
+                repairs.className = "chat-repair-actions";
+                data.repair_actions.forEach(function (action) {
+                    if (!actionLabels[action]) return;
+                    var actionBtn = document.createElement("button");
+                    actionBtn.type = "button";
+                    actionBtn.className = "chat-repair-btn";
+                    actionBtn.textContent = actionLabels[action];
+                    actionBtn.addEventListener("click", function () {
+                        if (action === "reindex") {
+                            Router.navigate("/app/settings/reindex");
+                            return;
+                        }
+                        if (action === "clear_filters") {
+                            if (self._els.meetingFilter) {
+                                self._els.meetingFilter.value = "";
+                                self._updateScopeStatus();
+                            }
+                            if (!self._els.chatInput.disabled) self._els.chatInput.focus();
+                            return;
+                        }
+                        if (action === "retry") {
+                            self._els.chatInput.value = data.query || "";
+                            self._els.chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+                            self._els.chatInput.focus();
+                        }
+                    });
+                    repairs.appendChild(actionBtn);
+                });
+                if (repairs.childNodes.length > 0) body.appendChild(repairs);
+            }
+
             // 참조 출처
             if (data.references && data.references.length > 0) {
                 var refsSection = document.createElement("div");
@@ -476,10 +650,14 @@
                     var card = document.createElement("a");
                     card.className = "ref-card";
                     // SPA 내비게이션으로 뷰어 이동
-                    card.href = "/app/viewer/" + encodeURIComponent(ref.meeting_id);
+                    var refPath = "/app/viewer/" + encodeURIComponent(ref.meeting_id);
+                    if (ref.start_time != null) {
+                        refPath += "?t=" + encodeURIComponent(ref.start_time);
+                    }
+                    card.href = refPath;
                     card.addEventListener("click", function (e) {
                         e.preventDefault();
-                        Router.navigate("/app/viewer/" + encodeURIComponent(ref.meeting_id));
+                        Router.navigate(refPath);
                     });
 
                     // 인덱스
@@ -587,8 +765,8 @@
         ChatView.prototype._setSending = function (sending) {
             var els = this._els;
             this._isSending = sending;
-            els.sendBtn.disabled = sending || !els.chatInput.value.trim();
-            els.chatInput.disabled = sending;
+            els.sendBtn.disabled = !this._canAsk() || sending || !els.chatInput.value.trim();
+            els.chatInput.disabled = !this._canAsk() || sending;
             els.typingIndicator.classList.toggle("visible", sending);
 
             if (sending) {
@@ -608,6 +786,17 @@
             var self = this;
             var els = self._els;
             var query = els.chatInput.value.trim();
+            if (!self._canAsk()) {
+                var readinessState = self._getReadinessState();
+                if (readinessState === "no_meetings") {
+                    errorBanner.show("회의를 먼저 추가한 뒤 질문할 수 있습니다.");
+                } else if (readinessState === "no_completed") {
+                    errorBanner.show("전사가 완료된 뒤 질문할 수 있습니다.");
+                } else {
+                    errorBanner.show("검색 인덱스를 준비한 뒤 질문할 수 있습니다.");
+                }
+                return;
+            }
             if (!query) return;
 
             // 입력 초기화
@@ -645,6 +834,15 @@
                     result = result || {};
                     result.answer = result.answer || "관련 회의 내용을 찾을 수 없습니다. 다른 키워드로 질문해 보세요.";
                 }
+                if (result && (result.has_context === false || result.grounding_status && result.grounding_status !== "grounded")) {
+                    result.answer = result.answer ||
+                        "회의 근거를 찾지 못했습니다. 검색어를 바꾸거나 회의 범위를 넓혀 다시 질문해 주세요.";
+                    result.references = [];
+                    result.wiki_sources = [];
+                    result.llm_used = false;
+                    result.repair_actions = result.repair_actions || ["clear_filters", "reindex"];
+                    result.no_source = true;
+                }
 
                 // AI 답변 표시
                 self._addAssistantMessage(result);
@@ -665,7 +863,7 @@
             } finally {
                 self._currentAbortController = null;
                 self._setSending(false);
-                els.chatInput.focus();
+                if (!els.chatInput.disabled) els.chatInput.focus();
             }
         };
 
@@ -678,7 +876,7 @@
                 this._currentAbortController = null;
             }
             this._setSending(false);
-            this._els.chatInput.focus();
+            if (!this._els.chatInput.disabled) this._els.chatInput.focus();
         };
 
         /**
@@ -700,7 +898,8 @@
             els.welcomeMessage = document.getElementById("chatWelcomeMessage");
 
             errorBanner.hide();
-            els.chatInput.focus();
+            self._syncChatAvailability();
+            if (!els.chatInput.disabled) els.chatInput.focus();
         };
 
         /**
