@@ -22,7 +22,7 @@ import queue
 import threading
 import unicodedata
 from collections.abc import AsyncGenerator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from config import AppConfig, ChatConfig, get_config
@@ -121,6 +121,9 @@ class ChatResponse:
         query: 원본 질문
         has_context: 검색 컨텍스트가 있었는지 여부
         llm_used: LLM 응답이 성공했는지 여부
+        llm_called: LLM 호출을 시도했는지 여부
+        grounding_status: 답변 근거 상태 ("grounded", "no_results", "search_error")
+        repair_actions: 사용자가 복구를 위해 시도할 수 있는 액션 목록
         error_message: 에러 발생 시 메시지 (없으면 None)
     """
 
@@ -129,6 +132,9 @@ class ChatResponse:
     query: str
     has_context: bool = True
     llm_used: bool = True
+    llm_called: bool = True
+    grounding_status: str = "grounded"
+    repair_actions: list[str] = field(default_factory=list)
     error_message: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -143,6 +149,9 @@ class ChatResponse:
             "query": self.query,
             "has_context": self.has_context,
             "llm_used": self.llm_used,
+            "llm_called": self.llm_called,
+            "grounding_status": self.grounding_status,
+            "repair_actions": list(self.repair_actions),
             "error_message": self.error_message,
         }
 
@@ -269,9 +278,44 @@ def _build_user_prompt(query: str, context_text: str) -> str:
         )
     return (
         f"관련 회의 내용을 찾을 수 없습니다. "
-        f"다음 질문에 대해 알고 있는 범위에서 답변해주세요:\n"
+        f"회의 근거 없이 추측으로 답변하지 말고, 근거 없음으로 안내하세요:\n"
         f"{query}"
     )
+
+
+def _build_no_grounding_answer(
+    grounding_status: str,
+    error_message: str | None = None,
+) -> str:
+    """검색 근거가 없을 때 LLM을 호출하지 않고 반환할 안내문을 만든다.
+
+    Args:
+        grounding_status: 근거 상태 ("no_results" 또는 "search_error")
+        error_message: 검색 실패 상세 메시지
+
+    Returns:
+        사용자에게 보여줄 안내문
+    """
+    if grounding_status == "search_error":
+        detail = f" 오류: {error_message}" if error_message else ""
+        return (
+            "회의 검색 중 오류가 발생해 근거 있는 답변을 생성하지 않았습니다."
+            f"{detail}\n\n검색 인덱스를 재생성하거나 잠시 후 다시 시도해 주세요."
+        )
+
+    return (
+        "관련 회의 내용을 찾지 못해 답변을 생성하지 않았습니다.\n\n"
+        "필터를 해제하거나 검색 인덱스를 재생성한 뒤 다시 질문해 주세요."
+    )
+
+
+def _repair_actions_for_grounding(grounding_status: str) -> list[str]:
+    """근거 상태별 권장 복구 액션 목록을 반환한다."""
+    if grounding_status == "search_error":
+        return ["retry", "reindex"]
+    if grounding_status == "no_results":
+        return ["clear_filters", "reindex"]
+    return []
 
 
 def _build_references(results: list[SearchResult]) -> list[ChatReference]:
@@ -605,6 +649,7 @@ class ChatEngine:
 
         # 1. 하이브리드 검색
         search_results: list[SearchResult] = []
+        search_error_message: str | None = None
         try:
             search_response: SearchResponse = await self._search_engine.search(
                 query=query,
@@ -616,10 +661,36 @@ class ChatEngine:
             search_results = search_response.results
             logger.info(f"검색 완료: {len(search_results)}개 결과")
         except Exception as e:
-            logger.warning(f"검색 실패, 컨텍스트 없이 진행: {e}")
+            search_error_message = str(e)
+            logger.warning(f"검색 실패, LLM 호출 중단: {e}")
 
         # 참조 출처 구성
         references = _build_references(search_results)
+
+        if search_error_message is not None:
+            return ChatResponse(
+                answer=_build_no_grounding_answer("search_error", search_error_message),
+                references=references,
+                query=query,
+                has_context=False,
+                llm_used=False,
+                llm_called=False,
+                grounding_status="search_error",
+                repair_actions=_repair_actions_for_grounding("search_error"),
+                error_message=search_error_message,
+            )
+
+        if not search_results:
+            return ChatResponse(
+                answer=_build_no_grounding_answer("no_results"),
+                references=references,
+                query=query,
+                has_context=False,
+                llm_used=False,
+                llm_called=False,
+                grounding_status="no_results",
+                repair_actions=_repair_actions_for_grounding("no_results"),
+            )
 
         # 2. LLM 프롬프트 구성
         context_text = _build_context_text(search_results)
@@ -670,6 +741,8 @@ class ChatEngine:
                 query=query,
                 has_context=bool(search_results),
                 llm_used=True,
+                llm_called=True,
+                grounding_status="grounded",
             )
 
         except (LLMConnectionError, LLMGenerationError) as e:
@@ -684,6 +757,8 @@ class ChatEngine:
                 query=query,
                 has_context=bool(search_results),
                 llm_used=False,
+                llm_called=True,
+                grounding_status="grounded",
                 error_message=str(e),
             )
         except ChatError as e:
@@ -694,6 +769,8 @@ class ChatEngine:
                 query=query,
                 has_context=bool(search_results),
                 llm_used=False,
+                llm_called=True,
+                grounding_status="grounded",
                 error_message=str(e),
             )
 
@@ -738,6 +815,7 @@ class ChatEngine:
 
         # 1. 하이브리드 검색
         search_results: list[SearchResult] = []
+        search_error_message: str | None = None
         try:
             search_response = await self._search_engine.search(
                 query=query,
@@ -748,7 +826,8 @@ class ChatEngine:
             )
             search_results = search_response.results
         except Exception as e:
-            logger.warning(f"검색 실패: {e}")
+            search_error_message = str(e)
+            logger.warning(f"검색 실패, 스트리밍 LLM 호출 중단: {e}")
 
         # 참조 출처 먼저 전송
         references = _build_references(search_results)
@@ -756,6 +835,56 @@ class ChatEngine:
             "type": "references",
             "data": [r.to_dict() for r in references],
         }
+
+        if search_error_message is not None:
+            grounding_status = "search_error"
+            answer = _build_no_grounding_answer(grounding_status, search_error_message)
+            repair_actions = _repair_actions_for_grounding(grounding_status)
+            yield {
+                "type": "grounding",
+                "data": {
+                    "status": grounding_status,
+                    "llm_called": False,
+                    "repair_actions": repair_actions,
+                    "error_message": search_error_message,
+                },
+            }
+            yield {
+                "type": "done",
+                "data": {
+                    "answer": answer,
+                    "grounding_status": grounding_status,
+                    "llm_called": False,
+                    "repair_actions": repair_actions,
+                    "error_message": search_error_message,
+                },
+            }
+            return
+
+        if not search_results:
+            grounding_status = "no_results"
+            answer = _build_no_grounding_answer(grounding_status)
+            repair_actions = _repair_actions_for_grounding(grounding_status)
+            yield {
+                "type": "grounding",
+                "data": {
+                    "status": grounding_status,
+                    "llm_called": False,
+                    "repair_actions": repair_actions,
+                    "error_message": None,
+                },
+            }
+            yield {
+                "type": "done",
+                "data": {
+                    "answer": answer,
+                    "grounding_status": grounding_status,
+                    "llm_called": False,
+                    "repair_actions": repair_actions,
+                    "error_message": None,
+                },
+            }
+            return
 
         # 2. LLM 프롬프트 구성
         context_text = _build_context_text(search_results)

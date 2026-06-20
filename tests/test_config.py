@@ -50,8 +50,10 @@ class TestConfigYamlParsing:
 
         assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
         assert config.stt.language == "ko"
+        assert config.stt.word_timestamps is True
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "cpu"
+        assert config.diarization.output_mode == "regular"
         assert config.diarization.min_speakers == 2
         assert config.diarization.max_speakers == 4
         assert config.diarization.protect_zoom_meetings is True
@@ -60,6 +62,8 @@ class TestConfigYamlParsing:
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0
         assert config.llm.correction_batch_size == 5
+        assert config.llm.correction_mode == "full"
+        assert config.llm.correction_adaptive_max_tokens is True
         assert config.embedding.dimension == 384
         assert config.embedding.batch_size == 64
         assert config.search.vector_weight == 0.6
@@ -90,8 +94,10 @@ class TestConfigYamlParsing:
         pairs = [
             (default.stt.model_name, loaded.stt.model_name),
             (default.stt.batch_size, loaded.stt.batch_size),
+            (default.stt.word_timestamps, loaded.stt.word_timestamps),
             (default.stt.condition_on_previous_text, loaded.stt.condition_on_previous_text),
             (default.diarization.device, loaded.diarization.device),
+            (default.diarization.output_mode, loaded.diarization.output_mode),
             (default.diarization.min_speakers, loaded.diarization.min_speakers),
             (default.diarization.max_speakers, loaded.diarization.max_speakers),
             (default.diarization.protect_zoom_meetings, loaded.diarization.protect_zoom_meetings),
@@ -99,6 +105,11 @@ class TestConfigYamlParsing:
             (default.llm.mlx_model_name, loaded.llm.mlx_model_name),
             (default.llm.temperature, loaded.llm.temperature),
             (default.llm.correction_batch_size, loaded.llm.correction_batch_size),
+            (default.llm.correction_mode, loaded.llm.correction_mode),
+            (
+                default.llm.correction_adaptive_max_tokens,
+                loaded.llm.correction_adaptive_max_tokens,
+            ),
             (default.embedding.batch_size, loaded.embedding.batch_size),
             (default.pipeline.min_disk_free_gb, loaded.pipeline.min_disk_free_gb),
             (default.hallucination_filter.enabled, loaded.hallucination_filter.enabled),
@@ -143,14 +154,18 @@ class TestDefaultValues:
         assert config.paths.base_dir == "~/.meeting-transcriber"
         assert config.stt.model_name == "mlx-community/whisper-large-v3-turbo"
         assert config.stt.batch_size == 12
+        assert config.stt.word_timestamps is True
         assert config.stt.condition_on_previous_text is False
         assert config.diarization.device == "cpu"
+        assert config.diarization.output_mode == "regular"
         assert config.diarization.protect_zoom_meetings is True
         assert config.diarization.zoom_protection_mode == "pause"
         assert config.llm.model_name == "exaone3.5:7.8b-instruct-q4_K_M"
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0
         assert config.llm.correction_batch_size == 5
+        assert config.llm.correction_mode == "full"
+        assert config.llm.correction_adaptive_max_tokens is True
         assert config.embedding.query_prefix == "query: "
         assert config.embedding.passage_prefix == "passage: "
         assert config.embedding.batch_size == 64

@@ -666,6 +666,16 @@ class PipelineManager:
         finally:
             self._llm_lock.release()
 
+    async def _unload_llm_model_if_current(self) -> None:
+        """현재 로드 모델이 LLM이면 조건부로 언로드한다."""
+        unload_if_current = getattr(self._model_manager, "unload_if_current", None)
+        if not callable(unload_if_current):
+            return
+
+        result = unload_if_current("exaone")
+        if asyncio.iscoroutine(result):
+            await result
+
     def _rebuild_state_from_checkpoints(self, meeting_id: str) -> PipelineState:
         """pipeline_state.json 이 유실되었을 때 기존 체크포인트로 상태를 재구성한다.
 
@@ -749,6 +759,36 @@ class PipelineManager:
         except Exception as e:
             # 숫자 정규화 실패 시 원본 유지 (파이프라인 중단하지 않음)
             logger.warning(f"숫자 정규화 처리 실패, 원본 유지: {e}")
+
+    def _build_passthrough_corrected_result(self, merged_result: Any) -> Any:
+        """LLM 보정 스킵 시 MergedResult를 CorrectedResult로 변환한다."""
+        from steps.corrector import CorrectedResult, CorrectedUtterance
+
+        utterances = [
+            CorrectedUtterance(
+                text=str(utterance.text),
+                original_text=str(utterance.text),
+                speaker=str(utterance.speaker),
+                start=float(utterance.start),
+                end=float(utterance.end),
+                was_corrected=False,
+            )
+            for utterance in getattr(merged_result, "utterances", [])
+        ]
+        audio_path = getattr(merged_result, "audio_path", "")
+        if not isinstance(audio_path, str):
+            audio_path = ""
+        num_speakers = getattr(merged_result, "num_speakers", 0)
+        if not isinstance(num_speakers, int):
+            num_speakers = 0
+
+        return CorrectedResult(
+            utterances=utterances,
+            num_speakers=num_speakers,
+            audio_path=audio_path,
+            total_corrected=0,
+            total_failed=0,
+        )
 
     def _validate_input(self, audio_path: Path) -> None:
         """입력 오디오 파일의 유효성을 검증한다.
@@ -887,7 +927,14 @@ class PipelineManager:
         # VAD 전처리: 음성 구간 감지 (enabled=false이면 None 반환)
         vad_clip_timestamps: list[float] | None = None
         vad_config = getattr(self._config, "vad", None)
-        if vad_config is not None and vad_config.enabled:
+        vad_enabled = False
+        if vad_config is not None:
+            vad_enabled_flag = getattr(vad_config, "enabled", False)
+            vad_mode = getattr(vad_config, "mode", "off")
+            vad_enabled = bool(vad_enabled_flag) or (
+                isinstance(vad_mode, str) and vad_mode.lower() != "off"
+            )
+        if vad_enabled:
             try:
                 from steps.vad_detector import VoiceActivityDetector
 
@@ -1198,6 +1245,98 @@ class PipelineManager:
 
         return result
 
+    def _delete_checkpoint_if_exists(self, checkpoint_path: Path) -> None:
+        """체크포인트가 있으면 삭제해 다음 단계가 실제 재실행되도록 한다."""
+        try:
+            checkpoint_path.unlink(missing_ok=True)
+        except OSError as e:
+            raise PipelineError(f"체크포인트 삭제 실패: {checkpoint_path}: {e}") from e
+
+    @staticmethod
+    def _remove_step_marker(state: PipelineState, step: PipelineStep) -> None:
+        """재실행할 단계의 완료/스킵 마커를 상태에서 제거한다."""
+        step_name = step.value
+        if step_name in state.completed_steps:
+            state.completed_steps.remove(step_name)
+        if step_name in state.skipped_steps:
+            state.skipped_steps.remove(step_name)
+
+    def _should_rebuild_search_index_after_llm(
+        self,
+        state: PipelineState,
+        meeting_id: str,
+    ) -> bool:
+        """온디맨드 LLM 후처리 후 검색 인덱스를 재생성해야 하는지 판단한다."""
+        if PipelineStep.CHUNK.value in state.completed_steps:
+            return True
+        if PipelineStep.EMBED.value in state.completed_steps:
+            return True
+        return any(
+            self._get_checkpoint_path(meeting_id, step).exists()
+            for step in (PipelineStep.CHUNK, PipelineStep.EMBED)
+        )
+
+    async def _rebuild_search_index_after_llm(
+        self,
+        *,
+        meeting_id: str,
+        audio_path: Path,
+        corrected_result: Any,
+        state: PipelineState,
+        state_path: Path,
+        on_step_start: Callable[[str], Awaitable[None]] | None,
+    ) -> None:
+        """온디맨드 LLM 후처리 뒤 chunk/embed를 재실행해 RAG 인덱스를 최신화한다."""
+        if not self._should_rebuild_search_index_after_llm(state, meeting_id):
+            return
+
+        for step in (PipelineStep.CHUNK, PipelineStep.EMBED):
+            self._remove_step_marker(state, step)
+
+        try:
+            chunk_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CHUNK)
+            embed_cp = self._get_checkpoint_path(meeting_id, PipelineStep.EMBED)
+            self._delete_checkpoint_if_exists(chunk_cp)
+            self._delete_checkpoint_if_exists(embed_cp)
+
+            meeting_date = self._derive_meeting_date(meeting_id, audio_path)
+
+            if on_step_start is not None:
+                try:
+                    await on_step_start(PipelineStep.CHUNK.value)
+                except Exception as e:
+                    logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
+
+            state.current_step = PipelineStep.CHUNK.value
+            self._save_state(state, state_path)
+            chunked_result = await self._run_step_chunk(
+                corrected_result,
+                chunk_cp,
+                meeting_id,
+                meeting_date,
+            )
+            if PipelineStep.CHUNK.value not in state.completed_steps:
+                state.completed_steps.append(PipelineStep.CHUNK.value)
+            self._save_state(state, state_path)
+
+            if on_step_start is not None:
+                try:
+                    await on_step_start(PipelineStep.EMBED.value)
+                except Exception as e:
+                    logger.warning(f"on_step_start 콜백 예외 (무시): {e}")
+
+            state.current_step = PipelineStep.EMBED.value
+            self._save_state(state, state_path)
+            await self._run_step_embed(chunked_result, embed_cp)
+            if PipelineStep.EMBED.value not in state.completed_steps:
+                state.completed_steps.append(PipelineStep.EMBED.value)
+            self._save_state(state, state_path)
+        except Exception as e:
+            state.status = "failed"
+            state.error_message = f"LLM 후처리 검색 인덱스 재생성 실패: {e}"
+            self._save_state(state, state_path)
+            raise PipelineError(state.error_message) from e
+
     async def _run_step_wiki_compile(
         self,
         *,
@@ -1468,16 +1607,23 @@ class PipelineManager:
                     if skip_msg not in state.warnings:
                         state.warnings.append(skip_msg)
 
-                    # correct 스킵 시 merged_result를 패스스루
+                    skipped_checkpoint_path = ""
+
+                    # correct 스킵 시 merged_result를 CorrectedResult 체크포인트로 패스스루
                     if step == PipelineStep.CORRECT:
-                        corrected_result = merged_result
-                    # summarize 스킵은 회의록 없이 종료
+                        assert merged_result is not None
+                        corrected_result = self._build_passthrough_corrected_result(merged_result)
+                        corrected_result.save_checkpoint(checkpoint_path)
+                        skipped_checkpoint_path = str(checkpoint_path)
+                    elif step == PipelineStep.SUMMARIZE:
+                        await self._unload_llm_model_if_current()
 
                     step_result = StepResult(
                         step=step.value,
                         success=True,
                         elapsed_seconds=0.0,
                         error_message=f"건너뜀: {skip_msg}",
+                        checkpoint_path=skipped_checkpoint_path,
                     )
                     state.step_results.append(step_result.to_dict())
                     state.completed_steps.append(step.value)
@@ -1895,6 +2041,7 @@ class PipelineManager:
         try:
             return await self._run_llm_steps_inner(meeting_id, on_step_start)
         finally:
+            await self._unload_llm_model_if_current()
             self._llm_lock.release()
 
     async def _run_llm_steps_inner(
@@ -1937,13 +2084,16 @@ class PipelineManager:
 
         # 4. correct 단계 실행
         correct_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CORRECT)
-        if correct_cp.exists():
+        correct_was_skipped = PipelineStep.CORRECT.value in state.skipped_steps
+        if correct_cp.exists() and not correct_was_skipped:
             # 이미 correct 체크포인트가 있으면 복원
             from steps.corrector import CorrectedResult
 
             corrected_result = CorrectedResult.from_checkpoint(correct_cp)
             logger.info(f"correct 체크포인트 복원: {correct_cp}")
         else:
+            if correct_was_skipped:
+                self._delete_checkpoint_if_exists(correct_cp)
             if on_step_start is not None:
                 try:
                     await on_step_start(PipelineStep.CORRECT.value)
@@ -1967,6 +2117,10 @@ class PipelineManager:
 
         # 5. summarize 단계 실행
         summarize_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
+        summarize_was_skipped = PipelineStep.SUMMARIZE.value in state.skipped_steps
+        if correct_was_skipped or summarize_was_skipped:
+            self._delete_checkpoint_if_exists(summarize_cp)
+
         if not summarize_cp.exists():
             if on_step_start is not None:
                 try:
@@ -1999,6 +2153,20 @@ class PipelineManager:
                 state.skipped_steps.remove(step_name)
             if step_name not in state.completed_steps:
                 state.completed_steps.append(step_name)
+
+        # 7. 기존 검색 인덱스가 있던 회의는 LLM 보정 결과 기준으로 chunk/embed 재생성
+        if self._should_rebuild_search_index_after_llm(state, meeting_id):
+            await self._unload_llm_model_if_current()
+            await self._rebuild_search_index_after_llm(
+                meeting_id=meeting_id,
+                audio_path=Path(state.audio_path)
+                if state.audio_path
+                else Path("__missing_audio__"),
+                corrected_result=corrected_result,
+                state=state,
+                state_path=state_path,
+                on_step_start=on_step_start,
+            )
 
         state.status = "completed"
         state.current_step = ""

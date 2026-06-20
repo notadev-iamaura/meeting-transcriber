@@ -52,6 +52,7 @@ def mock_config():
     config = MagicMock()
     config.diarization.model_name = "pyannote/speaker-diarization-3.1"
     config.diarization.device = "cpu"
+    config.diarization.output_mode = "regular"
     config.diarization.min_speakers = 2
     config.diarization.max_speakers = 4
     config.diarization.huggingface_token = "hf_test_token_12345"
@@ -474,6 +475,48 @@ class TestParseAnnotation:
         segments = diarizer._parse_annotation(annotation)
         assert segments[0].start == 1.235
         assert segments[0].end == 5.679
+
+    def test_exclusive_output_mode_우선_파싱(self, mock_config, mock_manager):
+        """output_mode=exclusive이면 exclusive_speaker_diarization을 우선 사용한다."""
+        manager, _ = mock_manager
+        mock_config.diarization.output_mode = "exclusive"
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        regular = _make_mock_annotation([{"speaker": "SPEAKER_REGULAR", "start": 0.0, "end": 1.0}])
+        exclusive = _make_mock_annotation(
+            [{"speaker": "SPEAKER_EXCLUSIVE", "start": 0.0, "end": 1.0}]
+        )
+        output = MagicMock()
+        output.speaker_diarization = regular
+        output.exclusive_speaker_diarization = exclusive
+
+        segments = diarizer._parse_annotation(output)
+
+        assert len(segments) == 1
+        assert segments[0].speaker == "SPEAKER_EXCLUSIVE"
+
+    @pytest.mark.asyncio
+    async def test_diarize_결과에는_실제_선택_output_mode를_저장한다(
+        self,
+        mock_config,
+        mock_manager,
+        sample_audio,
+    ):
+        """요청 mode가 exclusive여도 폴백되면 결과에는 regular를 저장한다."""
+        manager, mock_pipeline = mock_manager
+        mock_config.diarization.output_mode = "exclusive"
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        output = MagicMock()
+        output.speaker_diarization = _make_mock_annotation(
+            [{"speaker": "SPEAKER_REGULAR", "start": 0.0, "end": 12.0}]
+        )
+        output.exclusive_speaker_diarization = None
+        mock_pipeline.return_value = output
+
+        result = await diarizer.diarize(sample_audio)
+
+        assert result.output_mode == "regular"
+        assert result.segments[0].speaker == "SPEAKER_REGULAR"
 
 
 # === 화자분리 실행 테스트 ===

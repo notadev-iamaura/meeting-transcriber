@@ -664,7 +664,7 @@ async def batch_action(
             items: (meeting_id, classification, audio_path) 튜플 목록
             action: 요청 action (로그용)
         """
-        for mid, classification, audio_path in items:
+        for mid, classification, _audio_path in items:
             try:
                 if classification == "transcribe":
                     # 전사 항목은 위에서 JobProcessor 큐에 넣었으므로 직접 실행하지 않는다.

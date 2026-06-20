@@ -22,6 +22,7 @@ from api.dependencies import get_outputs_dir as _get_outputs_dir
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
 from core.io_utils import atomic_write_json as _atomic_write_json
 from core.io_utils import atomic_write_text as _atomic_write_text
+from steps.embedder import IndexPurgeError, purge_meeting_index
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,31 @@ def _has_transcript_artifact(config: Any, meeting_id: str) -> bool:
         checkpoints_dir / meeting_id / "merge.json",
     )
     return any(path.is_file() for path in candidates)
+
+
+async def _purge_meeting_search_index(config: Any, meeting_id: str, operation: str) -> None:
+    """회의 삭제/재전사 전 검색 인덱스를 정리하고 실패 시 HTTP 500으로 중단한다."""
+    try:
+        result = await asyncio.to_thread(purge_meeting_index, config, meeting_id)
+    except IndexPurgeError as exc:
+        logger.error(
+            "%s 전 검색 인덱스 정리 실패: meeting_id=%s, error=%s",
+            operation,
+            meeting_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"{operation} 전 검색 인덱스 정리에 실패했습니다: {exc}",
+        ) from exc
+
+    logger.info(
+        "%s 전 검색 인덱스 정리 완료: meeting_id=%s, chroma_deleted=%s, fts_deleted=%s",
+        operation,
+        meeting_id,
+        result.chroma_deleted,
+        result.fts_deleted,
+    )
 
 
 def _build_meeting_item(
@@ -705,10 +731,10 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
     """기존 전사 결과를 폐기하고 처음부터 다시 전사한다.
 
     completed/failed 상태의 작업을 대상으로:
-        1. 체크포인트 디렉토리 전체 삭제 (pipeline_state.json 포함)
-        2. 출력 디렉토리의 corrected.json/summary.md 삭제 (오디오는 보존)
-        3. job 상태를 queued 로 강제 전환 (retry_count 0 으로 리셋)
-        4. ChromaDB/FTS5 의 stale 청크는 embedder 단계에서 멱등 삭제
+        1. ChromaDB/FTS5 의 stale 청크 삭제
+        2. 체크포인트 디렉토리 전체 삭제 (pipeline_state.json 포함)
+        3. 출력 디렉토리의 corrected.json/summary.md 삭제 (오디오는 보존)
+        4. job 상태를 queued 로 강제 전환 (retry_count 0 으로 리셋)
 
     Args:
         request: FastAPI Request 객체
@@ -737,13 +763,16 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        # 1) 체크포인트 디렉토리 삭제
+        # 1) 검색 인덱스 삭제. 실패하면 산출물/DB 상태를 건드리지 않는다.
+        await _purge_meeting_search_index(config, meeting_id, "재전사")
+
+        # 2) 체크포인트 디렉토리 삭제
         checkpoints_dir = config.paths.resolved_checkpoints_dir / meeting_id
         if checkpoints_dir.exists():
             await asyncio.to_thread(shutil.rmtree, checkpoints_dir)
             logger.info(f"재전사: 체크포인트 삭제 — {checkpoints_dir}")
 
-        # 2) 출력 파일 삭제 (오디오/녹음본은 보존)
+        # 3) 출력 파일 삭제 (오디오/녹음본은 보존)
         outputs_meeting_dir = config.paths.resolved_outputs_dir / meeting_id
         if outputs_meeting_dir.exists():
             for fname in ("corrected.json", "summary.md"):
@@ -754,7 +783,7 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
                     except OSError as exc:
                         logger.warning(f"재전사: {fname} 삭제 실패: {exc}")
 
-        # 3) job 상태 강제 리셋
+        # 4) job 상태 강제 리셋
         updated_job = await asyncio.to_thread(queue.queue.reset_for_retranscribe, job.id)
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
@@ -1042,10 +1071,10 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
 
 @router.delete("/meetings/{meeting_id}")
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
-    """회의를 삭제한다 (DB 레코드 + 오디오 파일 → quarantine).
+    """회의를 삭제한다 (검색 인덱스 + DB 레코드 + 오디오 파일 → quarantine).
 
     Phase 1-7: 오디오 파일이 watcher에 의해 재감지되는 문제를 차단하기 위해
-    DB 삭제와 함께 원본 오디오 파일을 quarantine 디렉토리로 이동한다.
+    검색 인덱스/DB 삭제와 함께 원본 오디오 파일을 quarantine 디렉토리로 이동한다.
     파일 이동 실패는 best-effort(경고 로그만) 처리하여 DB 삭제 자체는
     항상 성공시킨다. 파일이 이미 없는 경우(사용자가 직접 삭제했거나,
     예전에 격리되었거나)도 마찬가지로 DB 삭제는 성공 처리한다.
@@ -1083,7 +1112,10 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
         # 삭제 전 audio_path 확보 (DB 삭제 이후에도 파일을 찾을 수 있도록 먼저 스냅샷)
         audio_path_str = getattr(job, "audio_path", None)
 
-        # DB 삭제 (반드시 먼저 — 파일 이동 실패해도 DB는 정리)
+        # 검색 인덱스 삭제. 실패하면 DB 레코드와 오디오 파일을 보존한다.
+        await _purge_meeting_search_index(config, meeting_id, "삭제")
+
+        # DB 삭제 (인덱스 정리 후 — 파일 이동 실패해도 DB는 정리)
         await asyncio.to_thread(queue.queue.delete_job, job.id)
         logger.info(f"회의 DB 삭제: {meeting_id} (job_id={job.id})")
 

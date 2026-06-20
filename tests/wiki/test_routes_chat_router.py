@@ -47,6 +47,9 @@ def _make_chat_response_mock(
     *,
     has_context: bool = True,
     llm_used: bool = True,
+    llm_called: bool = True,
+    grounding_status: str = "grounded",
+    repair_actions: list[str] | None = None,
     references: list[Any] | None = None,
 ) -> Any:
     """search.chat.ChatResponse 와 동등한 인터페이스의 mock 객체를 생성한다.
@@ -58,6 +61,9 @@ def _make_chat_response_mock(
         answer: 답변 텍스트.
         has_context: has_context 플래그.
         llm_used: llm_used 플래그.
+        llm_called: LLM 호출 여부 플래그.
+        grounding_status: 답변 근거 상태.
+        repair_actions: 복구 액션 목록.
         references: ChatReference 모방 객체 리스트.
 
     Returns:
@@ -67,6 +73,8 @@ def _make_chat_response_mock(
 
     if references is None:
         references = []
+    if repair_actions is None:
+        repair_actions = []
 
     return SimpleNamespace(
         answer=answer,
@@ -74,6 +82,9 @@ def _make_chat_response_mock(
         query="dummy",
         has_context=has_context,
         llm_used=llm_used,
+        llm_called=llm_called,
+        grounding_status=grounding_status,
+        repair_actions=repair_actions,
         error_message=None,
     )
 
@@ -245,6 +256,9 @@ class TestRouterDisabledRegression:
         # 기존 필드 유지
         assert len(body["references"]) == 1
         assert body["references"][0]["meeting_id"] == "m_001"
+        assert body["llm_called"] is True
+        assert body["grounding_status"] == "grounded"
+        assert body["repair_actions"] == []
         # chat_engine.chat() 이 1회 호출됨
         assert app.state.chat_engine.chat.call_count == 1
 
@@ -308,6 +322,9 @@ class TestRouterEnabledWikiRouting:
         # wiki_sources 가 채워져야 함
         assert body["wiki_sources"] is not None
         assert len(body["wiki_sources"]) >= 1
+        assert body["llm_called"] is True
+        assert body["grounding_status"] == "grounded"
+        assert body["repair_actions"] == []
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -357,6 +374,9 @@ class TestRouterEnabledRagRouting:
         assert body["router_verdict"]["decision"] == "rag"
         assert body["answer"] == "이번 회의에서 API 설계를 논의했습니다."
         assert len(body["references"]) == 1
+        assert body["llm_called"] is True
+        assert body["grounding_status"] == "grounded"
+        assert body["repair_actions"] == []
         # chat_engine 이 정확히 1회 호출됨
         assert app.state.chat_engine.chat.call_count == 1
 
@@ -454,6 +474,73 @@ class TestRouterAmbiguousQueryFallback:
         # chat_engine 이 호출되어 응답이 채워졌음
         assert app.state.chat_engine.chat.call_count == 1
         assert body["answer"] == "모호한 질문에 대한 RAG 답변"
+        assert body["llm_called"] is True
+        assert body["grounding_status"] == "grounded"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 4.5 BOTH 응답 grounding 집계
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestRouterBothGroundingAggregation:
+    """RAG+Wiki 병렬 응답의 근거 상태 집계를 검증한다."""
+
+    def test_both_에서_wiki_근거가_있으면_rag_no_results여도_grounded(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """RAG 0건 + Wiki 근거 있음이면 전체 응답은 grounded로 집계한다."""
+        from api.routers import search_chat as search_chat_router
+        from core.wiki.chat_integration import HybridChatResponse, WikiAnswerSource
+        from core.wiki.router import RouteDecision, RouterVerdict
+
+        rag_response = _make_chat_response_mock(
+            answer="회의 검색 결과가 없습니다.",
+            has_context=False,
+            llm_used=False,
+            llm_called=False,
+            grounding_status="no_results",
+            repair_actions=["reindex"],
+            references=[],
+        )
+        wiki_source = WikiAnswerSource(
+            page_path="decisions/launch.md",
+            page_type="decision",
+            title="출시 결정",
+            snippet="출시일은 5월 1일입니다.",
+            citations=["meeting:m1@00:01:00"],
+        )
+        hybrid_response = HybridChatResponse(
+            source_type="both",
+            router_verdict=RouterVerdict(
+                decision=RouteDecision.BOTH,
+                confidence=9,
+                reason="test_both",
+            ),
+            rag_response=rag_response,
+            wiki_answer="위키 근거 답변",
+            wiki_sources=[wiki_source],
+        )
+        hybrid = MagicMock()
+        hybrid.respond = AsyncMock(return_value=hybrid_response)
+        app = _make_app_with_chat_engine(tmp_path, router_enabled=True)
+
+        with patch.object(
+            search_chat_router,
+            "_build_hybrid_chat_service",
+            return_value=hybrid,
+        ):
+            response = TestClient(app).post("/api/chat", json={"query": "출시일 알려줘"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["source_type"] == "both"
+        assert body["has_context"] is True
+        assert body["llm_called"] is True
+        assert body["grounding_status"] == "grounded"
+        assert "reindex" not in body["repair_actions"]
+        assert len(body["wiki_sources"]) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -484,6 +571,9 @@ class TestChatResponseOptionalFields:
         # dict 직렬화 성공
         d = instance.model_dump()
         assert d["answer"] == "응답"
+        assert d["llm_called"] is True
+        assert d["grounding_status"] == "grounded"
+        assert d["repair_actions"] == []
         assert d["source_type"] is None
         assert d["router_verdict"] is None
         assert d["wiki_sources"] is None

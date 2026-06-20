@@ -571,6 +571,23 @@ class TestTranscribe:
         call_kwargs = mock_whisper.transcribe.call_args[1]
         assert call_kwargs["beam_size"] == 10
 
+    @pytest.mark.asyncio
+    async def test_word_timestamps_설정값_전달(
+        self,
+        mock_manager: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """word_timestamps=False 설정 시 mlx-whisper 호출에 그대로 전달된다."""
+        custom_config = AppConfig(stt={"word_timestamps": False})
+        t = Transcriber(config=custom_config, model_manager=mock_manager)
+        ctx = mock_manager.acquire.return_value
+        mock_whisper = ctx.__aenter__.return_value
+
+        await t.transcribe(audio_file)
+
+        call_kwargs = mock_whisper.transcribe.call_args[1]
+        assert call_kwargs["word_timestamps"] is False
+
     def test_batch_size_캐싱(
         self,
         config: AppConfig,

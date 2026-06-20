@@ -23,10 +23,12 @@ import sqlite3
 import sys
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from config import AppConfig, get_config
+from core.io_utils import atomic_write_json
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.preflight import run_preflight
 from steps.chunker import ChunkedResult
@@ -53,6 +55,10 @@ class ModelLoadError(EmbeddingError):
 
 class StorageError(EmbeddingError):
     """ChromaDB 또는 FTS5 저장 실패 시 발생한다."""
+
+
+class IndexPurgeError(StorageError):
+    """회의 삭제/재전사 전 검색 인덱스 정리에 실패했을 때 발생한다."""
 
 
 class EmptyChunksError(EmbeddingError):
@@ -202,6 +208,25 @@ class EmbeddedResult:
         )
 
 
+@dataclass
+class IndexPurgeResult:
+    """회의별 검색 인덱스 삭제 결과.
+
+    Attributes:
+        meeting_id: 정리한 회의 식별자
+        chroma_deleted: ChromaDB에서 삭제한 청크 수
+        fts_deleted: FTS5에서 삭제한 청크 수
+        reindex_required: 부분 삭제 실패 후 재색인이 필요한지 여부
+        reindex_marker_path: 재색인 필요 marker 파일 경로
+    """
+
+    meeting_id: str
+    chroma_deleted: int = 0
+    fts_deleted: int = 0
+    reindex_required: bool = False
+    reindex_marker_path: str = ""
+
+
 # === FTS5 관리 ===
 
 
@@ -290,6 +315,80 @@ def _store_chunks_fts(
     except Exception as e:
         conn.rollback()
         raise StorageError(f"FTS5 저장 실패: {e}") from e
+    finally:
+        conn.close()
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """SQLite 데이터베이스에 지정 테이블이 존재하는지 확인한다."""
+    cursor = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'virtual table') AND name = ?",
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _purge_chunks_fts(db_path: Path, meeting_id: str) -> int:
+    """FTS5에서 특정 회의의 청크를 삭제한다.
+
+    DB 파일 또는 FTS 테이블이 없으면 삭제할 인덱스가 없는 정상 상태로 본다.
+
+    Args:
+        db_path: SQLite 데이터베이스 파일 경로
+        meeting_id: 회의 식별자
+
+    Returns:
+        삭제한 청크 수
+
+    Raises:
+        IndexPurgeError: SQLite 접근 또는 삭제 실패 시
+    """
+    if not db_path.exists():
+        return 0
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error as e:
+        raise IndexPurgeError(f"FTS5 인덱스 DB 연결 실패: {e}") from e
+
+    try:
+        if not _table_exists(conn, _FTS_TABLE_NAME):
+            return 0
+
+        cursor = conn.execute(
+            f"DELETE FROM {_FTS_TABLE_NAME} WHERE meeting_id = ?",
+            (meeting_id,),
+        )
+        conn.commit()
+        deleted = max(cursor.rowcount, 0)
+        logger.info(f"FTS5 인덱스 삭제 완료: meeting_id={meeting_id}, {deleted}개 청크")
+        return deleted
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise IndexPurgeError(f"FTS5 인덱스 삭제 실패: {e}") from e
+    finally:
+        conn.close()
+
+
+def _preflight_purge_chunks_fts(db_path: Path, meeting_id: str) -> None:
+    """FTS5 purge가 삭제 전 접근 가능한지 확인한다."""
+    if not db_path.exists():
+        return
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error as e:
+        raise IndexPurgeError(f"FTS5 인덱스 DB 연결 실패: {e}") from e
+
+    try:
+        if not _table_exists(conn, _FTS_TABLE_NAME):
+            return
+        conn.execute(
+            f"SELECT rowid FROM {_FTS_TABLE_NAME} WHERE meeting_id = ? LIMIT 1",
+            (meeting_id,),
+        ).fetchone()
+    except sqlite3.Error as e:
+        raise IndexPurgeError(f"FTS5 인덱스 삭제 사전 점검 실패: {e}") from e
     finally:
         conn.close()
 
@@ -388,6 +487,210 @@ def _store_chunks_chroma(
                     logger.debug("ChromaDB PersistentClient close() 미지원 — 정리 생략")
             except Exception as cleanup_err:
                 logger.warning(f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}")
+
+
+def _is_missing_chroma_collection_error(error: Exception) -> bool:
+    """ChromaDB 컬렉션 부재 오류인지 메시지 기반으로 판별한다."""
+    message = str(error).lower()
+    return "does not exist" in message or "not found" in message
+
+
+def _close_chroma_client(client: Any) -> None:
+    """ChromaDB PersistentClient 리소스를 가능한 경우 정리한다."""
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+            logger.debug("ChromaDB PersistentClient close() 완료")
+        else:
+            logger.debug("ChromaDB PersistentClient close() 미지원 — 정리 생략")
+    except Exception as cleanup_err:
+        logger.warning(f"ChromaDB 리소스 정리 중 오류 (무시): {cleanup_err}")
+
+
+def _purge_chunks_chroma(chroma_dir: Path, meeting_id: str) -> int:
+    """ChromaDB에서 특정 회의의 청크를 삭제한다.
+
+    ChromaDB 디렉토리나 컬렉션이 없으면 삭제할 인덱스가 없는 정상 상태로 본다.
+
+    Args:
+        chroma_dir: ChromaDB 저장 디렉토리 경로
+        meeting_id: 회의 식별자
+
+    Returns:
+        삭제한 청크 수
+
+    Raises:
+        IndexPurgeError: ChromaDB 접근 또는 삭제 실패 시
+    """
+    try:
+        if not chroma_dir.is_dir() or not any(chroma_dir.iterdir()):
+            return 0
+    except OSError as e:
+        raise IndexPurgeError(f"ChromaDB 인덱스 디렉토리 접근 실패: {e}") from e
+
+    preflight = run_preflight()
+    if not preflight.can_use_chromadb:
+        raise IndexPurgeError(
+            "ChromaDB는 현재 Python 버전과 호환되지 않아 기존 인덱스를 안전하게 "
+            f"정리할 수 없습니다. (현재: Python {sys.version_info.major}.{sys.version_info.minor})"
+        )
+
+    import chromadb  # lazy import: chromadb가 무거우므로 필요 시에만 로드
+
+    client = None
+    try:
+        client = chromadb.PersistentClient(path=str(chroma_dir))
+        try:
+            collection = client.get_collection(name=_CHROMA_COLLECTION_NAME)
+        except Exception as e:
+            if _is_missing_chroma_collection_error(e):
+                return 0
+            raise
+
+        existing = collection.get(where={"meeting_id": meeting_id})
+        ids = list(existing.get("ids") or [])
+        if not ids:
+            return 0
+
+        collection.delete(ids=ids)
+        logger.info(f"ChromaDB 인덱스 삭제 완료: meeting_id={meeting_id}, {len(ids)}개 청크")
+        return len(ids)
+    except IndexPurgeError:
+        raise
+    except Exception as e:
+        raise IndexPurgeError(f"ChromaDB 인덱스 삭제 실패: {e}") from e
+    finally:
+        if client is not None:
+            _close_chroma_client(client)
+
+
+def _preflight_purge_chunks_chroma(chroma_dir: Path, meeting_id: str) -> None:
+    """ChromaDB purge가 삭제 전 접근 가능한지 확인한다."""
+    try:
+        if not chroma_dir.is_dir() or not any(chroma_dir.iterdir()):
+            return
+    except OSError as e:
+        raise IndexPurgeError(f"ChromaDB 인덱스 디렉토리 접근 실패: {e}") from e
+
+    preflight = run_preflight()
+    if not preflight.can_use_chromadb:
+        raise IndexPurgeError(
+            "ChromaDB는 현재 Python 버전과 호환되지 않아 기존 인덱스를 안전하게 "
+            f"정리할 수 없습니다. (현재: Python {sys.version_info.major}.{sys.version_info.minor})"
+        )
+
+    import chromadb
+
+    client = None
+    try:
+        client = chromadb.PersistentClient(path=str(chroma_dir))
+        try:
+            collection = client.get_collection(name=_CHROMA_COLLECTION_NAME)
+        except Exception as e:
+            if _is_missing_chroma_collection_error(e):
+                return
+            raise
+        collection.get(where={"meeting_id": meeting_id}, limit=1)
+    except IndexPurgeError:
+        raise
+    except Exception as e:
+        raise IndexPurgeError(f"ChromaDB 인덱스 삭제 사전 점검 실패: {e}") from e
+    finally:
+        if client is not None:
+            _close_chroma_client(client)
+
+
+def _write_reindex_required_marker(
+    config: Any,
+    meeting_id: str,
+    reason: str,
+    result: IndexPurgeResult,
+) -> str:
+    """부분 purge 실패 후 재색인 필요 marker를 저장한다."""
+    marker_path = config.paths.resolved_checkpoints_dir / meeting_id / "reindex_required.json"
+    atomic_write_json(
+        marker_path,
+        {
+            "meeting_id": meeting_id,
+            "reason": reason,
+            "chroma_deleted": result.chroma_deleted,
+            "fts_deleted": result.fts_deleted,
+            "created_at": datetime.now().isoformat(),
+            "recommended_action": f"POST /api/meetings/{meeting_id}/reindex",
+        },
+        backup=False,
+    )
+    return str(marker_path)
+
+
+def _deleted_index_entry_count(result: IndexPurgeResult) -> int:
+    """삭제된 인덱스 항목 수를 정수 필드만 기준으로 계산한다."""
+    chroma_deleted = result.chroma_deleted if isinstance(result.chroma_deleted, int) else 0
+    fts_deleted = result.fts_deleted if isinstance(result.fts_deleted, int) else 0
+    return chroma_deleted + fts_deleted
+
+
+def purge_meeting_index(config: Any, meeting_id: str) -> IndexPurgeResult:
+    """회의 삭제/재전사 전에 ChromaDB와 FTS5 인덱스를 정리한다.
+
+    양쪽 저장소 중 한쪽이라도 접근 가능한 기존 인덱스 삭제에 실패하면 실패를
+    전파한다. 없는 DB/컬렉션/테이블은 삭제할 데이터가 없는 상태로 처리한다.
+
+    Args:
+        config: AppConfig 호환 설정 객체
+        meeting_id: 회의 식별자
+
+    Returns:
+        IndexPurgeResult: 저장소별 삭제 건수
+
+    Raises:
+        IndexPurgeError: 어느 한 저장소라도 삭제 실패 시
+    """
+    result = IndexPurgeResult(meeting_id=meeting_id)
+
+    preflight_errors: list[str] = []
+    for preflight_func, path in (
+        (_preflight_purge_chunks_chroma, config.paths.resolved_chroma_db_dir),
+        (_preflight_purge_chunks_fts, config.paths.resolved_meetings_db),
+    ):
+        try:
+            preflight_func(path, meeting_id)
+        except IndexPurgeError as e:
+            preflight_errors.append(str(e))
+
+    if preflight_errors:
+        raise IndexPurgeError("; ".join(preflight_errors))
+
+    errors: list[str] = []
+    for store_name, purge_func, path, attr in (
+        ("ChromaDB", _purge_chunks_chroma, config.paths.resolved_chroma_db_dir, "chroma_deleted"),
+        ("FTS5", _purge_chunks_fts, config.paths.resolved_meetings_db, "fts_deleted"),
+    ):
+        try:
+            setattr(result, attr, purge_func(path, meeting_id))
+        except IndexPurgeError as e:
+            errors.append(f"{store_name}: {e}")
+
+    if errors:
+        if _deleted_index_entry_count(result) > 0:
+            result.reindex_required = True
+            result.reindex_marker_path = _write_reindex_required_marker(
+                config,
+                meeting_id,
+                "; ".join(errors),
+                result,
+            )
+            errors.append(f"reindex_required_marker={result.reindex_marker_path}")
+        raise IndexPurgeError("; ".join(errors))
+
+    logger.info(
+        "회의 검색 인덱스 정리 완료: meeting_id=%s, chroma_deleted=%s, fts_deleted=%s",
+        meeting_id,
+        result.chroma_deleted,
+        result.fts_deleted,
+    )
+    return result
 
 
 # === 메인 클래스 ===
@@ -646,28 +949,34 @@ class Embedder:
             embedding_dimension=self._dimension,
         )
 
-        # 3. ChromaDB 저장 (fail-loud: StorageError 가 발생하면 그대로 raise)
-        # 정책: ChromaDB 또는 FTS5 어느 한 쪽이라도 저장 실패 시 단계 자체를 실패로 처리.
-        # 반쪽짜리 인덱스(벡터만 있고 키워드 없음, 또는 그 반대)는 RAG 품질을 심하게
-        # 떨어뜨려 사용자에게 "회의가 완료됐는데 검색 결과가 부정확함" 으로 나타난다.
-        # 차라리 명시적으로 실패시켜 재시도 또는 사용자 알림으로 이어지게 한다.
-        await asyncio.to_thread(
-            _store_chunks_chroma,
-            embedded_chunks,
-            self._chroma_dir,
-            meeting_id,
-        )
-        result.chroma_stored = True
+        try:
+            # 3. ChromaDB 저장 (fail-loud: StorageError 가 발생하면 그대로 raise)
+            # 정책: ChromaDB 또는 FTS5 어느 한 쪽이라도 저장 실패 시 단계 자체를 실패로 처리.
+            # 반쪽짜리 인덱스(벡터만 있고 키워드 없음, 또는 그 반대)는 RAG 품질을 심하게
+            # 떨어뜨려 사용자에게 "회의가 완료됐는데 검색 결과가 부정확함" 으로 나타난다.
+            # 차라리 명시적으로 실패시켜 재시도 또는 사용자 알림으로 이어지게 한다.
+            await asyncio.to_thread(
+                _store_chunks_chroma,
+                embedded_chunks,
+                self._chroma_dir,
+                meeting_id,
+            )
+            result.chroma_stored = True
 
-        # 4. FTS5 저장 (fail-loud)
-        await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
-        await asyncio.to_thread(
-            _store_chunks_fts,
-            embedded_chunks,
-            self._meetings_db,
-            meeting_id,
-        )
-        result.fts_stored = True
+            # 4. FTS5 저장 (fail-loud)
+            await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
+            await asyncio.to_thread(
+                _store_chunks_fts,
+                embedded_chunks,
+                self._meetings_db,
+                meeting_id,
+            )
+            result.fts_stored = True
+        except Exception as e:
+            await self._purge_partial_index_after_storage_failure(meeting_id, e)
+            if isinstance(e, StorageError):
+                raise
+            raise StorageError(f"검색 인덱스 저장 실패: {e}") from e
 
         # 5. 결과 로깅
         logger.info(
@@ -678,3 +987,34 @@ class Embedder:
         )
 
         return result
+
+    async def _purge_partial_index_after_storage_failure(
+        self,
+        meeting_id: str,
+        original_error: Exception,
+    ) -> None:
+        """검색 인덱스 저장 실패 후 양쪽 저장소를 정리해 partial index를 제거한다."""
+        try:
+            purge_result = await asyncio.to_thread(purge_meeting_index, self._config, meeting_id)
+            if _deleted_index_entry_count(purge_result) > 0:
+                purge_result.reindex_required = True
+                purge_result.reindex_marker_path = _write_reindex_required_marker(
+                    self._config,
+                    meeting_id,
+                    str(original_error),
+                    purge_result,
+                )
+            logger.warning(
+                "검색 인덱스 저장 실패 후 partial index 정리 완료: "
+                "meeting_id=%s, chroma_deleted=%s, fts_deleted=%s, "
+                "reindex_marker=%s, original_error=%s",
+                meeting_id,
+                purge_result.chroma_deleted,
+                purge_result.fts_deleted,
+                purge_result.reindex_marker_path,
+                original_error,
+            )
+        except IndexPurgeError as cleanup_error:
+            raise StorageError(
+                f"{original_error}; partial index 정리 실패: {cleanup_error}"
+            ) from original_error

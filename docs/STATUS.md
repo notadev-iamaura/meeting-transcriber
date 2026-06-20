@@ -25,6 +25,36 @@
 
 ## 완료된 주요 작업
 
+### Backend Reliability Hardening (2026-06-20)
+
+- `/api/chat` 응답에 `llm_called`, `grounding_status`, `repair_actions`를 추가했습니다.
+  RAG 검색 실패 또는 검색 결과 0건이면 LLM을 호출하지 않고 근거 없음/검색 오류 응답으로 종료합니다.
+- 스트리밍 채팅도 같은 grounding 계약을 따릅니다. 근거가 없으면 token stream을 열지 않고
+  `grounding`/`done` 이벤트로 종료합니다.
+- Wiki router `source_type="both"` 응답은 RAG와 Wiki 근거를 통합 집계합니다.
+  RAG 검색 0건이어도 Wiki 근거가 있으면 전체 `grounding_status="grounded"`로 응답합니다.
+- `DELETE /api/meetings/{meeting_id}`와 `POST /api/meetings/{meeting_id}/re-transcribe`는
+  DB 삭제, 체크포인트 삭제, job 리셋 전에 ChromaDB/SQLite FTS5 검색 인덱스를 먼저 purge합니다.
+  purge 실패 시 기존 회의 레코드와 산출물을 보존하고 500으로 중단합니다.
+- `pipeline.skip_llm_steps=True` 또는 메모리 부족으로 correct 단계가 스킵되어도
+  `merge.json` 기반 pass-through `correct.json`을 저장합니다. 이후 resume, chunk, reindex는
+  항상 `CorrectedResult` 계약을 사용할 수 있습니다.
+- 온디맨드 LLM 후처리(`run_llm_steps`)는 skip으로 생성된 pass-through `correct.json`을
+  실제 LLM 보정으로 갱신하고, 기존 chunk/embed 인덱스가 있던 회의는 LLM 결과 기준으로
+  chunk/embed를 자동 재생성합니다. 재생성 중 실패하면 `chunk`/`embed` 완료 마커를 제거하고
+  상태를 `failed`로 저장해 stale 완료 표시를 방지합니다.
+- ChromaDB 또는 SQLite FTS5 저장 중 하나라도 실패하면 회의별 양쪽 검색 인덱스를 purge해
+  stale/partial index 대신 명시 실패 상태로 수렴합니다.
+- ChromaDB/FTS5 purge는 삭제 전 양쪽 저장소 접근성을 먼저 점검합니다. 삭제 도중 한쪽만
+  성공한 드문 부분 실패나 재색인 저장 실패로 기존 인덱스가 제거된 경우
+  `checkpoints/{meeting_id}/reindex_required.json` marker를 남겨 복구 필요 상태를 보존합니다.
+- `ModelLoadManager.unload_if_current(name)`를 추가해 LLM 후처리 체인 종료 시 현재 모델이
+  `exaone`일 때만 조건부로 언로드합니다.
+- direct pyannote 경로도 worker 경로처럼 실제 선택된 diarization `output_mode`를 결과
+  메타데이터에 저장합니다.
+- `scripts/benchmark_ai_pipeline.py`를 추가해 STT/VAD/화자분리/교정/요약 단계의 시간,
+  RSS/가용 메모리/swap/MLX 메모리와 품질 지표를 로컬 JSON 리포트로 남길 수 있습니다.
+
 ### Frontend Architecture
 
 `ui/web/spa.js`에서 다음 모듈을 분리했습니다.

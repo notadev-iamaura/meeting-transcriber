@@ -129,6 +129,30 @@ async def test_unload_when_no_model(manager: Any) -> None:
     assert manager.is_model_loaded is False
 
 
+async def test_unload_if_current_matching_model(manager: Any) -> None:
+    """현재 모델명이 일치할 때만 조건부 언로드가 수행된다."""
+    fake = FakeModel("exaone")
+    await manager.load_model("exaone", lambda: fake)
+
+    unloaded = await manager.unload_if_current("exaone")
+
+    assert unloaded is True
+    assert manager.current_model_name is None
+    assert manager.current_model is None
+
+
+async def test_unload_if_current_keeps_other_model(manager: Any) -> None:
+    """현재 모델명이 다르면 조건부 언로드는 아무것도 내리지 않는다."""
+    fake = FakeModel("e5")
+    await manager.load_model("e5", lambda: fake)
+
+    unloaded = await manager.unload_if_current("exaone")
+
+    assert unloaded is False
+    assert manager.current_model_name == "e5"
+    assert manager.current_model is fake
+
+
 # === 모델 교체 테스트 ===
 
 

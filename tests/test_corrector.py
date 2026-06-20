@@ -450,8 +450,8 @@ class TestCorrector정상보정:
         assert result.utterances[0].was_corrected is True
         assert result.total_corrected == 1
 
-    def test_교정_max_tokens_전달(self) -> None:
-        """교정 단계는 작업별 응답 토큰 상한을 백엔드에 전달한다."""
+    def test_교정_max_tokens_명시값_전달(self) -> None:
+        """교정 단계는 명시한 응답 토큰 상한을 백엔드에 전달한다."""
         backend = MagicMock()
         backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
         corrector = Corrector(
@@ -467,7 +467,57 @@ class TestCorrector정상보정:
         assert corrected == 1
         assert failed == 0
         assert result[0].text == "오늘 회의를 시작하겠습니다"
-        assert backend.chat.call_args.kwargs["max_tokens"] == 512
+        max_tokens = backend.chat.call_args.kwargs["max_tokens"]
+        assert max_tokens == 512
+
+    def test_명시적_adaptive_max_tokens_축소(self) -> None:
+        """adaptive max_tokens를 명시하면 입력 길이에 맞춰 상한을 낮춘다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
+        corrector = Corrector(
+            config=AppConfig(
+                llm={
+                    "correction_max_tokens": 512,
+                    "correction_adaptive_max_tokens": True,
+                }
+            ),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0)]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 1
+        assert failed == 0
+        assert result[0].text == "오늘 회의를 시작하겠습니다"
+        max_tokens = backend.chat.call_args.kwargs["max_tokens"]
+        assert 100 <= max_tokens < 512
+
+    def test_changed_only_교정은_누락_번호를_원문유지로_처리(self) -> None:
+        """changed_only 모드에서는 출력되지 않은 번호를 실패가 아닌 원문 유지로 본다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                ("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0),
+                ("수정 필요 없는 문장입니다", "SPEAKER_01", 5.0, 8.0),
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 1
+        assert failed == 0
+        assert result[0].text == "오늘 회의를 시작하겠습니다"
+        assert result[1].text == "수정 필요 없는 문장입니다"
+        system_prompt = backend.chat.call_args.kwargs["messages"][0]["content"]
+        assert "changed-only 교정 모드" in system_prompt
 
     @pytest.mark.asyncio
     async def test_다중_발화_보정(self) -> None:

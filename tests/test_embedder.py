@@ -16,6 +16,7 @@
 의존성: pytest, pytest-asyncio
 """
 
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,11 +34,16 @@ from steps.embedder import (
     EmbeddedResult,
     Embedder,
     EmptyChunksError,
+    IndexPurgeError,
+    IndexPurgeResult,
     ModelLoadError,
     StorageError,
     _ensure_fts_table,
+    _purge_chunks_chroma,
+    _purge_chunks_fts,
     _store_chunks_chroma,
     _store_chunks_fts,
+    purge_meeting_index,
 )
 
 # === 헬퍼 함수 ===
@@ -336,6 +342,70 @@ class TestFTS5:
         finally:
             conn.close()
 
+    def test_fts_회의별_purge(self, tmp_path: Path) -> None:
+        """특정 meeting_id의 FTS5 청크만 삭제한다."""
+        db_path = tmp_path / "test.db"
+        _ensure_fts_table(db_path)
+        chunks = [
+            EmbeddedChunk(
+                chunk_id="m1_chunk_0000",
+                text="삭제 대상",
+                embedding=[],
+                meeting_id="m1",
+                date="2026-03-04",
+                speakers=["A"],
+                start_time=0.0,
+                end_time=5.0,
+            ),
+            EmbeddedChunk(
+                chunk_id="m2_chunk_0000",
+                text="보존 대상",
+                embedding=[],
+                meeting_id="m2",
+                date="2026-03-04",
+                speakers=["B"],
+                start_time=0.0,
+                end_time=5.0,
+            ),
+        ]
+        _store_chunks_fts(chunks, db_path, "m1")
+        _store_chunks_fts([chunks[1]], db_path, "m2")
+
+        deleted = _purge_chunks_fts(db_path, "m1")
+
+        assert deleted == 1
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(f"SELECT meeting_id FROM {_FTS_TABLE_NAME}").fetchall()
+        finally:
+            conn.close()
+        assert rows == [("m2",)]
+
+    def test_fts_purge는_DB나_테이블이_없으면_0(self, tmp_path: Path) -> None:
+        """DB 파일 또는 FTS 테이블이 없으면 정상적으로 0을 반환한다."""
+        assert _purge_chunks_fts(tmp_path / "missing.db", "m1") == 0
+
+        db_path = tmp_path / "plain.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("CREATE TABLE normal_table (id TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert _purge_chunks_fts(db_path, "m1") == 0
+
+    def test_fts_purge_DB_연결_실패시_IndexPurgeError(self, tmp_path: Path) -> None:
+        """FTS5 DB 연결 실패는 IndexPurgeError로 감싼다."""
+        db_path = tmp_path / "locked.db"
+        db_path.write_text("", encoding="utf-8")
+
+        with (
+            patch("steps.embedder.sqlite3.connect", side_effect=sqlite3.Error("locked")),
+            pytest.raises(IndexPurgeError, match="DB 연결 실패"),
+        ):
+            _purge_chunks_fts(db_path, "m1")
+
 
 # === Embedder 동기 메서드 테스트 ===
 
@@ -510,9 +580,12 @@ class TestEmbedderAsync:
             ),
             patch("steps.embedder._ensure_fts_table"),
             patch("steps.embedder._store_chunks_fts"),
+            patch("steps.embedder.purge_meeting_index") as mock_purge,
             pytest.raises(StorageError, match="ChromaDB 연결 실패"),
         ):
             await embedder.embed(chunked)
+
+        mock_purge.assert_called_once_with(embedder._config, chunked.meeting_id)
 
     @pytest.mark.asyncio
     async def test_fts_실패_시_StorageError_전파(self) -> None:
@@ -538,9 +611,79 @@ class TestEmbedderAsync:
                 "steps.embedder._store_chunks_fts",
                 side_effect=StorageError("FTS5 오류"),
             ),
+            patch("steps.embedder.purge_meeting_index") as mock_purge,
             pytest.raises(StorageError, match="FTS5 오류"),
         ):
             await embedder.embed(chunked)
+
+        mock_purge.assert_called_once_with(embedder._config, chunked.meeting_id)
+
+    @pytest.mark.asyncio
+    async def test_storage_실패후_partial_index_정리도_실패하면_함께_보고(self) -> None:
+        """저장 실패 후 purge까지 실패하면 두 오류를 함께 포함해 전파한다."""
+        embedder = _make_embedder()
+        model = _make_fake_model()
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=model)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        embedder._model_manager.acquire = MagicMock(return_value=ctx)
+
+        chunked = _make_chunked_result()
+
+        with (
+            patch(
+                "steps.embedder._store_chunks_chroma",
+                side_effect=StorageError("ChromaDB 연결 실패"),
+            ),
+            patch(
+                "steps.embedder.purge_meeting_index",
+                side_effect=IndexPurgeError("purge 실패"),
+            ),
+            pytest.raises(StorageError, match="partial index 정리 실패"),
+        ):
+            await embedder.embed(chunked)
+
+    @pytest.mark.asyncio
+    async def test_storage_실패후_기존_index_삭제시_reindex_marker를_남긴다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """저장 실패 cleanup이 기존 인덱스를 제거하면 재색인 필요 marker를 남긴다."""
+        config = _make_config()
+        config.paths.base_dir = str(tmp_path)
+        embedder = _make_embedder(config)
+        model = _make_fake_model()
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=model)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        embedder._model_manager.acquire = MagicMock(return_value=ctx)
+
+        chunked = _make_chunked_result(meeting_id="meeting_marker")
+
+        with (
+            patch(
+                "steps.embedder._store_chunks_chroma",
+                side_effect=StorageError("ChromaDB 연결 실패"),
+            ),
+            patch(
+                "steps.embedder.purge_meeting_index",
+                return_value=IndexPurgeResult(
+                    meeting_id="meeting_marker",
+                    chroma_deleted=1,
+                    fts_deleted=2,
+                ),
+            ),
+            pytest.raises(StorageError, match="ChromaDB 연결 실패"),
+        ):
+            await embedder.embed(chunked)
+
+        marker = tmp_path / "checkpoints" / "meeting_marker" / "reindex_required.json"
+        assert marker.is_file()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert payload["chroma_deleted"] == 1
+        assert payload["fts_deleted"] == 2
 
     @pytest.mark.asyncio
     async def test_model_manager_acquire_호출(self) -> None:
@@ -785,6 +928,147 @@ class TestStoreChunksChroma:
             pytest.raises(StorageError, match="ChromaDB 저장 실패"),
         ):
             _store_chunks_chroma(chunks, Path("/tmp/chroma"), "m1")
+
+
+class TestPurgeChunksChroma:
+    """ChromaDB 회의별 purge 함수 테스트."""
+
+    def _make_mock_chromadb(self) -> MagicMock:
+        """chromadb 모듈 목을 생성한다."""
+        return MagicMock()
+
+    def test_디렉토리_없거나_비어있으면_0(self, tmp_path: Path) -> None:
+        """ChromaDB 디렉토리가 없거나 비어 있으면 import 없이 0을 반환한다."""
+        assert _purge_chunks_chroma(tmp_path / "missing", "m1") == 0
+
+        empty_dir = tmp_path / "empty_chroma"
+        empty_dir.mkdir()
+        assert _purge_chunks_chroma(empty_dir, "m1") == 0
+
+    def test_회의별_chroma_purge(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """특정 meeting_id의 ChromaDB 청크 ids를 삭제한다."""
+        monkeypatch.setattr(
+            "steps.embedder.run_preflight",
+            lambda: SimpleNamespace(can_use_chromadb=True),
+        )
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        (chroma_dir / "chroma.sqlite3").write_text("", encoding="utf-8")
+
+        mock_chromadb = self._make_mock_chromadb()
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {"ids": ["m1_chunk_0000", "m1_chunk_0001"]}
+        mock_client = MagicMock()
+        mock_client.get_collection.return_value = mock_collection
+        mock_chromadb.PersistentClient.return_value = mock_client
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            deleted = _purge_chunks_chroma(chroma_dir, "m1")
+
+        assert deleted == 2
+        mock_client.get_collection.assert_called_once_with(name=_CHROMA_COLLECTION_NAME)
+        mock_collection.get.assert_called_once_with(where={"meeting_id": "m1"})
+        mock_collection.delete.assert_called_once_with(ids=["m1_chunk_0000", "m1_chunk_0001"])
+        mock_client.close.assert_called_once()
+
+    def test_컬렉션이_없으면_0(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """컬렉션 부재는 삭제할 데이터가 없는 정상 상태로 처리한다."""
+        monkeypatch.setattr(
+            "steps.embedder.run_preflight",
+            lambda: SimpleNamespace(can_use_chromadb=True),
+        )
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        (chroma_dir / "chroma.sqlite3").write_text("", encoding="utf-8")
+
+        mock_chromadb = self._make_mock_chromadb()
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = Exception(
+            "Collection meeting_chunks does not exist"
+        )
+        mock_chromadb.PersistentClient.return_value = mock_client
+
+        with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
+            assert _purge_chunks_chroma(chroma_dir, "m1") == 0
+
+        mock_client.close.assert_called_once()
+
+    def test_chroma_purge_실패시_IndexPurgeError(self, tmp_path: Path) -> None:
+        """ChromaDB 접근 실패는 IndexPurgeError로 전파한다."""
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        (chroma_dir / "chroma.sqlite3").write_text("", encoding="utf-8")
+
+        with patch(
+            "steps.embedder.run_preflight",
+            return_value=SimpleNamespace(can_use_chromadb=False),
+        ):
+            with pytest.raises(IndexPurgeError, match="정리할 수 없습니다"):
+                _purge_chunks_chroma(chroma_dir, "m1")
+
+
+class TestPurgeMeetingIndex:
+    """양쪽 검색 인덱스 purge 오케스트레이션 테스트."""
+
+    def test_purge_meeting_index_성공_결과(self, tmp_path: Path) -> None:
+        """ChromaDB와 FTS5 삭제 건수를 결과로 반환한다."""
+        config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+
+        with (
+            patch("steps.embedder._purge_chunks_chroma", return_value=2) as mock_chroma,
+            patch("steps.embedder._purge_chunks_fts", return_value=3) as mock_fts,
+        ):
+            result = purge_meeting_index(config, "m1")
+
+        assert result.meeting_id == "m1"
+        assert result.chroma_deleted == 2
+        assert result.fts_deleted == 3
+        mock_chroma.assert_called_once_with(config.paths.resolved_chroma_db_dir, "m1")
+        mock_fts.assert_called_once_with(config.paths.resolved_meetings_db, "m1")
+
+    def test_preflight_실패시_실제_purge는_시도하지_않는다(self, tmp_path: Path) -> None:
+        """삭제 전 사전 점검이 실패하면 어느 저장소도 실제 삭제하지 않는다."""
+        config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+
+        with (
+            patch(
+                "steps.embedder._preflight_purge_chunks_chroma",
+                side_effect=IndexPurgeError("chroma boom"),
+            ),
+            patch("steps.embedder._preflight_purge_chunks_fts") as mock_fts_preflight,
+            patch("steps.embedder._purge_chunks_chroma") as mock_chroma,
+            patch("steps.embedder._purge_chunks_fts") as mock_fts,
+            pytest.raises(IndexPurgeError, match="chroma boom"),
+        ):
+            purge_meeting_index(config, "m1")
+
+        mock_fts_preflight.assert_called_once()
+        mock_chroma.assert_not_called()
+        mock_fts.assert_not_called()
+
+    def test_부분삭제후_실패하면_reindex_marker를_남긴다(self, tmp_path: Path) -> None:
+        """한 저장소 삭제 후 다른 저장소 삭제가 실패하면 재색인 필요 marker를 남긴다."""
+        config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+
+        with (
+            patch("steps.embedder._preflight_purge_chunks_chroma"),
+            patch("steps.embedder._preflight_purge_chunks_fts"),
+            patch("steps.embedder._purge_chunks_chroma", return_value=2),
+            patch(
+                "steps.embedder._purge_chunks_fts",
+                side_effect=IndexPurgeError("fts boom"),
+            ),
+            pytest.raises(IndexPurgeError, match="reindex_required_marker"),
+        ):
+            purge_meeting_index(config, "m1")
+
+        marker = tmp_path / "checkpoints" / "m1" / "reindex_required.json"
+        assert marker.is_file()
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert payload["meeting_id"] == "m1"
+        assert payload["chroma_deleted"] == 2
+        assert payload["fts_deleted"] == 0
+        assert "fts boom" in payload["reason"]
 
 
 # === _load_model 테스트 ===

@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from config import AppConfig
 from steps.vad_detector import (
     VADError,
     VADResult,
@@ -100,6 +101,26 @@ class TestVAD비활성화:
         assert result is None
 
 
+class TestVADAppConfigPolicy:
+    """실제 AppConfig 기반 VAD mode 정책 테스트."""
+
+    def test_enabled_true_legacy_설정은_on_mode로_승격한다(self) -> None:
+        """AppConfig(vad.enabled=True)는 mode 기본값 off를 하위 호환 on으로 처리한다."""
+        detector = VoiceActivityDetector(config=AppConfig(vad={"enabled": True}))
+
+        assert detector._mode == "on"
+        assert detector._enabled is True
+        assert detector._coalesce_enabled is True
+
+    def test_auto_mode는_명시_mode로_유지된다(self) -> None:
+        """명시된 auto mode는 legacy enabled 값과 무관하게 유지된다."""
+        detector = VoiceActivityDetector(config=AppConfig(vad={"enabled": False, "mode": "auto"}))
+
+        assert detector._mode == "auto"
+        assert detector._enabled is True
+        assert detector._coalesce_enabled is True
+
+
 # === 2. 파일 미존재 시 FileNotFoundError 테스트 ===
 
 
@@ -128,6 +149,22 @@ class TestClipTimestamps변환:
         # duration을 충분히 크게 설정하여 조정이 발생하지 않도록 함
         result = VoiceActivityDetector._to_clip_timestamps(segments, duration=20.0)
         assert result == [1.0, 3.0, 5.0, 8.0]
+
+    def test_가까운_음성구간_병합(self) -> None:
+        """merge_gap_seconds 이내의 음성 구간은 하나로 병합한다."""
+        segments = [
+            {"start": 1.0, "end": 3.0},
+            {"start": 4.0, "end": 5.0},
+            {"start": 10.0, "end": 12.0},
+        ]
+        result = VoiceActivityDetector._coalesce_segments(
+            segments,
+            merge_gap_seconds=2.0,
+        )
+        assert result == [
+            {"start": 1.0, "end": 5.0},
+            {"start": 10.0, "end": 12.0},
+        ]
 
 
 # === 4. 마지막 타임스탬프 무한루프 방지 테스트 ===
@@ -180,6 +217,54 @@ class TestEmptySpeech:
         with patch.object(detector, "_run_vad", return_value=([], 10.0)):
             result = await detector.detect(audio_file)
             assert result is None
+
+
+class TestVADAutoMode:
+    """VAD auto 게이트 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_auto_무음절감_부족시_None_반환(self, audio_file: Path) -> None:
+        """auto 모드는 무음 절감 비율이 낮으면 전체 오디오로 폴백한다."""
+        config = MagicMock()
+        config.vad.enabled = False
+        config.vad.mode = "auto"
+        config.vad.threshold = 0.5
+        config.vad.min_speech_duration_ms = 250
+        config.vad.min_silence_duration_ms = 100
+        config.vad.speech_pad_ms = 30
+        config.vad.merge_gap_seconds = 0.0
+        config.vad.max_clip_segments = 80
+        config.vad.min_silence_saved_ratio = 0.5
+        detector = VoiceActivityDetector(config)
+
+        with patch.object(detector, "_run_vad", return_value=([{"start": 0.0, "end": 9.0}], 10.0)):
+            result = await detector.detect(audio_file)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_auto_조건_통과시_결과_반환(self, audio_file: Path) -> None:
+        """auto 모드는 구간 수와 절감 비율 조건을 통과하면 VAD 결과를 사용한다."""
+        config = MagicMock()
+        config.vad.enabled = False
+        config.vad.mode = "auto"
+        config.vad.threshold = 0.5
+        config.vad.min_speech_duration_ms = 250
+        config.vad.min_silence_duration_ms = 100
+        config.vad.speech_pad_ms = 30
+        config.vad.merge_gap_seconds = 2.0
+        config.vad.max_clip_segments = 80
+        config.vad.min_silence_saved_ratio = 0.2
+        detector = VoiceActivityDetector(config)
+
+        speech = [{"start": 1.0, "end": 3.0}, {"start": 4.0, "end": 5.0}]
+        with patch.object(detector, "_run_vad", return_value=(speech, 10.0)):
+            result = await detector.detect(audio_file)
+
+        assert result is not None
+        assert result.mode == "auto"
+        assert result.coalesced_from_segments == 2
+        assert result.clip_timestamps == [1.0, 5.0]
 
 
 # === 6. CPU 강제 실행 테스트 ===

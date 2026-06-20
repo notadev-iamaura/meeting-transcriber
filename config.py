@@ -104,6 +104,15 @@ class VADConfig(BaseModel):
     """
 
     enabled: bool = False
+    mode: str = Field(
+        default="off",
+        pattern="^(off|on|auto)$",
+        description=(
+            "VAD 실행 모드. off=미사용, on=항상 clip_timestamps 적용, "
+            "auto=음성 구간 병합/절감률 게이트를 통과할 때만 적용. "
+            "하위 호환을 위해 enabled=True 이면 mode=off 여도 on처럼 동작한다."
+        ),
+    )
     threshold: float = Field(default=0.5, ge=0.0, le=1.0, description="음성 확률 임계값")
     min_speech_duration_ms: int = Field(
         default=250, ge=50, le=2000, description="최소 음성 구간 길이(ms)"
@@ -112,6 +121,30 @@ class VADConfig(BaseModel):
         default=100, ge=30, le=2000, description="최소 무음 구간 길이(ms)"
     )
     speech_pad_ms: int = Field(default=30, ge=0, le=500, description="음성 구간 전후 패딩(ms)")
+    merge_gap_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=30.0,
+        description="가까운 VAD 음성 구간을 하나로 병합할 최대 무음 간격(초)",
+    )
+    max_clip_segments: int = Field(
+        default=80,
+        ge=1,
+        le=2000,
+        description="clip_timestamps로 넘길 최대 음성 구간 수. 초과 시 전체 오디오로 폴백",
+    )
+    min_silence_saved_ratio: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.95,
+        description="auto 모드에서 VAD를 적용할 최소 무음 절감 비율",
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        """VAD mode 값을 소문자로 정규화한다."""
+        return v.lower()
 
 
 class HallucinationFilterConfig(BaseModel):
@@ -212,6 +245,13 @@ class STTConfig(BaseModel):
             "0.4.x 계열처럼 **decode_options만 받는 버전에는 전달하지 않는다."
         ),
     )
+    word_timestamps: bool = Field(
+        default=True,
+        description=(
+            "True이면 단어 단위 타임스탬프를 요청해 세밀한 segment boundary를 사용한다. "
+            "False이면 segment-level timestamp만 사용해 STT 비용을 줄이는 실험 경로로 쓴다."
+        ),
+    )
     auto_detect_chipset: bool = False  # True: 칩셋 기반 batch_size 자동 설정
     initial_prompt: str | None = Field(
         default=None,
@@ -291,6 +331,14 @@ class DiarizationConfig(BaseModel):
 
     model_name: str = "pyannote/speaker-diarization-3.1"
     device: str = "cpu"  # pyannote MPS 버그 회피: 런타임은 CPU 강제
+    output_mode: str = Field(
+        default="regular",
+        pattern="^(regular|exclusive|auto)$",
+        description=(
+            "pyannote DiarizeOutput 파싱 모드. regular=speaker_diarization, "
+            "exclusive=exclusive_speaker_diarization, auto=exclusive가 있으면 우선 사용."
+        ),
+    )
     min_speakers: int = Field(default=2, ge=1)
     max_speakers: int = Field(default=4, ge=1, le=20)
     huggingface_token: str | None = None
@@ -318,6 +366,12 @@ class DiarizationConfig(BaseModel):
             raise ValueError(f"device는 {allowed} 중 하나여야 합니다: '{v}'")
         return v.lower()
 
+    @field_validator("output_mode")
+    @classmethod
+    def validate_output_mode(cls, v: str) -> str:
+        """화자분리 출력 모드를 소문자로 정규화한다."""
+        return v.lower()
+
 
 class LLMConfig(BaseModel):
     """LLM 백엔드 설정 (MLX 기본, Ollama 선택 가능)
@@ -342,6 +396,22 @@ class LLMConfig(BaseModel):
         default=800,
         ge=100,
         description="전사문 교정 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
+    )
+    correction_mode: str = Field(
+        default="full",
+        pattern="^(full|changed_only|auto)$",
+        description=(
+            "전사문 교정 출력 모드. full=모든 줄 재출력, changed_only=수정된 줄만 출력, "
+            "auto=changed_only 시도 후 필요 시 full 폴백."
+        ),
+    )
+    correction_adaptive_max_tokens: bool = Field(
+        default=True,
+        description="교정 배치 크기와 입력 길이에 맞춰 max_tokens를 동적으로 낮춘다.",
+    )
+    correction_changed_only_fallback: bool = Field(
+        default=True,
+        description="changed_only 응답 파싱이 불안정하면 full 모드로 재시도한다.",
     )
     summarize_max_tokens: int = Field(
         default=1200,
@@ -378,6 +448,12 @@ class LLMConfig(BaseModel):
         if v not in allowed:
             raise ValueError(f"backend는 {allowed} 중 하나여야 합니다: '{v}'")
         return v
+
+    @field_validator("correction_mode")
+    @classmethod
+    def validate_correction_mode(cls, v: str) -> str:
+        """교정 출력 모드를 소문자로 정규화한다."""
+        return v.lower()
 
 
 class EmbeddingConfig(BaseModel):

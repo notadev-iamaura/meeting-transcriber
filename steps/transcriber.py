@@ -183,6 +183,7 @@ class Transcriber:
         self._language = self._config.stt.language
         self._beam_size = self._config.stt.beam_size
         self._batch_size = self._config.stt.batch_size  # 향후 mlx-whisper batch 지원 대비 캐싱
+        self._word_timestamps = bool(getattr(self._config.stt, "word_timestamps", True))
         # 컨텍스트 바이어싱용 initial_prompt (None이면 미적용)
         self._initial_prompt: str | None = getattr(self._config.stt, "initial_prompt", None)
         # 이전 윈도우 텍스트 전파 제어 (False: 각 윈도우 독립 전사)
@@ -193,7 +194,7 @@ class Transcriber:
         logger.info(
             f"Transcriber 초기화: model={self._model_name}, "
             f"language={self._language}, beam_size={self._beam_size}, "
-            f"batch_size={self._batch_size}"
+            f"batch_size={self._batch_size}, word_timestamps={self._word_timestamps}"
         )
 
     def _load_whisper_module(self) -> Any:
@@ -341,7 +342,7 @@ class Transcriber:
         kwargs: dict[str, Any] = {
             "path_or_hf_repo": self._model_name,
             "language": self._language,
-            "word_timestamps": True,
+            "word_timestamps": self._word_timestamps,
             "condition_on_previous_text": self._condition_on_previous_text,
         }
 

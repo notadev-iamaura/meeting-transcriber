@@ -235,6 +235,8 @@ class TestUtilityFunctions:
         prompt = _build_user_prompt("질문입니다", "")
 
         assert "찾을 수 없습니다" in prompt
+        assert "추측" in prompt
+        assert "알고 있는 범위" not in prompt
         assert "질문입니다" in prompt
 
     def test_참조출처_구성(self) -> None:
@@ -293,6 +295,9 @@ class TestUtilityFunctions:
         assert d["query"] == "질문"
         assert d["has_context"] is True
         assert d["llm_used"] is True
+        assert d["llm_called"] is True
+        assert d["grounding_status"] == "grounded"
+        assert d["repair_actions"] == []
         assert d["error_message"] is None
 
     def test_chat_message_to_dict(self) -> None:
@@ -363,22 +368,44 @@ class TestChatEngine:
         assert response.query == "프로젝트 일정이 어떻게 되나요?"
 
     @pytest.mark.asyncio
-    async def test_검색_실패_시_컨텍스트_없이_진행(self) -> None:
-        """검색 실패 시 컨텍스트 없이 LLM 호출이 진행되는지 확인한다."""
+    async def test_검색_실패_시_LLM_호출하지_않음(self) -> None:
+        """검색 실패 시 근거 없는 LLM 호출을 하지 않는다."""
         search_engine = MagicMock()
         search_engine.search = AsyncMock(side_effect=Exception("검색 오류"))
 
         engine = self._make_engine(search_engine=search_engine)
 
-        # LLM 백엔드 목의 chat 반환값 설정
-        backend_mock = engine._model_manager.acquire.return_value.__aenter__.return_value
-        backend_mock.chat.return_value = "검색 결과 없이 답변합니다."
+        response = await engine.chat("질문입니다")
+
+        assert response.llm_used is False
+        assert response.llm_called is False
+        assert response.has_context is False
+        assert response.grounding_status == "search_error"
+        assert response.repair_actions == ["retry", "reindex"]
+        assert "검색 오류" in (response.error_message or "")
+        assert "근거 있는 답변" in response.answer
+        assert len(response.references) == 0
+        engine._model_manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_검색_결과_없으면_LLM_호출하지_않음(self) -> None:
+        """검색 결과 0건이면 LLM을 호출하지 않고 근거 없음 안내를 반환한다."""
+        search_engine = MagicMock()
+        search_engine.search = AsyncMock(return_value=_make_search_response(results=[]))
+
+        engine = self._make_engine(search_engine=search_engine)
 
         response = await engine.chat("질문입니다")
 
-        assert response.llm_used is True
+        assert response.llm_used is False
+        assert response.llm_called is False
         assert response.has_context is False
+        assert response.grounding_status == "no_results"
+        assert response.repair_actions == ["clear_filters", "reindex"]
+        assert response.error_message is None
+        assert "관련 회의 내용을 찾지 못해" in response.answer
         assert len(response.references) == 0
+        engine._model_manager.acquire.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ollama_연결_실패_graceful_degradation(self) -> None:
@@ -639,6 +666,48 @@ class TestChatEngineStreaming:
         error_event = events[-1]
         assert error_event["type"] == "error"
         assert "스트리밍 연결 실패" in error_event["data"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_스트리밍_검색결과_없으면_LLM_호출하지_않음(self) -> None:
+        """스트리밍에서도 검색 결과 0건이면 토큰 생성 없이 done을 반환한다."""
+        engine = self._make_engine(search_results=[])
+
+        events = []
+        async for event in engine.stream_chat("없는 안건"):
+            events.append(event)
+
+        assert events[0]["type"] == "references"
+        assert events[0]["data"] == []
+        assert events[1]["type"] == "grounding"
+        assert events[1]["data"]["status"] == "no_results"
+        assert events[1]["data"]["llm_called"] is False
+        assert events[-1]["type"] == "done"
+        assert events[-1]["data"]["grounding_status"] == "no_results"
+        assert events[-1]["data"]["llm_called"] is False
+        assert "관련 회의 내용을 찾지 못해" in events[-1]["data"]["answer"]
+        assert [e for e in events if e["type"] == "token"] == []
+        engine._model_manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_스트리밍_검색_실패시_LLM_호출하지_않음(self) -> None:
+        """스트리밍 검색 실패도 근거 없는 LLM 호출을 차단한다."""
+        engine = self._make_engine()
+        engine._search_engine.search = AsyncMock(side_effect=Exception("검색 오류"))
+
+        events = []
+        async for event in engine.stream_chat("질문"):
+            events.append(event)
+
+        assert events[0]["type"] == "references"
+        assert events[1]["type"] == "grounding"
+        assert events[1]["data"]["status"] == "search_error"
+        assert events[1]["data"]["llm_called"] is False
+        assert events[-1]["type"] == "done"
+        assert events[-1]["data"]["grounding_status"] == "search_error"
+        assert events[-1]["data"]["llm_called"] is False
+        assert "검색 오류" in (events[-1]["data"]["error_message"] or "")
+        assert [e for e in events if e["type"] == "token"] == []
+        engine._model_manager.acquire.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_스트리밍_닫기시_worker_완료_후_model_cleanup(self) -> None:

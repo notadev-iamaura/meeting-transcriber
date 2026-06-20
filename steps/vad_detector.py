@@ -32,8 +32,11 @@ class VADResult:
         speech_segments: 음성 구간 목록 [{'start': 초, 'end': 초}, ...]
         clip_timestamps: mlx-whisper clip_timestamps 형식 [s1, e1, s2, e2, ...]
         audio_path: 분석한 오디오 파일 경로 문자열
-        total_speech_seconds: 총 음성 구간 길이 (초)
-        total_silence_seconds: 총 무음 구간 길이 (초)
+    total_speech_seconds: 총 음성 구간 길이 (초)
+    total_silence_seconds: 총 무음 구간 길이 (초)
+    mode: VAD 적용 모드 (off/on/auto)
+    silence_saved_ratio: 전체 오디오 대비 제거 가능한 무음 비율
+    coalesced_from_segments: 병합 전 음성 구간 수
     """
 
     speech_segments: list[dict[str, float]]
@@ -41,6 +44,9 @@ class VADResult:
     audio_path: str
     total_speech_seconds: float
     total_silence_seconds: float
+    mode: str = "on"
+    silence_saved_ratio: float = 0.0
+    coalesced_from_segments: int = 0
 
     @property
     def num_segments(self) -> int:
@@ -98,24 +104,75 @@ class VoiceActivityDetector:
                 "VoiceActivityDetector 초기화: VAD 설정 없음, VADConfig 기본값 사용 (비활성)"
             )
 
-        self._enabled = vad_config.enabled
+        raw_enabled = getattr(vad_config, "enabled", False)
+        self._legacy_enabled = bool(raw_enabled) if isinstance(raw_enabled, bool) else False
+        raw_mode = getattr(vad_config, "mode", None)
+        if isinstance(raw_mode, str):
+            explicit_mode = True
+            mode = raw_mode.lower()
+        else:
+            explicit_mode = False
+            mode = "on" if self._legacy_enabled else "off"
+        if mode not in {"off", "on", "auto"}:
+            mode = "off"
+        # 하위 호환: 기존 config 에서 enabled=true 만 지정한 경우 on 으로 처리한다.
+        self._mode = "on" if self._legacy_enabled and mode == "off" else mode
+        self._enabled = self._mode != "off"
         self._threshold = vad_config.threshold
         self._min_speech_duration_ms = vad_config.min_speech_duration_ms
         self._min_silence_duration_ms = vad_config.min_silence_duration_ms
         self._speech_pad_ms = vad_config.speech_pad_ms
+        self._merge_gap_seconds = self._get_float_setting(
+            vad_config,
+            "merge_gap_seconds",
+            2.0,
+        )
+        self._max_clip_segments = self._get_int_setting(
+            vad_config,
+            "max_clip_segments",
+            80,
+        )
+        self._min_silence_saved_ratio = self._get_float_setting(
+            vad_config,
+            "min_silence_saved_ratio",
+            0.15,
+        )
+        self._coalesce_enabled = explicit_mode and self._merge_gap_seconds > 0
 
         if _has_vad_in_config:
             logger.info(
-                f"VoiceActivityDetector 초기화: enabled={self._enabled}, "
+                f"VoiceActivityDetector 초기화: enabled={self._enabled}, mode={self._mode}, "
                 f"threshold={self._threshold}, "
                 f"min_speech_ms={self._min_speech_duration_ms}, "
                 f"min_silence_ms={self._min_silence_duration_ms}, "
-                f"speech_pad_ms={self._speech_pad_ms}"
+                f"speech_pad_ms={self._speech_pad_ms}, "
+                f"merge_gap={self._merge_gap_seconds:.1f}s, "
+                f"coalesce={self._coalesce_enabled}, "
+                f"max_clip_segments={self._max_clip_segments}, "
+                f"min_silence_saved_ratio={self._min_silence_saved_ratio:.2f}"
             )
 
         # 모델은 지연 로드 (첫 detect() 호출 시)
         self._model: Any = None
         self._utils: Any = None
+
+    @staticmethod
+    def _get_float_setting(config_obj: Any, name: str, default: float) -> float:
+        """MagicMock 등 비정상 설정 객체에서도 float 설정을 안전하게 읽는다."""
+        value = getattr(config_obj, name, default)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return default
+
+    @staticmethod
+    def _get_int_setting(config_obj: Any, name: str, default: int) -> int:
+        """MagicMock 등 비정상 설정 객체에서도 int 설정을 안전하게 읽는다."""
+        value = getattr(config_obj, name, default)
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value
+        return default
 
     def _load_model(self) -> None:
         """Silero VAD 모델을 CPU 모드로 로드한다.
@@ -302,6 +359,64 @@ class VoiceActivityDetector:
 
         return clip_timestamps
 
+    @staticmethod
+    def _coalesce_segments(
+        segments: list[dict[str, float]],
+        *,
+        merge_gap_seconds: float,
+    ) -> list[dict[str, float]]:
+        """가까운 음성 구간을 병합하여 Whisper clip 분할 오버헤드를 줄인다."""
+        if not segments:
+            return []
+
+        sorted_segments = sorted(segments, key=lambda segment: float(segment["start"]))
+        coalesced: list[dict[str, float]] = []
+
+        for segment in sorted_segments:
+            start = float(segment["start"])
+            end = float(segment["end"])
+            if start >= end:
+                logger.debug(f"역전된 VAD 구간 병합 제외: start={start:.3f}, end={end:.3f}")
+                continue
+
+            if not coalesced:
+                coalesced.append({"start": start, "end": end})
+                continue
+
+            previous = coalesced[-1]
+            gap = start - previous["end"]
+            if gap <= merge_gap_seconds:
+                previous["end"] = max(previous["end"], end)
+            else:
+                coalesced.append({"start": start, "end": end})
+
+        return coalesced
+
+    def _passes_auto_gate(
+        self,
+        *,
+        segment_count: int,
+        silence_saved_ratio: float,
+    ) -> bool:
+        """auto 모드에서 VAD clip_timestamps를 적용할지 판단한다."""
+        if self._mode != "auto":
+            return True
+        if segment_count > self._max_clip_segments:
+            logger.info(
+                "VAD auto 폴백: 음성 구간 수가 너무 많음 (%d > %d)",
+                segment_count,
+                self._max_clip_segments,
+            )
+            return False
+        if silence_saved_ratio < self._min_silence_saved_ratio:
+            logger.info(
+                "VAD auto 폴백: 무음 절감 비율 부족 (%.1f%% < %.1f%%)",
+                silence_saved_ratio * 100,
+                self._min_silence_saved_ratio * 100,
+            )
+            return False
+        return True
+
     async def detect(self, audio_path: Path) -> VADResult | None:
         """오디오 파일에서 음성 구간을 감지한다 (비동기 진입점).
 
@@ -342,12 +457,31 @@ class VoiceActivityDetector:
             logger.warning(f"VAD 결과 음성 구간 없음: {audio_path.name} | 전체 오디오 처리로 폴백")
             return None
 
+        original_segment_count = len(speech_segments)
+        if self._coalesce_enabled:
+            speech_segments = self._coalesce_segments(
+                speech_segments,
+                merge_gap_seconds=self._merge_gap_seconds,
+            )
+        if not speech_segments:
+            logger.warning(
+                f"VAD 병합 후 음성 구간 없음: {audio_path.name} | 전체 오디오 처리로 폴백"
+            )
+            return None
+
         # clip_timestamps 변환
         clip_timestamps = self._to_clip_timestamps(speech_segments, duration)
 
         # 음성/무음 시간 계산
         total_speech = sum(float(seg["end"]) - float(seg["start"]) for seg in speech_segments)
         total_silence = max(0.0, duration - total_speech)
+        silence_saved_ratio = total_silence / duration if duration > 0 else 0.0
+
+        if not self._passes_auto_gate(
+            segment_count=len(speech_segments),
+            silence_saved_ratio=silence_saved_ratio,
+        ):
+            return None
 
         result = VADResult(
             speech_segments=speech_segments,
@@ -355,13 +489,18 @@ class VoiceActivityDetector:
             audio_path=str(audio_path),
             total_speech_seconds=round(total_speech, 3),
             total_silence_seconds=round(total_silence, 3),
+            mode=self._mode,
+            silence_saved_ratio=round(silence_saved_ratio, 4),
+            coalesced_from_segments=original_segment_count,
         )
 
         logger.info(
             f"VAD 감지 완료: {audio_path.name} | "
-            f"음성 구간: {result.num_segments}개 | "
+            f"음성 구간: {result.num_segments}개 "
+            f"(원본 {original_segment_count}개) | "
             f"음성: {result.total_speech_seconds:.1f}초 | "
-            f"무음: {result.total_silence_seconds:.1f}초"
+            f"무음: {result.total_silence_seconds:.1f}초 | "
+            f"절감비율: {result.silence_saved_ratio:.1%}"
         )
 
         return result

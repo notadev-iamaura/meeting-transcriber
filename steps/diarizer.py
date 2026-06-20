@@ -78,11 +78,15 @@ class DiarizationResult:
         segments: 화자분리된 세그먼트 목록
         num_speakers: 감지된 화자 수
         audio_path: 원본 오디오 파일 경로 문자열
+        model_name: 사용한 pyannote 모델명
+        output_mode: 파싱한 pyannote 출력 모드
     """
 
     segments: list[DiarizationSegment]
     num_speakers: int
     audio_path: str
+    model_name: str = ""
+    output_mode: str = "regular"
 
     @property
     def total_duration(self) -> float:
@@ -114,6 +118,8 @@ class DiarizationResult:
             "segments": [seg.to_dict() for seg in self.segments],
             "num_speakers": self.num_speakers,
             "audio_path": self.audio_path,
+            "model_name": self.model_name,
+            "output_mode": self.output_mode,
         }
 
     def save_checkpoint(self, output_path: Path) -> None:
@@ -153,6 +159,8 @@ class DiarizationResult:
             segments=segments,
             num_speakers=data.get("num_speakers", 0),
             audio_path=data.get("audio_path", ""),
+            model_name=data.get("model_name", ""),
+            output_mode=data.get("output_mode", "regular"),
         )
 
 
@@ -207,10 +215,12 @@ class Diarizer:
         # 화자분리 설정 캐시
         self._model_name = self._config.diarization.model_name
         self._device = self._config.diarization.device
+        self._output_mode = getattr(self._config.diarization, "output_mode", "regular")
         self._min_speakers = self._config.diarization.min_speakers
         self._max_speakers = self._config.diarization.max_speakers
         self._hf_token = self._config.diarization.huggingface_token
         self._timeout_seconds = self._config.diarization.timeout_seconds
+        self._selected_output_mode = str(self._output_mode)
         self._protect_zoom_meetings = bool(
             getattr(self._config.diarization, "protect_zoom_meetings", False)
         )
@@ -226,6 +236,7 @@ class Diarizer:
         logger.info(
             f"Diarizer 초기화: model={self._model_name}, "
             f"device={self._device}, "
+            f"output_mode={self._output_mode}, "
             f"speakers={self._min_speakers}~{self._max_speakers}, "
             f"timeout={self._timeout_seconds}초, "
             f"zoom_protection={self._zoom_protection_mode if self._protect_zoom_meetings else 'off'}"
@@ -410,6 +421,7 @@ class Diarizer:
             "min_speakers": self._min_speakers,
             "max_speakers": self._max_speakers,
             "huggingface_token": token,
+            "output_mode": self._output_mode,
         }
 
     async def _run_zoom_protected_worker(self, audio_path: Path) -> DiarizationResult:
@@ -504,6 +516,29 @@ class Diarizer:
             logger.info(f"Zoom 보호 화자분리 worker 완료: pid={process.pid}")
             return result
 
+    def _select_annotation_output(self, annotation: Any) -> tuple[Any, str]:
+        """설정에 따라 pyannote DiarizeOutput에서 사용할 Annotation을 선택한다."""
+        explicit_output_attrs = getattr(annotation, "__dict__", {})
+        looks_like_diarize_output = any(
+            key in explicit_output_attrs
+            for key in ("speaker_diarization", "exclusive_speaker_diarization")
+        )
+        if callable(getattr(annotation, "itertracks", None)) and not looks_like_diarize_output:
+            return annotation, "regular"
+
+        mode = str(self._output_mode).lower()
+        if mode in {"exclusive", "auto"}:
+            exclusive = getattr(annotation, "exclusive_speaker_diarization", None)
+            if callable(getattr(exclusive, "itertracks", None)):
+                return exclusive, "exclusive"
+            if mode == "exclusive":
+                logger.warning(
+                    "exclusive_speaker_diarization 출력이 없어 speaker_diarization으로 폴백합니다."
+                )
+
+        regular = getattr(annotation, "speaker_diarization", None)
+        return regular, "regular"
+
     def _parse_annotation(self, annotation: Any) -> list[DiarizationSegment]:
         """pyannote Annotation 객체를 DiarizationSegment 리스트로 변환한다.
 
@@ -516,9 +551,15 @@ class Diarizer:
         segments: list[DiarizationSegment] = []
 
         # pyannote 4.x: DiarizeOutput 객체에서 Annotation 추출
-        # (DiarizeOutput은 itertracks 메서드가 없으므로 타입으로 구분)
+        # community-1 등은 exclusive_speaker_diarization도 제공할 수 있다.
+        annotation, selected_mode = self._select_annotation_output(annotation)
+        self._selected_output_mode = selected_mode
         if not callable(getattr(annotation, "itertracks", None)):
-            annotation = annotation.speaker_diarization
+            raise DiarizationError(
+                "pyannote 결과에서 itertracks 가능한 Annotation을 찾을 수 없습니다."
+            )
+        if selected_mode != "regular":
+            logger.info("pyannote 출력 모드 적용: %s", selected_mode)
 
         for turn, _, speaker in annotation.itertracks(yield_label=True):
             # 유효한 구간만 포함 (duration > 0)
@@ -648,6 +689,8 @@ class Diarizer:
             segments=segments,
             num_speakers=num_speakers,
             audio_path=str(audio_path),
+            model_name=self._model_name,
+            output_mode=self._selected_output_mode,
         )
 
         logger.info(

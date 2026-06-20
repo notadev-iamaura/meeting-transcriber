@@ -364,6 +364,21 @@ class ModelLoadManager:
         async with self._context_lock:
             await self._unload_model_locked()
 
+    async def unload_if_current(self, name: str) -> bool:
+        """현재 로드된 모델 이름이 일치할 때만 언로드한다.
+
+        acquire() 컨텍스트가 모델을 사용 중이면 해당 컨텍스트가 끝날 때까지
+        기다린다. 다른 모델이 이미 로드되어 있으면 아무 동작도 하지 않는다.
+
+        Args:
+            name: 조건부 언로드 대상 모델 이름
+
+        Returns:
+            실제로 언로드했으면 True, 대상 모델이 아니면 False
+        """
+        async with self._context_lock:
+            return await self._unload_if_current_locked(name)
+
     async def _unload_model_locked(self) -> None:
         """context lock을 이미 보유한 상태에서 현재 모델을 언로드한다.
 
@@ -373,6 +388,14 @@ class ModelLoadManager:
         """
         async with self._lock:
             await self._unload_current()
+
+    async def _unload_if_current_locked(self, name: str) -> bool:
+        """context lock을 이미 보유한 상태에서 이름이 일치할 때만 언로드한다."""
+        async with self._lock:
+            if self._current is None or self._current.name != name:
+                return False
+            await self._unload_current()
+            return True
 
     async def _unload_model_from_context(self) -> None:
         """acquire() 컨텍스트 종료 시 현재 모델을 언로드한다."""

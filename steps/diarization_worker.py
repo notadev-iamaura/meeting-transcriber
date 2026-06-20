@@ -17,10 +17,32 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _parse_annotation(annotation: Any) -> list[dict[str, Any]]:
+def _select_annotation_output(annotation: Any, output_mode: str) -> tuple[Any, str]:
+    """payload output_mode 기준으로 DiarizeOutput에서 Annotation을 선택한다."""
+    explicit_output_attrs = getattr(annotation, "__dict__", {})
+    looks_like_diarize_output = any(
+        key in explicit_output_attrs
+        for key in ("speaker_diarization", "exclusive_speaker_diarization")
+    )
+    if callable(getattr(annotation, "itertracks", None)) and not looks_like_diarize_output:
+        return annotation, "regular"
+
+    mode = output_mode.lower()
+    if mode in {"exclusive", "auto"}:
+        exclusive = getattr(annotation, "exclusive_speaker_diarization", None)
+        if callable(getattr(exclusive, "itertracks", None)):
+            return exclusive, "exclusive"
+
+    return getattr(annotation, "speaker_diarization", None), "regular"
+
+
+def _parse_annotation(
+    annotation: Any, output_mode: str = "regular"
+) -> tuple[list[dict[str, Any]], str]:
     """pyannote Annotation 객체를 JSON 직렬화 가능한 세그먼트 목록으로 변환한다."""
+    annotation, selected_mode = _select_annotation_output(annotation, output_mode)
     if not callable(getattr(annotation, "itertracks", None)):
-        annotation = annotation.speaker_diarization
+        raise RuntimeError("pyannote 결과에서 itertracks 가능한 Annotation을 찾을 수 없습니다.")
 
     segments: list[dict[str, Any]] = []
     for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -34,7 +56,7 @@ def _parse_annotation(annotation: Any) -> list[dict[str, Any]]:
             }
         )
     segments.sort(key=lambda segment: segment["start"])
-    return segments
+    return segments, selected_mode
 
 
 def _run(payload: dict[str, Any]) -> None:
@@ -55,6 +77,7 @@ def _run(payload: dict[str, Any]) -> None:
     token = payload.get("huggingface_token")
     min_speakers = payload.get("min_speakers")
     max_speakers = payload.get("max_speakers")
+    output_mode = str(payload.get("output_mode", "regular"))
 
     if not token:
         raise RuntimeError("HuggingFace 토큰이 설정되지 않았습니다.")
@@ -75,11 +98,13 @@ def _run(payload: dict[str, Any]) -> None:
         params["max_speakers"] = int(max_speakers)
 
     annotation = pipeline(str(audio_path), **params)
-    segments = _parse_annotation(annotation)
+    segments, selected_output_mode = _parse_annotation(annotation, output_mode)
     result = {
         "segments": segments,
         "num_speakers": len({segment["speaker"] for segment in segments}),
         "audio_path": str(audio_path),
+        "model_name": model_name,
+        "output_mode": selected_output_mode,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

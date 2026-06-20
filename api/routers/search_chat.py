@@ -136,6 +136,9 @@ class ChatResponse(BaseModel):
         query: 원본 질문
         has_context: 검색 컨텍스트 존재 여부
         llm_used: LLM 응답 성공 여부
+        llm_called: LLM 호출 시도 여부
+        grounding_status: 답변 근거 상태 ("grounded", "no_results", "search_error")
+        repair_actions: 사용자가 시도할 수 있는 복구 액션 목록
         error_message: 에러 메시지 (선택)
         source_type: "rag" | "wiki" | "both" | None.
             None — config.wiki.router_enabled=False 일 때 (회귀 0 보장).
@@ -152,6 +155,9 @@ class ChatResponse(BaseModel):
     query: str
     has_context: bool = True
     llm_used: bool = True
+    llm_called: bool = True
+    grounding_status: str = "grounded"
+    repair_actions: list[str] = Field(default_factory=list)
     error_message: str | None = None
     source_type: str | None = None
     router_verdict: dict[str, Any] | None = None
@@ -327,6 +333,39 @@ def _serialize_wiki_sources(sources: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _aggregate_both_grounding(
+    rag_response: Any,
+    wiki_sources: list[Any],
+) -> tuple[bool, bool, str, list[str]]:
+    """RAG+Wiki 병렬 응답의 근거 상태를 하나의 API 계약으로 집계한다."""
+    rag_refs = (
+        list(getattr(rag_response, "references", []) or []) if rag_response is not None else []
+    )
+    rag_has_context = bool(getattr(rag_response, "has_context", False)) or bool(rag_refs)
+    wiki_has_context = bool(wiki_sources)
+    has_context = rag_has_context or wiki_has_context
+
+    llm_called = (
+        bool(getattr(rag_response, "llm_called", False)) if rag_response is not None else False
+    )
+    if wiki_has_context:
+        llm_called = True
+
+    if has_context:
+        grounding_status = "grounded"
+    elif rag_response is not None:
+        grounding_status = getattr(rag_response, "grounding_status", "no_results")
+    else:
+        grounding_status = "search_error"
+
+    repair_actions = set(getattr(rag_response, "repair_actions", []) or [])
+    if wiki_has_context:
+        repair_actions.discard("reindex")
+    elif not rag_has_context:
+        repair_actions.add("reindex")
+    return has_context, llm_called, grounding_status, sorted(repair_actions)
+
+
 def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
     """라우터 활성 분기에서 HybridChatService 인스턴스를 생성한다.
 
@@ -441,6 +480,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 query=result.query,
                 has_context=result.has_context,
                 llm_used=result.llm_used,
+                llm_called=getattr(result, "llm_called", result.llm_used),
+                grounding_status=getattr(result, "grounding_status", "grounded"),
+                repair_actions=list(getattr(result, "repair_actions", [])),
                 error_message=result.error_message,
                 # 회귀 보장: 라우터 비활성 시 새 필드는 None 유지
                 source_type=None,
@@ -470,6 +512,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 query=body.query,
                 has_context=bool(hybrid_result.wiki_sources),
                 llm_used=True,
+                llm_called=True,
+                grounding_status="grounded" if hybrid_result.wiki_sources else "no_results",
+                repair_actions=[] if hybrid_result.wiki_sources else ["reindex"],
                 error_message=hybrid_result.error_message,
                 source_type="wiki",
                 router_verdict=verdict_dict,
@@ -490,12 +535,19 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             refs = (
                 _build_chat_references(rag_response.references) if rag_response is not None else []
             )
+            has_context, llm_called, grounding_status, repair_actions = _aggregate_both_grounding(
+                rag_response,
+                hybrid_result.wiki_sources,
+            )
             return ChatResponse(
                 answer=combined,
                 references=refs,
                 query=body.query,
-                has_context=bool(refs) or bool(hybrid_result.wiki_sources),
+                has_context=has_context,
                 llm_used=rag_response.llm_used if rag_response is not None else True,
+                llm_called=llm_called,
+                grounding_status=grounding_status,
+                repair_actions=repair_actions,
                 error_message=hybrid_result.error_message,
                 source_type="both",
                 router_verdict=verdict_dict,
@@ -511,6 +563,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 query=body.query,
                 has_context=False,
                 llm_used=False,
+                llm_called=False,
+                grounding_status="search_error",
+                repair_actions=["retry"],
                 error_message=hybrid_result.error_message or "rag_response_missing",
                 source_type="rag",
                 router_verdict=verdict_dict,
@@ -523,6 +578,9 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
             query=rag_response.query,
             has_context=rag_response.has_context,
             llm_used=rag_response.llm_used,
+            llm_called=getattr(rag_response, "llm_called", rag_response.llm_used),
+            grounding_status=getattr(rag_response, "grounding_status", "grounded"),
+            repair_actions=list(getattr(rag_response, "repair_actions", [])),
             error_message=rag_response.error_message or hybrid_result.error_message,
             source_type="rag",
             router_verdict=verdict_dict,

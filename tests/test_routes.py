@@ -19,7 +19,7 @@ API 라우터 테스트 모듈 (API Routes Test Module)
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
+from steps.embedder import IndexPurgeError, IndexPurgeResult
 
 # === 헬퍼 ===
 
@@ -167,6 +168,9 @@ class MockChatResponse:
     query: str
     has_context: bool = True
     llm_used: bool = True
+    llm_called: bool = True
+    grounding_status: str = "grounded"
+    repair_actions: list[str] = field(default_factory=list)
     error_message: str | None = None
 
 
@@ -692,6 +696,9 @@ class TestChatEndpoint:
         assert "프로젝트 일정" in data["answer"]
         assert len(data["references"]) == 1
         assert data["llm_used"] is True
+        assert data["llm_called"] is True
+        assert data["grounding_status"] == "grounded"
+        assert data["repair_actions"] == []
 
     def test_chat_빈_질문_422(self, tmp_path: Path) -> None:
         """빈 질문으로 Chat 시 422(pydantic 검증)를 반환하는지 확인한다."""
@@ -773,6 +780,8 @@ class TestChatEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["llm_used"] is False
+        assert data["llm_called"] is True
+        assert data["grounding_status"] == "grounded"
         assert data["error_message"] is not None
 
     def test_chat_EmptyQueryError_400(self, tmp_path: Path) -> None:
@@ -833,6 +842,9 @@ class TestChatEndpoint:
         assert "query" in data
         assert "has_context" in data
         assert "llm_used" in data
+        assert "llm_called" in data
+        assert "grounding_status" in data
+        assert "repair_actions" in data
         ref = data["references"][0]
         assert "chunk_id" in ref
         assert "text_preview" in ref
@@ -1634,6 +1646,62 @@ class TestDeleteMeetingEndpoint:
 
         assert response.status_code == 200
 
+    def test_삭제는_검색인덱스_정리_후_DB삭제(self, tmp_path: Path) -> None:
+        """삭제 시 stale 검색 인덱스를 먼저 정리한 뒤 DB 레코드를 삭제한다."""
+        app = _make_test_app(tmp_path)
+        mock_job = MockJob(1, "meeting_order", "", "completed")
+        calls: list[str] = []
+
+        def _fake_purge(_config: AppConfig, _meeting_id: str) -> IndexPurgeResult:
+            calls.append("purge")
+            return IndexPurgeResult(meeting_id="meeting_order")
+
+        def _fake_delete(_job_id: int) -> None:
+            calls.append("delete")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=_fake_purge,
+            ),
+        ):
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock(side_effect=_fake_delete)
+
+            response = client.delete("/api/meetings/meeting_order")
+
+        assert response.status_code == 200
+        assert calls == ["purge", "delete"]
+
+    def test_삭제시_검색인덱스_정리_실패하면_DB삭제하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """검색 인덱스 정리 실패 시 DB 레코드를 보존하고 500을 반환한다."""
+        app = _make_test_app(tmp_path)
+        mock_job = MockJob(1, "meeting_purge_fail", "", "completed")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("index locked"),
+            ),
+        ):
+            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+                return_value=mock_job,
+            )
+            app.state.job_queue._queue.delete_job = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_purge_fail")
+
+        assert response.status_code == 500
+        assert "검색 인덱스" in response.json()["detail"]
+        app.state.job_queue._queue.delete_job.assert_not_called()
+
     # === Phase 1-7: 오디오 파일 quarantine 이동 테스트 ===
 
     def test_삭제시_오디오_파일도_quarantine으로_이동(self, tmp_path: Path) -> None:
@@ -2067,6 +2135,87 @@ class TestReTranscribeMeetingEndpoint:
         assert not transcript_path.exists()
         assert not summary_path.exists()
         assert audio_path.exists()
+
+    def test_재전사는_검색인덱스_정리_후_상태를_리셋한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """재전사 요청은 stale 인덱스 정리 후 job 상태를 queued로 되돌린다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_order"
+        audio_path = tmp_path / "outputs" / meeting_id / "input.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+
+        mock_job = MockJob(1, meeting_id, str(audio_path), "completed", retry_count=1)
+        mock_reset = MockJob(1, meeting_id, str(audio_path), "queued", retry_count=0)
+        calls: list[str] = []
+
+        def _fake_purge(_config: AppConfig, _meeting_id: str) -> IndexPurgeResult:
+            calls.append("purge")
+            return IndexPurgeResult(meeting_id=meeting_id)
+
+        def _fake_reset(_job_id: int) -> MockJob:
+            calls.append("reset")
+            return mock_reset
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=_fake_purge,
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            queue.reset_for_retranscribe = MagicMock(side_effect=_fake_reset)
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 200
+        assert calls == ["purge", "reset"]
+
+    def test_재전사시_검색인덱스_정리_실패하면_산출물을_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """검색 인덱스 정리 실패 시 체크포인트/결과 파일과 job 상태를 보존한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_purge_fail"
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        out_dir = tmp_path / "outputs" / meeting_id
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state_path = ckpt_dir / "pipeline_state.json"
+        transcript_path = out_dir / "corrected.json"
+        summary_path = out_dir / "summary.md"
+        audio_path = out_dir / "input.wav"
+        state_path.write_text("{}", encoding="utf-8")
+        transcript_path.write_text("{}", encoding="utf-8")
+        summary_path.write_text("# summary", encoding="utf-8")
+        audio_path.write_bytes(b"audio")
+
+        mock_job = MockJob(1, meeting_id, str(audio_path), "completed", retry_count=1)
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("fts busy"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        assert state_path.exists()
+        assert transcript_path.exists()
+        assert summary_path.exists()
+        assert audio_path.exists()
+        app.state.job_queue._queue.reset_for_retranscribe.assert_not_called()
 
 
 class TestGetMeetingAudio:
