@@ -176,6 +176,10 @@ def _apply_overrides(config: AppConfig, args: argparse.Namespace) -> None:
         config.diarization.model_name = args.diarization_model
     if args.diarization_output_mode:
         config.diarization.output_mode = args.diarization_output_mode
+    if args.diarization_min_speakers is not None:
+        config.diarization.min_speakers = args.diarization_min_speakers
+    if args.diarization_max_speakers is not None:
+        config.diarization.max_speakers = args.diarization_max_speakers
     if args.correction_mode:
         config.llm.correction_mode = args.correction_mode
     if args.no_adaptive_correction_tokens:
@@ -373,6 +377,9 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "vad_mode": config.vad.mode,
             "diarization_model": config.diarization.model_name,
             "diarization_output_mode": config.diarization.output_mode,
+            "diarization_min_speakers": config.diarization.min_speakers,
+            "diarization_max_speakers": config.diarization.max_speakers,
+            "diarization_silence_compression_enabled": config.diarization.silence_compression_enabled,
             "llm_model": config.llm.mlx_model_name
             if config.llm.backend == "mlx"
             else config.llm.model_name,
@@ -406,6 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["regular", "exclusive", "auto"],
         help="pyannote output mode override",
     )
+    parser.add_argument("--diarization-min-speakers", type=int, help="pyannote min_speakers")
+    parser.add_argument("--diarization-max-speakers", type=int, help="pyannote max_speakers")
     parser.add_argument(
         "--correction-mode",
         choices=["full", "changed_only", "auto"],

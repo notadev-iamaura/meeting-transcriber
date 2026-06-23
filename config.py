@@ -329,23 +329,32 @@ class STTConfig(BaseModel):
 class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
 
-    model_name: str = "pyannote/speaker-diarization-3.1"
+    model_name: str = "pyannote/speaker-diarization-community-1"
     device: str = "cpu"  # pyannote MPS 버그 회피: 런타임은 CPU 강제
     output_mode: str = Field(
-        default="regular",
+        default="auto",
         pattern="^(regular|exclusive|auto)$",
         description=(
             "pyannote DiarizeOutput 파싱 모드. regular=speaker_diarization, "
             "exclusive=exclusive_speaker_diarization, auto=exclusive가 있으면 우선 사용."
         ),
     )
-    min_speakers: int = Field(default=2, ge=1)
-    max_speakers: int = Field(default=4, ge=1, le=20)
+    min_speakers: int | None = Field(default=2, ge=1)
+    max_speakers: int | None = Field(default=4, ge=1, le=20)
     huggingface_token: str | None = None
     timeout_seconds: int = Field(default=1800, ge=60, description="화자분리 타임아웃 (초)")
     protect_zoom_meetings: bool = True
     zoom_protection_mode: str = Field(default="pause", pattern="^(pause|off)$")
     zoom_protection_poll_seconds: float = Field(default=1.0, ge=0.5, le=10.0)
+    silence_compression_enabled: bool = Field(
+        default=True,
+        description="화자분리 입력에서 긴 무음만 조건부 압축한다. STT 원본 타임라인은 유지된다.",
+    )
+    silence_compression_min_duration_seconds: float = Field(default=10.0, ge=1.0)
+    silence_compression_threshold_db: float = Field(default=-40.0, le=0.0)
+    silence_compression_keep_seconds: float = Field(default=0.75, ge=0.0)
+    silence_compression_min_saved_seconds: float = Field(default=60.0, ge=0.0)
+    silence_compression_min_saved_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @field_validator("device")
     @classmethod
@@ -371,6 +380,17 @@ class DiarizationConfig(BaseModel):
     def validate_output_mode(cls, v: str) -> str:
         """화자분리 출력 모드를 소문자로 정규화한다."""
         return v.lower()
+
+    @model_validator(mode="after")
+    def validate_speaker_range(self) -> DiarizationConfig:
+        """화자 수 제한값이 둘 다 있으면 순서를 검증한다."""
+        if (
+            self.min_speakers is not None
+            and self.max_speakers is not None
+            and self.min_speakers > self.max_speakers
+        ):
+            raise ValueError("min_speakers는 max_speakers보다 클 수 없습니다.")
+        return self
 
 
 class LLMConfig(BaseModel):
@@ -398,7 +418,7 @@ class LLMConfig(BaseModel):
         description="전사문 교정 단계 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
     )
     correction_mode: str = Field(
-        default="full",
+        default="changed_only",
         pattern="^(full|changed_only|auto)$",
         description=(
             "전사문 교정 출력 모드. full=모든 줄 재출력, changed_only=수정된 줄만 출력, "
@@ -411,7 +431,7 @@ class LLMConfig(BaseModel):
     )
     correction_changed_only_fallback: bool = Field(
         default=True,
-        description="changed_only 응답 파싱이 불안정하면 full 모드로 재시도한다.",
+        description="changed_only 응답 파싱 또는 guard 폐기가 불안정하면 full 모드로 재시도한다.",
     )
     summarize_max_tokens: int = Field(
         default=1200,

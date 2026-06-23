@@ -50,10 +50,24 @@
   `checkpoints/{meeting_id}/reindex_required.json` marker를 남겨 복구 필요 상태를 보존합니다.
 - `ModelLoadManager.unload_if_current(name)`를 추가해 LLM 후처리 체인 종료 시 현재 모델이
   `exaone`일 때만 조건부로 언로드합니다.
+- MLX LLM 백엔드는 `ThreadBoundLLMBackend` wrapper를 통해 모델 로드, `chat`,
+  `chat_stream`, `cleanup`을 단일 worker thread에 고정합니다. Gemma 4 E4B에서
+  worker thread 첫 generation 시 발생하던 `There is no Stream(gpu, 1) in current thread`
+  오류를 방지합니다.
 - direct pyannote 경로도 worker 경로처럼 실제 선택된 diarization `output_mode`를 결과
   메타데이터에 저장합니다.
 - `scripts/benchmark_ai_pipeline.py`를 추가해 STT/VAD/화자분리/교정/요약 단계의 시간,
   RSS/가용 메모리/swap/MLX 메모리와 품질 지표를 로컬 JSON 리포트로 남길 수 있습니다.
+- 기본 화자분리는 `pyannote/speaker-diarization-community-1` + `output_mode=auto`
+  로 전환했습니다. exclusive 출력이 있으면 우선 사용하고, pyannote는 계속 CPU 강제입니다.
+- 화자 수는 사용자가 직접 기억해 입력하지 않아도 되도록 내부 기본 2~4 bounded auto를
+  유지합니다. 완전 자동(`min_speakers/max_speakers=null`)은 가능하지만 동일 샘플에서
+  속도 이득이 없어 기본값으로 두지 않았습니다.
+- 화자분리용 긴 무음 압축을 추가했습니다. STT 원본 타임라인은 유지하고, pyannote 입력
+  사본만 조건부 압축한 뒤 결과 시간을 원본으로 복원합니다. 기본 임계값은 60초 이상 및
+  전체 5% 이상 절약입니다.
+- LLM 교정 기본값은 `changed_only`로 전환했습니다. 줄 밀림/병합/파괴적 축약 guard를
+  통과한 수정만 반영하고, guard 폐기가 많은 배치는 full 모드로 1회 fallback합니다.
 
 ### Frontend Architecture
 

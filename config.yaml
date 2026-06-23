@@ -24,14 +24,20 @@ stt:
 
 # === 화자분리 설정 ===
 diarization:
-  model_name: "pyannote/speaker-diarization-3.1"
+  model_name: "pyannote/speaker-diarization-community-1"
   device: "cpu"                              # pyannote MPS 버그 회피: CPU 강제
-  output_mode: "regular"                     # regular | exclusive | auto (community-1 A/B용)
-  min_speakers: 2                            # 최소 화자 수 (회의 기본값: 2명 이상)
-  max_speakers: 4                            # 최대 화자 수 (기본 회의 규모 최적화)
+  output_mode: "auto"                        # regular | exclusive | auto (exclusive 출력이 있으면 우선 사용)
+  min_speakers: 2                            # 사용자 입력 요구 없음. null이면 완전 자동 추정
+  max_speakers: 4                            # 일반 회의 bounded auto. 대형 회의는 null 또는 더 큰 값으로 조정
   protect_zoom_meetings: true                # Zoom 회의 중 화자분리 worker 일시정지
   zoom_protection_mode: "pause"              # pause: 별도 worker 를 SIGSTOP/SIGCONT 로 제어
   zoom_protection_poll_seconds: 1.0          # Zoom 상태 확인 간격 (초)
+  silence_compression_enabled: true          # 화자분리용 입력에서만 긴 무음 조건부 압축
+  silence_compression_min_duration_seconds: 10.0  # 10초 이상 무음만 후보
+  silence_compression_threshold_db: -40.0    # ffmpeg silencedetect 기준
+  silence_compression_keep_seconds: 0.75     # 무음 양끝을 남겨 경계 왜곡 완화
+  silence_compression_min_saved_seconds: 60.0 # 최소 60초 이상 줄어야 적용
+  silence_compression_min_saved_ratio: 0.05  # 전체 길이의 5% 이상 줄어야 적용
   # huggingface_token은 환경변수 HUGGINGFACE_TOKEN으로 설정
 
 # === LLM 설정 ===
@@ -42,9 +48,9 @@ llm:
   mlx_model_name: "mlx-community/gemma-4-e4b-it-4bit"  # 벤치마크 기반 기본값 (docs/BENCHMARK.md §4). EXAONE 전환 시 "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
   mlx_max_tokens: 2000                       # MLX 기본 최대 생성 토큰 (아래 단계별 상한이 우선)
   correction_max_tokens: 800                 # 교정 단계 응답 상한 (짧은 배치 출력 폭주 방지)
-  correction_mode: "full"                    # full | changed_only | auto (changed_only는 A/B 후 승격)
+  correction_mode: "changed_only"            # full | changed_only | auto
   correction_adaptive_max_tokens: true        # 입력 길이/배치 크기에 맞춰 교정 max_tokens 동적 축소
-  correction_changed_only_fallback: true      # changed_only 파싱 불안정 시 full 모드 재시도
+  correction_changed_only_fallback: true      # changed_only 파싱/guard 불안정 시 full 모드 재시도
   summarize_max_tokens: 1200                 # 요약 단계 응답 상한 (메모리 안정성 우선)
   chat_max_tokens: 1000                      # RAG 채팅 응답 상한
   max_context_tokens: 6144                   # 컨텍스트 윈도우 (요약 청크 입력 약 4K 토큰)

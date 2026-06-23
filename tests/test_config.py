@@ -52,17 +52,21 @@ class TestConfigYamlParsing:
         assert config.stt.language == "ko"
         assert config.stt.word_timestamps is True
         assert config.stt.condition_on_previous_text is False
+        assert config.diarization.model_name == "pyannote/speaker-diarization-community-1"
         assert config.diarization.device == "cpu"
-        assert config.diarization.output_mode == "regular"
+        assert config.diarization.output_mode == "auto"
         assert config.diarization.min_speakers == 2
         assert config.diarization.max_speakers == 4
         assert config.diarization.protect_zoom_meetings is True
         assert config.diarization.zoom_protection_mode == "pause"
+        assert config.diarization.silence_compression_enabled is True
+        assert config.diarization.silence_compression_min_duration_seconds == 10.0
+        assert config.diarization.silence_compression_min_saved_seconds == 60.0
         assert config.llm.host == "http://127.0.0.1:11434"
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0
         assert config.llm.correction_batch_size == 5
-        assert config.llm.correction_mode == "full"
+        assert config.llm.correction_mode == "changed_only"
         assert config.llm.correction_adaptive_max_tokens is True
         assert config.embedding.dimension == 384
         assert config.embedding.batch_size == 64
@@ -96,12 +100,17 @@ class TestConfigYamlParsing:
             (default.stt.batch_size, loaded.stt.batch_size),
             (default.stt.word_timestamps, loaded.stt.word_timestamps),
             (default.stt.condition_on_previous_text, loaded.stt.condition_on_previous_text),
+            (default.diarization.model_name, loaded.diarization.model_name),
             (default.diarization.device, loaded.diarization.device),
             (default.diarization.output_mode, loaded.diarization.output_mode),
             (default.diarization.min_speakers, loaded.diarization.min_speakers),
             (default.diarization.max_speakers, loaded.diarization.max_speakers),
             (default.diarization.protect_zoom_meetings, loaded.diarization.protect_zoom_meetings),
             (default.diarization.zoom_protection_mode, loaded.diarization.zoom_protection_mode),
+            (
+                default.diarization.silence_compression_enabled,
+                loaded.diarization.silence_compression_enabled,
+            ),
             (default.llm.mlx_model_name, loaded.llm.mlx_model_name),
             (default.llm.temperature, loaded.llm.temperature),
             (default.llm.correction_batch_size, loaded.llm.correction_batch_size),
@@ -156,15 +165,19 @@ class TestDefaultValues:
         assert config.stt.batch_size == 12
         assert config.stt.word_timestamps is True
         assert config.stt.condition_on_previous_text is False
+        assert config.diarization.model_name == "pyannote/speaker-diarization-community-1"
         assert config.diarization.device == "cpu"
-        assert config.diarization.output_mode == "regular"
+        assert config.diarization.output_mode == "auto"
+        assert config.diarization.min_speakers == 2
+        assert config.diarization.max_speakers == 4
         assert config.diarization.protect_zoom_meetings is True
         assert config.diarization.zoom_protection_mode == "pause"
+        assert config.diarization.silence_compression_enabled is True
         assert config.llm.model_name == "exaone3.5:7.8b-instruct-q4_K_M"
         assert config.llm.mlx_model_name == "mlx-community/gemma-4-e4b-it-4bit"
         assert config.llm.temperature == 0.0
         assert config.llm.correction_batch_size == 5
-        assert config.llm.correction_mode == "full"
+        assert config.llm.correction_mode == "changed_only"
         assert config.llm.correction_adaptive_max_tokens is True
         assert config.embedding.query_prefix == "query: "
         assert config.embedding.passage_prefix == "passage: "
@@ -304,6 +317,12 @@ class TestValidation:
         """DiarizationConfig의 device 기본값은 pyannote 안정성을 위해 'cpu'이다."""
         diar = DiarizationConfig()
         assert diar.device == "cpu"
+
+    def test_화자수_완전자동_옵션_허용(self) -> None:
+        """화자 수 제한값을 None으로 두면 pyannote 완전 자동 추정을 사용할 수 있다."""
+        diar = DiarizationConfig(min_speakers=None, max_speakers=None)
+        assert diar.min_speakers is None
+        assert diar.max_speakers is None
 
     def test_auto_detect_chipset_기본값_false(self) -> None:
         """STTConfig의 auto_detect_chipset 기본값이 False인지 확인한다."""

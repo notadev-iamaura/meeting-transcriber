@@ -519,6 +519,151 @@ class TestCorrector정상보정:
         system_prompt = backend.chat.call_args.kwargs["messages"][0]["content"]
         assert "changed-only 교정 모드" in system_prompt
 
+    def test_changed_only_줄밀림_의심_교정은_폐기(self) -> None:
+        """changed_only 결과가 다른 줄 원문에 더 가까우면 줄 밀림으로 보고 원문을 유지한다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 다음 주 배포 일정은 목요일로 보겠습니다"
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                ("오늘은 프로젝트 일정부터 이야기하겠습니다", "SPEAKER_00", 0.0, 4.0),
+                ("다음 주 배포 일정은 목요일로 보겠습니다", "SPEAKER_00", 4.0, 8.0),
+                ("마지막으로 QA 담당자를 확인하겠습니다", "SPEAKER_01", 8.0, 12.0),
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 0
+        assert failed == 1
+        assert result[0].text == "오늘은 프로젝트 일정부터 이야기하겠습니다"
+        assert result[0].was_corrected is False
+        assert result[1].text == "다음 주 배포 일정은 목요일로 보겠습니다"
+
+    def test_파괴적_짧은_교정은_폐기(self) -> None:
+        """긴 원문을 짧은 일반 문구로 덮는 LLM 출력은 원문 유지로 처리한다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 그 부분에"
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                (
+                    "지금 말씀하신 예산 검토 내용은 다음 회의에서 다시 확인하겠습니다",
+                    "SPEAKER_00",
+                    0.0,
+                    6.0,
+                )
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 0
+        assert failed == 1
+        assert result[0].text == "지금 말씀하신 예산 검토 내용은 다음 회의에서 다시 확인하겠습니다"
+        assert result[0].was_corrected is False
+
+    def test_다음줄을_붙인_병합형_교정은_폐기(self) -> None:
+        """현재 줄 뒤에 다음 줄 내용을 붙인 출력은 줄 병합으로 보고 폐기한다."""
+        backend = MagicMock()
+        backend.chat.return_value = (
+            "[1] 담당자에게 요청을 해서 수정을 요청해 두겠습니다."
+        )
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                ("담당자에게 요청을 해서", "SPEAKER_00", 0.0, 3.0),
+                ("수정을 요청해두겠습니다.", "SPEAKER_00", 3.0, 6.0),
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 0
+        assert failed == 1
+        assert result[0].text == "담당자에게 요청을 해서"
+        assert result[1].text == "수정을 요청해두겠습니다."
+
+    def test_짧은_조각을_긴_다음문장으로_확장하면_폐기(self) -> None:
+        """짧은 발화 조각이 긴 인접 문장으로 확장되면 원문을 유지한다."""
+        backend = MagicMock()
+        backend.chat.return_value = (
+            "[1] 제가 작업하려다 보니까 화면이 분할되어 있는 것들이 불편하더라고요."
+        )
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                ("요청을 해서 수정하겠습니다.", "SPEAKER_00", 0.0, 3.0),
+                ("제가 작업하려다 보니까 화면이 분할되어 있는 것들이", "SPEAKER_00", 3.0, 6.0),
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 0
+        assert failed == 1
+        assert result[0].text == "요청을 해서 수정하겠습니다."
+
+    def test_full_모드_동일출력은_가드_실패로_세지_않음(self) -> None:
+        """full 모드에서 원문과 같은 출력은 다른 줄과 겹쳐도 보정 실패가 아니다."""
+        backend = MagicMock()
+        backend.chat.return_value = (
+            "[1] 그것들은 어드민에서는 수정하시지.\n"
+            "[2] 어드민에서는 수정하시지 마시고 여기 시트에만 표시해주시고"
+        )
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "full"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [
+                ("그것들은 어드민에서는 수정하시지.", "SPEAKER_00", 0.0, 3.0),
+                (
+                    "어드민에서는 수정하시지 마시고 여기 시트에만 표시해주시고",
+                    "SPEAKER_00",
+                    3.0,
+                    6.0,
+                ),
+            ]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 0
+        assert failed == 0
+        assert [utterance.was_corrected for utterance in result] == [False, False]
+
+    def test_정상_오인식_교정은_허용(self) -> None:
+        """의미를 보존하는 짧은 오인식 교정은 안전장치를 통과한다."""
+        backend = MagicMock()
+        backend.chat.return_value = "[1] 오늘 회의를 시작하겠습니다"
+        corrector = Corrector(
+            config=AppConfig(llm={"correction_mode": "changed_only"}),
+            model_manager=MagicMock(),
+        )
+        batch = _make_merged_result(
+            [("오늘 화의를 시작하겠습니다", "SPEAKER_00", 0.0, 5.0)]
+        ).utterances
+
+        result, corrected, failed = corrector._correct_batch(backend, batch, "시스템")
+
+        assert corrected == 1
+        assert failed == 0
+        assert result[0].text == "오늘 회의를 시작하겠습니다"
+        assert result[0].was_corrected is True
+
     @pytest.mark.asyncio
     async def test_다중_발화_보정(self) -> None:
         """여러 발화를 보정한다."""

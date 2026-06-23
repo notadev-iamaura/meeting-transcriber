@@ -93,7 +93,7 @@ chmod 700 ~/.meeting-transcriber
 1. **Ollama 앱 설치**: https://ollama.com 에서 macOS 앱 다운로드 (brew 불가)
 2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 사용자가 직접:
    - https://huggingface.co/join 가입
-   - https://huggingface.co/pyannote/speaker-diarization-3.1 → "Agree" 클릭
+   - https://huggingface.co/pyannote/speaker-diarization-community-1 → "Agree" 클릭
    - https://huggingface.co/pyannote/segmentation-3.0 → "Agree" 클릭
    - https://huggingface.co/settings/tokens → Read 토큰 발급
    - `export HUGGINGFACE_TOKEN=hf_xxxxx` 및 `export HF_TOKEN=hf_xxxxx` 설정
@@ -268,7 +268,7 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 | 영역 | 기술 | 디바이스 | 비고 |
 |------|------|---------|------|
 | STT | mlx-whisper — **`whisper-large-v3-turbo` 기본** (한국어 fine-tune 3종도 GUI 선택 가능) | MPS(GPU) | Apple MLX 가속. 6 회의 벤치마크 기준 komixv2 대비 CER −16%p |
-| 화자분리 | pyannote-audio 3.1 | **CPU 강제** | MPS 버그 있음 |
+| 화자분리 | `pyannote/speaker-diarization-community-1` via pyannote-audio | **CPU 강제** | `exclusive_speaker_diarization` 우선, MPS 버그 있음 |
 | LLM | **Gemma 4 E4B 기본** (EXAONE 3.5 / Gemma 4 E2B 선택 가능) — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
 | 벡터DB | ChromaDB PersistentClient | — | |

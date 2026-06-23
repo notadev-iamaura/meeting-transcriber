@@ -1032,8 +1032,32 @@ class PipelineManager:
             logger.info(f"화자분리 체크포인트 복원: {checkpoint_path}")
             return DiarizationResult.from_checkpoint(checkpoint_path)
 
+        diarization_audio_path = wav_path
+        silence_plan: Any | None = None
+        if getattr(self._config.diarization, "silence_compression_enabled", False) is True:
+            try:
+                from steps.diarization_silence import prepare_diarization_audio
+
+                silence_plan = prepare_diarization_audio(
+                    audio_path=wav_path,
+                    output_path=checkpoint_path.with_name("diarization_input.compressed.wav"),
+                    diarization_config=self._config.diarization,
+                )
+                diarization_audio_path = silence_plan.audio_path
+            except Exception as e:
+                logger.warning(f"화자분리 긴 무음 압축 준비 실패, 원본 WAV 사용: {e}")
+
         diarizer = Diarizer(self._config, self._model_manager)
-        result = await diarizer.diarize(wav_path)
+        result = await diarizer.diarize(diarization_audio_path)
+
+        if silence_plan is not None and getattr(silence_plan, "applied", False):
+            from steps.diarization_silence import remap_diarization_result
+
+            result = remap_diarization_result(
+                result,
+                silence_plan,
+                original_audio_path=wav_path,
+            )
 
         # 체크포인트 저장
         if self._checkpoint_enabled:

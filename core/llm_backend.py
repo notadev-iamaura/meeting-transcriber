@@ -13,10 +13,15 @@ LLM 백엔드 추상화 모듈 (LLM Backend Abstraction Module)
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
-from typing import Any, Protocol, runtime_checkable
+import queue
+import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 # === 통합 에러 계층 ===
@@ -226,6 +231,151 @@ class OllamaBackend:
         pass
 
 
+class ThreadBoundLLMBackend:
+    """LLM 백엔드를 단일 전용 스레드에 고정해 실행한다.
+
+    MLX-VLM은 모델 로드와 첫 생성 호출이 서로 다른 thread에서 일어나면
+    Metal stream을 찾지 못하는 경우가 있다. 이 wrapper는 백엔드 생성,
+    chat/chat_stream, cleanup을 모두 같은 worker thread에서 실행해 그 경계를
+    명확하게 고정한다.
+    """
+
+    def __init__(
+        self,
+        backend_factory: Callable[[], LLMBackend],
+        *,
+        thread_name_prefix: str = "llm-backend",
+    ) -> None:
+        """전용 worker thread에서 실제 backend를 생성한다."""
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=thread_name_prefix,
+        )
+        self._worker_thread_id: int | None = None
+        self._backend: LLMBackend | None = None
+        self._closed = False
+
+        try:
+            self._backend = self._executor.submit(
+                self._create_backend,
+                backend_factory,
+            ).result()
+        except BaseException:
+            self._closed = True
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
+
+    def _create_backend(self, backend_factory: Callable[[], LLMBackend]) -> LLMBackend:
+        """worker thread에서 실제 backend를 생성하고 thread id를 기록한다."""
+        self._worker_thread_id = threading.get_ident()
+        return backend_factory()
+
+    def _require_backend(self) -> LLMBackend:
+        """정리되지 않은 실제 backend를 반환한다."""
+        if self._closed or self._backend is None:
+            raise LLMGenerationError("LLM backend가 이미 정리되었습니다")
+        return self._backend
+
+    def _run_on_worker(self, func: Callable[[LLMBackend], T]) -> T:
+        """func를 backend 전용 worker thread에서 실행한다."""
+        if threading.get_ident() == self._worker_thread_id:
+            return func(self._require_backend())
+        return self._executor.submit(lambda: func(self._require_backend())).result()
+
+    def chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
+    ) -> str:
+        """전용 worker thread에서 동기 chat 호출을 실행한다."""
+        return self._run_on_worker(
+            lambda backend: backend.chat(
+                messages=messages,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        )
+
+    def chat_stream(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        num_ctx: int | None = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
+    ) -> Iterator[str]:
+        """전용 worker thread에서 streaming 호출을 실행하고 token을 전달한다."""
+        if threading.get_ident() == self._worker_thread_id:
+            yield from self._require_backend().chat_stream(
+                messages=messages,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            return
+
+        events: queue.Queue[tuple[str, str | BaseException | None]] = queue.Queue()
+
+        def produce() -> None:
+            try:
+                backend = self._require_backend()
+                for token in backend.chat_stream(
+                    messages=messages,
+                    temperature=temperature,
+                    num_ctx=num_ctx,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                ):
+                    events.put(("token", token))
+            except BaseException as exc:
+                events.put(("error", exc))
+            else:
+                events.put(("done", None))
+
+        future = self._executor.submit(produce)
+
+        while True:
+            kind, payload = events.get()
+            if kind == "token":
+                yield cast(str, payload)
+                continue
+            if kind == "error":
+                future.result()
+                raise cast(BaseException, payload)
+            future.result()
+            return
+
+    def cleanup(self) -> None:
+        """전용 worker thread에서 backend cleanup을 실행하고 executor를 종료한다."""
+        if self._closed:
+            return
+
+        called_from_worker = threading.get_ident() == self._worker_thread_id
+
+        def cleanup_backend() -> None:
+            backend = self._backend
+            if backend is not None:
+                backend.cleanup()
+            self._backend = None
+
+        try:
+            if called_from_worker:
+                cleanup_backend()
+            else:
+                self._executor.submit(cleanup_backend).result()
+        finally:
+            self._closed = True
+            self._executor.shutdown(wait=not called_from_worker, cancel_futures=True)
+
+
 # === 팩토리 함수 ===
 
 
@@ -251,7 +401,10 @@ def create_backend(config: Any) -> LLMBackend:
         from core.mlx_client import MLXBackend
 
         logger.info("MLX 백엔드 선택됨")
-        return MLXBackend(config)
+        return ThreadBoundLLMBackend(
+            lambda: MLXBackend(config),
+            thread_name_prefix="mlx-llm",
+        )
 
     if backend_type == "ollama":
         logger.info("Ollama 백엔드 선택됨")

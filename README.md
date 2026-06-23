@@ -38,7 +38,7 @@ Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반
 
 - **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
 - **STT 모델 선택기**: 웹 UI에서 사용할 음성 인식 모델을 관리
-- **화자 분리**: pyannote-audio 3.1로 발화자별 자동 분리
+- **화자 분리**: `pyannote/speaker-diarization-community-1`로 발화자별 자동 분리
 - **AI 교정**: Gemma 4 (기본) 또는 EXAONE 3.5 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
 - **하이브리드 검색**: 전사문은 ChromaDB + SQLite FTS5 RAG로, Wiki는 BM25/FTS5 + e5-small 벡터 검색으로 탐색
@@ -192,7 +192,7 @@ llm:
 
 1. [HuggingFace](https://huggingface.co/join)에 무료 가입
 2. 아래 두 모델 페이지를 방문하여 각각 **"Agree and access repository"** 클릭:
-   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
    - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
 3. [토큰 발급 페이지](https://huggingface.co/settings/tokens)에서 **Access Token** 생성 (Read 권한)
 4. 환경변수로 설정:
@@ -342,7 +342,7 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 
 pyannote 모델은 HuggingFace **게이트 모델**이라 약관 동의 + 토큰이 반드시 필요합니다. **에이전트가 대신 동의하거나 공개 미러를 찾아 우회하면 안 됩니다.**
 
-1. <https://huggingface.co/pyannote/speaker-diarization-3.1> 방문 → **"Agree and access repository"** 클릭
+1. <https://huggingface.co/pyannote/speaker-diarization-community-1> 방문 → **"Agree and access repository"** 클릭
 2. <https://huggingface.co/pyannote/segmentation-3.0> 방문 → 동일하게 동의
 3. <https://huggingface.co/settings/tokens> 에서 **Read 권한** 토큰 발급
 4. 환경변수 설정:
@@ -352,7 +352,7 @@ export HUGGINGFACE_TOKEN=hf_xxxxx
 export HF_TOKEN=hf_xxxxx
 ```
 
-5. SSL 인증서 자체가 깨진 환경이라면 위 1~3 은 일반 브라우저에서 진행하되, 모델 파일은 동일한 게이트 페이지 → **"Files and versions"** → 각 파일 다운로드 → `~/.cache/huggingface/hub/models--pyannote--speaker-diarization-3.1/` 에 위와 동일한 캐시 구조로 배치
+5. SSL 인증서 자체가 깨진 환경이라면 위 1~3 은 일반 브라우저에서 진행하되, 모델 파일은 동일한 게이트 페이지 → **"Files and versions"** → 각 파일 다운로드 → `~/.cache/huggingface/hub/models--pyannote--speaker-diarization-community-1/` 에 위와 동일한 캐시 구조로 배치
 
 ### 4. Python 패키지 (pip install) 자체가 SSL 실패하는 경우
 
@@ -727,7 +727,7 @@ meeting-transcriber/
   → [3] STT 전사 (mlx-whisper, 한국어 최적화)
   → [4] 환각 필터링 (no_speech_prob + logprob + compression_ratio + 반복 패턴)
   → [5] 텍스트 후처리 (NFC 정규화, 공백 정리)
-  → [6] 화자 분리 (pyannote-audio 3.1, CPU)
+  → [6] 화자 분리 (pyannote community-1, CPU)
   → [7] 세그먼트 병합 (STT + 화자 시간 매칭)
   → [8] LLM 교정 (EXAONE 3.5, 배치 보정)
   → [9] 스마트 청킹 (토픽/시간 기반, 300토큰)

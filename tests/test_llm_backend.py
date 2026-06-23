@@ -6,6 +6,8 @@ LLM 백엔드 추상화 테스트 모듈 (LLM Backend Abstraction Tests)
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ from core.llm_backend import (
     LLMGenerationError,
     LLMLoadError,
     OllamaBackend,
+    ThreadBoundLLMBackend,
     create_backend,
 )
 from core.ollama_client import (
@@ -292,6 +295,102 @@ class TestMLXBackend:
             assert isinstance(backend, LLMBackend)
 
 
+class TestThreadBoundLLMBackend:
+    """ThreadBoundLLMBackend가 같은 thread에서 backend 작업을 실행하는지 검증."""
+
+    def test_생성_chat_stream_cleanup은_같은_worker_thread에서_실행된다(self) -> None:
+        """backend lifecycle 전체가 동일 worker thread에 고정된다."""
+        events: list[tuple[str, int]] = []
+        main_thread_id = threading.get_ident()
+
+        class RecordingBackend:
+            def __init__(self) -> None:
+                events.append(("init", threading.get_ident()))
+
+            def chat(
+                self,
+                *,
+                messages: list[dict[str, str]],
+                temperature: float | None = None,
+                num_ctx: int | None = None,
+                max_tokens: int | None = None,
+                timeout: int | None = None,
+            ) -> str:
+                events.append(("chat", threading.get_ident()))
+                return "chat-ok"
+
+            def chat_stream(
+                self,
+                *,
+                messages: list[dict[str, str]],
+                temperature: float | None = None,
+                num_ctx: int | None = None,
+                max_tokens: int | None = None,
+                timeout: int | None = None,
+            ) -> Iterator[str]:
+                events.append(("stream", threading.get_ident()))
+                yield "a"
+                yield "b"
+
+            def cleanup(self) -> None:
+                events.append(("cleanup", threading.get_ident()))
+
+        backend = ThreadBoundLLMBackend(
+            lambda: RecordingBackend(),
+            thread_name_prefix="test-llm",
+        )
+
+        try:
+            assert backend.chat(messages=[{"role": "user", "content": "hi"}]) == "chat-ok"
+            assert list(
+                backend.chat_stream(messages=[{"role": "user", "content": "hi"}])
+            ) == ["a", "b"]
+        finally:
+            backend.cleanup()
+
+        worker_thread_ids = {thread_id for _, thread_id in events}
+        assert len(worker_thread_ids) == 1
+        assert next(iter(worker_thread_ids)) != main_thread_id
+        assert [name for name, _ in events] == ["init", "chat", "stream", "cleanup"]
+
+    def test_cleanup은_여러_번_호출해도_안전하다(self) -> None:
+        """cleanup 중복 호출은 no-op으로 처리된다."""
+        cleanup_count = 0
+
+        class RecordingBackend:
+            def chat(
+                self,
+                *,
+                messages: list[dict[str, str]],
+                temperature: float | None = None,
+                num_ctx: int | None = None,
+                max_tokens: int | None = None,
+                timeout: int | None = None,
+            ) -> str:
+                return "ok"
+
+            def chat_stream(
+                self,
+                *,
+                messages: list[dict[str, str]],
+                temperature: float | None = None,
+                num_ctx: int | None = None,
+                max_tokens: int | None = None,
+                timeout: int | None = None,
+            ) -> Iterator[str]:
+                yield "ok"
+
+            def cleanup(self) -> None:
+                nonlocal cleanup_count
+                cleanup_count += 1
+
+        backend = ThreadBoundLLMBackend(lambda: RecordingBackend())
+        backend.cleanup()
+        backend.cleanup()
+
+        assert cleanup_count == 1
+
+
 # === 팩토리 함수 테스트 ===
 
 
@@ -313,9 +412,12 @@ class TestCreateBackend:
         assert isinstance(backend, OllamaBackend)
 
     def test_mlx_백엔드_생성(self) -> None:
-        """backend='mlx' 시 MLXBackend 생성."""
+        """backend='mlx' 시 thread-bound MLX backend wrapper를 생성한다."""
         mock_mlx_lm = MagicMock()
-        mock_mlx_lm.load.return_value = (MagicMock(), MagicMock())
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.apply_chat_template.return_value = "formatted prompt"
+        mock_mlx_lm.load.return_value = (MagicMock(), mock_tokenizer)
+        mock_mlx_lm.generate.return_value = "ok"
 
         config = MagicMock()
         config.backend = "mlx"
@@ -324,10 +426,13 @@ class TestCreateBackend:
         config.temperature = 0.3
 
         with patch.dict("sys.modules", {"mlx_lm": mock_mlx_lm}):
-            from core.mlx_client import MLXBackend
-
             backend = create_backend(config)
-            assert isinstance(backend, MLXBackend)
+            try:
+                assert isinstance(backend, ThreadBoundLLMBackend)
+                assert isinstance(backend, LLMBackend)
+                assert backend.chat(messages=[{"role": "user", "content": "테스트"}]) == "ok"
+            finally:
+                backend.cleanup()
 
     def test_지원하지_않는_백엔드(self) -> None:
         """미지원 backend 값 시 ValueError 발생."""

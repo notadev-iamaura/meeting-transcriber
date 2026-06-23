@@ -20,6 +20,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -56,13 +57,28 @@ _CHANGED_ONLY_SYSTEM_SUFFIX = """
 
 이번 요청은 changed-only 교정 모드입니다. 위 규칙 중 "입력과 동일한 번호와 포맷으로 모두 출력" 규칙은
 이번 요청에서만 다음 규칙으로 대체합니다.
-1. 보정이 필요한 줄만 [번호] 보정문 형식으로 출력하세요.
-2. 보정이 필요 없는 줄은 출력하지 마세요.
-3. 수정할 줄이 없으면 아무 내용도 출력하지 마세요.
-4. 설명, 요약, 코드블록, "수정 없음" 같은 부가 텍스트를 출력하지 마세요."""
+1. 명백한 STT 오인식, 띄어쓰기, 조사, 문장부호, 반복어는 적극적으로 자연스럽게 고치세요.
+2. 보정이 필요한 줄만 [번호] 보정문 형식으로 출력하세요.
+3. 보정이 필요 없는 줄은 출력하지 마세요.
+4. 수정할 줄이 없으면 아무 내용도 출력하지 마세요.
+5. 문장 순서 변경, 줄 병합/분리, 옆 줄 내용 가져오기, 요약, 의미 추가는 절대 금지입니다.
+6. 설명, 요약, 코드블록, "수정 없음" 같은 부가 텍스트를 출력하지 마세요."""
 
 # 발화 번호 파싱 정규식
 _LINE_PATTERN = re.compile(r"\[(\d+)\]\s*(.*)")
+_GENERIC_SHORT_CORRECTIONS = {
+    "그 부분에",
+    "있으세요",
+    "있습니다",
+    "네",
+    "네.",
+    "예",
+    "예.",
+    "맞습니다",
+    "좋습니다",
+    "그렇습니다",
+    "감사합니다",
+}
 
 
 @dataclass
@@ -251,6 +267,106 @@ def _parse_correction_response(
                 corrections[idx] = text
 
     return corrections
+
+
+def _normalize_for_similarity(text: str) -> str:
+    """유사도 비교용으로 공백과 문장부호를 제거한다."""
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+
+def _similarity(left: str, right: str) -> float:
+    """두 문장의 완화된 문자열 유사도를 반환한다."""
+    left_normalized = _normalize_for_similarity(left)
+    right_normalized = _normalize_for_similarity(right)
+    if not left_normalized and not right_normalized:
+        return 1.0
+    if not left_normalized or not right_normalized:
+        return 0.0
+    return SequenceMatcher(None, left_normalized, right_normalized).ratio()
+
+
+def _is_generic_short_rewrite(candidate: str) -> bool:
+    """일반적인 짧은 문구로 긴 원문을 덮은 결과인지 판단한다."""
+    stripped = candidate.strip()
+    stripped_without_punct = stripped.strip(" .,!?:;~…。！？")
+    if stripped in _GENERIC_SHORT_CORRECTIONS:
+        return True
+    if stripped_without_punct in _GENERIC_SHORT_CORRECTIONS:
+        return True
+    return any(stripped.startswith(value) for value in _GENERIC_SHORT_CORRECTIONS)
+
+
+def _find_suspicious_correction_reason(
+    batch: list[MergedUtterance],
+    *,
+    idx: int,
+    candidate: str,
+) -> str | None:
+    """LLM 교정 결과가 원문 계약을 깨는지 보수적으로 판정한다.
+
+    Args:
+        batch: 같은 LLM 요청에 들어간 발화 배치
+        idx: 1부터 시작하는 발화 번호
+        candidate: LLM이 반환한 보정문
+
+    Returns:
+        의심 사유. 안전해 보이면 None.
+    """
+    if not (1 <= idx <= len(batch)):
+        return "invalid_index"
+
+    original = batch[idx - 1].text.strip()
+    candidate = candidate.strip()
+    original_normalized = _normalize_for_similarity(original)
+    candidate_normalized = _normalize_for_similarity(candidate)
+    original_len = len(original_normalized)
+    candidate_len = len(candidate_normalized)
+
+    if not candidate_normalized:
+        return "empty_candidate"
+
+    if original_len >= 18 and candidate_len <= 6:
+        return "destructive_shortening"
+    if original_len >= 18 and candidate_len / max(original_len, 1) < 0.35:
+        return "destructive_length_ratio"
+    if original_len >= 15 and _is_generic_short_rewrite(candidate):
+        return "generic_short_rewrite"
+    if original_len >= 8 and candidate_len > original_len * 2.0 and (
+        candidate_len - original_len
+    ) >= 12:
+        return "unexpected_expansion"
+    if original_len >= 20 and candidate_len > original_len * 1.6 and (
+        candidate_len - original_len
+    ) >= 20:
+        return "unexpected_expansion"
+
+    own_similarity = _similarity(original, candidate)
+    best_other_similarity = 0.0
+    best_other_idx = 0
+    for other_idx, utterance in enumerate(batch, 1):
+        if other_idx == idx:
+            continue
+        other_normalized = _normalize_for_similarity(utterance.text)
+        if len(other_normalized) >= 8:
+            longest = SequenceMatcher(
+                None,
+                candidate_normalized,
+                other_normalized,
+            ).find_longest_match()
+            if longest.size >= max(8, int(len(other_normalized) * 0.75)):
+                return f"line_merge_with_{other_idx}"
+        other_similarity = _similarity(utterance.text, candidate)
+        if other_similarity > best_other_similarity:
+            best_other_similarity = other_similarity
+            best_other_idx = other_idx
+
+    if best_other_idx and best_other_similarity >= 0.82 and best_other_similarity > (
+        own_similarity + 0.2
+    ):
+        return f"line_shift_to_{best_other_idx}"
+
+    return None
 
 
 def _with_changed_only_instruction(system_prompt: str) -> str:
@@ -477,6 +593,77 @@ class Corrector:
 
         return corrections, False, mode, False
 
+    def _materialize_corrections(
+        self,
+        batch: list[MergedUtterance],
+        corrections: dict[int, str],
+        *,
+        batch_failed: bool,
+        used_mode: str,
+    ) -> tuple[list[CorrectedUtterance], int, int, int]:
+        """파싱된 LLM 응답을 보정 결과 객체로 변환한다."""
+        results: list[CorrectedUtterance] = []
+        corrected_count = 0
+        failed_count = 0
+        rejected_count = 0
+
+        for i, utterance in enumerate(batch):
+            idx = i + 1
+            corrected_text = corrections.get(idx)
+
+            if corrected_text:
+                # NFC 정규화 적용
+                corrected_text = unicodedata.normalize("NFC", corrected_text.strip())
+                original_normalized = unicodedata.normalize("NFC", utterance.text.strip())
+                if corrected_text == original_normalized:
+                    was_corrected = False
+                else:
+                    suspicious_reason = _find_suspicious_correction_reason(
+                        batch,
+                        idx=idx,
+                        candidate=corrected_text,
+                    )
+                    if suspicious_reason is not None:
+                        logger.warning(
+                            "의심스러운 LLM 교정 결과 폐기: batch_idx=%d, reason=%s, "
+                            "original=%r, candidate=%r",
+                            idx,
+                            suspicious_reason,
+                            utterance.text,
+                            corrected_text,
+                        )
+                        corrected_text = utterance.text
+                        was_corrected = False
+                        failed_count += 1
+                        rejected_count += 1
+                    else:
+                        was_corrected = True
+                        corrected_count += 1
+            else:
+                # 보정 결과 없음 → 원본 유지
+                corrected_text = utterance.text
+                was_corrected = False
+                # full 모드에서는 번호 누락을 실패로 보지만 changed-only 모드에서는 원문 유지가 정상이다.
+                if batch_failed:
+                    # 전체 배치가 실패한 경우
+                    failed_count += 1
+                elif used_mode == "full":
+                    # 개별 발화가 파싱에서 누락된 경우
+                    failed_count += 1
+
+            results.append(
+                CorrectedUtterance(
+                    text=corrected_text,
+                    original_text=utterance.text,
+                    speaker=utterance.speaker,
+                    start=utterance.start,
+                    end=utterance.end,
+                    was_corrected=was_corrected,
+                )
+            )
+
+        return results, corrected_count, failed_count, rejected_count
+
     def _correct_batch(
         self,
         backend: LLMBackend,
@@ -524,44 +711,53 @@ class Corrector:
                 mode="full",
             )
 
-        results: list[CorrectedUtterance] = []
-        corrected_count = 0
-        failed_count = 0
+        results, corrected_count, failed_count, rejected_count = self._materialize_corrections(
+            batch,
+            corrections,
+            batch_failed=batch_failed,
+            used_mode=used_mode,
+        )
 
-        for i, utterance in enumerate(batch):
-            idx = i + 1
-            corrected_text = corrections.get(idx)
-
-            if corrected_text:
-                # NFC 정규화 적용
-                corrected_text = unicodedata.normalize("NFC", corrected_text.strip())
-                original_normalized = unicodedata.normalize("NFC", utterance.text.strip())
-                was_corrected = corrected_text != original_normalized
-
-                if was_corrected:
-                    corrected_count += 1
-            else:
-                # 보정 결과 없음 → 원본 유지
-                corrected_text = utterance.text
-                was_corrected = False
-                # full 모드에서는 번호 누락을 실패로 보지만 changed-only 모드에서는 원문 유지가 정상이다.
-                if batch_failed:
-                    # 전체 배치가 실패한 경우
-                    failed_count += 1
-                elif used_mode == "full":
-                    # 개별 발화가 파싱에서 누락된 경우
-                    failed_count += 1
-
-            results.append(
-                CorrectedUtterance(
-                    text=corrected_text,
-                    original_text=utterance.text,
-                    speaker=utterance.speaker,
-                    start=utterance.start,
-                    end=utterance.end,
-                    was_corrected=was_corrected,
-                )
+        guard_fallback_threshold = max(2, len(batch) // 4)
+        if (
+            not batch_failed
+            and fallback_enabled
+            and used_mode == "changed_only"
+            and rejected_count >= guard_fallback_threshold
+        ):
+            logger.info(
+                "changed-only 교정 가드 폐기 %d/%d건으로 full 모드 재시도",
+                rejected_count,
+                len(batch),
             )
+            full_corrections, full_failed, full_mode, _ = self._collect_corrections(
+                backend,
+                batch,
+                system_prompt,
+                mode="full",
+            )
+            (
+                full_results,
+                full_corrected_count,
+                full_failed_count,
+                _,
+            ) = self._materialize_corrections(
+                batch,
+                full_corrections,
+                batch_failed=full_failed,
+                used_mode=full_mode,
+            )
+            if full_failed_count < failed_count or (
+                full_failed_count == failed_count and full_corrected_count > corrected_count
+            ):
+                logger.info(
+                    "full 모드 재시도 결과 채택: corrected %d→%d, failed %d→%d",
+                    corrected_count,
+                    full_corrected_count,
+                    failed_count,
+                    full_failed_count,
+                )
+                return full_results, full_corrected_count, full_failed_count
 
         return results, corrected_count, failed_count
 
