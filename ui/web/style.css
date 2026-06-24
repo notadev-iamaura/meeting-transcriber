@@ -3874,6 +3874,33 @@ button {
   line-height: 1.3;
 }
 
+.meeting-list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 10px 4px 14px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.meeting-list-load-more {
+  width: 100%;
+  min-height: 28px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              border-color var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.meeting-list-load-more:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 
 /* ═══════════════════════��══════════════════
    15. 접근성 (Accessibility)

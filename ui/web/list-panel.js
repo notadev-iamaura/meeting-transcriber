@@ -15,6 +15,8 @@
         var STATUS_SORT_ORDER = deps.STATUS_SORT_ORDER || {};
         var STATUS_POLL_INTERVAL = deps.STATUS_POLL_INTERVAL || 5000;
         var MEETINGS_POLL_INTERVAL = deps.MEETINGS_POLL_INTERVAL || 15000;
+        var MEETINGS_PAGE_SIZE = 50;
+        var MEETINGS_SCROLL_THRESHOLD = 120;
 
         if (!App || !Router) {
             throw new Error("MeetingListPanel requires App and Router");
@@ -32,6 +34,10 @@
             var _statusTimer = null;      // 상태 폴링 타이머
             var _meetingsTimer = null;    // 회의 목록 폴링 타이머
             var _searchTimeout = null;    // 검색 디바운스 타이머
+            var _meetingsTotal = 0;       // 서버 기준 전체 회의 수
+            var _meetingsHasMore = false; // 추가 페이지 존재 여부
+            var _meetingsLoading = false; // 첫 페이지/새로고침 로딩 중
+            var _meetingsLoadingMore = false; // 추가 페이지 로딩 중
 
             // 다중 선택 상태 (bulk-actions §A)
             // _selectedIds: 현재 체크된 meeting_id 의 Set
@@ -168,12 +174,17 @@
                     });
                 }
 
+                // 목록 끝 근처에 도달하면 다음 50건을 이어서 로드한다.
+                if (_listEl) {
+                    _listEl.addEventListener("scroll", _handleListScroll, { passive: true });
+                }
+
                 // WebSocket 이벤트 리스닝 — 회의 목록 자동 갱신
                 document.addEventListener("ws:job_completed", function () {
-                    loadMeetings();
+                    loadMeetings({ preserveLoaded: true });
                 });
                 document.addEventListener("ws:job_added", function () {
-                    loadMeetings();
+                    loadMeetings({ preserveLoaded: true });
                 });
 
                 // WebSocket 연결 상태 표시
@@ -722,7 +733,9 @@
 
                 // 주기적 폴링 (WebSocket 폴백)
                 _statusTimer = setInterval(fetchStatus, STATUS_POLL_INTERVAL);
-                _meetingsTimer = setInterval(loadMeetings, MEETINGS_POLL_INTERVAL);
+                _meetingsTimer = setInterval(function () {
+                    loadMeetings({ preserveLoaded: true });
+                }, MEETINGS_POLL_INTERVAL);
             }
 
             /**
@@ -752,14 +765,102 @@
              * 스켈레톤을 표시하지 않는다. mockup §3.3 표 (회의 목록 = 카드형 × 4).
              * render() 진입 시 _listEl.innerHTML="" 으로 자동 cleanup.
              */
-            async function loadMeetings() {
+            function _meetingsEndpoint(offset, limit) {
+                return "/meetings?offset=" + encodeURIComponent(offset) +
+                    "&limit=" + encodeURIComponent(limit);
+            }
+
+            function _meetingKey(meeting) {
+                if (!meeting) return "";
+                return meeting.meeting_id || String(meeting.id || "");
+            }
+
+            function _mergeMeetingPages(primary, secondary) {
+                var seen = {};
+                var merged = [];
+
+                function pushUnique(meeting) {
+                    var key = _meetingKey(meeting);
+                    if (!key || seen[key]) return;
+                    seen[key] = true;
+                    merged.push(meeting);
+                }
+
+                (primary || []).forEach(pushUnique);
+                (secondary || []).forEach(pushUnique);
+                return merged;
+            }
+
+            function _normaliseTotal(data, fallbackCount) {
+                if (data && typeof data.total === "number") {
+                    return data.total;
+                }
+                return Math.max(fallbackCount || 0, _meetings.length);
+            }
+
+            function _updatePaginationState(total) {
+                _meetingsTotal = Math.max(total || 0, _meetings.length);
+                _meetingsHasMore = _meetings.length < _meetingsTotal;
+            }
+
+            async function _fetchMeetingsPage(offset) {
+                return App.apiRequest(_meetingsEndpoint(offset, MEETINGS_PAGE_SIZE));
+            }
+
+            function _handleListScroll() {
+                if (!_listEl || !_meetingsHasMore || _meetingsLoadingMore || _meetingsLoading) {
+                    return;
+                }
+                var remaining = _listEl.scrollHeight - _listEl.scrollTop - _listEl.clientHeight;
+                if (remaining <= MEETINGS_SCROLL_THRESHOLD) {
+                    loadMeetings({ append: true });
+                }
+            }
+
+            async function loadMeetings(options) {
+                options = options || {};
+                var append = options.append === true;
+                var preserveLoaded = options.preserveLoaded === true;
+
+                if (append) {
+                    if (_meetingsLoadingMore || _meetingsLoading || !_meetingsHasMore) {
+                        return;
+                    }
+                    _meetingsLoadingMore = true;
+                    _applyFilterAndSort();
+                    try {
+                        var pageData = await _fetchMeetingsPage(_meetings.length);
+                        var pageMeetings = pageData.meetings || [];
+                        _meetings = _mergeMeetingPages(_meetings, pageMeetings);
+                        _updatePaginationState(_normaliseTotal(pageData, _meetings.length));
+                        _applyFilterAndSort();
+                    } catch (e) {
+                        // 추가 페이지 로드 실패는 현재 목록을 유지한다.
+                    } finally {
+                        _meetingsLoadingMore = false;
+                        _applyFilterAndSort();
+                    }
+                    return;
+                }
+
+                if (_meetingsLoading) {
+                    return;
+                }
+                _meetingsLoading = true;
                 // 최초 로딩 시점 (목록 비어있고 _meetings 도 비어있음) 에만 스켈레톤 노출
                 if (_listEl && _meetings.length === 0 && _listEl.children.length === 0) {
                     _listEl.appendChild(App.createSkeletonCards(4));
                 }
                 try {
-                    var data = await App.apiRequest("/meetings");
-                    _meetings = data.meetings || [];
+                    var data = await _fetchMeetingsPage(0);
+                    var firstPage = data.meetings || [];
+                    var nextTotal = _normaliseTotal(data, firstPage.length);
+                    if (preserveLoaded && nextTotal >= _meetingsTotal) {
+                        _meetings = _mergeMeetingPages(firstPage, _meetings);
+                    } else {
+                        _meetings = firstPage;
+                    }
+                    _updatePaginationState(nextTotal);
                     _applyFilterAndSort();
                 } catch (e) {
                     // 조용히 처리 (리스트 로드 실패는 치명적이지 않음)
@@ -770,6 +871,8 @@
                             _listEl.innerHTML = "";
                         }
                     }
+                } finally {
+                    _meetingsLoading = false;
                 }
             }
 
@@ -806,7 +909,11 @@
 
                 // 카운트 업데이트
                 if (_countEl) {
-                    App.safeText(_countEl, filtered.length + "/" + _meetings.length);
+                    var totalForLabel = _meetingsTotal || _meetings.length;
+                    var countText = query
+                        ? filtered.length + "/" + _meetings.length
+                        : _meetings.length + "/" + totalForLabel;
+                    App.safeText(_countEl, countText);
                 }
 
                 // Progressive Disclosure: 회의가 하나도 없을 때 검색/정렬/카운트 UI 숨김
@@ -1054,6 +1161,26 @@
                     _listEl.appendChild(item);
                 });
 
+                if (_meetingsHasMore || _meetingsLoadingMore) {
+                    var footer = document.createElement("div");
+                    footer.className = "meeting-list-footer";
+                    if (_meetingsLoadingMore) {
+                        footer.setAttribute("role", "status");
+                        footer.setAttribute("aria-live", "polite");
+                        footer.textContent = "불러오는 중...";
+                    } else {
+                        var moreBtn = document.createElement("button");
+                        moreBtn.type = "button";
+                        moreBtn.className = "meeting-list-load-more";
+                        moreBtn.textContent = "더 보기";
+                        moreBtn.addEventListener("click", function () {
+                            loadMeetings({ append: true });
+                        });
+                        footer.appendChild(moreBtn);
+                    }
+                    _listEl.appendChild(footer);
+                }
+
                 // render() 재호출 후에도 selection 보존 — DOM 이 새로 만들어졌으므로
                 // _selectedIds 상태를 시각/ARIA 에 다시 반영 (B12 정책).
                 _syncSelectionUI();
@@ -1105,6 +1232,7 @@
                 if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; }
                 if (_meetingsTimer) { clearInterval(_meetingsTimer); _meetingsTimer = null; }
                 if (_searchTimeout) { clearTimeout(_searchTimeout); _searchTimeout = null; }
+                if (_listEl) { _listEl.removeEventListener("scroll", _handleListScroll); }
             }
 
             return {

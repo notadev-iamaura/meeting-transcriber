@@ -89,6 +89,10 @@
 - `mobile-drawer.js`
 - `shortcut-controller.js`
 
+회의 목록 사이드바는 `/api/meetings?offset=...&limit=50` 페이지 조회를 사용해
+최초 50건만 렌더링하고, 목록 하단 스크롤 또는 "더 보기" 액션으로 50건씩 추가 로드합니다.
+장기 사용자의 수백~수천 건 회의에서 초기 DOM/렌더 비용이 한 번에 커지지 않도록 제한합니다.
+
 각 모듈은 `window.Meeting*` factory boundary를 통해 `spa.js`에 주입되며,
 기존 `window.SPA.*` 공개 계약은 유지합니다.
 

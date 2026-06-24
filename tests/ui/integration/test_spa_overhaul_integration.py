@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.sync_api import Browser, Page, Route
@@ -186,6 +187,74 @@ def test_t101_meeting_list_empty_state(browser: Browser, spa_static_server: str)
         assert title.inner_text().strip() == "아직 회의가 없어요", (
             f"empty-state 제목 불일치: {title.inner_text()!r}"
         )
+
+
+def test_meeting_list_loads_more_in_50_item_pages(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """회의 목록은 최초 50건 후 스크롤 시 50건씩 추가 로드한다."""
+    meetings = [
+        {
+            "meeting_id": f"meeting-{idx:03d}",
+            "status": "completed",
+            "created_at": f"2026-05-05T10:{idx % 60:02d}:00",
+            "summary_preview": f"요약 {idx:03d}",
+        }
+        for idx in range(120)
+    ]
+    requests: list[tuple[int, int]] = []
+
+    def paged_meetings_api(route: Route) -> None:
+        url = route.request.url
+        parsed = urlparse(url)
+        if parsed.path == "/api/meetings":
+            query = parse_qs(parsed.query)
+            offset = int(query.get("offset", ["0"])[0])
+            limit = int(query.get("limit", ["50"])[0])
+            requests.append((offset, limit))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meetings": meetings[offset : offset + limit],
+                        "total": len(meetings),
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 520},
+        path="/app",
+        api_handler=paged_meetings_api,
+    ) as page:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.meeting-item').length === 50"
+        )
+        assert page.locator("#listCount").inner_text().strip() == "50/120"
+
+        page.locator("#listContent").evaluate(
+            "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
+        )
+        page.wait_for_function(
+            "() => document.querySelectorAll('.meeting-item').length === 100"
+        )
+        assert page.locator("#listCount").inner_text().strip() == "100/120"
+
+        page.locator("#listContent").evaluate(
+            "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
+        )
+        page.wait_for_function(
+            "() => document.querySelectorAll('.meeting-item').length === 120"
+        )
+        assert page.locator("#listCount").inner_text().strip() == "120/120"
+
+    assert requests[:3] == [(0, 50), (50, 50), (100, 50)]
 
 
 def test_home_route_stats_actions_dropdowns_and_public_boundary(
@@ -2732,7 +2801,7 @@ def test_chat_prompt_chip_and_scope_status(browser: Browser, spa_static_server: 
 
     def chat_api(route: Route) -> None:
         url = route.request.url
-        if url.endswith("/api/meetings"):
+        if urlparse(url).path == "/api/meetings":
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -2898,7 +2967,7 @@ def test_t302_mobile_meeting_selection_closes_drawer_and_restores_background(
 
     def mobile_api(route: Route) -> None:
         url = route.request.url
-        if url.endswith("/api/meetings"):
+        if urlparse(url).path == "/api/meetings":
             route.fulfill(
                 status=200,
                 content_type="application/json",
