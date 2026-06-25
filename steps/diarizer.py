@@ -29,6 +29,7 @@ from typing import Any
 
 from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.runtime_safety import pyannote_offline_cache_issue
 from steps.diarization_process_guard import ZoomPauseGuard, terminate_process
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,12 @@ class Diarizer:
             )
         return self._hf_token
 
+    def _validate_offline_cache(self) -> None:
+        """HF 오프라인 모드에서 pyannote 캐시가 완전한지 사전 검증한다."""
+        issue = pyannote_offline_cache_issue(self._model_name)
+        if issue is not None:
+            raise ModelNotAvailableError(issue.message)
+
     def _resolve_device(self, torch_module: Any) -> str:
         """pyannote 실행 디바이스를 CPU로 강제한다.
 
@@ -299,6 +306,7 @@ class Diarizer:
         """
         # 토큰 검증
         token = self._validate_token()
+        self._validate_offline_cache()
 
         try:
             from pyannote.audio import Pipeline  # type: ignore[import-untyped]
@@ -414,6 +422,7 @@ class Diarizer:
     def _build_worker_payload(self, audio_path: Path, output_path: Path) -> dict[str, Any]:
         """worker 프로세스에 전달할 JSON payload 를 생성한다."""
         token = self._validate_token()
+        self._validate_offline_cache()
         return {
             "model_name": self._model_name,
             "audio_path": str(audio_path),

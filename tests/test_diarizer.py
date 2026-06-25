@@ -776,6 +776,26 @@ class TestLoadPipeline:
         with pytest.raises(TokenNotConfiguredError):
             diarizer._load_pipeline()
 
+    def test_HF_offline_캐시_누락시_pyannote_import_전에_ModelNotAvailableError(
+        self,
+        mock_config,
+        mock_manager,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """HF offline + pyannote 캐시 누락이면 모델 로드 전 명확히 실패한다."""
+        mock_config.diarization.model_name = "pyannote/speaker-diarization-community-1"
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        monkeypatch.setattr(
+            "core.runtime_safety.missing_pyannote_offline_cache_files",
+            lambda _model_name: ["pyannote/speaker-diarization-community-1:config.yaml"],
+        )
+
+        with pytest.raises(ModelNotAvailableError, match="오프라인 캐시가 불완전"):
+            diarizer._load_pipeline()
+
     @patch("steps.diarizer.Diarizer._validate_token", return_value="token")
     def test_pyannote_미설치시_ModelNotAvailableError(
         self, _mock_token, mock_config, mock_manager

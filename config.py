@@ -762,6 +762,31 @@ class AutoProcessingConfig(BaseModel):
         default=False,
         description="앱 시작 시 오늘 실행 시각이 이미 지났으면 한 번 실행할지 여부.",
     )
+    safety_checks_enabled: bool = Field(
+        default=True,
+        description="자동 처리 실행 전 HF offline/cache/thermal 위험 조합을 차단할지 여부.",
+    )
+    max_items_per_run: int = Field(
+        default=1,
+        ge=0,
+        le=100,
+        description="자동 처리 1회 실행에서 처리할 최대 회의 수. 0이면 제한 없음.",
+    )
+    block_hf_offline_cache_miss: bool = Field(
+        default=True,
+        description="HF offline 모드에서 pyannote 캐시가 불완전하면 자동 전사를 차단한다.",
+    )
+    max_thermal_batch_size: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="자동 전사 허용 thermal.batch_size 상한.",
+    )
+    min_thermal_cooldown_seconds: int = Field(
+        default=180,
+        ge=30,
+        description="자동 전사 허용 thermal.cooldown_seconds 하한.",
+    )
 
 
 class WikiRankingConfig(BaseModel):

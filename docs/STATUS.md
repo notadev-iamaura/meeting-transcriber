@@ -60,6 +60,8 @@
   RSS/가용 메모리/swap/MLX 메모리와 품질 지표를 로컬 JSON 리포트로 남길 수 있습니다.
 - 기본 화자분리는 `pyannote/speaker-diarization-community-1` + `output_mode=auto`
   로 전환했습니다. exclusive 출력이 있으면 우선 사용하고, pyannote는 계속 CPU 강제입니다.
+- `HF_HUB_OFFLINE` 또는 `TRANSFORMERS_OFFLINE` 상태에서 pyannote 캐시가 불완전하면
+  화자분리 모델 로드까지 진행하지 않고 사전 검증 단계에서 명확히 실패합니다.
 - 화자 수는 사용자가 직접 기억해 입력하지 않아도 되도록 내부 기본 2~4 bounded auto를
   유지합니다. 완전 자동(`min_speakers/max_speakers=null`)은 가능하지만 동일 샘플에서
   속도 이득이 없어 기본값으로 두지 않았습니다.
@@ -68,6 +70,9 @@
   전체 5% 이상 절약입니다.
 - LLM 교정 기본값은 `changed_only`로 전환했습니다. 줄 밀림/병합/파괴적 축약 guard를
   통과한 수정만 반영하고, guard 폐기가 많은 배치는 full 모드로 1회 fallback합니다.
+- 자동 전사/요약은 안전 점검을 통과한 경우에만 실행합니다. 기본값은 1회 1건 처리이며,
+  HF offline + pyannote 캐시 누락 또는 `thermal.batch_size > 2` / `cooldown_seconds < 180`
+  조합에서는 실행을 보류하고 API 결과의 `errors`에 이유를 남깁니다.
 
 ### Frontend Architecture
 

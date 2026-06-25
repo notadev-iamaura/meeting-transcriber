@@ -37,6 +37,13 @@ def _make_config(tmp_path: Path) -> AppConfig:
     return AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
 
 
+def _with_auto_processing_overrides(config: AppConfig, **updates: object) -> AppConfig:
+    """테스트용 auto_processing 설정 override를 적용한다."""
+    return config.model_copy(
+        update={"auto_processing": config.auto_processing.model_copy(update=updates)}
+    )
+
+
 def test_classify_meeting_전사_요약_완료를_구분한다(tmp_path: Path) -> None:
     checkpoints = tmp_path / "checkpoints"
     outputs = tmp_path / "outputs"
@@ -59,6 +66,7 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     tmp_path: Path,
 ) -> None:
     config = _make_config(tmp_path)
+    config = _with_auto_processing_overrides(config, max_items_per_run=0)
     audio = config.paths.resolved_audio_input_dir / "m1.wav"
     audio.parent.mkdir(parents=True, exist_ok=True)
     audio.write_bytes(b"audio")
@@ -95,6 +103,93 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     pipeline.run.assert_awaited_once()
     assert pipeline.run.await_args.kwargs["skip_llm_steps"] is False
     pipeline.run_llm_steps.assert_awaited_once_with("m2")
+
+
+@pytest.mark.asyncio
+async def test_auto_processing_runner는_기본적으로_1회_1건만_처리한다(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    audio = config.paths.resolved_audio_input_dir / "m1.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+
+    now = datetime.now().isoformat()
+    queue = _Queue(
+        [
+            _Job("m1", str(audio), now, status="recorded"),
+            _Job("m2", str(audio), now, status="recorded"),
+        ]
+    )
+    pipeline = AsyncMock()
+
+    runner = AutoProcessingRunner(config=config, job_queue=queue, pipeline=pipeline)
+    result = await runner.run(action="transcribe", recent_hours=48)
+
+    assert result.matched == 2
+    assert result.queued == 1
+    assert result.skipped == 1
+    assert result.meeting_ids == ["m1"]
+    pipeline.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_auto_processing_runner는_HF_offline_pyannote_cache_누락시_보류한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(tmp_path)
+    config = _with_auto_processing_overrides(config, max_items_per_run=0)
+    audio = config.paths.resolved_audio_input_dir / "m1.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(
+        "core.runtime_safety.missing_pyannote_offline_cache_files",
+        lambda _model_name: ["pyannote/speaker-diarization-community-1:config.yaml"],
+    )
+
+    now = datetime.now().isoformat()
+    queue = _Queue([_Job("m1", str(audio), now, status="recorded")])
+    pipeline = AsyncMock()
+
+    runner = AutoProcessingRunner(config=config, job_queue=queue, pipeline=pipeline)
+    result = await runner.run(action="full", recent_hours=48)
+
+    assert result.queued == 0
+    assert result.skipped == 1
+    assert result.errors[0]["code"] == "hf_offline_pyannote_cache_incomplete"
+    pipeline.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_processing_runner는_공격적_thermal_설정이면_전사를_보류한다(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    config = config.model_copy(
+        update={
+            "thermal": config.thermal.model_copy(
+                update={"batch_size": 3, "cooldown_seconds": 60}
+            )
+        }
+    )
+    audio = config.paths.resolved_audio_input_dir / "m1.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+
+    now = datetime.now().isoformat()
+    queue = _Queue([_Job("m1", str(audio), now, status="recorded")])
+    pipeline = AsyncMock()
+
+    runner = AutoProcessingRunner(config=config, job_queue=queue, pipeline=pipeline)
+    result = await runner.run(action="transcribe", recent_hours=48)
+
+    assert result.queued == 0
+    assert result.skipped == 1
+    assert result.errors[0]["code"] == "auto_processing_aggressive_thermal"
+    pipeline.run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -224,6 +224,11 @@ auto_processing:
   recent_hours: 48                           # 최근 N시간 내 회의만 대상
   action: "full"                             # transcribe | summarize | full
   run_on_startup_if_missed: false            # 시작 시 오늘 실행 시간이 지났으면 1회 실행
+  safety_checks_enabled: true                # HF offline/cache/thermal 위험 조합이면 자동처리 보류
+  max_items_per_run: 1                       # 자동 처리 1회당 최대 회의 수 (0=제한 없음)
+  block_hf_offline_cache_miss: true          # HF offline + pyannote 캐시 불완전 시 전사 자동 실행 차단
+  max_thermal_batch_size: 2                  # 자동 전사 허용 thermal.batch_size 상한
+  min_thermal_cooldown_seconds: 180          # 자동 전사 허용 cooldown 하한 (초)
 
 # === VAD (Voice Activity Detection) 설정 ===
 # 주의: mlx-whisper + 외부 silero-vad 조합에서 VAD ON 은 실행시간을 약 3배 늘리고

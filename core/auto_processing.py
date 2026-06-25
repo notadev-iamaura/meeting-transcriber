@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from core.runtime_safety import auto_processing_safety_issues
+
 logger = logging.getLogger(__name__)
 
 AutoProcessingAction = Literal["transcribe", "summarize", "full"]
@@ -145,13 +147,38 @@ class AutoProcessingRunner:
 
         한 회의가 실패해도 나머지 회의는 계속 처리한다.
         """
-        items = await self.prepare(action=action, recent_hours=recent_hours)
+        safety_issues = auto_processing_safety_issues(self._config, action=action)
+        if safety_issues:
+            logger.warning(
+                "자동 처리 보류: %s",
+                "; ".join(issue.message for issue in safety_issues),
+            )
+            return AutoProcessingResult(
+                action=action,
+                recent_hours=recent_hours,
+                skipped=len(safety_issues),
+                errors=[issue.to_dict() for issue in safety_issues],
+            )
+
+        prepared_items = await self.prepare(action=action, recent_hours=recent_hours)
+        max_items = int(getattr(self._config.auto_processing, "max_items_per_run", 1))
+        items = prepared_items if max_items == 0 else prepared_items[:max_items]
+        skipped_by_limit = max(0, len(prepared_items) - len(items))
+
+        if skipped_by_limit > 0:
+            logger.info(
+                "자동 처리: 1회 처리 상한으로 %d건 보류 (max_items_per_run=%d)",
+                skipped_by_limit,
+                max_items,
+            )
+
         result = AutoProcessingResult(
             action=action,
             recent_hours=recent_hours,
-            matched=len(items),
+            matched=len(prepared_items),
             queued=len(items),
             meeting_ids=[item.meeting_id for item in items],
+            skipped=skipped_by_limit,
         )
 
         for item in items:
