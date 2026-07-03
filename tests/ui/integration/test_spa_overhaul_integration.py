@@ -2756,6 +2756,351 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
         assert any("다시 전사" in text for text in groups["danger"])
 
 
+def test_viewer_draft_transcript_is_readonly_but_copyable(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """처리 중 transcribe 초안은 표시/검색/복사/다운로드 가능하지만 편집은 막는다."""
+    mutation_requests: list[str] = []
+
+    def draft_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        if path == "/api/meetings/meeting-draft/transcript":
+            if route.request.method in {"PUT", "POST"}:
+                mutation_requests.append(route.request.method + " " + path)
+                route.fulfill(status=500, content_type="application/json", body="{}")
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-draft",
+                        "source_stage": "transcribe",
+                        "readonly": True,
+                        "utterances": [
+                            {
+                                "speaker": "UNKNOWN",
+                                "start": 0,
+                                "end": 2,
+                                "text": "초안 전사입니다",
+                                "original_text": "초안 전사입니다",
+                                "was_corrected": False,
+                            }
+                        ],
+                        "speakers": [],
+                        "num_speakers": 0,
+                        "total_utterances": 1,
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-draft":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-draft",
+                        "audio_path": "/tmp/draft.wav",
+                        "created_at": "2026-05-05T10:00:00",
+                        "status": "diarizing",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-draft/summary":
+            route.fulfill(status=404, content_type="application/json", body="{}")
+            return
+        if path == "/api/meetings/meeting-draft/pipeline-state":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"running","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-draft",
+        api_handler=draft_api,
+    ) as page:
+        page.wait_for_selector(".utterance")
+        assert "전사 초안" in page.locator("#viewerTranscriptSourceStatus").inner_text()
+        assert "화자 구분 전" in page.locator("#viewerMetaSpeakers").inner_text()
+        assert page.locator("#viewerTranscriptSourceStatus").get_attribute("role") == "status"
+        assert page.locator("#viewerTranscriptSourceStatus").get_attribute("aria-live") == "polite"
+        assert page.locator(".viewer-action-btn.copy").count() == 1
+        assert page.locator(".viewer-action-btn.download-txt").count() == 1
+        assert page.locator(".viewer-action-btn.replace").count() == 0
+
+        page.locator("#viewerSearchInput").fill("초안")
+        page.wait_for_function(
+            "() => document.querySelector('#viewerSearchInfo').textContent.includes('1 / 1')"
+        )
+
+        page.locator(".utterance-text").dblclick()
+        page.wait_for_timeout(200)
+        assert page.locator(".utterance-textarea").count() == 0
+        assert mutation_requests == []
+
+
+def test_viewer_polling_shows_draft_before_completion(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """전사 API가 처음 404여도 처리 중 polling으로 초안이 나타난다."""
+    transcript_calls = {"count": 0}
+
+    def polling_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        if path == "/api/meetings/meeting-poll/transcript":
+            transcript_calls["count"] += 1
+            if transcript_calls["count"] == 1:
+                route.fulfill(status=404, content_type="application/json", body="{}")
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-poll",
+                        "source_stage": "transcribe",
+                        "readonly": True,
+                        "utterances": [
+                            {
+                                "speaker": "UNKNOWN",
+                                "start": 0,
+                                "end": 1,
+                                "text": "폴링 초안",
+                            }
+                        ],
+                        "speakers": [],
+                        "num_speakers": 0,
+                        "total_utterances": 1,
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-poll":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-poll",
+                        "audio_path": "/tmp/poll.wav",
+                        "created_at": "2026-05-05T10:00:00",
+                        "status": "diarizing",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-poll/summary":
+            route.fulfill(status=404, content_type="application/json", body="{}")
+            return
+        if path == "/api/meetings/meeting-poll/pipeline-state":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"running","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-poll",
+        api_handler=polling_api,
+    ) as page:
+        page.wait_for_selector(".utterance", timeout=5000)
+        assert "폴링 초안" in page.locator(".utterance-text").inner_text()
+        assert "전사 초안" in page.locator("#viewerTranscriptSourceStatus").inner_text()
+
+
+def test_viewer_draft_upgrades_to_editable_correct_transcript(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """처리 중 초안이 이후 correct 응답으로 업그레이드되고 편집 액션이 열린다."""
+    transcript_calls = {"count": 0}
+
+    def upgrade_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        if path == "/api/meetings/meeting-upgrade/transcript":
+            transcript_calls["count"] += 1
+            if transcript_calls["count"] == 1:
+                body = {
+                    "meeting_id": "meeting-upgrade",
+                    "source_stage": "transcribe",
+                    "readonly": True,
+                    "utterances": [{"speaker": "UNKNOWN", "start": 0, "end": 1, "text": "초안"}],
+                    "speakers": [],
+                    "num_speakers": 0,
+                    "total_utterances": 1,
+                }
+            else:
+                body = {
+                    "meeting_id": "meeting-upgrade",
+                    "source_stage": "correct",
+                    "readonly": False,
+                    "utterances": [
+                        {
+                            "speaker": "SPEAKER_00",
+                            "start": 0,
+                            "end": 1,
+                            "text": "보정 전사",
+                            "original_text": "초안",
+                            "was_corrected": True,
+                        }
+                    ],
+                    "speakers": ["SPEAKER_00"],
+                    "num_speakers": 1,
+                    "total_utterances": 1,
+                }
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+            return
+        if path == "/api/meetings/meeting-upgrade":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-upgrade",
+                        "audio_path": "/tmp/upgrade.wav",
+                        "created_at": "2026-05-05T10:00:00",
+                        "status": "completed",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-upgrade/summary":
+            route.fulfill(status=404, content_type="application/json", body="{}")
+            return
+        if path == "/api/meetings/meeting-upgrade/pipeline-state":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"completed","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-upgrade",
+        api_handler=upgrade_api,
+    ) as page:
+        page.wait_for_selector(".utterance")
+        page.evaluate("() => document.dispatchEvent(new CustomEvent('ws:job_completed'))")
+        page.wait_for_function(
+            "() => document.querySelector('.utterance-text').textContent.includes('보정 전사')"
+        )
+        assert page.locator(".viewer-action-btn.replace").count() == 1
+        page.locator(".utterance-text").dblclick()
+        page.wait_for_selector(".utterance-textarea")
+
+
+def test_viewer_correct_transcript_is_readonly_while_processing(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """correct 응답이어도 회의가 처리 중이면 표시만 하고 편집은 막는다."""
+    mutation_requests: list[str] = []
+
+    def processing_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        if path == "/api/meetings/meeting-processing/transcript":
+            if route.request.method in {"PUT", "POST"}:
+                mutation_requests.append(route.request.method + " " + path)
+                route.fulfill(status=500, content_type="application/json", body="{}")
+                return
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-processing",
+                        "source_stage": "correct",
+                        "readonly": False,
+                        "utterances": [
+                            {
+                                "speaker": "SPEAKER_00",
+                                "start": 0,
+                                "end": 2,
+                                "text": "보정은 됐지만 아직 검색 준비 중입니다",
+                                "original_text": "보정은 됐지만 아직 검색 준비 중입니다",
+                                "was_corrected": False,
+                            }
+                        ],
+                        "speakers": ["SPEAKER_00"],
+                        "num_speakers": 1,
+                        "total_utterances": 1,
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-processing":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-processing",
+                        "audio_path": "/tmp/processing.wav",
+                        "created_at": "2026-05-05T10:00:00",
+                        "status": "embedding",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-processing/summary":
+            route.fulfill(status=404, content_type="application/json", body="{}")
+            return
+        if path == "/api/meetings/meeting-processing/pipeline-state":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"running","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-processing",
+        api_handler=processing_api,
+    ) as page:
+        page.wait_for_selector(".utterance")
+        assert "보정본" in page.locator("#viewerTranscriptSourceStatus").inner_text()
+        assert "검색 준비 진행 중" in page.locator("#viewerTranscriptSourceStatus").inner_text()
+        assert page.locator(".viewer-action-btn.copy").count() == 1
+        assert page.locator(".viewer-action-btn.download-txt").count() == 1
+        assert page.locator(".viewer-action-btn.replace").count() == 0
+
+        page.locator(".utterance-text").dblclick()
+        page.wait_for_timeout(200)
+        assert page.locator(".utterance-textarea").count() == 0
+        assert mutation_requests == []
+
+
 def test_search_labels_and_suggestion_chip(browser: Browser, spa_static_server: str) -> None:
     """검색 필터 label과 추천 chip이 실제 검색 payload에 반영된다."""
     payloads: list[dict] = []

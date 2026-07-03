@@ -86,7 +86,7 @@ def seeded_meeting(job_queue: JobQueue, isolated_base: Path) -> str:
     job_queue.add_job(
         meeting_id=meeting_id,
         audio_path="/tmp/test.wav",
-        initial_status=JobStatus.RECORDED.value,
+        initial_status=JobStatus.COMPLETED.value,
     )
 
     # 전사 파일
@@ -289,6 +289,37 @@ class TestUpdateTranscript:
         )
         assert resp.status_code == 404
 
+    def test_처리중_전사문_수정_거부(
+        self,
+        client: TestClient,
+        seeded_meeting: str,
+        isolated_base: Path,
+        job_queue: JobQueue,
+    ) -> None:
+        """correct.json이 있어도 파이프라인 완료 전에는 전사문 편집을 막는다."""
+        job = job_queue.get_job_by_meeting_id(seeded_meeting)
+        assert job is not None
+        job_queue.force_set_status(job.id, JobStatus.EMBEDDING)
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
+        before = cp.read_text()
+
+        resp = client.put(
+            f"/api/meetings/{seeded_meeting}/transcript",
+            json={
+                "utterances": [
+                    {
+                        "text": "처리 중 수정 시도",
+                        "speaker": "SPEAKER_00",
+                        "start": 0,
+                        "end": 1,
+                    }
+                ]
+            },
+        )
+
+        assert resp.status_code == 409
+        assert cp.read_text() == before
+
 
 # === 전사 패턴 치환 + 용어집 자동 등록 ===
 
@@ -336,7 +367,32 @@ class TestTranscriptReplace:
         )
         assert resp.status_code == 200
         assert resp.json()["changes"] == 0
-        assert resp.json()["updated_utterances"] == 0
+
+    def test_처리중_모두바꾸기_거부(
+        self,
+        client: TestClient,
+        seeded_meeting: str,
+        isolated_base: Path,
+        job_queue: JobQueue,
+    ) -> None:
+        """correct.json이 있어도 파이프라인 완료 전에는 패턴 치환을 막는다."""
+        job = job_queue.get_job_by_meeting_id(seeded_meeting)
+        assert job is not None
+        job_queue.force_set_status(job.id, JobStatus.EMBEDDING)
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
+        before = cp.read_text()
+
+        resp = client.post(
+            f"/api/meetings/{seeded_meeting}/transcript/replace",
+            json={
+                "find": "파이선",
+                "replace": "FastAPI",
+                "add_to_vocabulary": False,
+            },
+        )
+
+        assert resp.status_code == 409
+        assert cp.read_text() == before
 
     def test_find과_replace_동일_거부(self, client: TestClient, seeded_meeting: str) -> None:
         resp = client.post(

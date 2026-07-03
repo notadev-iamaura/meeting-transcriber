@@ -167,22 +167,30 @@ def _find_latest_audio(config: AppConfig) -> Path:
 
 def _apply_overrides(config: AppConfig, args: argparse.Namespace) -> None:
     """CLI variant 인자를 AppConfig에 반영한다."""
-    if args.stt_word_timestamps is not None:
-        config.stt.word_timestamps = args.stt_word_timestamps
-    if args.vad_mode is not None:
-        config.vad.mode = args.vad_mode
-        config.vad.enabled = args.vad_mode != "off"
-    if args.diarization_model:
-        config.diarization.model_name = args.diarization_model
-    if args.diarization_output_mode:
-        config.diarization.output_mode = args.diarization_output_mode
-    if args.diarization_min_speakers is not None:
-        config.diarization.min_speakers = args.diarization_min_speakers
-    if args.diarization_max_speakers is not None:
-        config.diarization.max_speakers = args.diarization_max_speakers
-    if args.correction_mode:
-        config.llm.correction_mode = args.correction_mode
-    if args.no_adaptive_correction_tokens:
+    stt_word_timestamps = getattr(args, "stt_word_timestamps", None)
+    vad_mode = getattr(args, "vad_mode", None)
+    diarization_model = getattr(args, "diarization_model", None)
+    diarization_output_mode = getattr(args, "diarization_output_mode", None)
+    diarization_min_speakers = getattr(args, "diarization_min_speakers", None)
+    diarization_max_speakers = getattr(args, "diarization_max_speakers", None)
+    correction_mode = getattr(args, "correction_mode", None)
+
+    if stt_word_timestamps is not None:
+        config.stt.word_timestamps = stt_word_timestamps
+    if vad_mode is not None:
+        config.vad.mode = vad_mode
+        config.vad.enabled = vad_mode != "off"
+    if diarization_model:
+        config.diarization.model_name = diarization_model
+    if diarization_output_mode:
+        config.diarization.output_mode = diarization_output_mode
+    if diarization_min_speakers is not None:
+        config.diarization.min_speakers = diarization_min_speakers
+    if diarization_max_speakers is not None:
+        config.diarization.max_speakers = diarization_max_speakers
+    if correction_mode:
+        config.llm.correction_mode = correction_mode
+    if getattr(args, "no_adaptive_correction_tokens", False):
         config.llm.correction_adaptive_max_tokens = False
 
 

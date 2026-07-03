@@ -426,6 +426,52 @@ class TestParseSegments:
         segments = transcriber._parse_segments(raw)
         assert segments[0].text == "한국"
 
+    def test_words_타임스탬프가_있으면_세그먼트_경계를_보정한다(
+        self,
+        transcriber: Transcriber,
+    ) -> None:
+        """words 배열이 있으면 첫/마지막 단어 시간으로 경계를 보정한다."""
+        raw = _make_raw_result(
+            segments=[
+                {
+                    "text": " 안녕하세요",
+                    "start": 0.0,
+                    "end": 30.0,
+                    "words": [
+                        {"word": "안녕", "start": 1.2, "end": 1.8},
+                        {"word": "하세요", "start": 1.8, "end": 2.4},
+                    ],
+                }
+            ]
+        )
+
+        segments = transcriber._parse_segments(raw)
+
+        assert len(segments) == 1
+        assert segments[0].start == 1.2
+        assert segments[0].end == 2.4
+
+    def test_words_타임스탬프가_없으면_segment_경계를_유지한다(
+        self,
+        transcriber: Transcriber,
+    ) -> None:
+        """words 배열이 없으면 segment-level start/end를 그대로 사용한다."""
+        raw = _make_raw_result(
+            segments=[
+                {
+                    "text": " 안녕하세요",
+                    "start": 0.0,
+                    "end": 30.0,
+                }
+            ]
+        )
+
+        segments = transcriber._parse_segments(raw)
+
+        assert len(segments) == 1
+        assert segments[0].start == 0.0
+        assert segments[0].end == 30.0
+
 
 # === Whisper 모듈 로드 테스트 ===
 

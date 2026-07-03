@@ -33,20 +33,22 @@ class _JsonFileCache:
     """JSON 파일을 mtime 기반으로 캐싱하는 스레드 안전 캐시."""
 
     def __init__(self, max_size: int = 64) -> None:
-        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache: dict[str, tuple[int, int, Any]] = {}
         self._max_size = max_size
         self._lock = threading.Lock()
 
     def get(self, file_path: Path) -> Any:
         """캐시된 JSON 데이터를 반환한다. 변경 시 자동 갱신한다."""
         key = str(file_path)
-        current_mtime = file_path.stat().st_mtime
+        stat = file_path.stat()
+        current_mtime_ns = stat.st_mtime_ns
+        current_size = stat.st_size
 
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                cached_mtime, cached_data = cached
-                if cached_mtime == current_mtime:
+                cached_mtime_ns, cached_size, cached_data = cached
+                if cached_mtime_ns == current_mtime_ns and cached_size == current_size:
                     return cached_data
 
         with open(file_path, encoding="utf-8") as f:
@@ -56,7 +58,7 @@ class _JsonFileCache:
             if len(self._cache) >= self._max_size and key not in self._cache:
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
-            self._cache[key] = (current_mtime, data)
+            self._cache[key] = (current_mtime_ns, current_size, data)
 
         return data
 
@@ -73,11 +75,27 @@ _MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
 
 def _validate_meeting_id(meeting_id: str) -> None:
     """meeting_id 형식을 검증한다 (path traversal 방지)."""
-    if not _MEETING_ID_PATTERN.match(meeting_id):
+    parts = re.split(r"[\\/]+", meeting_id)
+    if (
+        not _MEETING_ID_PATTERN.match(meeting_id)
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
         )
+
+
+def _safe_child_path(root: Path, *parts: str) -> Path:
+    """root 하위 경로만 허용하는 안전한 파일 경로를 만든다."""
+    root_resolved = root.resolve()
+    candidate = root_resolved.joinpath(*parts).resolve(strict=False)
+    if not candidate.is_relative_to(root_resolved):
+        raise HTTPException(
+            status_code=400,
+            detail="유효하지 않은 파일 경로입니다.",
+        )
+    return candidate
 
 
 def _get_config(request: Request) -> Any:
@@ -296,6 +314,8 @@ class TranscriptResponse(BaseModel):
         num_speakers: 감지된 화자 수
         speakers: 화자 라벨 목록
         total_utterances: 전체 발화 수
+        source_stage: 응답을 구성한 산출물 단계
+        readonly: 편집 가능한 최종/보정 전사인지 여부
     """
 
     utterances: list[TranscriptUtteranceItem] = Field(default_factory=list)
@@ -303,6 +323,8 @@ class TranscriptResponse(BaseModel):
     num_speakers: int = 0
     speakers: list[str] = Field(default_factory=list)
     total_utterances: int = 0
+    source_stage: str = "corrected"
+    readonly: bool = False
 
 
 class SummaryResponse(BaseModel):
@@ -1166,6 +1188,7 @@ async def get_transcript(
       1. outputs/{meeting_id}/corrected.json (LLM 보정 완료)
       2. checkpoints/{meeting_id}/correct.json (보정 체크포인트)
       3. checkpoints/{meeting_id}/merge.json (병합 결과, 미보정)
+      4. checkpoints/{meeting_id}/transcribe.json (화자분리 전 전사 초안, 읽기 전용)
 
     Args:
         request: FastAPI Request 객체
@@ -1185,17 +1208,38 @@ async def get_transcript(
     outputs_dir = config.paths.resolved_outputs_dir
     checkpoints_dir = config.paths.resolved_checkpoints_dir
 
-    # 폴백 순서: corrected.json → correct.json → merge.json
+    # 폴백 순서: corrected.json → correct.json → merge.json → transcribe.json
     candidates = [
-        outputs_dir / meeting_id / "corrected.json",
-        checkpoints_dir / meeting_id / "correct.json",
-        checkpoints_dir / meeting_id / "merge.json",
+        (
+            _safe_child_path(outputs_dir, meeting_id, "corrected.json"),
+            "corrected",
+            False,
+        ),
+        (
+            _safe_child_path(checkpoints_dir, meeting_id, "correct.json"),
+            "correct",
+            False,
+        ),
+        (
+            _safe_child_path(checkpoints_dir, meeting_id, "merge.json"),
+            "merge",
+            True,
+        ),
+        (
+            _safe_child_path(checkpoints_dir, meeting_id, "transcribe.json"),
+            "transcribe",
+            True,
+        ),
     ]
 
     transcript_path: Path | None = None
-    for candidate in candidates:
+    source_stage = ""
+    readonly = True
+    for candidate, candidate_stage, candidate_readonly in candidates:
         if candidate.is_file():
             transcript_path = candidate
+            source_stage = candidate_stage
+            readonly = candidate_readonly
             break
 
     if transcript_path is None:
@@ -1210,20 +1254,34 @@ async def get_transcript(
         # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
         data = await asyncio.to_thread(_json_cache.get, transcript_path)
 
-        # merge.json은 original_text/was_corrected 필드가 없으므로 폴백 처리
-        is_merge_fallback = "merge" in transcript_path.name
-
-        utterances = [
-            TranscriptUtteranceItem(
-                text=u.get("text", ""),
-                original_text=u.get("original_text", u.get("text", "")),
-                speaker=u.get("speaker", "UNKNOWN"),
-                start=u.get("start", 0.0),
-                end=u.get("end", 0.0),
-                was_corrected=u.get("was_corrected", False) if not is_merge_fallback else False,
-            )
-            for u in data.get("utterances", [])
-        ]
+        if source_stage == "transcribe":
+            utterances = [
+                TranscriptUtteranceItem(
+                    text=segment.get("text", ""),
+                    original_text=segment.get("text", ""),
+                    speaker="UNKNOWN",
+                    start=segment.get("start", 0.0),
+                    end=segment.get("end", 0.0),
+                    was_corrected=False,
+                )
+                for segment in data.get("segments", [])
+            ]
+        else:
+            # merge.json은 original_text/was_corrected 필드가 없으므로 폴백 처리
+            is_merge_fallback = source_stage == "merge"
+            utterances = [
+                TranscriptUtteranceItem(
+                    text=u.get("text", ""),
+                    original_text=u.get("original_text", u.get("text", "")),
+                    speaker=u.get("speaker", "UNKNOWN"),
+                    start=u.get("start", 0.0),
+                    end=u.get("end", 0.0),
+                    was_corrected=(
+                        u.get("was_corrected", False) if not is_merge_fallback else False
+                    ),
+                )
+                for u in data.get("utterances", [])
+            ]
 
         # 화자 목록 추출 (UNKNOWN 제외, 순서 보존)
         seen: set[str] = set()
@@ -1236,9 +1294,13 @@ async def get_transcript(
         return TranscriptResponse(
             utterances=utterances,
             meeting_id=meeting_id,
-            num_speakers=data.get("num_speakers", len(speakers)),
+            num_speakers=(
+                0 if source_stage == "transcribe" else data.get("num_speakers", len(speakers))
+            ),
             speakers=speakers,
             total_utterances=len(utterances),
+            source_stage=source_stage,
+            readonly=readonly,
         )
     except HTTPException:
         raise
@@ -1506,16 +1568,30 @@ def _find_transcript_file(config: Any, meeting_id: str) -> tuple[Path | None, st
     checkpoints_dir = config.paths.resolved_checkpoints_dir
 
     # 1순위: outputs/{id}/corrected.json
-    corrected = outputs_dir / meeting_id / "corrected.json"
+    corrected = _safe_child_path(outputs_dir, meeting_id, "corrected.json")
     if corrected.is_file():
         return corrected, "output"
 
     # 2순위: checkpoints/{id}/correct.json
-    checkpoint = checkpoints_dir / meeting_id / "correct.json"
+    checkpoint = _safe_child_path(checkpoints_dir, meeting_id, "correct.json")
     if checkpoint.is_file():
         return checkpoint, "checkpoint"
 
     return None, ""
+
+
+async def _ensure_transcript_edit_allowed(request: Request, meeting_id: str) -> None:
+    """완료되지 않은 파이프라인의 전사문 수정 요청을 거부한다."""
+    from core.job_queue import JobStatus
+
+    queue = _get_job_queue(request)
+    raw_queue = getattr(queue, "queue", queue)
+    job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+    if job is not None and job.status != JobStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409,
+            detail="파이프라인 처리 중에는 전사문을 수정할 수 없습니다. 완료 후 다시 시도해 주세요.",
+        )
 
 
 @router.put(
@@ -1545,6 +1621,8 @@ async def update_transcript(
             status_code=404,
             detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id} (먼저 파이프라인을 실행하세요)",
         )
+
+    await _ensure_transcript_edit_allowed(request, meeting_id)
 
     try:
         # 기존 데이터 로드 (num_speakers 등 메타 필드 보존)
@@ -1593,6 +1671,8 @@ async def update_transcript(
         num_speakers=existing.get("num_speakers", 0),
         speakers=speakers,
         total_utterances=len(new_utterances),
+        source_stage="corrected" if target.name == "corrected.json" else "correct",
+        readonly=False,
     )
 
 
@@ -1640,6 +1720,8 @@ async def replace_transcript_pattern(
             status_code=404,
             detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id}",
         )
+
+    await _ensure_transcript_edit_allowed(request, meeting_id)
 
     try:
 

@@ -998,6 +998,75 @@ def _create_corrected_json(outputs_dir: Path, meeting_id: str) -> Path:
     return file_path
 
 
+def _create_transcript_checkpoint(
+    checkpoints_dir: Path,
+    meeting_id: str,
+    filename: str,
+    *,
+    speaker: str = "SPEAKER_00",
+    text: str = "체크포인트 전사",
+) -> Path:
+    """테스트용 correct/merge checkpoint JSON을 생성한다."""
+    meeting_dir = checkpoints_dir / meeting_id
+    meeting_dir.mkdir(parents=True, exist_ok=True)
+    file_path = meeting_dir / filename
+    file_path.write_text(
+        json.dumps(
+            {
+                "utterances": [
+                    {
+                        "text": text,
+                        "original_text": text,
+                        "speaker": speaker,
+                        "start": 1.0,
+                        "end": 2.0,
+                        "was_corrected": filename == "correct.json",
+                    }
+                ],
+                "num_speakers": 1,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return file_path
+
+
+def _create_transcribe_checkpoint(
+    checkpoints_dir: Path,
+    meeting_id: str,
+    *,
+    text: str = "초안 전사입니다.",
+) -> Path:
+    """테스트용 transcribe.json checkpoint를 생성한다."""
+    meeting_dir = checkpoints_dir / meeting_id
+    meeting_dir.mkdir(parents=True, exist_ok=True)
+    file_path = meeting_dir / "transcribe.json"
+    file_path.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "text": text,
+                        "start": 0.5,
+                        "end": 3.0,
+                        "avg_logprob": -0.1,
+                        "no_speech_prob": 0.01,
+                    }
+                ],
+                "full_text": text,
+                "language": "ko",
+                "audio_path": "/tmp/audio.wav",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return file_path
+
+
 def _create_summary_files(
     outputs_dir: Path,
     meeting_id: str,
@@ -1071,6 +1140,8 @@ class TestTranscriptEndpoint:
         assert len(data["speakers"]) == 2
         assert "SPEAKER_00" in data["speakers"]
         assert "SPEAKER_01" in data["speakers"]
+        assert data["source_stage"] == "corrected"
+        assert data["readonly"] is False
 
     def test_전사문_발화_필드_검증(self, tmp_path: Path) -> None:
         """전사문 발화 항목의 필드가 올바른지 확인한다."""
@@ -1121,6 +1192,154 @@ class TestTranscriptEndpoint:
         # SPEAKER_00이 먼저 등장하므로 첫 번째
         assert data["speakers"][0] == "SPEAKER_00"
         assert data["speakers"][1] == "SPEAKER_01"
+
+    def test_transcribe_checkpoint_초안_조회(self, tmp_path: Path) -> None:
+        """transcribe.json만 있으면 읽기 전용 전사 초안을 반환한다."""
+        app = _make_test_app(tmp_path)
+        checkpoints_dir = tmp_path / "checkpoints"
+        _create_transcribe_checkpoint(checkpoints_dir, "meeting_draft")
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_draft/transcript")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["meeting_id"] == "meeting_draft"
+        assert data["source_stage"] == "transcribe"
+        assert data["readonly"] is True
+        assert data["num_speakers"] == 0
+        assert data["speakers"] == []
+        assert data["total_utterances"] == 1
+        first = data["utterances"][0]
+        assert first["text"] == "초안 전사입니다."
+        assert first["original_text"] == "초안 전사입니다."
+        assert first["speaker"] == "UNKNOWN"
+        assert first["start"] == 0.5
+        assert first["end"] == 3.0
+        assert first["was_corrected"] is False
+
+    def test_전사문_source_우선순위와_readonly(self, tmp_path: Path) -> None:
+        """corrected > correct > merge > transcribe 우선순위와 readonly 계약을 검증한다."""
+        app = _make_test_app(tmp_path)
+        outputs_dir = tmp_path / "outputs"
+        checkpoints_dir = tmp_path / "checkpoints"
+
+        _create_transcribe_checkpoint(checkpoints_dir, "meeting_priority", text="draft")
+        _create_transcript_checkpoint(checkpoints_dir, "meeting_priority", "merge.json", text="merge")
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_priority/transcript")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_stage"] == "merge"
+        assert data["readonly"] is True
+        assert data["utterances"][0]["text"] == "merge"
+
+        _create_transcript_checkpoint(checkpoints_dir, "meeting_priority", "correct.json", text="correct")
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_priority/transcript")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_stage"] == "correct"
+        assert data["readonly"] is False
+        assert data["utterances"][0]["text"] == "correct"
+
+        _create_corrected_json(outputs_dir, "meeting_priority")
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_priority/transcript")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_stage"] == "corrected"
+        assert data["readonly"] is False
+
+    def test_transcribe_checkpoint_초안은_편집_불가(self, tmp_path: Path) -> None:
+        """transcribe.json만 있는 상태에서는 PUT/replace가 파일을 바꾸지 않는다."""
+        app = _make_test_app(tmp_path)
+        checkpoints_dir = tmp_path / "checkpoints"
+        draft_path = _create_transcribe_checkpoint(checkpoints_dir, "meeting_draft_edit")
+        before = draft_path.read_text(encoding="utf-8")
+        payload = {
+            "utterances": [
+                {
+                    "text": "수정",
+                    "original_text": "수정",
+                    "speaker": "UNKNOWN",
+                    "start": 0,
+                    "end": 1,
+                    "was_corrected": True,
+                }
+            ]
+        }
+
+        with TestClient(app) as client:
+            put_response = client.put(
+                "/api/meetings/meeting_draft_edit/transcript",
+                json=payload,
+            )
+            replace_response = client.post(
+                "/api/meetings/meeting_draft_edit/transcript/replace",
+                json={"find": "초안", "replace": "수정", "add_to_vocabulary": False},
+            )
+
+        assert put_response.status_code == 404
+        assert replace_response.status_code == 404
+        assert draft_path.read_text(encoding="utf-8") == before
+
+    def test_dot_segment_meeting_id가_checkpoint_root를_읽지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """'.' 같은 meeting_id가 checkpoints 루트 파일을 읽지 못하게 한다."""
+        app = _make_test_app(tmp_path)
+        checkpoints_dir = tmp_path / "checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoints_dir / "transcribe.json").write_text(
+            json.dumps({"segments": [{"text": "root leak", "start": 0, "end": 1}]}),
+            encoding="utf-8",
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/./transcript")
+
+        assert response.status_code != 200
+
+    def test_transcript_cache가_higher_stage_생성시_갱신됨(self, tmp_path: Path) -> None:
+        """draft 조회 뒤 merge가 생기면 다음 조회는 merge를 반환한다."""
+        app = _make_test_app(tmp_path)
+        checkpoints_dir = tmp_path / "checkpoints"
+        _create_transcribe_checkpoint(checkpoints_dir, "meeting_cache", text="draft")
+
+        with TestClient(app) as client:
+            first_response = client.get("/api/meetings/meeting_cache/transcript")
+            _create_transcript_checkpoint(
+                checkpoints_dir,
+                "meeting_cache",
+                "merge.json",
+                text="merge",
+            )
+            second_response = client.get("/api/meetings/meeting_cache/transcript")
+
+        assert first_response.status_code == 200
+        assert first_response.json()["source_stage"] == "transcribe"
+        assert second_response.status_code == 200
+        assert second_response.json()["source_stage"] == "merge"
+        assert second_response.json()["utterances"][0]["text"] == "merge"
+
+    def test_higher_stage_json_손상시_초안으로_조용히_fallback하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """merge.json이 존재하지만 깨진 경우 transcribe 초안으로 숨기지 않는다."""
+        app = _make_test_app(tmp_path)
+        checkpoints_dir = tmp_path / "checkpoints"
+        _create_transcribe_checkpoint(checkpoints_dir, "meeting_corrupt", text="draft")
+        meeting_dir = checkpoints_dir / "meeting_corrupt"
+        (meeting_dir / "merge.json").write_text("{broken", encoding="utf-8")
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_corrupt/transcript")
+
+        assert response.status_code == 500
 
 
 # === TestSummaryEndpoint ===

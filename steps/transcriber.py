@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
+from core.io_utils import atomic_write_json
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.preflight import run_preflight
 from core.retry_policy import TranscriptionTimeoutError
@@ -102,9 +103,7 @@ class TranscriptResult:
         Raises:
             IOError: 파일 쓰기 실패 시
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False)
+        atomic_write_json(output_path, self.to_dict(), backup=False)
         logger.info(f"전사 체크포인트 저장: {output_path}")
 
     @classmethod

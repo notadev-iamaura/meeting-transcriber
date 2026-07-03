@@ -20,6 +20,13 @@
             throw new Error("MeetingViewerView requires App, Router, and ListPanel");
         }
 
+        var TRANSCRIPT_STAGE_RANK = {
+            transcribe: 1,
+            merge: 2,
+            correct: 3,
+            corrected: 4,
+        };
+
         // =================================================================
         // === ViewerView (전사문 뷰어) ===
         // =================================================================
@@ -56,6 +63,9 @@
             // status: "pending" | "running" | "completed" | "failed" | "skipped"
             self._liveLog = {};
             self._liveLogTickTimer = null;
+            self._transcriptSourceStage = "corrected";
+            self._transcriptReadonly = false;
+            self._transcriptSignature = "";
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
             var urlParams = new URLSearchParams(window.location.search);
@@ -96,6 +106,8 @@
                 '    <span class="viewer-meta-item" id="viewerMetaSpeakers"></span>',
                 '    <span class="viewer-meta-item" id="viewerMetaUtterances"></span>',
                 '  </div>',
+                '  <div class="transcript-source-status" id="viewerTranscriptSourceStatus"',
+                '       role="status" aria-live="polite" style="display:none;"></div>',
                 '  <div class="speaker-legend" id="viewerSpeakerLegend"></div>',
                 '  <div class="viewer-actions" id="viewerActions"></div>',
                 '  <details class="viewer-log-panel" id="viewerLogPanel" style="display:none;">',
@@ -201,6 +213,7 @@
                 metaDate: document.getElementById("viewerMetaDate"),
                 metaSpeakers: document.getElementById("viewerMetaSpeakers"),
                 metaUtterances: document.getElementById("viewerMetaUtterances"),
+                transcriptSourceStatus: document.getElementById("viewerTranscriptSourceStatus"),
                 speakerLegend: document.getElementById("viewerSpeakerLegend"),
                 viewerActions: document.getElementById("viewerActions"),
                 logPanel: document.getElementById("viewerLogPanel"),
@@ -388,6 +401,9 @@
                 self._loadMeetingInfo();
                 // 요약 완료 시 요약 데이터 갱신
                 var detail = e.detail || {};
+                if (!detail.meeting_id || detail.meeting_id === self._meetingId) {
+                    self._loadTranscript({ silent: true });
+                }
                 if (detail.step === "summarize") {
                     self._loadSummary();
                 }
@@ -646,7 +662,9 @@
                 // 텍스트
                 var textEl = document.createElement("div");
                 textEl.className = "utterance-text";
-                textEl.title = "더블클릭하여 편집";
+                textEl.title = self._canEditTranscript()
+                    ? "더블클릭하여 편집"
+                    : "읽기 전용 전사문";
 
                 if (query) {
                     var htmlContent = App.highlightText(u.text, query);
@@ -663,9 +681,11 @@
                 // 더블클릭 → 인라인 편집 모드
                 // (단일 클릭은 텍스트 선택과 충돌하므로 더블클릭 사용)
                 var utteranceIndex = utterances.indexOf(u);
-                textEl.addEventListener("dblclick", function () {
-                    self._beginEditUtterance(utteranceIndex, textEl);
-                });
+                if (self._canEditTranscript()) {
+                    textEl.addEventListener("dblclick", function () {
+                        self._beginEditUtterance(utteranceIndex, textEl);
+                    });
+                }
 
                 // ▶ 버튼 → 해당 발화 구간만 재생 (toggle)
                 (function (idx, container, btn) {
@@ -857,6 +877,9 @@
          */
         ViewerView.prototype._beginEditUtterance = function (index, textEl) {
             var self = this;
+            if (!self._canEditTranscript()) {
+                return;
+            }
             if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
             if (textEl.classList.contains("editing")) return;
 
@@ -926,6 +949,10 @@
          */
         ViewerView.prototype._saveTranscript = async function () {
             var self = this;
+            if (!self._canEditTranscript()) {
+                errorBanner.show("처리 중이거나 읽기 전용인 전사문은 수정할 수 없습니다.");
+                return;
+            }
             try {
                 var payload = {
                     utterances: self._allUtterances.map(function (u) {
@@ -954,8 +981,7 @@
                     throw new Error(err.detail || "HTTP " + resp.status);
                 }
                 var data = await resp.json();
-                self._allUtterances = data.utterances || [];
-                self._renderTimeline(self._allUtterances, self._currentQuery || "");
+                self._applyTranscriptResponse(data, { silent: true, force: true });
             } catch (e) {
                 errorBanner.show("전사문 저장 실패: " + (e.message || e));
                 // 실패 시 서버에서 재로드
@@ -968,6 +994,10 @@
          */
         ViewerView.prototype._openReplaceModal = function () {
             var self = this;
+            if (!self._canEditTranscript()) {
+                errorBanner.show("처리 중이거나 읽기 전용인 전사문은 모두 바꾸기를 사용할 수 없습니다.");
+                return;
+            }
             // 기존 모달 제거
             var existing = document.getElementById("transcriptReplaceModal");
             if (existing) existing.remove();
@@ -1165,6 +1195,7 @@
                 // 액션 버튼 렌더링 (전사 시작, 재시도, 요약 생성, 삭제)
                 // _loadTranscript 완료 후 다시 호출되어 복사/다운로드 버튼이 갱신됨
                 self._lastMeetingData = data;
+                self._renderTranscriptSourceStatus();
                 self._renderActions(data);
 
                 // 처리 로그 (단계별 소요시간) 로드 — completed/failed 일 때만 의미가 있음
@@ -1460,8 +1491,9 @@
                 secondaryGroup.appendChild(abTestBtn);
             }
 
-            // 전사문 복사/다운로드 + 모두 바꾸기 버튼 (완료된 회의이며 전사문 로드된 경우)
-            if (data.status === "completed" && self._allUtterances && self._allUtterances.length > 0) {
+            // 전사문 복사/다운로드는 draft/처리 중 상태에서도 허용.
+            // 모두 바꾸기는 편집 가능한 최종/보정 전사에서만 허용한다.
+            if (self._allUtterances && self._allUtterances.length > 0) {
                 var copyBtn = document.createElement("button");
                 copyBtn.className = "viewer-action-btn copy";
                 copyBtn.innerHTML = Icons.copy + ' 전사문 복사';
@@ -1480,20 +1512,22 @@
                 });
                 primaryGroup.appendChild(downloadBtn);
 
-                // 모두 바꾸기 (find/replace + 용어집 자동 등록)
-                var replaceBtn = document.createElement("button");
-                replaceBtn.className = "viewer-action-btn replace";
-                replaceBtn.innerHTML = "↻ 모두 바꾸기";
-                replaceBtn.setAttribute(
-                    "aria-label",
-                    "전사문에서 특정 패턴을 찾아 모두 치환하고 용어집에 추가"
-                );
-                replaceBtn.title =
-                    "오인식 패턴을 한 번에 치환하고 용어집에도 자동 등록해요 (발화 더블클릭으로 개별 편집도 가능)";
-                replaceBtn.addEventListener("click", function () {
-                    self._openReplaceModal();
-                });
-                secondaryGroup.appendChild(replaceBtn);
+                if (self._canEditTranscript()) {
+                    // 모두 바꾸기 (find/replace + 용어집 자동 등록)
+                    var replaceBtn = document.createElement("button");
+                    replaceBtn.className = "viewer-action-btn replace";
+                    replaceBtn.innerHTML = "↻ 모두 바꾸기";
+                    replaceBtn.setAttribute(
+                        "aria-label",
+                        "전사문에서 특정 패턴을 찾아 모두 치환하고 용어집에 추가"
+                    );
+                    replaceBtn.title =
+                        "오인식 패턴을 한 번에 치환하고 용어집에도 자동 등록해요 (발화 더블클릭으로 개별 편집도 가능)";
+                    replaceBtn.addEventListener("click", function () {
+                        self._openReplaceModal();
+                    });
+                    secondaryGroup.appendChild(replaceBtn);
+                }
             }
 
             // 삭제 버튼 (완료/실패/녹음완료 시)
@@ -1540,11 +1574,22 @@
                 return "참석자 " + (speakerNumbers[speaker] || "?");
             }
 
+            var sourceLabels = {
+                transcribe: "전사 초안",
+                merge: "화자 병합본",
+                correct: "보정본",
+                corrected: "최종 전사문",
+            };
+            var speakerCountText = self._transcriptSourceStage === "transcribe"
+                ? "화자 구분 전"
+                : count + "명";
+
             // 헤더 + 본문
             var header = [
                 "회의 ID: " + self._meetingId,
                 "추출 일시: " + new Date().toISOString(),
-                "화자 수: " + count + "명",
+                "전사 상태: " + (sourceLabels[self._transcriptSourceStage] || "전사문"),
+                "화자 수: " + speakerCountText,
                 "발화 수: " + self._allUtterances.length + "건",
                 "─────────────────────────────────────────",
                 "",
@@ -2015,68 +2060,216 @@
             await this._requestSummarize(false);
         };
 
+        ViewerView.prototype._normalizeTranscriptStage = function (stage) {
+            if (TRANSCRIPT_STAGE_RANK[stage]) return stage;
+            return "corrected";
+        };
+
+        ViewerView.prototype._isProcessingStatus = function (status) {
+            return {
+                queued: true,
+                transcribing: true,
+                diarizing: true,
+                merging: true,
+                embedding: true,
+            }[status] === true;
+        };
+
+        ViewerView.prototype._canEditTranscript = function () {
+            var status = this._lastMeetingData && this._lastMeetingData.status;
+            return status === "completed" && !this._transcriptReadonly;
+        };
+
+        ViewerView.prototype._buildTranscriptSignature = function (stage, readonly, utterances) {
+            return [
+                stage,
+                readonly ? "ro" : "rw",
+                utterances.length,
+                utterances.map(function (u) {
+                    return [
+                        u.speaker || "",
+                        Number(u.start) || 0,
+                        Number(u.end) || 0,
+                        u.text || "",
+                    ].join("~");
+                }).join("^"),
+            ].join("|");
+        };
+
+        ViewerView.prototype._renderTranscriptSourceStatus = function () {
+            var self = this;
+            var el = self._els.transcriptSourceStatus;
+            if (!el) return;
+
+            var stage = self._transcriptSourceStage;
+            var status = self._lastMeetingData && self._lastMeetingData.status;
+            var processingLabels = {
+                queued: "대기",
+                transcribing: "전사",
+                diarizing: "화자 구분",
+                merging: "병합",
+                embedding: "검색 준비",
+            };
+            var stageLabels = {
+                transcribe: "전사 초안",
+                merge: "화자 병합본",
+                correct: "보정본",
+                corrected: "",
+            };
+            var parts = [];
+            if (stageLabels[stage]) {
+                parts.push(stageLabels[stage]);
+            }
+            if (stage === "transcribe") {
+                parts.push("화자 구분 전");
+            } else if (self._transcriptReadonly) {
+                parts.push("읽기 전용");
+            }
+            if (processingLabels[status]) {
+                parts.push(processingLabels[status] + " 진행 중");
+            }
+
+            el.className = "transcript-source-status stage-" + App.escapeHtml(stage);
+            if (parts.length === 0) {
+                el.style.display = "none";
+                el.textContent = "";
+                return;
+            }
+            el.style.display = "inline-flex";
+            el.textContent = parts.join(" · ");
+        };
+
+        ViewerView.prototype._applyTranscriptResponse = function (data, options) {
+            var self = this;
+            var els = self._els;
+            options = options || {};
+
+            var stage = self._normalizeTranscriptStage(data.source_stage || "corrected");
+            var readonly = typeof data.readonly === "boolean" ? data.readonly : false;
+            var utterances = data.utterances || [];
+            var currentRank = TRANSCRIPT_STAGE_RANK[self._transcriptSourceStage] || 0;
+            var incomingRank = TRANSCRIPT_STAGE_RANK[stage] || 0;
+
+            if (
+                !options.force &&
+                self._allUtterances &&
+                self._allUtterances.length > 0 &&
+                incomingRank < currentRank
+            ) {
+                return true;
+            }
+
+            var signature = self._buildTranscriptSignature(stage, readonly, utterances);
+            if (options.silent && signature === self._transcriptSignature) {
+                return true;
+            }
+
+            self._transcriptSourceStage = stage;
+            self._transcriptReadonly = readonly;
+            self._transcriptSignature = signature;
+            self._allUtterances = utterances;
+
+            if (self._allUtterances.length === 0) {
+                return false;
+            }
+
+            els.transcriptEmpty.style.display = "none";
+            if (els.pipelineProgress) {
+                els.pipelineProgress.style.display = "none";
+            }
+
+            self._buildSpeakerColorMap(data.speakers || []);
+            self._renderSpeakerLegend(data.speakers || []);
+
+            if (stage === "transcribe") {
+                els.metaSpeakers.innerHTML = Icons.person + ' <span>화자 구분 전</span>';
+            } else {
+                els.metaSpeakers.innerHTML =
+                    Icons.person +
+                    ' <span>화자 ' +
+                    App.escapeHtml(String(data.num_speakers || 0)) +
+                    '명</span>';
+            }
+            els.metaUtterances.innerHTML =
+                Icons.chat +
+                ' <span>발화 ' +
+                App.escapeHtml(String(data.total_utterances || self._allUtterances.length || 0)) +
+                '건</span>';
+
+            self._renderTranscriptSourceStatus();
+
+            if (self._lastMeetingData) {
+                self._renderActions(self._lastMeetingData);
+            }
+
+            els.tabNav.style.display = "flex";
+            els.searchBar.style.display = "flex";
+
+            if (self._initialQuery && !self._currentQuery) {
+                els.searchInput.value = self._initialQuery;
+                self._currentQuery = self._initialQuery;
+            }
+
+            self._renderTimeline(self._allUtterances, self._currentQuery);
+
+            if (!options.silent && !isNaN(self._initialTimestamp) && self._initialTimestamp >= 0) {
+                self._scrollToTimestamp(self._initialTimestamp);
+            }
+
+            if (
+                self._lastMeetingData &&
+                self._isProcessingStatus(self._lastMeetingData.status) &&
+                !self._pipelinePollTimer
+            ) {
+                self._startPipelinePolling();
+            }
+
+            return true;
+        };
+
         /**
          * 전사문을 로드한다.
          */
-        ViewerView.prototype._loadTranscript = async function () {
+        ViewerView.prototype._loadTranscript = async function (options) {
             var self = this;
             var els = self._els;
-            els.transcriptLoading.classList.add("visible");
-            els.transcriptEmpty.style.display = "none";
+            options = options || {};
+            var showLoading = !options.silent;
+            if (showLoading) {
+                els.transcriptLoading.classList.add("visible");
+            }
+            if (!options.silent) {
+                els.transcriptEmpty.style.display = "none";
+            }
 
             try {
                 var data = await App.apiRequest(
                     "/meetings/" + encodeURIComponent(self._meetingId) + "/transcript"
                 );
 
-                self._allUtterances = data.utterances || [];
-
-                if (self._allUtterances.length === 0) {
+                if (!self._applyTranscriptResponse(data, options)) {
                     els.transcriptEmpty.style.display = "block";
                     self._handleMissingTranscript(self._lastMeetingData);
-                    return;
+                    return false;
                 }
-
-                // 화자 색상 맵 + 범례
-                self._buildSpeakerColorMap(data.speakers || []);
-                self._renderSpeakerLegend(data.speakers || []);
-
-                // 메타 정보 업데이트
-                els.metaSpeakers.innerHTML = Icons.person + ' <span>화자 ' + App.escapeHtml(String(data.num_speakers || 0)) + '명</span>';
-                els.metaUtterances.innerHTML = Icons.chat + ' <span>발화 ' + App.escapeHtml(String(data.total_utterances || 0)) + '건</span>';
-
-                // 전사문 로드 후 액션 버튼 재렌더 (복사/다운로드 버튼이 _allUtterances 길이에 의존)
-                if (self._lastMeetingData) {
-                    self._renderActions(self._lastMeetingData);
-                }
-
-                // 탭과 검색바 표시
-                els.tabNav.style.display = "flex";
-                els.searchBar.style.display = "flex";
-
-                // 초기 검색어 적용 (URL에서 전달된 경우)
-                if (self._initialQuery) {
-                    els.searchInput.value = self._initialQuery;
-                    self._currentQuery = self._initialQuery;
-                }
-
-                // 타임라인 렌더링
-                self._renderTimeline(self._allUtterances, self._currentQuery);
-
-                // URL 타임스탬프로 해당 발화 위치로 스크롤
-                if (!isNaN(self._initialTimestamp) && self._initialTimestamp >= 0) {
-                    self._scrollToTimestamp(self._initialTimestamp);
-                }
+                return true;
 
             } catch (e) {
                 if (e.status === 404) {
-                    els.transcriptEmpty.style.display = "block";
-                    self._handleMissingTranscript(self._lastMeetingData);
+                    if (!options.silent) {
+                        els.transcriptEmpty.style.display = "block";
+                        self._handleMissingTranscript(self._lastMeetingData);
+                    }
                 } else {
-                    errorBanner.show("전사문 로드 실패: " + e.message);
+                    if (!options.silent) {
+                        errorBanner.show("전사문 로드 실패: " + e.message);
+                    }
                 }
+                return false;
             } finally {
-                els.transcriptLoading.classList.remove("visible");
+                if (showLoading) {
+                    els.transcriptLoading.classList.remove("visible");
+                }
             }
         };
 
@@ -2216,7 +2409,7 @@
                         self._stopPipelinePolling();
                         els.pipelineProgress.style.display = "none";
                         els.transcriptEmpty.style.display = "none";
-                        self._loadTranscript();
+                        self._loadTranscript({ force: true });
                         self._loadSummary();
                         self._loadMeetingInfo();
                         return;
@@ -2238,6 +2431,8 @@
                         self._handleMissingTranscript(meeting);
                         return;
                     }
+
+                    await self._loadTranscript({ silent: true });
 
                     // 처리 중: 단계 업데이트
                     var currentStep = statusToStep[status] || "";

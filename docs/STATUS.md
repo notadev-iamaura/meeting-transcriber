@@ -73,6 +73,21 @@
 - 자동 전사/요약은 안전 점검을 통과한 경우에만 실행합니다. 기본값은 1회 1건 처리이며,
   HF offline + pyannote 캐시 누락 또는 `thermal.batch_size > 2` / `cooldown_seconds < 180`
   조합에서는 실행을 보류하고 API 결과의 `errors`에 이유를 남깁니다.
+- `stt.word_timestamps=false` 기본값 전환은 보류했습니다. 단어 timestamp가 저장 산출물에
+  직접 노출되지는 않지만 STT 세그먼트 경계를 보정하고, 이후 화자 병합 overlap과
+  UNKNOWN 비율에 영향을 줄 수 있기 때문입니다. 기본값 변경은 `true/false` A/B에서
+  시간/메모리 이득과 segment drift, temporal coverage, merge UNKNOWN, speaker distribution,
+  reference CER/WER를 검증한 뒤 별도 판단합니다.
+- 전사 단계가 끝나면 전체 파이프라인 완료 전에도 `checkpoints/{meeting_id}/transcribe.json`
+  기반 전사 초안을 Viewer에서 볼 수 있습니다. `/api/meetings/{id}/transcript`는
+  `corrected → correct → merge → transcribe` 순서로 산출물을 찾고,
+  `source_stage`와 `readonly`를 반환합니다. `merge`/`transcribe`는 읽기 전용이며,
+  초안은 UI에서 검색/복사/다운로드만 허용하고 인라인 편집/모두 바꾸기를 차단합니다.
+  또한 `correct`/`corrected` 산출물이 먼저 생겼더라도 job 상태가 `completed`가 아니면
+  전사문 PUT/replace는 409로 거부되어 처리 중 결과를 수정하지 않습니다.
+- 조기 전사 초안 노출을 안전하게 하기 위해 meeting_id의 dot segment를 차단하고,
+  transcript JSON cache를 `mtime_ns + size` 기준으로 갱신하며, STT `transcribe.json`
+  체크포인트 저장을 원자적 JSON 쓰기로 변경했습니다.
 
 ### Frontend Architecture
 
