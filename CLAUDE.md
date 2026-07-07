@@ -523,6 +523,7 @@ meeting-transcriber/
 ├── ui/                      # 사용자 인터페이스
 │   ├── menubar.py           # macOS 메뉴바 (rumps) — 네이티브 창 통합
 │   ├── native_window.py     # PyWebView 네이티브 창 (서브프로세스 실행)
+│   ├── launcher.py          # 경량 .app 런처용 read-only preflight/command 계약
 │   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
 │       ├── index.html       # SPA 셸 (사이드바 + 콘텐츠 영역)
 │       ├── viewer.html      # SPA 리다이렉트 스텁 → /app/viewer/{id}
@@ -534,10 +535,16 @@ meeting-transcriber/
 ├── security/                # 보안
 │   ├── secure_dir.py        # 디렉토리 권한 설정 (chmod 700)
 │   ├── lifecycle.py         # 데이터 수명주기 (hot→warm→cold)
-│   └── health_check.py      # 시스템 상태 점검
+│   ├── health_check.py      # 시스템 상태 점검
+│   └── setup_readiness.py   # 최초 설정 마법사용 read-only 준비 상태
 │
 ├── scripts/                 # 설치/배포 스크립트
 │   ├── install.sh           # 통합 설치 스크립트
+│   ├── build_launcher_app.py # unsigned local .app 런처 번들 생성
+│   ├── validate_launcher_app.py # .app 구조/서명 readiness read-only 검증
+│   ├── build_launcher_dmg.py # unsigned local DMG 패키징
+│   ├── build_release_manifest.py # unsigned local 산출물 manifest 생성
+│   ├── build_unsigned_release.py # unsigned local release 산출물 일괄 생성
 │   └── setup_launchagent.sh # macOS 로그인 시 자동 시작
 │
 ├── tests/                   # 테스트 (1231개)
@@ -572,6 +579,18 @@ meeting-transcriber/
 | `spa.js` | SPA 라우터, Sidebar, HomeView, ViewerView, ChatView | 2번째 (app.js 의존) |
 | `style.css` | macOS 디자인 언어 CSS (light/dark 자동 전환) | — |
 
+#### 프론트엔드 전환 경계
+
+React/TypeScript 전환은 뷰 단위 island 방식으로 점진 진행한다. 기존
+`window.Meeting*`, `window.SPA`, `window.ListPanel` 전역은 legacy bridge로만
+허용되며, 허용 목록은 `tests/harness/test_frontend_boundaries.py`가 고정한다.
+신규 프론트엔드 코드는 `window.*`/`globalThis` 전역 의존을 추가하지 않는다.
+세부 규약은 `docs/design-decisions/frontend-react-migration.md`를 따른다. React,
+Vite, TanStack Query 같은 production 의존성 추가는 별도 사용자 승인 후 진행한다.
+FastAPI는 `ui/web-dist`가 있을 때만 `/app-assets`로 build output을 서빙한다.
+이 prefix는 `/app/{path}` catch-all 밖에 두는 계약이며, 파일럿 Vite base는
+`/app-assets/`에 맞춘다.
+
 #### 네이티브 창
 
 메뉴바 "웹 UI 열기" 클릭 시 PyWebView 네이티브 창으로 열린다. 실패 시 브라우저 폴백.
@@ -586,6 +605,12 @@ rumps (메인 스레드)
 ```
 
 - `ui/native_window.py`: `NativeWindowConfig`(dataclass) + `build_window_config()` + `launch_native_window()` + `run_webview_window()`
+- `ui/launcher.py`: 경량 `.app` 런처가 서버 시작 전에 사용할 read-only preflight/command 계약. `main.py --no-menubar` argv, cwd, 비밀 없는 환경변수 override, `/app/setup` URL을 JSON으로 반환하며 프로세스 실행·설치·권한 변경은 하지 않음.
+- `scripts/build_launcher_app.py`: unsigned local `.app`를 생성. `--bundle-source`를 명시하면 allowlist 기반 런타임 소스(`main.py`, config/pyproject, `api/core/steps/search/security/ui`)만 `Contents/Resources/project`에 포함하며 `.env*`, `.git`, `.venv`, 캐시, 테스트, benchmark/build/dist/output/state, 모델/오디오/DB 산출물, symlink escape는 제외. 번들 `config.yaml` 복사본의 HuggingFace 토큰 값/comment도 제거. 앱 실행·설치·네트워크 작업은 하지 않음.
+- `scripts/validate_launcher_app.py`: 생성된 unsigned `.app`의 Info.plist, executable 권한, launcher metadata, optional source bundle 계약, secret marker, optional codesign readiness를 read-only로 검증. 앱 실행·서명·공증·네트워크·파일 mutation 금지.
+- `scripts/build_launcher_dmg.py`: `local_ready` unsigned `.app`만 `hdiutil create -format UDZO`로 unsigned local DMG에 패키징. `.app` 내부 출력, symlink/디렉토리 overwrite, 앱 실행, attach, 서명, 공증, 네트워크, 설치 작업 금지. 생성된 `.dmg`는 일반 파일/non-empty로 재검증하며 distribution readiness와 서명/공증은 별도 범위.
+- `scripts/build_release_manifest.py`: 생성된 `.app`/`.dmg`를 read-only로 검사해 unsigned local release manifest를 출력. SHA-256/byte size/app file count, local_ready/distribution_ready, codesign summary를 기록하며 DMG mount/open, 앱 실행, 서명, 공증, 네트워크, 설치 작업 금지.
+- `scripts/build_unsigned_release.py`: `build_launcher_app` → `build_launcher_dmg` → `build_release_manifest`를 순서대로 호출해 output 디렉토리 안에 `Recap.app`, `Recap.dmg`, `Recap.release-manifest.json` 생성. `release_type=unsigned_local`이며 output_dir symlink, 산출물 symlink/디렉토리, 기존 산출물(`--force` 없음)을 거부. 앱/서버 실행, attach/open, 서명/공증, 네트워크, 설치 작업 금지.
 - `config.py`: `WindowConfig`(Pydantic) — `use_native`, `width`, `height`, `title` 등 설정
 - **서브프로세스 필수**: rumps와 pywebview 모두 NSApplication 메인 스레드를 요구하므로 같은 프로세스 불가
 

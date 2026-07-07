@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import threading
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 # 프로젝트 루트에서 ui/web/ 경로 계산
 _PROJECT_ROOT = Path(__file__).parent.parent
 _STATIC_DIR = _PROJECT_ROOT / "ui" / "web"
+_WEB_DIST_DIR = _PROJECT_ROOT / "ui" / "web-dist"
 
 RuntimeProfile: TypeAlias = Literal["desktop", "api-test", "unit-test"]
 DEFAULT_RUNTIME_PROFILE: RuntimeProfile = "desktop"
@@ -118,24 +120,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.job_queue = async_queue
     app.state.start_time = time.time()
 
-    # 검색 엔진 및 Chat 엔진 초기화 (lazy: 실패해도 서버 시작은 가능)
-    try:
-        from search.hybrid_search import HybridSearchEngine
-
-        app.state.search_engine = HybridSearchEngine(config=config)
-        logger.info("HybridSearchEngine 초기화 완료")
-    except Exception as e:
-        app.state.search_engine = None
-        logger.warning(f"HybridSearchEngine 초기화 실패 (검색 비활성화): {e}")
-
-    try:
-        from search.chat import ChatEngine
-
-        app.state.chat_engine = ChatEngine(config=config)
-        logger.info("ChatEngine 초기화 완료")
-    except Exception as e:
-        app.state.chat_engine = None
-        logger.warning(f"ChatEngine 초기화 실패 (Chat 비활성화): {e}")
+    # 검색/Chat 엔진은 첫 요청 시점에 생성한다. 서버 콜드 스타트는
+    # UI/API shell 응답을 우선하고, 검색/Chat 의존성 오류는 해당 API에서 503으로 드러낸다.
+    app.state.search_engine = None
+    app.state.chat_engine = None
+    app.state.search_engine_lock = threading.Lock()
+    app.state.chat_engine_lock = threading.Lock()
+    logger.info("HybridSearchEngine/ChatEngine 지연 초기화 준비 완료")
 
     # WebSocket ConnectionManager 초기화
     from api.websocket import ConnectionManager
@@ -465,6 +456,9 @@ def create_app(
     # 정적 파일 서빙 (ui/web/ 디렉토리가 존재할 때만)
     _setup_static_files(app)
 
+    # 선택적 frontend build 산출물 서빙 (ui/web-dist/ 디렉토리가 존재할 때만)
+    _setup_web_dist_files(app)
+
     # SPA 라우팅 (/app 및 /app/{path} → index.html)
     _setup_spa_routes(app)
 
@@ -625,27 +619,59 @@ def _setup_static_files(app: FastAPI) -> None:
     if _STATIC_DIR.is_dir():
         # 캐시 무효화: 로컬 데스크탑 앱이므로 Last-Modified/ETag 조차 무시하고
         # 항상 최신 파일을 서빙. 사용자가 업데이트 후 새로고침만 하면 즉시 반영되어야 한다.
-        from starlette.types import Scope
-
-        class NoCacheStaticFiles(StaticFiles):
-            async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
-                resp = await super().get_response(path, scope)
-                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                resp.headers["Pragma"] = "no-cache"
-                resp.headers["Expires"] = "0"
-                return resp
-
-        app.mount(
-            "/static",
-            NoCacheStaticFiles(directory=str(_STATIC_DIR)),
-            name="static",
-        )
+        _mount_no_cache_static_files(app, path="/static", directory=_STATIC_DIR, name="static")
         logger.info(f"정적 파일 서빙 설정 완료 (no-cache) — 경로: {_STATIC_DIR}")
     else:
         logger.warning(
             f"정적 파일 디렉토리가 존재하지 않습니다: {_STATIC_DIR}. "
             f"정적 파일 서빙이 비활성화됩니다."
         )
+
+
+def _setup_web_dist_files(app: FastAPI) -> None:
+    """선택적 frontend build 산출물 서빙을 설정한다.
+
+    `ui/web-dist`가 존재할 때만 `/app-assets`에 마운트한다. 이 경로는 `/app/*`
+    SPA catch-all 밖에 두어 legacy 라우팅과 충돌하지 않게 유지한다.
+
+    Args:
+        app: FastAPI 인스턴스
+    """
+    if _WEB_DIST_DIR.is_dir():
+        _mount_no_cache_static_files(
+            app,
+            path="/app-assets",
+            directory=_WEB_DIST_DIR,
+            name="app-assets",
+        )
+        logger.info(f"frontend build 산출물 서빙 설정 완료 (no-cache) — 경로: {_WEB_DIST_DIR}")
+    else:
+        logger.info(f"frontend build 산출물 디렉토리 없음 — 비활성화: {_WEB_DIST_DIR}")
+
+
+def _mount_no_cache_static_files(
+    app: FastAPI,
+    *,
+    path: str,
+    directory: Path,
+    name: str,
+) -> None:
+    """정적 파일을 no-cache 헤더와 함께 마운트한다."""
+    from starlette.types import Scope
+
+    class NoCacheStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope: Scope):  # type: ignore[override]
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+            return resp
+
+    app.mount(
+        path,
+        NoCacheStaticFiles(directory=str(directory)),
+        name=name,
+    )
 
 
 # === SPA 라우팅 ===

@@ -116,6 +116,113 @@
 각 모듈은 `window.Meeting*` factory boundary를 통해 `spa.js`에 주입되며,
 기존 `window.SPA.*` 공개 계약은 유지합니다.
 
+React/TypeScript 점진 전환을 준비하기 위해 legacy `window.*` 전역 노출면을
+`tests/harness/test_frontend_boundaries.py` allowlist로 고정했습니다. 신규
+React island 코드는 `window.*`/`globalThis` 직접 의존을 추가하지 않는 규약을
+`docs/design-decisions/frontend-react-migration.md`와 `CLAUDE.md`/`AGENTS.md`에
+명시했습니다.
+React/Vite asset-only scaffold를 `ui/web-src`에 추가했습니다. Vite는 dedicated
+`ui/web-src/index.html`을 entry로 사용하고, `base: "/app-assets/"`와
+`build.outDir: "../web-dist"`로 산출물을 `ui/web-dist`에 생성합니다. FastAPI는 이
+build output이 존재할 때만 `/app-assets`에서 no-cache 정적 파일로 서빙합니다.
+기존 `/static` legacy asset과 `/app` SPA catch-all은 그대로 유지되며,
+legacy `ui/web/index.html`에는 React asset을 주입하지 않았습니다. `ui/web-dist`는
+generated artifact로 ignore하고 launcher source bundle/validator exclusion 목록에서도
+제외합니다.
+
+`/app/setup` 준비 상태 화면을 추가했습니다. 이 화면은
+`GET /api/setup/readiness`만 호출해 데이터 디렉토리, Python 런타임 후보, ffmpeg,
+HuggingFace 토큰, BlackHole/Aggregate 장치, 활성 STT 모델 상태를 표시하며,
+설치/권한 변경/모델 다운로드
+같은 setup mutation은 수행하지 않습니다.
+각 점검 항목은 표시 전용 `actions` metadata를 포함할 수 있습니다. 웹 UI는
+HuggingFace `https://huggingface.co/...` 링크, `/app/settings` 내부 이동, 터미널
+명령 예시 텍스트만 렌더링하며 action을 자동 실행하지 않습니다.
+
+`ui/launcher.py`를 추가해 경량 `.app` 런처가 서버 시작 전에 사용할 read-only
+preflight/command 계약을 분리했습니다. 이 모듈은 `main.py --no-menubar` 실행 argv,
+cwd, 비밀 없는 환경변수 override, `/app` 및 `/app/setup` URL을 JSON으로 반환하지만
+프로세스를 시작하거나 설치/권한 변경/네트워크/모델 작업을 수행하지 않습니다.
+JSON의 `runtime` 필드는 선택된 Python source(`explicit`, `project_venv`,
+`managed_venv`, `current_interpreter`)와 후보별 존재/파일/실행권한 여부를 함께 노출해
+최초 설정 마법사와 네이티브 런처가 관리형 venv 상태를 같은 계약으로 판단할 수
+있게 합니다. 이 판정도 파일 메타데이터와 실행 권한만 확인하며 venv 생성,
+패키지 설치, Python 실행은 하지 않습니다.
+서버 실행에 쓰는 Python path는 venv의 `bin/python` symlink를 보존합니다. symlink를
+base framework interpreter로 resolve하면 venv site-packages를 잃을 수 있기 때문입니다.
+생성된 `.app` wrapper는 지원되는 환경에서 `/usr/bin/arch -arm64`로 이 Python을 실행해
+LaunchServices/Rosetta가 arm64 wheel을 x86_64 Python으로 로드하는 mismatch를 피합니다.
+선택 후보가 없거나 실행 권한이 없거나 `current_interpreter` fallback을 쓰는 경우에는
+Python 버전 확인, 프로젝트 `.venv`, 관리형 venv 준비 명령 예시를
+`python_runtime.actions`로 표시합니다. 이 값은 placeholder 기반 텍스트 안내일 뿐이며
+readiness API나 웹 UI가 venv 생성, `pip install`, 네트워크 접근을 실행했다는 의미가
+아닙니다. 실행 권한 누락은 `python_runtime` check를 실패로 표시하지만, 이 check는
+계속 advisory이므로 top-level `configured`/`ready` 판정은 기존 설치 필수 조건을 유지합니다.
+런처가 서버를 시작할 때는 `MT_LAUNCHER_PYTHON_SOURCE`,
+`MT_LAUNCHER_PYTHON_EXECUTABLE`, `MT_LAUNCHER_PROJECT_DIR` 비밀 없는 handoff 값을
+environment override로 전달합니다. `/api/setup/readiness`의 `python_runtime` check는
+이 handoff가 유효하면 `runtime_scope=launcher_handoff`로 표시하고, 없거나 불완전하면
+서버 프로세스 안에서 런처 후보를 재구성해 `runtime_scope=server_reconstructed`로
+표시합니다. 두 경우 모두 실제 실행 중인 `sys.executable`과 선택 후보의 일치 여부를
+함께 보여주지만, top-level `configured`/`ready` 판정은 기존 설치 필수 조건을 유지합니다.
+`scripts/build_launcher_app.py`는 이 계약을 사용해 unsigned local `.app` 번들을
+지정 output 디렉토리에 생성합니다. 빌드 스크립트는 앱을 실행하지 않으며, 생성된
+bundle은 `Info.plist`, `Contents/MacOS/<executable>`,
+`Resources/launcher-metadata.json`으로 구성됩니다.
+생성된 executable은 metadata와 같은 host, port, log path를 런타임 spec에 전달해
+non-default 로컬 포트 번들도 빌드 시 지정한 endpoint를 그대로 사용합니다.
+새 서버 프로세스를 시작하는 경로에서는 child stdout/stderr를 같은 로컬 launcher log에
+append합니다. 이 로그는 사용자 로컬 파일에만 남으며 원격 수집되지 않습니다. 이미 떠 있는
+서버를 여는 경로나 wrapper preflight 이전 실패까지 모두 포착한다는 의미는 아닙니다.
+직접 `.app` builder도 output 디렉토리 symlink, 파일형 output 디렉토리, target `.app`
+symlink, non-directory overwrite를 거부해 산출물이 지정 위치 밖으로 빠져나가지 않게 합니다.
+생성된 executable은 staging bundle에서 `/bin/bash -n` syntax 검증을 통과한 뒤에만
+최종 `.app` 경로로 설치됩니다. 검증 실패 시 partial bundle을 남기지 않으며,
+`--force` 교체 대상의 기존 bundle도 보존합니다.
+명시적으로 `--bundle-source`를 사용하면 `Contents/Resources/project`에 런타임
+소스 스냅샷을 포함합니다. 이 스냅샷은 allowlist 기반으로 `main.py`, `config.py`,
+`config.yaml`, `pyproject.toml`, 런타임 패키지 디렉토리(`api`, `core`, `steps`,
+`search`, `security`, `ui`)만 복사하며 `.env*`, `.git`, `.venv`, 캐시, 테스트,
+벤치마크, build/dist/output/state, 모델/오디오/DB 산출물, symlink escape는 제외합니다.
+번들 내부 `config.yaml`은 원본을 수정하지 않고 복사본에서 HuggingFace 토큰 값과
+토큰 안내 comment를 제거합니다.
+생성된 executable은 앱 이동을 고려해 실행 시점에 `Contents/Resources/project`를
+계산하고, 존재할 때만 이를 `PROJECT_DIR`로 사용합니다.
+`scripts/validate_launcher_app.py`는 생성된 bundle을 read-only로 검사해
+Info.plist 계약, executable 존재/권한과 bash syntax, launcher metadata, secret marker 미노출,
+optional `codesign --verify` 결과를 JSON으로 보고합니다. unsigned local prototype은
+local readiness 통과와 distribution readiness 미충족으로 구분합니다. validator는
+serialized `launcher-metadata.json` 안의 `MT_LAUNCHER_*` handoff key와 `runtime`
+metadata가 서로 일관적인지도 확인합니다. 이 검사는 metadata coherence 검증이며 실제
+`.app` 실행 시점의 handoff 값을 증명하지는 않습니다. runtime 후보 목록은 각 후보의
+`id`, `path`, `exists`, `is_file`, `is_executable`, `selected` shape와 정확히 하나의
+selected 후보가 top-level runtime source/path와 일치하는지도 serialized metadata 안에서만
+검사합니다. source bundle이 활성화된 경우
+필수 런타임 소스와 제외 규칙도 검사하며, 검증 중 앱 실행, 서명, 공증, 네트워크,
+파일 mutation은 하지 않습니다.
+`CFBundleExecutable`은 `Contents/MacOS` 아래 단일 파일명만 허용하며, 절대경로나
+`..`가 포함된 값으로 bundle 밖 파일을 stat/read/bash-probe하지 않습니다.
+`scripts/build_launcher_dmg.py`는 local_ready를 통과한 unsigned `.app`만
+`hdiutil create -format UDZO`로 unsigned local DMG에 패키징합니다. 산출물은 실제
+일반 파일이고 non-empty인지 확인하며, `.app` 내부 출력, symlink/디렉토리 overwrite,
+앱 실행, 서명, 공증, 네트워크, 설치 작업은 거부합니다. JSON 출력은 command/path/volume에
+secret marker가 있으면 redaction합니다. 이 DMG는 distribution_ready를 의미하지 않으며
+서명/공증은 별도 단계로 남아 있습니다.
+`scripts/build_release_manifest.py`는 생성된 `.app`과 `.dmg`를 read-only로 검사해
+unsigned local release manifest를 출력합니다. `.app`는 `validate_launcher_app(...,
+check_codesign=True)`로 검증하고, `.dmg`는 존재하는 일반 non-empty 파일인지 확인합니다.
+manifest에는 generated timestamp, artifact path/type/byte size/SHA-256, app file count,
+local_ready/distribution_ready, codesign summary가 포함됩니다. unsigned app은
+local_ready=true, distribution_ready=false 상태로 허용되며, DMG mount/open, app 실행,
+서명/공증, 네트워크, 설치 작업은 수행하지 않습니다.
+`scripts/build_unsigned_release.py`는 위 세 단계를 조합해 지정 output 디렉토리 안에
+`Recap.app`, `Recap.dmg`, `Recap.release-manifest.json`을 생성합니다. 이 스크립트는
+새 packaging semantics를 만들지 않고 Python API(`build_launcher_app`,
+`build_launcher_dmg`, `build_release_manifest`)만 호출합니다. output 디렉토리 symlink,
+산출물 symlink/디렉토리, `--force` 없는 기존 산출물은 사전에 거부하며, 결과 JSON은
+`release_type=unsigned_local`, `local_ready`, `distribution_ready`를 명시합니다.
+앱 실행, 서버 실행, DMG attach/open, 서명/공증, 네트워크, 설치 작업은 하지 않습니다.
+
 ### Backend/API
 
 - `api/dependencies.py`로 FastAPI `app.state` 접근을 모았습니다.
@@ -125,6 +232,12 @@
 - `api/routers/settings.py`와 `api/routers/user_settings.py`로 설정/프롬프트/용어집 API를 분리했습니다.
 - `api/routers/search_chat.py`로 검색/RAG 채팅 API를 분리했습니다.
 - `api/routers/meeting_detail.py`로 단일 회의 상세/전사/요약/오디오 API를 분리했습니다.
+- `api/routers/setup_readiness.py`로 최초 설정 마법사용
+  `GET /api/setup/readiness` API를 추가했습니다. 이 endpoint는 데이터 디렉토리,
+  ffmpeg, HuggingFace 토큰 설정 여부, BlackHole/Aggregate 장치, 활성 STT 모델의
+  read-only 상태만 반환하며 설치, 권한 보정, 네트워크 호출, 모델 로드를 수행하지 않습니다.
+  웹 UI `/app/setup`도 이 read-only 계약만 사용합니다. 구조화된 `actions`는
+  안내 표시 전용이며 외부 링크는 HuggingFace 도메인으로 제한됩니다.
 - `api/routers/system.py`, `api/routers/uploads.py`, `api/routers/recording.py`로
   시스템 상태/대시보드/업로드/녹음 API를 분리했습니다.
 - `api/server.py`는 router 등록과 dependency wiring을 더 명확히 갖습니다.
@@ -137,6 +250,29 @@
 - CI는 기본 안정 gate, UI bulk actions gate, mypy 타입 검사 gate를 구분합니다.
 - README, PR template, AGENTS.md, 평가 문서를 최신 정책에 맞췄습니다.
 - `harness/*`와 `docs/agentic-ops/*`가 main에 포함되어 consensus 기반 작업 흐름을 지원합니다.
+- 데이터 디렉토리 보안 설정의 Time Machine 제외 명령은
+  `security.timemachine_exclusion_timeout_seconds` 기본 0.5초 안에 끝나지 않으면
+  경고만 남기고 앱 시작을 계속합니다. 권한 설정, Spotlight 제외, `.gitignore`
+  생성은 기존처럼 즉시 적용됩니다.
+- `scripts/measure_startup.py`는 임시 `MT_BASE_DIR`와 임시 포트로
+  `main.py --no-menubar` 실제 경로를 실행해 `/api/health`와 `/app` 양쪽 200
+  응답까지의 콜드 스타트를 측정합니다. 기본 목표는 3초입니다.
+- `HybridSearchEngine`과 `ChatEngine`은 FastAPI startup에서 만들지 않고
+  `/api/search` 또는 `/api/chat` 첫 요청 시점에 지연 초기화합니다. `/api/health`
+  및 UI shell 응답은 검색/Chat 엔진 생성 없이 처리되며, 생성 실패는 해당 API에서
+  503으로 반환됩니다.
+- `ui/launcher.py`는 향후 경량 `.app`가 사용할 서버 시작 전 계약입니다.
+  `/api/setup/readiness`는 서버 기동 후 최초 설정 화면의 진단 계약으로 유지됩니다.
+- `scripts/build_launcher_app.py`는 `ui.launcher` 계약을 소비하는 unsigned local
+  `.app` prototype builder입니다. `scripts/validate_launcher_app.py`는 이 산출물의
+  구조, optional bundled source 계약, optional codesign readiness를 read-only로
+  검사합니다. `scripts/build_launcher_dmg.py`는 local_ready `.app`을 unsigned local
+  DMG로 감쌀 뿐이며, `scripts/build_release_manifest.py`는 `.app`/`.dmg`의 hash,
+  size, local/distribution readiness를 기록합니다. `scripts/build_unsigned_release.py`는
+  이 단계들을 한 번에 조합하는 unsigned_local 산출물 builder입니다. 서명/공증과
+  distribution-ready release는 아직 별도입니다.
+- 최초 설정 readiness 계약은 `docs/design-decisions/setup-readiness-api.md`에
+  기록했습니다. `/api/health`는 계속 liveness 전용이며 readiness 진단을 호출하지 않습니다.
 
 ## 권장 검증 게이트
 
@@ -153,6 +289,7 @@ pytest -m harness -q
 API/router 변경:
 
 ```bash
+pytest tests/test_setup_readiness.py tests/test_routes_setup_readiness.py -q
 pytest tests/test_api_dependencies.py tests/test_server.py tests/test_routes_meetings_batch.py tests/test_routes_stt_models.py tests/test_routes_reindex.py tests/test_user_settings_api.py tests/test_user_settings_e2e.py tests/test_security_fixes.py -q
 pytest tests/wiki/test_routes.py tests/wiki/test_routes_phase2.py tests/wiki/test_routes_backfill.py tests/wiki/test_rag_unchanged.py tests/wiki/test_routes_chat_router.py -q
 pytest tests/test_routes.py -q
@@ -161,10 +298,29 @@ pytest tests/test_routes.py -q
 Frontend shell/view 변경:
 
 ```bash
+pytest tests/test_server.py -q
 node --check ui/web/spa.js
 node --check ui/web/viewer-view.js
 pytest tests/harness/test_frontend_boundaries.py -q
 pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -q
+```
+
+Setup readiness UI 변경:
+
+```bash
+node --check ui/web/spa.js
+pytest tests/harness/test_frontend_boundaries.py -q
+pytest -m ui tests/ui/integration/test_spa_overhaul_integration.py -k "setup_route or t301" -q
+pytest tests/test_setup_readiness.py tests/test_routes_setup_readiness.py -q
+```
+
+Launcher/setup preflight 변경:
+
+```bash
+.venv/bin/python -m py_compile scripts/build_unsigned_release.py scripts/build_release_manifest.py scripts/build_launcher_app.py scripts/validate_launcher_app.py scripts/build_launcher_dmg.py ui/launcher.py
+.venv/bin/python -m pytest tests/test_build_unsigned_release.py tests/test_build_release_manifest.py tests/test_build_launcher_dmg.py tests/test_validate_launcher_app.py tests/test_build_launcher_app.py tests/test_launcher.py tests/test_native_window.py tests/test_setup_launchagent.py tests/test_install.py -q
+.venv/bin/python -m pytest tests/test_setup_readiness.py tests/test_routes_setup_readiness.py -q
+bash -n scripts/install.sh && bash -n scripts/setup_launchagent.sh
 ```
 
 Fixed-port bulk actions UI tests는 순차 실행합니다.

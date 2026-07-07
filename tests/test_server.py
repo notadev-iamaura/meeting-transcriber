@@ -15,9 +15,12 @@ FastAPI 백엔드 서버 테스트 모듈 (FastAPI Backend Server Test Module)
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from config import AppConfig, ServerConfig
@@ -499,6 +502,96 @@ class TestStaticFiles:
         assert response.status_code == 200
         assert "테스트" in response.text
 
+    def test_web_dist_디렉토리_미존재시_app_assets_마운트_안함(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ui/web-dist가 없으면 React/Vite 산출물 라우트를 만들지 않는다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        nonexistent = tmp_path / "missing-web-dist"
+
+        with patch("api.server._WEB_DIST_DIR", nonexistent):
+            app = create_app(config, runtime_profile="api-test")
+
+        route_paths = [getattr(route, "path", "") for route in app.routes]
+        assert not any(path.startswith("/app-assets") for path in route_paths)
+
+        with TestClient(app) as client:
+            response = client.get("/app-assets/assets/missing.js")
+
+        assert response.status_code == 404
+
+    def test_web_dist_디렉토리_존재시_app_assets_서빙(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ui/web-dist가 있으면 /app-assets에서 no-cache로 서빙한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        web_dist = tmp_path / "web-dist"
+        assets_dir = web_dist / "assets"
+        assets_dir.mkdir(parents=True)
+        (assets_dir / "pilot.js").write_text(
+            'console.log("pilot");\n',
+            encoding="utf-8",
+        )
+
+        with patch("api.server._WEB_DIST_DIR", web_dist):
+            app = create_app(config, runtime_profile="api-test")
+
+        route_paths = [getattr(route, "path", "") for route in app.routes]
+        assert "/app-assets" in route_paths
+
+        with TestClient(app) as client:
+            response = client.get("/app-assets/assets/pilot.js")
+
+        assert response.status_code == 200
+        assert 'console.log("pilot")' in response.text
+        assert response.headers["cache-control"] == (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
+        assert response.headers["pragma"] == "no-cache"
+
+    def test_web_dist_app_assets는_spa_catch_all과_충돌하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """/app-assets는 /app catch-all 밖에서 실제 asset을 반환한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        static_dir = tmp_path / "web"
+        static_dir.mkdir()
+        (static_dir / "index.html").write_text("<html>SPA</html>", encoding="utf-8")
+        (static_dir / "legacy.js").write_text("window.legacy = true;\n", encoding="utf-8")
+        web_dist = tmp_path / "web-dist"
+        web_dist.mkdir()
+        (web_dist / "island.js").write_text("export const island = true;\n", encoding="utf-8")
+
+        with (
+            patch("api.server._STATIC_DIR", static_dir),
+            patch("api.server._WEB_DIST_DIR", web_dist),
+        ):
+            app = create_app(config, runtime_profile="api-test")
+
+        with TestClient(app) as client:
+            asset_response = client.get("/app-assets/island.js")
+            spa_response = client.get("/app/island.js")
+            static_response = client.get("/static/legacy.js")
+            health_response = client.get("/api/health")
+
+        assert asset_response.status_code == 200
+        assert "export const island" in asset_response.text
+        assert asset_response.headers["content-type"].startswith("text/javascript")
+        assert spa_response.status_code == 200
+        assert spa_response.text == "<html>SPA</html>"
+        assert static_response.status_code == 200
+        assert "window.legacy" in static_response.text
+        assert health_response.status_code == 200
+
 
 # === TestLifespan ===
 
@@ -566,11 +659,33 @@ class TestLifespan:
 class TestLifespanPartialFailure:
     """lifespan 부분 초기화 실패 테스트.
 
-    검색/Chat 엔진 초기화가 실패해도 서버가 정상 시작되는지 확인한다.
+    검색/Chat 엔진은 startup 이 아니라 요청 시점에 지연 초기화된다.
     """
 
-    def test_search_engine_초기화_실패(self, tmp_path: Path) -> None:
-        """HybridSearchEngine 초기화 실패 시 서버가 정상 시작되고 search_engine이 None인지 확인한다."""
+    def test_health는_search_chat_엔진을_초기화하지_않음(self, tmp_path: Path) -> None:
+        """헬스체크는 검색/Chat 엔진 생성 없이 응답한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config, runtime_profile="api-test")
+
+        with (
+            patch("search.hybrid_search.HybridSearchEngine") as mock_search_cls,
+            patch("search.chat.ChatEngine") as mock_chat_cls,
+            TestClient(app) as client,
+        ):
+            response = client.get("/api/health")
+            assert response.status_code == 200
+            assert app.state.search_engine is None
+            assert app.state.chat_engine is None
+            assert hasattr(app.state, "search_engine_lock")
+            assert hasattr(app.state, "chat_engine_lock")
+            mock_search_cls.assert_not_called()
+            mock_chat_cls.assert_not_called()
+
+    def test_search_engine_지연_초기화_실패는_503(self, tmp_path: Path) -> None:
+        """HybridSearchEngine 생성 실패는 검색 의존성에서 503으로 드러난다."""
+        from api.dependencies import get_search_engine
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
@@ -581,59 +696,87 @@ class TestLifespanPartialFailure:
                 "search.hybrid_search.HybridSearchEngine",
                 side_effect=RuntimeError("검색 엔진 초기화 실패"),
             ),
-            TestClient(app) as client,
+            TestClient(app),
         ):
-            # 서버가 정상 작동하는지 헬스체크로 확인
-            response = client.get("/api/health")
-            assert response.status_code == 200
-
-            # search_engine이 None으로 설정되어야 함
+            request = MagicMock()
+            request.app = app
+            with pytest.raises(HTTPException) as exc_info:
+                get_search_engine(request)
+            assert exc_info.value.status_code == 503
+            assert exc_info.value.detail == "검색 엔진이 초기화되지 않았습니다."
             assert app.state.search_engine is None
 
-    def test_chat_engine_초기화_실패(self, tmp_path: Path) -> None:
-        """ChatEngine 초기화 실패 시 서버가 정상 시작되고 chat_engine이 None인지 확인한다."""
+    def test_chat_engine_지연_초기화는_search_engine을_공유(self, tmp_path: Path) -> None:
+        """ChatEngine 지연 생성 시 기존 검색 엔진을 주입해 중복 생성을 피한다."""
+        from api.dependencies import get_chat_engine
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        app = create_app(config, runtime_profile="api-test")
+        search_engine = MagicMock()
+        chat_engine = MagicMock()
+
+        with (
+            patch(
+                "search.hybrid_search.HybridSearchEngine", return_value=search_engine
+            ) as search_cls,
+            patch("search.chat.ChatEngine", return_value=chat_engine) as chat_cls,
+            TestClient(app),
+        ):
+            request = MagicMock()
+            request.app = app
+            assert get_chat_engine(request) is chat_engine
+            assert app.state.search_engine is search_engine
+            assert app.state.chat_engine is chat_engine
+            search_cls.assert_called_once_with(config=config)
+            chat_cls.assert_called_once_with(config=config, search_engine=search_engine)
+
+    def test_chat_engine_지연_초기화_실패는_503(self, tmp_path: Path) -> None:
+        """ChatEngine 생성 실패는 Chat 의존성에서 503으로 드러난다."""
+        from api.dependencies import get_chat_engine
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
         app = create_app(config, runtime_profile="api-test")
 
         with (
-            patch(
-                "search.chat.ChatEngine",
-                side_effect=RuntimeError("Chat 엔진 초기화 실패"),
-            ),
-            TestClient(app) as client,
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", side_effect=RuntimeError("Chat 엔진 초기화 실패")),
+            TestClient(app),
         ):
-            # 서버가 정상 작동하는지 헬스체크로 확인
-            response = client.get("/api/health")
-            assert response.status_code == 200
-
-            # chat_engine이 None으로 설정되어야 함
+            request = MagicMock()
+            request.app = app
+            with pytest.raises(HTTPException) as exc_info:
+                get_chat_engine(request)
+            assert exc_info.value.status_code == 503
+            assert exc_info.value.detail == "Chat 엔진이 초기화되지 않았습니다."
             assert app.state.chat_engine is None
 
-    def test_search_engine과_chat_engine_동시_실패(self, tmp_path: Path) -> None:
-        """검색/Chat 엔진 모두 초기화 실패해도 서버가 정상 시작되는지 확인한다."""
+    def test_search_engine_동시_첫_요청에서도_한번만_생성(self, tmp_path: Path) -> None:
+        """동시 첫 접근에서도 HybridSearchEngine은 1회만 생성된다."""
+        from api.dependencies import get_search_engine
         from api.server import create_app
 
         config = _make_test_config(tmp_path)
         app = create_app(config, runtime_profile="api-test")
+        search_engine = MagicMock()
 
         with (
             patch(
-                "search.hybrid_search.HybridSearchEngine",
-                side_effect=RuntimeError("검색 엔진 실패"),
-            ),
-            patch(
-                "search.chat.ChatEngine",
-                side_effect=RuntimeError("Chat 엔진 실패"),
-            ),
-            TestClient(app) as client,
+                "search.hybrid_search.HybridSearchEngine", return_value=search_engine
+            ) as search_cls,
+            TestClient(app),
+            ThreadPoolExecutor(max_workers=4) as executor,
         ):
-            response = client.get("/api/health")
-            assert response.status_code == 200
+            requests = []
+            for _ in range(4):
+                request = MagicMock()
+                request.app = app
+                requests.append(request)
+            results = list(executor.map(get_search_engine, requests))
 
-            assert app.state.search_engine is None
-            assert app.state.chat_engine is None
+        assert results == [search_engine, search_engine, search_engine, search_engine]
+        search_cls.assert_called_once_with(config=config)
 
 
 # === TestExceptionHandler ===

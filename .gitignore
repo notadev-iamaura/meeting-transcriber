@@ -37,6 +37,10 @@ chroma_db/
 htmlcov/
 .coverage
 
+# Node / frontend build
+node_modules/
+ui/web-dist/
+
 # IDE
 .vscode/
 .idea/

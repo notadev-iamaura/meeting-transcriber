@@ -79,6 +79,7 @@ class TestSecureDirManagerInit:
         assert manager._permissions == 0o700
         assert manager._exclude_spotlight is True
         assert manager._exclude_timemachine is True
+        assert manager._timemachine_timeout_seconds == 0.5
 
     def test_init_custom_permissions(self, base_dir: Path) -> None:
         """커스텀 권한 설정이 올바르게 적용되는지 확인한다."""
@@ -282,7 +283,25 @@ class TestTimeMachineExclusion:
                 ["tmutil", "addexclusion", str(base_dir)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=0.5,
+            )
+
+    def test_calls_tmutil_with_custom_timeout(self, base_dir: Path) -> None:
+        """설정한 Time Machine 제외 타임아웃이 tmutil 호출에 전달되는지 확인한다."""
+        base_dir.mkdir(parents=True)
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(base_dir)),
+            security=SecurityConfig(timemachine_exclusion_timeout_seconds=0.75),
+        )
+        mgr = SecureDirManager(config)
+        with patch("security.secure_dir.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mgr._exclude_from_timemachine(base_dir)
+            mock_run.assert_called_once_with(
+                ["tmutil", "addexclusion", str(base_dir)],
+                capture_output=True,
+                text=True,
+                timeout=0.75,
             )
 
     def test_tmutil_not_found_logs_debug(
@@ -322,7 +341,7 @@ class TestTimeMachineExclusion:
 
         with patch(
             "security.secure_dir.subprocess.run",
-            side_effect=sp.TimeoutExpired(cmd="tmutil", timeout=10),
+            side_effect=sp.TimeoutExpired(cmd="tmutil", timeout=0.5),
         ):
             import logging
 

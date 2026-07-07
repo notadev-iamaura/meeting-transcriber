@@ -662,6 +662,7 @@ class SecurityConfig(BaseModel):
     data_dir_permissions: int = 0o700
     exclude_from_spotlight: bool = True
     exclude_from_timemachine: bool = True
+    timemachine_exclusion_timeout_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
 
 
 class RecordingConfig(BaseModel):

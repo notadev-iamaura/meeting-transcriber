@@ -46,7 +46,7 @@ Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반
 - **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
 - **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
 - **macOS 메뉴바 앱**: rumps 기반 메뉴바 상주, 녹음 상태 실시간 표시
-- **웹 UI**: macOS 네이티브 스타일 SPA (회의 목록 + 뷰어 + 검색 + Wiki + AI 채팅 + 설정)
+- **웹 UI**: macOS 네이티브 스타일 SPA (회의 목록 + 뷰어 + 검색 + Wiki + AI 채팅 + 준비 상태 + 설정)
 - **설정 UI**: 웹에서 STT 모델/LLM 모델/Temperature/전사 언어 등 실시간 변경
 - **Zoom 감지**: Zoom 회의 시작/종료 자동 감지 (CptHost 프로세스 모니터링)
 - **폴더 감시**: 지정 폴더에 파일 추가 시 자동 처리
@@ -222,6 +222,36 @@ python main.py --port 9000
 
 # 디버그 로깅
 python main.py --log-level debug
+
+# 콜드 스타트 측정 (임시 데이터 디렉토리/포트 사용, 3초 초과 시 실패)
+python scripts/measure_startup.py --python .venv/bin/python --max-seconds 3
+
+# 최초 설정 마법사용 로컬 준비 상태 확인
+curl -s http://127.0.0.1:8765/api/setup/readiness | jq
+
+# 같은 정보를 웹 UI에서 확인
+open http://127.0.0.1:8765/app/setup
+
+# 경량 .app 런처용 read-only 실행 계약 확인 (서버 시작 전)
+.venv/bin/python -m ui.launcher --project-dir "$PWD"
+
+# unsigned local .app 번들 생성 (실행하지 않고 dist/ 아래 산출물만 생성)
+.venv/bin/python scripts/build_launcher_app.py --output-dir dist --project-dir "$PWD" --force
+
+# 런타임 소스 스냅샷을 .app 안에 포함해 생성 (기본은 off)
+.venv/bin/python scripts/build_launcher_app.py --output-dir dist --project-dir "$PWD" --bundle-source --force
+
+# 생성된 .app 구조/서명 readiness read-only 검증 (앱 실행/서명/공증 없음)
+.venv/bin/python scripts/validate_launcher_app.py "dist/Recap.app" --json
+
+# unsigned local DMG 생성 (local_ready .app만 허용, 서명/공증/앱 실행 없음)
+.venv/bin/python scripts/build_launcher_dmg.py --app-path "dist/Recap.app" --output-dir dist --force --json
+
+# unsigned local release manifest 생성 (hash/size/readiness 기록, mount/서명/공증 없음)
+.venv/bin/python scripts/build_release_manifest.py --app-path "dist/Recap.app" --dmg-path "dist/Recap.dmg" --json
+
+# unsigned local release 산출물 일괄 생성 (.app + .dmg + manifest, 서명/공증 없음)
+.venv/bin/python scripts/build_unsigned_release.py --output-dir dist --project-dir "$PWD" --force --json
 ```
 
 ## 상세 설치 가이드
@@ -391,6 +421,7 @@ python main.py --no-menubar
 │ 📋 회의록 │  2026-03-10 ●  │  회의 제목 / 전사문 / 요약       │
 │ 🔍 검색  │  2026-03-09 ●  │  또는 검색 결과 / AI 채팅       │
 │ 💬 채팅  │  ...           │                              │
+│ 준비     │                │                              │
 │ ⚙ 설정  │                │                              │
 │          │                │                    ☀/🌙      │
 │ 상태표시  │                │                              │
@@ -406,6 +437,8 @@ python main.py --no-menubar
 **검색**: 전체 회의 내용에서 키워드 검색. 날짜/화자 필터. 결과 클릭 시 해당 발화로 이동.
 
 **AI 채팅**: 회의 내용 기반 질의응답. "지난 회의에서 결정된 일정이 뭐야?" 같은 질문 가능.
+
+**준비 상태**: `/app/setup`에서 데이터 디렉토리, ffmpeg, HuggingFace 토큰, 오디오 장치, STT 모델 상태를 읽기 전용으로 확인. 설치나 권한 변경은 실행하지 않음.
 
 **설정**: STT 모델 선택, LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 즉시 적용.
 
@@ -643,6 +676,8 @@ meeting-transcriber/
 │   └── websocket.py         # WebSocket 실시간 통신
 ├── ui/                      # 사용자 인터페이스
 │   ├── menubar.py           # macOS 메뉴바 (rumps)
+│   ├── native_window.py     # PyWebView 네이티브 창
+│   ├── launcher.py          # 경량 .app 런처용 read-only preflight/command 계약
 │   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
 │       ├── index.html       # 3-Column SPA 셸
 │       ├── style.css        # 공통 레이아웃/디자인 시스템
@@ -653,9 +688,15 @@ meeting-transcriber/
 ├── security/                # 보안
 │   ├── secure_dir.py        # 디렉토리 보안 설정
 │   ├── lifecycle.py         # 데이터 수명주기 관리
-│   └── health_check.py      # 시스템 상태 점검
+│   ├── health_check.py      # 시스템 상태 점검
+│   └── setup_readiness.py   # 최초 설정 마법사용 read-only 준비 상태
 ├── scripts/                 # 스크립트
 │   ├── install.sh           # 설치 스크립트
+│   ├── build_launcher_app.py # unsigned local .app 런처 번들 생성
+│   ├── validate_launcher_app.py # .app 구조/서명 readiness read-only 검증
+│   ├── build_launcher_dmg.py # unsigned local DMG 패키징
+│   ├── build_release_manifest.py # unsigned local 산출물 manifest 생성
+│   ├── build_unsigned_release.py # unsigned local release 산출물 일괄 생성
 │   ├── setup_launchagent.sh # 자동 시작 설정
 │   ├── benchmark_ab_test.py # STT A/B 벤치마크
 │   └── convert_whisper_mlx.py # Whisper 모델 MLX 변환

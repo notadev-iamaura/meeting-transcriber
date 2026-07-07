@@ -436,6 +436,17 @@ run_auto_processing_now = _auto_processing_router.run_auto_processing_now
 router.include_router(_auto_processing_router.router)
 
 
+# 최초 설정 마법사용 readiness API
+from api.routers import setup_readiness as _setup_readiness_router  # noqa: E402
+
+ReadinessActionItem = _setup_readiness_router.ReadinessActionItem
+ReadinessCheckItem = _setup_readiness_router.ReadinessCheckItem
+SetupReadinessResponse = _setup_readiness_router.SetupReadinessResponse
+get_setup_readiness = _setup_readiness_router.get_setup_readiness
+
+router.include_router(_setup_readiness_router.router)
+
+
 # 사용자 편집 가능 프롬프트/용어집 API 는 api.routers.user_settings 로 분리한다.
 # 아래 re-export 는 기존 `api.routes.PromptsResponse` 같은 접근을 보존한다.
 from api.routers import user_settings as _user_settings_router  # noqa: E402

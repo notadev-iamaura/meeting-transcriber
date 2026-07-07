@@ -79,6 +79,32 @@ def _make_test_app(tmp_path: Path) -> Any:
     return app
 
 
+def _install_search_engine_mock(
+    app: Any,
+    *,
+    return_value: Any | None = None,
+    side_effect: Exception | None = None,
+) -> MagicMock:
+    """lazy search dependency가 사용할 검색 엔진 mock을 설치한다."""
+    engine = MagicMock()
+    engine.search = AsyncMock(return_value=return_value, side_effect=side_effect)
+    app.state.search_engine = engine
+    return engine
+
+
+def _install_chat_engine_mock(
+    app: Any,
+    *,
+    return_value: Any | None = None,
+    side_effect: Exception | None = None,
+) -> MagicMock:
+    """lazy chat dependency가 사용할 Chat 엔진 mock을 설치한다."""
+    engine = MagicMock()
+    engine.chat = AsyncMock(return_value=return_value, side_effect=side_effect)
+    app.state.chat_engine = engine
+    return engine
+
+
 def _create_completed_pipeline_state(
     tmp_path: Path,
     meeting_id: str,
@@ -511,9 +537,7 @@ class TestSearchEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_search_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/search",
@@ -549,9 +573,7 @@ class TestSearchEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_search_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/search",
@@ -573,12 +595,16 @@ class TestSearchEndpoint:
         assert call_kwargs["top_k"] == 3
 
     def test_search_엔진_미초기화_503(self, tmp_path: Path) -> None:
-        """검색 엔진이 초기화되지 않았을 때 503을 반환하는지 확인한다."""
+        """검색 엔진 지연 초기화 실패 시 503을 반환하는지 확인한다."""
         app = _make_test_app(tmp_path)
 
-        with TestClient(app) as client:
-            app.state.search_engine = None
-
+        with (
+            patch(
+                "search.hybrid_search.HybridSearchEngine",
+                side_effect=RuntimeError("검색 엔진 초기화 실패"),
+            ),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/api/search",
                 json={"query": "테스트"},
@@ -593,9 +619,7 @@ class TestSearchEndpoint:
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                side_effect=EmptyQueryError("빈 쿼리"),
-            )
+            _install_search_engine_mock(app, side_effect=EmptyQueryError("빈 쿼리"))
 
             response = client.post(
                 "/api/search",
@@ -632,9 +656,7 @@ class TestSearchEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_search_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/search",
@@ -682,9 +704,7 @@ class TestChatEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -723,9 +743,7 @@ class TestChatEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -742,12 +760,14 @@ class TestChatEndpoint:
         assert call_kwargs["meeting_id_filter"] == "m001"
 
     def test_chat_엔진_미초기화_503(self, tmp_path: Path) -> None:
-        """Chat 엔진이 초기화되지 않았을 때 503을 반환하는지 확인한다."""
+        """Chat 엔진 지연 초기화 실패 시 503을 반환하는지 확인한다."""
         app = _make_test_app(tmp_path)
 
-        with TestClient(app) as client:
-            app.state.chat_engine = None
-
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", side_effect=RuntimeError("Chat 엔진 초기화 실패")),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/api/chat",
                 json={"query": "테스트"},
@@ -768,9 +788,7 @@ class TestChatEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -791,9 +809,7 @@ class TestChatEndpoint:
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                side_effect=EmptyQueryError("빈 질문"),
-            )
+            _install_chat_engine_mock(app, side_effect=EmptyQueryError("빈 질문"))
 
             response = client.post(
                 "/api/chat",
@@ -827,9 +843,7 @@ class TestChatEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -1225,7 +1239,9 @@ class TestTranscriptEndpoint:
         checkpoints_dir = tmp_path / "checkpoints"
 
         _create_transcribe_checkpoint(checkpoints_dir, "meeting_priority", text="draft")
-        _create_transcript_checkpoint(checkpoints_dir, "meeting_priority", "merge.json", text="merge")
+        _create_transcript_checkpoint(
+            checkpoints_dir, "meeting_priority", "merge.json", text="merge"
+        )
 
         with TestClient(app) as client:
             response = client.get("/api/meetings/meeting_priority/transcript")
@@ -1235,7 +1251,9 @@ class TestTranscriptEndpoint:
         assert data["readonly"] is True
         assert data["utterances"][0]["text"] == "merge"
 
-        _create_transcript_checkpoint(checkpoints_dir, "meeting_priority", "correct.json", text="correct")
+        _create_transcript_checkpoint(
+            checkpoints_dir, "meeting_priority", "correct.json", text="correct"
+        )
         with TestClient(app) as client:
             response = client.get("/api/meetings/meeting_priority/transcript")
         assert response.status_code == 200

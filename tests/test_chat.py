@@ -930,6 +930,30 @@ def _make_integration_test_app(tmp_path: Path) -> FastAPI:
     return app
 
 
+def _install_integration_search_engine_mock(
+    app: FastAPI,
+    *,
+    return_value: Any | None = None,
+) -> MagicMock:
+    """lazy search dependency가 사용할 통합 테스트용 검색 엔진 mock을 설치한다."""
+    engine = MagicMock()
+    engine.search = AsyncMock(return_value=return_value)
+    app.state.search_engine = engine
+    return engine
+
+
+def _install_integration_chat_engine_mock(
+    app: FastAPI,
+    *,
+    return_value: Any | None = None,
+) -> MagicMock:
+    """lazy chat dependency가 사용할 통합 테스트용 Chat 엔진 mock을 설치한다."""
+    engine = MagicMock()
+    engine.chat = AsyncMock(return_value=return_value)
+    app.state.chat_engine = engine
+    return engine
+
+
 @dataclass
 class _MockJob:
     """통합 테스트용 Job 데이터 클래스."""
@@ -1035,9 +1059,7 @@ class TestPhase3APIChatIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -1066,9 +1088,7 @@ class TestPhase3APIChatIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_chat_engine_mock(app, return_value=mock_response)
 
             # 세션 A
             client.post(
@@ -1099,9 +1119,7 @@ class TestPhase3APIChatIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -1150,9 +1168,7 @@ class TestPhase3APIChatIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_chat_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/chat",
@@ -1182,21 +1198,20 @@ class TestPhase3APIChatIntegration:
         assert response.status_code == 422
 
     def test_chat_엔진_미초기화_503(self, tmp_path: Path) -> None:
-        """ChatEngine이 초기화되지 않았을 때 503을 반환한다."""
+        """ChatEngine 지연 초기화 실패 시 503을 반환한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
-        with TestClient(app) as client:
-            original = app.state.chat_engine
-            app.state.chat_engine = None
-
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", side_effect=RuntimeError("Chat 엔진 초기화 실패")),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/api/chat",
                 json={"query": "테스트"},
             )
-
-            app.state.chat_engine = original
 
         assert response.status_code == 503
 
@@ -1246,9 +1261,7 @@ class TestPhase3APISearchIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_search_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/search",
@@ -1277,9 +1290,7 @@ class TestPhase3APISearchIntegration:
         )
 
         with TestClient(app) as client:
-            app.state.search_engine.search = AsyncMock(
-                return_value=mock_response,
-            )
+            _install_integration_search_engine_mock(app, return_value=mock_response)
 
             response = client.post(
                 "/api/search",
@@ -1425,9 +1436,7 @@ class TestPhase3MultiEndpointFlow:
                 vector_count=1,
                 fts_count=0,
             )
-            app.state.search_engine.search = AsyncMock(
-                return_value=search_mock,
-            )
+            _install_integration_search_engine_mock(app, return_value=search_mock)
 
             search_resp = client.post(
                 "/api/search",
@@ -1453,9 +1462,7 @@ class TestPhase3MultiEndpointFlow:
                 ],
                 query="프로젝트 일정이 어떻게 되나요?",
             )
-            app.state.chat_engine.chat = AsyncMock(
-                return_value=chat_mock,
-            )
+            _install_integration_chat_engine_mock(app, return_value=chat_mock)
 
             chat_resp = client.post(
                 "/api/chat",
@@ -1730,9 +1737,9 @@ class TestPhase3GracefulDegradation:
         app = _make_integration_test_app(tmp_path)
 
         with TestClient(app) as client:
-            app.state.chat_engine.chat = AsyncMock(
-                side_effect=Exception("내부 검색 오류"),
-            )
+            chat_engine = MagicMock()
+            chat_engine.chat = AsyncMock(side_effect=Exception("내부 검색 오류"))
+            app.state.chat_engine = chat_engine
 
             response = client.post(
                 "/api/chat",
@@ -1742,14 +1749,18 @@ class TestPhase3GracefulDegradation:
         assert response.status_code == 500
 
     def test_검색엔진_미초기화_503(self, tmp_path: Path) -> None:
-        """검색 엔진이 초기화되지 않았을 때 503을 반환하는지 검증한다."""
+        """검색 엔진 지연 초기화 실패 시 503을 반환하는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
-        with TestClient(app) as client:
-            app.state.search_engine = None
-
+        with (
+            patch(
+                "search.hybrid_search.HybridSearchEngine",
+                side_effect=RuntimeError("검색 엔진 초기화 실패"),
+            ),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/api/search",
                 json={"query": "테스트"},
@@ -1786,25 +1797,27 @@ class TestPhase3ServerLifespan:
         self,
         tmp_path: Path,
     ) -> None:
-        """서버 시작 시 chat_engine이 app.state에 설정되는지 검증한다."""
+        """서버 시작 시 chat_engine placeholder가 app.state에 설정되는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
         with TestClient(app):
             assert hasattr(app.state, "chat_engine")
+            assert app.state.chat_engine is None
 
     def test_lifespan_search_engine_초기화(
         self,
         tmp_path: Path,
     ) -> None:
-        """서버 시작 시 search_engine이 app.state에 설정되는지 검증한다."""
+        """서버 시작 시 search_engine placeholder가 app.state에 설정되는지 검증한다."""
         from fastapi.testclient import TestClient
 
         app = _make_integration_test_app(tmp_path)
 
         with TestClient(app):
             assert hasattr(app.state, "search_engine")
+            assert app.state.search_engine is None
 
     def test_lifespan_ws_manager_초기화(
         self,

@@ -83,6 +83,7 @@ class SecureDirManager:
         self._permissions = config.security.data_dir_permissions
         self._exclude_spotlight = config.security.exclude_from_spotlight
         self._exclude_timemachine = config.security.exclude_from_timemachine
+        self._timemachine_timeout_seconds = config.security.timemachine_exclusion_timeout_seconds
 
     @property
     def base_dir(self) -> Path:
@@ -270,7 +271,7 @@ class SecureDirManager:
                 ["tmutil", "addexclusion", str(dir_path)],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=self._timemachine_timeout_seconds,
             )
             if result.returncode == 0:
                 logger.info(f"Time Machine 제외 설정: {dir_path}")
@@ -282,7 +283,10 @@ class SecureDirManager:
             # tmutil이 없는 환경 (Linux 등)
             logger.debug("tmutil 미설치. Time Machine 제외 생략.")
         except subprocess.TimeoutExpired:
-            logger.warning(f"Time Machine 제외 명령 타임아웃: {dir_path}")
+            logger.warning(
+                "Time Machine 제외 명령 타임아웃: "
+                f"{dir_path} ({self._timemachine_timeout_seconds:.1f}초)"
+            )
 
     def _create_gitignore(self, dir_path: Path) -> None:
         """.gitignore 파일을 생성한다. 이미 존재하면 스킵.

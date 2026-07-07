@@ -142,6 +142,129 @@ def _ab_test_detail(status: str = "completed") -> dict:
     }
 
 
+def _setup_readiness_payload(ready: bool = False) -> dict:
+    """Setup readiness 뷰 테스트용 최소 응답."""
+    return {
+        "status": "pass" if ready else "fail",
+        "configured": ready,
+        "ready": ready,
+        "capabilities": {
+            "recording_usable": ready,
+            "full_meeting_capture_ready": False,
+            "stt_model_ready": ready,
+        },
+        "checks": [
+            {
+                "id": "base_dir",
+                "status": "pass",
+                "message": "데이터 디렉토리 준비됨",
+                "details": {
+                    "path": "/tmp/recap",
+                    "actual_mode": "0700",
+                    "expected_mode": "0700",
+                },
+            },
+            {
+                "id": "ffmpeg",
+                "status": "pass",
+                "message": "ffmpeg 사용 가능",
+                "details": {"path": "/opt/homebrew/bin/ffmpeg"},
+            },
+            {
+                "id": "python_runtime",
+                "status": "fail",
+                "ready": False,
+                "message": "현재 인터프리터 후보에 실행 권한이 없습니다.",
+                "details": {
+                    "advisory": True,
+                    "runtime_scope": "server_reconstructed",
+                    "python_source": "current_interpreter",
+                    "python_executable": "/tmp/runtime-python<script>",
+                    "running_python": "/usr/bin/python3",
+                    "selected_matches_running_python": False,
+                    "selected_is_file": True,
+                    "selected_is_executable": False,
+                },
+                "actions": [
+                    {
+                        "id": "check_system_python",
+                        "label": "Python 확인 <img src=x>",
+                        "kind": "command",
+                        "value": "python3 --version\n<script>bad()</script>",
+                        "description": "터미널에서 직접 실행 <script>bad()</script>",
+                    }
+                ],
+            },
+            {
+                "id": "hf_token_env",
+                "status": "warn",
+                "message": '토큰 미설정 <img src=x onerror="window.__setupXss = true">',
+                "action_hint": "HuggingFace 토큰을 발급하세요 <script>bad()</script>",
+                "details": {
+                    "configured": False,
+                    "environment_variables_present": ["HF_TOKEN<script>"],
+                },
+                "actions": [
+                    {
+                        "id": "open_hf_token_settings",
+                        "label": "토큰 발급 <script>bad()</script>",
+                        "kind": "external_link",
+                        "value": "https://huggingface.co/settings/tokens",
+                        "description": "브라우저에서 직접 엽니다.",
+                    },
+                    {
+                        "id": "bad_external_link",
+                        "label": "악성 링크",
+                        "kind": "external_link",
+                        "value": "javascript:alert(1)",
+                    },
+                    {
+                        "id": "export_hf_token_placeholder",
+                        "label": '환경변수 예시 <img src=x onerror="bad()">',
+                        "kind": "command",
+                        "value": "export HUGGINGFACE_TOKEN=hf_xxxxx\nexport HF_TOKEN=hf_xxxxx",
+                        "description": "placeholder만 표시합니다 <script>bad()</script>",
+                    },
+                ],
+            },
+            {
+                "id": "audio_devices",
+                "status": "fail",
+                "message": "Aggregate Device 없음",
+                "action_hint": "오디오 녹음 셋업을 먼저 진행하세요.",
+                "details": {
+                    "has_blackhole": False,
+                    "has_aggregate": False,
+                    "selected_mode": "aggregate",
+                },
+            },
+            {
+                "id": "stt_model",
+                "status": "unknown",
+                "message": "모델 상태 확인 불가",
+                "details": {
+                    "active_model_id": "whisper-large-v3-turbo",
+                    "model_status": "not_downloaded",
+                },
+                "actions": [
+                    {
+                        "id": "open_stt_settings",
+                        "label": "설정에서 모델 관리",
+                        "kind": "route",
+                        "value": "/app/settings",
+                    },
+                    {
+                        "id": "bad_route",
+                        "label": "나쁜 설정 라우트",
+                        "kind": "route",
+                        "value": "/api/setup/run",
+                    },
+                ],
+            },
+        ],
+    }
+
+
 @contextmanager
 def _spa_page(
     browser: Browser,
@@ -233,25 +356,19 @@ def test_meeting_list_loads_more_in_50_item_pages(
         path="/app",
         api_handler=paged_meetings_api,
     ) as page:
-        page.wait_for_function(
-            "() => document.querySelectorAll('.meeting-item').length === 50"
-        )
+        page.wait_for_function("() => document.querySelectorAll('.meeting-item').length === 50")
         assert page.locator("#listCount").inner_text().strip() == "50/120"
 
         page.locator("#listContent").evaluate(
             "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
         )
-        page.wait_for_function(
-            "() => document.querySelectorAll('.meeting-item').length === 100"
-        )
+        page.wait_for_function("() => document.querySelectorAll('.meeting-item').length === 100")
         assert page.locator("#listCount").inner_text().strip() == "100/120"
 
         page.locator("#listContent").evaluate(
             "(el) => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
         )
-        page.wait_for_function(
-            "() => document.querySelectorAll('.meeting-item').length === 120"
-        )
+        page.wait_for_function("() => document.querySelectorAll('.meeting-item').length === 120")
         assert page.locator("#listCount").inner_text().strip() == "120/120"
 
     assert requests[:3] == [(0, 50), (50, 50), (100, 50)]
@@ -2574,6 +2691,167 @@ def test_settings_auto_processing_gui_save_and_run_now(
         )
 
     assert run_now_calls
+
+
+def test_setup_route_renders_readiness_without_html_injection(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """Setup route는 readiness API 문자열을 HTML로 실행하지 않고 표시한다."""
+    setup_requests: list[tuple[str, str]] = []
+
+    def setup_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        if parsed.path == "/api/setup/readiness":
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_setup_readiness_payload()),
+            )
+            return
+        if parsed.path.startswith("/api/setup/"):
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(status=500, content_type="application/json", body="{}")
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/setup",
+        api_handler=setup_api,
+    ) as page:
+        page.wait_for_function("() => document.querySelectorAll('.setup-check').length === 6")
+
+        assert page.locator("#navSetup").get_attribute("aria-current") == "page"
+        assert page.locator("#navHome").get_attribute("aria-current") is None
+        assert "확인이 필요한 항목" in page.locator(".setup-summary-title").inner_text()
+        assert "Python 런타임" in page.locator(".setup-view").inner_text()
+        assert "/tmp/runtime-python<script>" in page.locator(".setup-view").inner_text()
+        assert page.locator(".setup-check-details script").count() == 0
+        assert "실행 권한 없음" in page.locator(".setup-view").inner_text()
+        assert "python3 --version" in page.locator(".setup-view").inner_text()
+        assert "<script>bad()</script>" in page.locator(".setup-view").inner_text()
+        assert "HuggingFace 토큰" in page.locator(".setup-view").inner_text()
+        assert (
+            '<img src=x onerror="window.__setupXss = true">'
+            in page.locator(".setup-view").inner_text()
+        )
+        assert page.locator(".setup-check-message img").count() == 0
+        assert page.locator(".setup-check-action script").count() == 0
+        assert page.locator(".setup-check-actions-list script").count() == 0
+        assert page.locator(".setup-check-actions-list img").count() == 0
+        token_link = page.locator(
+            '.setup-action-link[href="https://huggingface.co/settings/tokens"]'
+        )
+        assert token_link.count() == 1
+        assert token_link.first.get_attribute("target") == "_blank"
+        assert token_link.first.get_attribute("rel") == "noopener noreferrer"
+        assert page.locator('.setup-action-link[href^="javascript:"]').count() == 0
+        assert "악성 링크" not in page.locator(".setup-view").inner_text()
+        assert "나쁜 설정 라우트" not in page.locator(".setup-view").inner_text()
+        assert "export HUGGINGFACE_TOKEN=hf_xxxxx" in page.locator(".setup-view").inner_text()
+        assert page.locator('[data-setup-route="/app/settings"]').count() == 1
+        assert page.evaluate("() => window.__setupXss") is None
+
+    assert setup_requests == [("GET", "/api/setup/readiness")]
+
+
+def test_setup_route_refreshes_with_get_only_and_links_to_settings(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """새로고침은 readiness GET만 반복하고 설정 버튼은 설정 라우트로 이동한다."""
+    setup_requests: list[tuple[str, str]] = []
+    counter = {"count": 0}
+
+    def setup_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        if parsed.path == "/api/setup/readiness":
+            counter["count"] += 1
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_setup_readiness_payload(ready=counter["count"] > 1)),
+            )
+            return
+        if parsed.path.startswith("/api/setup/"):
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(status=500, content_type="application/json", body="{}")
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/setup",
+        api_handler=setup_api,
+    ) as page:
+        page.wait_for_function("() => document.querySelectorAll('.setup-check').length === 6")
+
+        page.locator("#setupRefreshBtn").click()
+        page.wait_for_function(
+            "() => document.querySelector('.setup-summary-title')"
+            "?.textContent.includes('첫 회의 처리 준비 완료')"
+        )
+
+        page.locator("#setupSettingsBtn").click()
+        page.wait_for_url("**/app/settings")
+        page.wait_for_selector(".settings-view")
+
+    assert setup_requests == [
+        ("GET", "/api/setup/readiness"),
+        ("GET", "/api/setup/readiness"),
+    ]
+
+
+def test_setup_route_shows_readiness_error_without_mutation(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """readiness API 실패 시에도 inline error만 표시하고 setup mutation은 호출하지 않는다."""
+    setup_requests: list[tuple[str, str]] = []
+
+    def failing_setup_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        if parsed.path == "/api/setup/readiness":
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"detail": "readiness unavailable <b>bad</b>"}),
+            )
+            return
+        if parsed.path.startswith("/api/setup/"):
+            setup_requests.append((route.request.method, parsed.path))
+            route.fulfill(status=500, content_type="application/json", body="{}")
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/setup",
+        api_handler=failing_setup_api,
+    ) as page:
+        page.wait_for_function(
+            "() => document.querySelector('.setup-summary-title')"
+            "?.textContent.includes('준비 상태를 불러오지 못했습니다')"
+        )
+
+        assert (
+            "readiness unavailable <b>bad</b>" in page.locator(".setup-summary-sub").inner_text()
+        )
+        assert page.locator(".setup-summary-sub b").count() == 0
+        assert page.locator("#setupRefreshBtn").count() == 1
+        assert page.locator("#setupSettingsBtn").count() == 1
+
+    assert setup_requests == [("GET", "/api/setup/readiness")]
 
 
 # ============================================================

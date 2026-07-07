@@ -2,11 +2,50 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.harness
+
+_WINDOW_DOT_ASSIGNMENT_RE = re.compile(r"\bwindow\.([A-Za-z_$][\w$]*)\s*=")
+_WINDOW_BRACKET_ASSIGNMENT_RE = re.compile(r"""\bwindow\[\s*["']([A-Za-z_$][\w$]*)["']\s*\]\s*=""")
+_WINDOW_MUTATION_RE = re.compile(
+    r"\bObject\.(?:assign|defineProperty|defineProperties)\(\s*window\b"
+)
+_WEB_JS_DIR = Path("ui/web")
+_REACT_SRC_DIR = Path("ui/web-src")
+_ALLOWED_WINDOW_GLOBALS_BY_FILE = {
+    "ui/web/ab-test-view.js": ["MeetingAbTestView"],
+    "ui/web/api-client.js": ["MeetingApi"],
+    "ui/web/app.js": ["MeetingApp"],
+    "ui/web/bulk-action-bar.js": ["MeetingBulkActionBar"],
+    "ui/web/chat-view.js": ["MeetingChatView"],
+    "ui/web/command-palette.js": ["MeetingCommandPalette"],
+    "ui/web/empty-view.js": ["MeetingEmptyView"],
+    "ui/web/global-resource-bar.js": ["MeetingGlobalResourceBar"],
+    "ui/web/list-panel.js": ["MeetingListPanel"],
+    "ui/web/mobile-drawer.js": ["MeetingMobileDrawer"],
+    "ui/web/search-view.js": ["MeetingSearchView"],
+    "ui/web/settings-view.js": ["MeetingSettingsView"],
+    "ui/web/shortcut-controller.js": ["MeetingShortcutController"],
+    "ui/web/spa.js": ["ListPanel", "SPA"],
+    "ui/web/theme-controller.js": ["MeetingThemeController"],
+    "ui/web/viewer-view.js": ["MeetingViewerView"],
+    "ui/web/wiki-view.js": ["MeetingWikiView"],
+}
+
+
+def _window_global_assignments(path: Path) -> list[str]:
+    """JS 파일의 직접 window 전역 할당 이름을 반환한다."""
+    content = path.read_text(encoding="utf-8")
+    return sorted(
+        {
+            *_WINDOW_DOT_ASSIGNMENT_RE.findall(content),
+            *_WINDOW_BRACKET_ASSIGNMENT_RE.findall(content),
+        }
+    )
 
 
 def test_frontend_modules_load_in_dependency_order() -> None:
@@ -70,6 +109,40 @@ def test_api_client_exposes_stable_namespace() -> None:
     assert "delete: deleteRequest" in api_client
 
 
+def test_legacy_window_global_assignments_are_allowlisted() -> None:
+    """React 전환 전 legacy window 전역 노출면을 고정한다."""
+    observed = {}
+    for path in sorted(_WEB_JS_DIR.glob("*.js")):
+        assignments = _window_global_assignments(path)
+        if assignments:
+            observed[str(path)] = assignments
+
+    assert observed == _ALLOWED_WINDOW_GLOBALS_BY_FILE
+
+
+def test_frontend_modules_do_not_broaden_global_surface() -> None:
+    """신규 전역 확산 패턴을 도입하지 않는다."""
+    for path in sorted(_WEB_JS_DIR.glob("*.js")):
+        content = path.read_text(encoding="utf-8")
+        assert "globalThis" not in content, f"{path} uses globalThis"
+        assert not _WINDOW_MUTATION_RE.search(content), (
+            f"{path} mutates window outside the allowlist"
+        )
+
+
+def test_future_react_source_does_not_use_window_globals() -> None:
+    """React/TypeScript island 코드에는 window 전역 의존을 추가하지 않는다."""
+    if not _REACT_SRC_DIR.exists():
+        return
+
+    for path in sorted(_REACT_SRC_DIR.rglob("*")):
+        if path.suffix not in {".ts", ".tsx"}:
+            continue
+        content = path.read_text(encoding="utf-8")
+        assert "window." not in content, f"{path} uses window.*"
+        assert "globalThis" not in content, f"{path} uses globalThis"
+
+
 def test_api_client_preserves_abort_error_contract() -> None:
     api_client = Path("ui/web/api-client.js").read_text(encoding="utf-8")
 
@@ -83,6 +156,34 @@ def test_api_client_supports_non_json_success_payloads() -> None:
     assert 'response.headers.get("content-type")' in api_client
     assert 'contentType.indexOf("application/json")' in api_client
     assert "return response.text();" in api_client
+
+
+def test_setup_view_stays_private_read_only_and_abortable() -> None:
+    index_html = Path("ui/web/index.html").read_text(encoding="utf-8")
+    spa_js = Path("ui/web/spa.js").read_text(encoding="utf-8")
+    setup_block = spa_js[spa_js.index("// === SetupView") : spa_js.index("// === ListPanel")]
+
+    assert 'data-route="/app/setup"' in index_html
+    assert "function SetupView()" in setup_block
+    assert "window.MeetingSetupView" not in spa_js
+    assert "SetupView: SetupView" not in spa_js
+    assert "MeetingSetupView" not in setup_block
+    assert re.findall(r'App\.apiRequest\("([^"]+)"', setup_block) == ["/setup/readiness"]
+    assert "App.apiPost(" not in setup_block
+    assert "App.apiDelete(" not in setup_block
+    assert "fetch(" not in setup_block
+    assert "new AbortController()" in setup_block
+    assert "this._controller.abort()" in setup_block
+    assert "if (self._destroyed) return;" in setup_block
+    assert 'App.escapeHtml(check.message || "")' in setup_block
+    assert "App.escapeHtml(hint)" in setup_block
+    assert "setupSafeExternalHref(action.value)" in setup_block
+    assert "https://huggingface.co/" in setup_block
+    assert "setupSafeRoute(action.value)" in setup_block
+    assert 'return value === "/app/settings" ? value : "";' in setup_block
+    assert 'target="_blank" rel="noopener noreferrer"' in setup_block
+    assert "App.escapeHtml(command)" in setup_block
+    assert "Router.navigate(route)" in setup_block
 
 
 def test_command_palette_exposes_factory_boundary() -> None:

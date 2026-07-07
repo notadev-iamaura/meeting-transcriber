@@ -223,6 +223,13 @@
                 },
             },
             {
+                // /app/setup — 최초 설정 준비 상태
+                pattern: /^\/app\/setup\/?$/,
+                handler: function () {
+                    return new SetupView();
+                },
+            },
+            {
                 // /app/settings 및 /app/settings/{tab}
                 pattern: /^\/app\/settings(?:\/(general|prompts|vocabulary|reindex|wiki-backfill))?$/,
                 handler: function (match) {
@@ -284,6 +291,7 @@
                     pathname === "/app/chat" ||
                     pathname === "/app/wiki" ||
                     pathname.indexOf("/app/wiki/") === 0 ||
+                    pathname === "/app/setup" ||
                     pathname.indexOf("/app/settings") === 0 ||
                     pathname.indexOf("/app/ab-test") === 0
                 ) {
@@ -388,6 +396,394 @@
             getContentEl: getContentEl,
         };
     })();
+
+
+    // =================================================================
+    // === SetupView (최초 설정 준비 상태)
+    // =================================================================
+
+    function SetupView() {
+        this._destroyed = false;
+        this._controller = null;
+        this._contentEl = Router.getContentEl();
+        this._onActionClick = null;
+        this._renderShell();
+        this._bindEvents();
+        this._loadReadiness();
+    }
+
+    SetupView.prototype.destroy = function () {
+        this._destroyed = true;
+        if (this._controller) {
+            this._controller.abort();
+            this._controller = null;
+        }
+        if (this._onActionClick) {
+            this._contentEl.removeEventListener("click", this._onActionClick);
+            this._onActionClick = null;
+        }
+    };
+
+    SetupView.prototype._renderShell = function () {
+        this._contentEl.innerHTML = [
+            '<div class="setup-view">',
+            '  <header class="setup-header">',
+            '    <div>',
+            '      <div class="overline">첫 실행 준비</div>',
+            '      <h2 class="setup-title">녹음과 전사를 시작하기 전 확인</h2>',
+            '      <p class="setup-subtitle">로컬 환경 상태만 확인합니다. 설치, 권한 변경, 모델 다운로드는 실행하지 않습니다.</p>',
+            '    </div>',
+            '    <div class="setup-actions">',
+            '      <button type="button" class="btn-secondary" id="setupRefreshBtn">새로고침</button>',
+            '      <button type="button" class="settings-save-btn" id="setupSettingsBtn">설정 열기</button>',
+            '    </div>',
+            '  </header>',
+            '  <section class="setup-summary is-loading" id="setupSummary" role="status" aria-live="polite">',
+            '    <div class="setup-summary-dot is-loading" aria-hidden="true"></div>',
+            '    <div>',
+            '      <div class="setup-summary-title">준비 상태 확인 중</div>',
+            '      <div class="setup-summary-sub">데이터 디렉토리, 오디오 장치, 모델 상태를 확인합니다.</div>',
+            '    </div>',
+            '  </section>',
+            '  <section class="setup-capabilities" id="setupCapabilities" aria-label="기능 준비 상태"></section>',
+            '  <section class="setup-checks" id="setupChecks" aria-label="설정 점검 항목">',
+            '    <div class="setup-skeleton"></div>',
+            '    <div class="setup-skeleton"></div>',
+            '    <div class="setup-skeleton"></div>',
+            '  </section>',
+            '</div>',
+        ].join("\n");
+    };
+
+    SetupView.prototype._bindEvents = function () {
+        var self = this;
+        var refreshBtn = document.getElementById("setupRefreshBtn");
+        var settingsBtn = document.getElementById("setupSettingsBtn");
+        if (refreshBtn) {
+            refreshBtn.addEventListener("click", function () {
+                self._loadReadiness();
+            });
+        }
+        if (settingsBtn) {
+            settingsBtn.addEventListener("click", function () {
+                Router.navigate("/app/settings");
+            });
+        }
+        this._onActionClick = function (event) {
+            var rawTarget = event.target;
+            if (!rawTarget || typeof rawTarget.closest !== "function") return;
+            var target = rawTarget.closest("[data-setup-route]");
+            if (!target || !self._contentEl.contains(target)) return;
+            var route = setupSafeRoute(target.getAttribute("data-setup-route"));
+            if (!route) return;
+            event.preventDefault();
+            Router.navigate(route);
+        };
+        this._contentEl.addEventListener("click", this._onActionClick);
+    };
+
+    SetupView.prototype._loadReadiness = async function () {
+        var self = this;
+        if (this._controller) {
+            this._controller.abort();
+        }
+        this._controller = new AbortController();
+        this._setLoading();
+        try {
+            var data = await App.apiRequest("/setup/readiness", {
+                signal: this._controller.signal,
+            });
+            if (self._destroyed) return;
+            self._renderReadiness(data);
+        } catch (err) {
+            if (err && err.name === "AbortError") return;
+            if (self._destroyed) return;
+            self._renderError(err);
+        }
+    };
+
+    SetupView.prototype._setLoading = function () {
+        var summary = document.getElementById("setupSummary");
+        var checks = document.getElementById("setupChecks");
+        var capabilities = document.getElementById("setupCapabilities");
+        if (summary) {
+            summary.className = "setup-summary is-loading";
+            summary.innerHTML = [
+                '<div class="setup-summary-dot is-loading" aria-hidden="true"></div>',
+                '<div>',
+                '  <div class="setup-summary-title">준비 상태 확인 중</div>',
+                '  <div class="setup-summary-sub">로컬 상태를 읽고 있습니다.</div>',
+                '</div>',
+            ].join("\n");
+        }
+        if (capabilities) {
+            capabilities.innerHTML = "";
+        }
+        if (checks) {
+            checks.innerHTML = [
+                '<div class="setup-skeleton"></div>',
+                '<div class="setup-skeleton"></div>',
+                '<div class="setup-skeleton"></div>',
+            ].join("\n");
+        }
+    };
+
+    SetupView.prototype._renderReadiness = function (data) {
+        this._renderSummary(data);
+        this._renderCapabilities(data.capabilities || {});
+        this._renderChecks(data.checks || []);
+    };
+
+    SetupView.prototype._renderSummary = function (data) {
+        var summary = document.getElementById("setupSummary");
+        if (!summary) return;
+        var ready = Boolean(data && data.ready);
+        var configured = Boolean(data && data.configured);
+        var title = ready ? "첫 회의 처리 준비 완료" : "확인이 필요한 항목이 있습니다";
+        var subtitle = ready
+            ? "녹음과 전사에 필요한 기본 조건이 준비되었습니다."
+            : (
+                configured
+                    ? "일부 기능이 아직 완전한 회의 캡처 상태가 아닙니다."
+                    : "필수 설정 또는 로컬 도구를 먼저 확인해야 합니다."
+            );
+        summary.className = "setup-summary " + (ready ? "is-ready" : "is-action-required");
+        summary.innerHTML = [
+            '<div class="setup-summary-dot ' + (ready ? "is-ready" : "is-action-required") + '" aria-hidden="true"></div>',
+            '<div>',
+            '  <div class="setup-summary-title">' + App.escapeHtml(title) + '</div>',
+            '  <div class="setup-summary-sub">' + App.escapeHtml(subtitle) + '</div>',
+            '</div>',
+        ].join("\n");
+    };
+
+    SetupView.prototype._renderCapabilities = function (capabilities) {
+        var host = document.getElementById("setupCapabilities");
+        if (!host) return;
+        var items = [
+            ["recording_usable", "녹음"],
+            ["full_meeting_capture_ready", "전체 회의 캡처"],
+            ["stt_model_ready", "음성 인식 모델"],
+        ];
+        host.innerHTML = items.map(function (item) {
+            var key = item[0];
+            var label = item[1];
+            var ready = Boolean(capabilities[key]);
+            return [
+                '<div class="setup-capability ' + (ready ? "is-ready" : "is-pending") + '">',
+                '  <span class="setup-capability-dot" aria-hidden="true"></span>',
+                '  <span>' + App.escapeHtml(label) + '</span>',
+                '  <strong>' + (ready ? "준비됨" : "확인 필요") + '</strong>',
+                '</div>',
+            ].join("\n");
+        }).join("");
+    };
+
+    SetupView.prototype._renderChecks = function (checks) {
+        var host = document.getElementById("setupChecks");
+        if (!host) return;
+        if (!checks.length) {
+            host.innerHTML = '<div class="setup-empty">표시할 점검 항목이 없습니다.</div>';
+            return;
+        }
+        host.innerHTML = checks.map(function (check) {
+            return [
+                '<article class="setup-check setup-check--' + App.escapeHtml(check.status || "unknown") + '">',
+                '  <div class="setup-check-main">',
+                '    <div class="setup-check-icon" aria-hidden="true">' + setupStatusGlyph(check.status) + '</div>',
+                '    <div class="setup-check-copy">',
+                '      <div class="setup-check-title-row">',
+                '        <h3 class="setup-check-title">' + App.escapeHtml(setupCheckLabel(check.id)) + '</h3>',
+                '        <span class="setup-check-badge">' + App.escapeHtml(setupStatusLabel(check.status)) + '</span>',
+                '      </div>',
+                '      <p class="setup-check-message">' + App.escapeHtml(check.message || "") + '</p>',
+                setupActionHint(check.action_hint),
+                setupActionList(check.actions),
+                setupDetails(check),
+                '    </div>',
+                '  </div>',
+                '</article>',
+            ].join("\n");
+        }).join("");
+    };
+
+    SetupView.prototype._renderError = function (err) {
+        var summary = document.getElementById("setupSummary");
+        var checks = document.getElementById("setupChecks");
+        var message = err && err.message ? err.message : "알 수 없는 오류";
+        if (summary) {
+            summary.className = "setup-summary is-action-required";
+            summary.innerHTML = [
+                '<div class="setup-summary-dot is-action-required" aria-hidden="true"></div>',
+                '<div>',
+                '  <div class="setup-summary-title">준비 상태를 불러오지 못했습니다</div>',
+                '  <div class="setup-summary-sub">' + App.escapeHtml(message) + '</div>',
+                '</div>',
+            ].join("\n");
+        }
+        if (checks) {
+            checks.innerHTML = '<div class="setup-empty">새로고침을 눌러 다시 확인하세요.</div>';
+        }
+    };
+
+    function setupCheckLabel(id) {
+        var labels = {
+            base_dir: "데이터 디렉토리",
+            python_runtime: "Python 런타임",
+            ffmpeg: "ffmpeg",
+            hf_token_env: "HuggingFace 토큰",
+            audio_devices: "오디오 장치",
+            stt_model: "음성 인식 모델",
+        };
+        return labels[id] || id || "점검 항목";
+    }
+
+    function setupStatusLabel(status) {
+        var labels = {
+            pass: "정상",
+            warn: "주의",
+            fail: "필요",
+            unknown: "확인 불가",
+        };
+        return labels[status] || "확인 불가";
+    }
+
+    function setupStatusGlyph(status) {
+        if (status === "pass") return "✓";
+        if (status === "warn") return "!";
+        if (status === "fail") return "×";
+        return "?";
+    }
+
+    function setupActionHint(hint) {
+        if (!hint) return "";
+        return '<p class="setup-check-action">' + App.escapeHtml(hint) + '</p>';
+    }
+
+    function setupActionList(actions) {
+        if (!Array.isArray(actions) || !actions.length) return "";
+        var rendered = actions.map(setupActionMarkup).filter(Boolean).join("");
+        if (!rendered) return "";
+        return '<div class="setup-check-actions-list">' + rendered + '</div>';
+    }
+
+    function setupActionMarkup(action) {
+        if (!action || !action.kind) return "";
+        var label = App.escapeHtml(action.label || "다음 단계");
+        var description = action.description
+            ? '<span class="setup-action-description">' + App.escapeHtml(action.description) + '</span>'
+            : "";
+
+        if (action.kind === "external_link") {
+            var href = setupSafeExternalHref(action.value);
+            if (!href) return "";
+            return [
+                '<a class="setup-action-link" href="' + App.escapeHtml(href) + '" target="_blank" rel="noopener noreferrer">',
+                '  <span>' + label + '</span>',
+                description,
+                '</a>',
+            ].join("");
+        }
+
+        if (action.kind === "route") {
+            var route = setupSafeRoute(action.value);
+            if (!route) return "";
+            return [
+                '<a class="setup-action-link" href="' + App.escapeHtml(route) + '" data-setup-route="' + App.escapeHtml(route) + '">',
+                '  <span>' + label + '</span>',
+                description,
+                '</a>',
+            ].join("");
+        }
+
+        if (action.kind === "command") {
+            var command = setupSafeCommand(action.value);
+            if (!command) return "";
+            return [
+                '<div class="setup-action-command">',
+                '  <span class="setup-action-label">' + label + '</span>',
+                description,
+                '  <code>' + App.escapeHtml(command) + '</code>',
+                '</div>',
+            ].join("");
+        }
+
+        return "";
+    }
+
+    function setupSafeExternalHref(value) {
+        if (typeof value !== "string" || value.indexOf("https://huggingface.co/") !== 0) {
+            return "";
+        }
+        try {
+            var parsed = new URL(value);
+            if (parsed.protocol !== "https:" || parsed.hostname !== "huggingface.co") {
+                return "";
+            }
+            return parsed.href;
+        } catch (err) {
+            return "";
+        }
+    }
+
+    function setupSafeRoute(value) {
+        return value === "/app/settings" ? value : "";
+    }
+
+    function setupSafeCommand(value) {
+        if (typeof value !== "string") return "";
+        if (!value.trim()) return "";
+        return value;
+    }
+
+    function setupDetails(check) {
+        var details = check && check.details ? check.details : {};
+        var parts = [];
+        if (check.id === "base_dir" && details.path) {
+            parts.push("경로 " + details.path);
+            if (details.actual_mode && details.expected_mode) {
+                parts.push("권한 " + details.actual_mode + " / 권장 " + details.expected_mode);
+            }
+        } else if (check.id === "ffmpeg" && details.path) {
+            parts.push(details.path);
+        } else if (check.id === "python_runtime") {
+            if (details.runtime_scope === "launcher_handoff") {
+                parts.push("런처 전달");
+            } else if (details.runtime_scope === "server_reconstructed") {
+                parts.push("서버 기준 재구성");
+            }
+            if (details.python_source) parts.push("선택 " + details.python_source);
+            if (details.python_executable) parts.push("후보 " + details.python_executable);
+            if (details.running_python) parts.push("실행 중 " + details.running_python);
+            if (details.selected_matches_running_python === false) {
+                parts.push("실행 Python과 후보 다름");
+            }
+            if (details.selected_is_file === false) {
+                parts.push("후보 파일 아님");
+            } else if (details.selected_is_executable === false) {
+                parts.push("실행 권한 없음");
+            }
+        } else if (check.id === "hf_token_env") {
+            parts.push(details.configured ? "설정됨" : "미설정");
+            if (
+                details.environment_variables_present &&
+                details.environment_variables_present.length
+            ) {
+                parts.push("환경변수 " + details.environment_variables_present.join(", "));
+            }
+        } else if (check.id === "audio_devices") {
+            parts.push(details.has_blackhole ? "BlackHole 감지" : "BlackHole 없음");
+            parts.push(details.has_aggregate ? "Aggregate 감지" : "Aggregate 없음");
+            if (details.selected_mode) parts.push("모드 " + details.selected_mode);
+        } else if (check.id === "stt_model") {
+            if (details.active_model_id) parts.push(details.active_model_id);
+            if (details.model_status) parts.push(details.model_status);
+        }
+        if (!parts.length) return "";
+        return '<div class="setup-check-details">' + parts.map(function (part) {
+            return '<span>' + App.escapeHtml(part) + '</span>';
+        }).join("") + '</div>';
+    }
 
 
     // =================================================================
