@@ -918,11 +918,8 @@ class TestRouterIntegration:
         """API 라우터가 앱에 등록되었는지 확인한다."""
         app = _make_test_app(tmp_path)
 
-        # 등록된 라우트 경로 수집
-        route_paths = []
-        for route in app.routes:
-            if hasattr(route, "path"):
-                route_paths.append(route.path)
+        # FastAPI 공개 계약인 OpenAPI schema에서 등록된 REST 경로를 수집한다.
+        route_paths = set(app.openapi()["paths"])
 
         assert "/api/status" in route_paths
         assert "/api/meetings" in route_paths

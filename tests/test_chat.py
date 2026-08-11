@@ -1370,12 +1370,7 @@ class TestPhase3WebSocketIntegration:
         """서버 앱에 /ws/events 라우트가 등록되어 있는지 검증한다."""
         app = _make_integration_test_app(tmp_path)
 
-        route_paths = []
-        for route in app.routes:
-            if hasattr(route, "path"):
-                route_paths.append(route.path)
-
-        assert "/ws/events" in route_paths
+        assert str(app.url_path_for("websocket_events")) == "/ws/events"
 
 
 # === Phase 3 다중 엔드포인트 워크플로우 테스트 ===
@@ -1854,7 +1849,7 @@ class TestPhase3ServerLifespan:
         """Phase 3의 모든 API 엔드포인트가 등록되어 있는지 검증한다."""
         app = _make_integration_test_app(tmp_path)
 
-        route_paths = [getattr(route, "path", "") for route in app.routes]
+        route_paths = set(app.openapi()["paths"])
 
         # REST API 엔드포인트
         assert "/api/status" in route_paths
@@ -1865,6 +1860,6 @@ class TestPhase3ServerLifespan:
         assert "/api/search" in route_paths
         assert "/api/chat" in route_paths
         # WebSocket 엔드포인트
-        assert "/ws/events" in route_paths
+        assert str(app.url_path_for("websocket_events")) == "/ws/events"
         # 헬스체크
         assert "/api/health" in route_paths
