@@ -248,6 +248,8 @@ local_ready=true, distribution_ready=false 상태로 허용되며, DMG mount/ope
 
 - model/pipeline runtime gate와 테스트 프로파일을 정리했습니다.
 - CI는 기본 안정 gate, UI bulk actions gate, mypy 타입 검사 gate를 구분합니다.
+- Ruff는 개발 extra와 CI 모두 `0.15.13`으로 고정해 로컬/CI 포맷 결과의 버전별 변동을
+  차단합니다. 포맷터 버전 업그레이드는 전체 저장소 diff를 확인하는 별도 변경으로 진행합니다.
 - README, PR template, AGENTS.md, 평가 문서를 최신 정책에 맞췄습니다.
 - `harness/*`와 `docs/agentic-ops/*`가 main에 포함되어 consensus 기반 작업 흐름을 지원합니다.
 - 데이터 디렉토리 보안 설정의 Time Machine 제외 명령은

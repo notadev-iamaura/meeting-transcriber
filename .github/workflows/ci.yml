@@ -55,7 +55,8 @@ jobs:
           python-version: "3.12"
 
       - name: ruff 설치
-        run: pip install ruff
+        # pyproject.toml dev extra와 동일 버전으로 고정해 로컬/CI 포맷 결과를 일치시킨다.
+        run: pip install ruff==0.15.13
 
       - name: 린트 검사
         run: ruff check .

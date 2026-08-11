@@ -73,7 +73,7 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
-    "ruff>=0.8.0",
+    "ruff==0.15.13",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
     # E2E (Playwright) — `pytest -m e2e` 로 명시 실행. chromium 바이너리는
