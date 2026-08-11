@@ -332,13 +332,17 @@ def _find_suspicious_correction_reason(
         return "destructive_length_ratio"
     if original_len >= 15 and _is_generic_short_rewrite(candidate):
         return "generic_short_rewrite"
-    if original_len >= 8 and candidate_len > original_len * 2.0 and (
-        candidate_len - original_len
-    ) >= 12:
+    if (
+        original_len >= 8
+        and candidate_len > original_len * 2.0
+        and (candidate_len - original_len) >= 12
+    ):
         return "unexpected_expansion"
-    if original_len >= 20 and candidate_len > original_len * 1.6 and (
-        candidate_len - original_len
-    ) >= 20:
+    if (
+        original_len >= 20
+        and candidate_len > original_len * 1.6
+        and (candidate_len - original_len) >= 20
+    ):
         return "unexpected_expansion"
 
     own_similarity = _similarity(original, candidate)
@@ -361,8 +365,10 @@ def _find_suspicious_correction_reason(
             best_other_similarity = other_similarity
             best_other_idx = other_idx
 
-    if best_other_idx and best_other_similarity >= 0.82 and best_other_similarity > (
-        own_similarity + 0.2
+    if (
+        best_other_idx
+        and best_other_similarity >= 0.82
+        and best_other_similarity > (own_similarity + 0.2)
     ):
         return f"line_shift_to_{best_other_idx}"
 

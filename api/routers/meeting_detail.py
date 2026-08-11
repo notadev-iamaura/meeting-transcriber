@@ -76,10 +76,7 @@ _MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
 def _validate_meeting_id(meeting_id: str) -> None:
     """meeting_id 형식을 검증한다 (path traversal 방지)."""
     parts = re.split(r"[\\/]+", meeting_id)
-    if (
-        not _MEETING_ID_PATTERN.match(meeting_id)
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
+    if not _MEETING_ID_PATTERN.match(meeting_id) or any(part in {"", ".", ".."} for part in parts):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",

@@ -170,9 +170,7 @@ async def test_auto_processing_runner는_공격적_thermal_설정이면_전사�
     config = _make_config(tmp_path)
     config = config.model_copy(
         update={
-            "thermal": config.thermal.model_copy(
-                update={"batch_size": 3, "cooldown_seconds": 60}
-            )
+            "thermal": config.thermal.model_copy(update={"batch_size": 3, "cooldown_seconds": 60})
         }
     )
     audio = config.paths.resolved_audio_input_dir / "m1.wav"

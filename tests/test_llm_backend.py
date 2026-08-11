@@ -342,9 +342,10 @@ class TestThreadBoundLLMBackend:
 
         try:
             assert backend.chat(messages=[{"role": "user", "content": "hi"}]) == "chat-ok"
-            assert list(
-                backend.chat_stream(messages=[{"role": "user", "content": "hi"}])
-            ) == ["a", "b"]
+            assert list(backend.chat_stream(messages=[{"role": "user", "content": "hi"}])) == [
+                "a",
+                "b",
+            ]
         finally:
             backend.cleanup()
 

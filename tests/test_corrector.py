@@ -572,9 +572,7 @@ class TestCorrector정상보정:
     def test_다음줄을_붙인_병합형_교정은_폐기(self) -> None:
         """현재 줄 뒤에 다음 줄 내용을 붙인 출력은 줄 병합으로 보고 폐기한다."""
         backend = MagicMock()
-        backend.chat.return_value = (
-            "[1] 담당자에게 요청을 해서 수정을 요청해 두겠습니다."
-        )
+        backend.chat.return_value = "[1] 담당자에게 요청을 해서 수정을 요청해 두겠습니다."
         corrector = Corrector(
             config=AppConfig(llm={"correction_mode": "changed_only"}),
             model_manager=MagicMock(),
