@@ -383,7 +383,7 @@ def _check_main_py(main_py: Path) -> LauncherCheck:
 def _check_python(python_executable: Path) -> LauncherCheck:
     is_file = python_executable.is_file()
     is_executable = bool(is_file and os.access(python_executable, os.X_OK))
-    details = {
+    details: dict[str, str | int | bool] = {
         "path": str(python_executable),
         "is_file": is_file,
         "is_executable": is_executable,

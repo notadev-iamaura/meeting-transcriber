@@ -210,8 +210,7 @@ def _summarize_validation(validation: LauncherAppValidationReport) -> dict[str, 
             else None
         ),
         "checks": [
-            {"id": check.id, "status": check.status, "ok": check.ok}
-            for check in validation.checks
+            {"id": check.id, "status": check.status, "ok": check.ok} for check in validation.checks
         ],
     }
 

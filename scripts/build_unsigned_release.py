@@ -147,7 +147,9 @@ def build_unsigned_release(
 
 def _resolve_targets(output_dir: Path, app_name: str) -> dict[str, Path]:
     if "/" in app_name or app_name.endswith(".app") or not app_name.strip():
-        raise ValueError("app_name must be a non-empty bundle display name without slashes or .app")
+        raise ValueError(
+            "app_name must be a non-empty bundle display name without slashes or .app"
+        )
     return {
         "app": output_dir / f"{app_name}.app",
         "dmg": output_dir / f"{app_name}.dmg",

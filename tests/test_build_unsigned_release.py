@@ -30,9 +30,7 @@ def _make_bundle_project(tmp_path: Path) -> tuple[Path, Path]:
     for filename in ("config.py", "pyproject.toml", "requirements.txt"):
         (project_dir / filename).write_text(f"# {filename}\n", encoding="utf-8")
     (project_dir / "config.yaml").write_text(
-        "diarization:\n"
-        "  huggingface_token: hf_secretvalue\n"
-        "  block_hf_offline_cache_miss: true\n",
+        "diarization:\n  huggingface_token: hf_secretvalue\n  block_hf_offline_cache_miss: true\n",
         encoding="utf-8",
     )
     for dirname in ("api", "core", "steps", "search", "security", "ui"):
@@ -108,7 +106,9 @@ def test_build_unsigned_release_creates_app_dmg_and_manifest_in_order(
     assert calls == ["app", "dmg", "manifest"]
     assert result.app.app_path == (tmp_path / "dist" / "Recap Test.app").resolve()
     assert result.dmg.dmg_path == (tmp_path / "dist" / "Recap Test.dmg").resolve()
-    assert result.manifest_path == (tmp_path / "dist" / "Recap Test.release-manifest.json").resolve()
+    assert (
+        result.manifest_path == (tmp_path / "dist" / "Recap Test.release-manifest.json").resolve()
+    )
     assert result.app.app_path.is_dir()
     assert result.dmg.dmg_path.is_file()
     assert result.manifest_path.is_file()
@@ -173,8 +173,8 @@ def test_build_unsigned_release_direct_script_invocation_matches_readme(
     fake_hdiutil = fake_bin / "hdiutil"
     fake_hdiutil.write_text(
         "#!/bin/sh\n"
-        "last=\"\"\n"
-        "for arg in \"$@\"; do last=\"$arg\"; done\n"
+        'last=""\n'
+        'for arg in "$@"; do last="$arg"; done\n'
         "printf 'fake dmg' > \"$last\"\n",
         encoding="utf-8",
     )

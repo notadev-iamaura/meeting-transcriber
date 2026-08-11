@@ -25,12 +25,15 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
+
+if TYPE_CHECKING:
+    from search.hybrid_search import SearchResponse
 
 # ─── 헬퍼 ───────────────────────────────────────────────────────────────
 
@@ -53,18 +56,7 @@ def _make_app(tmp_path: Path, *, wiki_enabled: bool) -> Any:
         wiki=WikiConfig(enabled=wiki_enabled, root=tmp_path / "wiki"),
     )
 
-    with (
-        patch(
-            "search.hybrid_search.HybridSearchEngine",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "search.chat.ChatEngine",
-            return_value=MagicMock(),
-        ),
-    ):
-        app = create_app(config, runtime_profile="api-test")
-    return app
+    return create_app(config, runtime_profile="api-test")
 
 
 # ─── 1. 정적 의존성 검사 (Wiki ↛ RAG) ─────────────────────────────────
@@ -123,7 +115,7 @@ class TestStaticImportIsolation:
 class TestRAGResponsesUnaffectedByWiki:
     """wiki.enabled 가 True/False 와 무관하게 RAG 응답이 동일함을 검증."""
 
-    def _make_search_response(self) -> dict[str, Any]:
+    def _make_search_response(self) -> SearchResponse:
         """검색 응답 mock 데이터 (deterministic).
 
         Returns:
@@ -161,9 +153,9 @@ class TestRAGResponsesUnaffectedByWiki:
             app = _make_app(tmp_path / f"state_{wiki_state}", wiki_enabled=wiki_state)
             with TestClient(app) as client:
                 # 동일한 mock 응답을 양쪽 모두에 주입
-                app.state.search_engine.search = AsyncMock(
-                    return_value=self._make_search_response()
-                )
+                search_engine = MagicMock()
+                search_engine.search = AsyncMock(return_value=self._make_search_response())
+                app.state.search_engine = search_engine
 
                 response = client.post(
                     "/api/search",

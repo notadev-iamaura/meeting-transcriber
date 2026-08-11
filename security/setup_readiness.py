@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from config import AppConfig
 from core.coreaudio_helper import get_aggregate_device_names
@@ -23,6 +23,7 @@ from ui.launcher import (
     LAUNCHER_PROJECT_DIR_ENV,
     LAUNCHER_PYTHON_EXECUTABLE_ENV,
     LAUNCHER_PYTHON_SOURCE_ENV,
+    PythonSource,
     build_launcher_spec,
 )
 
@@ -397,22 +398,29 @@ def check_ffmpeg() -> ReadinessCheck:
 def check_python_runtime() -> ReadinessCheck:
     """서버 기준 런처 Python 후보를 read-only로 진단한다."""
     reconstructed_spec = build_launcher_spec()
-    reconstructed_runtime = reconstructed_spec.to_dict().get("runtime", {})
+    reconstructed_runtime = reconstructed_spec.to_dict().get("runtime")
+    reconstructed_candidates: list[dict[str, Any]] = []
+    if isinstance(reconstructed_runtime, dict):
+        raw_candidates = reconstructed_runtime.get("candidates")
+        if isinstance(raw_candidates, list):
+            reconstructed_candidates = [
+                cast(dict[str, Any], candidate)
+                for candidate in raw_candidates
+                if isinstance(candidate, dict)
+            ]
     handoff = _launcher_runtime_handoff()
     if handoff is None:
         selected_path = reconstructed_spec.python_executable
         python_source = reconstructed_spec.python_source
         runtime_scope = "server_reconstructed"
-        candidates = reconstructed_runtime.get("candidates", [])
+        candidates = reconstructed_candidates
         extra_details: dict[str, Any] = {}
         origin_label = "서버 기준 런처"
     else:
         python_source, selected_path, handoff_details = handoff
         runtime_scope = "launcher_handoff"
         candidates = [_runtime_candidate_details(python_source, selected_path)]
-        extra_details = handoff_details | {
-            "reconstructed_candidates": reconstructed_runtime.get("candidates", [])
-        }
+        extra_details = handoff_details | {"reconstructed_candidates": reconstructed_candidates}
         origin_label = "런처가 전달한"
 
     selected_is_file = selected_path.is_file()
@@ -708,7 +716,7 @@ def _local_model_path(model_path: str) -> Path | None:
     return None
 
 
-def _launcher_runtime_handoff() -> tuple[str, Path, dict[str, Any]] | None:
+def _launcher_runtime_handoff() -> tuple[PythonSource, Path, dict[str, Any]] | None:
     """런처가 서버에 전달한 Python 런타임 진단값을 검증해 반환한다."""
     python_source = os.environ.get(LAUNCHER_PYTHON_SOURCE_ENV, "").strip()
     python_executable = os.environ.get(LAUNCHER_PYTHON_EXECUTABLE_ENV, "").strip()
@@ -730,10 +738,10 @@ def _launcher_runtime_handoff() -> tuple[str, Path, dict[str, Any]] | None:
             details["handoff_project_dir"] = str(_safe_resolved_path(handoff_project_dir))
         except (OSError, RuntimeError, ValueError):
             details["handoff_project_dir_valid"] = False
-    return python_source, selected_path, details
+    return cast(PythonSource, python_source), selected_path, details
 
 
-def _runtime_candidate_details(python_source: str, path: Path) -> dict[str, Any]:
+def _runtime_candidate_details(python_source: PythonSource, path: Path) -> dict[str, Any]:
     """Python 후보 1개의 표시용 상태를 반환한다."""
     is_file = path.is_file()
     return {
