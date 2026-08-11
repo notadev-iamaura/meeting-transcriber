@@ -107,9 +107,13 @@ jobs:
         # tests/ui/ 의 a11y/behavior/visual 테스트가 chromium 헤드리스
         # 셸을 요구한다. 이 단계 누락 시 첫 Playwright 테스트가
         # `BrowserType.launch: Executable doesn't exist` 로 전체 잡 실패.
+        # pyproject.toml의 Playwright 1.60.0 pin이 visual baseline의
+        # Chromium 148 렌더링 환경을 고정한다.
         # `pyproject.toml` 의 addopts 로 e2e/ui/native 마커는 기본 실행에서
         # 제외되므로, 여기서는 chromium 헤드리스 셸만 설치하면 충분하다.
-        run: playwright install chromium
+        run: |
+          playwright --version
+          playwright install chromium
 
       - name: 기본 안정 게이트 실행
         timeout-minutes: 20

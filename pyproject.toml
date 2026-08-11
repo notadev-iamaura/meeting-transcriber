@@ -77,9 +77,10 @@ dev = [
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
     # E2E (Playwright) — `pytest -m e2e` 로 명시 실행. chromium 바이너리는
-    # `playwright install chromium` 명령으로 별도 설치 필요.
-    "playwright>=1.58.0",
-    "pytest-playwright>=0.7.2",
+    # `playwright install chromium` 명령으로 별도 설치 필요. visual baseline은
+    # Playwright 1.60.0 / Chromium 148 기준이므로 재캡처 전까지 정확히 고정한다.
+    "playwright==1.60.0",
+    "pytest-playwright==0.8.0",
     "axe-playwright-python>=0.1.4",
     "Pillow>=10.0",
 ]

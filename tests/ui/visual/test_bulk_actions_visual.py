@@ -59,6 +59,7 @@ ACTUAL_DIR = PROJECT_ROOT / "tests" / "ui" / "visual" / "_actual"
 BASELINES_DIR = PROJECT_ROOT / "tests" / "ui" / "visual" / "baselines"
 
 DEVICE_SCALE_FACTOR = 2  # Retina 캡처 (mockup §1.4 등 baseline 기대 DPR)
+EXPECTED_CHROMIUM_MAJOR = 148
 
 
 @contextmanager
@@ -70,6 +71,15 @@ def _make_page(
     color_scheme: Literal["light", "dark", "no-preference"],
 ) -> Iterator[Page]:
     """variant 별 viewport·color-scheme·DPR 일치 context."""
+    chromium_major = int(browser.version.split(".", maxsplit=1)[0])
+    if chromium_major != EXPECTED_CHROMIUM_MAJOR:
+        pytest.fail(
+            "bulk-actions visual baseline은 Chromium "
+            f"{EXPECTED_CHROMIUM_MAJOR} 기준입니다. 현재 Chromium은 "
+            f"{browser.version}입니다. pyproject.toml의 Playwright pin과 "
+            "브라우저 설치 상태를 맞춘 뒤 다시 실행하세요.",
+            pytrace=False,
+        )
     context = browser.new_context(
         viewport={"width": width, "height": height},
         device_scale_factor=DEVICE_SCALE_FACTOR,

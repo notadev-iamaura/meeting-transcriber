@@ -130,6 +130,14 @@ legacy `ui/web/index.html`에는 React asset을 주입하지 않았습니다. `u
 generated artifact로 ignore하고 launcher source bundle/validator exclusion 목록에서도
 제외합니다.
 
+bulk actions 시각 회귀 기준 이미지 6종은 2026-08-11 현재 UI로 재캡처했습니다.
+5월 기준 이미지 이후 반영된 빈 상태 UX와 `/app/setup` 준비 상태 내비게이션을 포함하며,
+라이트/다크 데스크톱과 모바일 화면을 직접 검토했습니다. 픽셀 비교 재현성을 위해 dev
+extra의 Playwright를 `1.60.0`, pytest-playwright를 `0.8.0`으로 고정하고 Chromium 148이
+아닌 브라우저로 bulk actions visual gate를 실행하면 기준 이미지 비교 전에 명확히
+실패하도록 런타임 가드를 추가했습니다. Playwright를 올릴 때는 브라우저 렌더링을 검토한
+뒤 이 버전 계약과 기준 이미지 6종을 함께 갱신해야 합니다.
+
 `/app/setup` 준비 상태 화면을 추가했습니다. 이 화면은
 `GET /api/setup/readiness`만 호출해 데이터 디렉토리, Python 런타임 후보, ffmpeg,
 HuggingFace 토큰, BlackHole/Aggregate 장치, 활성 STT 모델 상태를 표시하며,
