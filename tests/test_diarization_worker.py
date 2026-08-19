@@ -8,7 +8,10 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from steps.diarization_worker import _run
+from steps.transcriber import inspect_audio_path_no_symlinks
 
 
 class FakeTurn:
@@ -72,6 +75,7 @@ def test_worker_writes_diarization_json(
         {
             "model_name": "pyannote/speaker-diarization-3.1",
             "audio_path": str(audio_path),
+            "audio_identity": list(inspect_audio_path_no_symlinks(audio_path)),
             "output_path": str(output_path),
             "huggingface_token": "hf_test",
             "min_speakers": 1,
@@ -89,3 +93,38 @@ def test_worker_writes_diarization_json(
     assert FakePipeline.loaded_token == "hf_test"
     assert FakePipeline.received_device == "cpu"
     assert FakePipeline.received_params == {"min_speakers": 1, "max_speakers": 2}
+
+
+def test_worker_rejects_source_change_before_model_load(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """부모 identity와 다른 source는 pyannote import/모델 로드 전에 차단한다."""
+    audio_path = tmp_path / "audio.wav"
+    output_path = tmp_path / "result.json"
+    audio_path.write_bytes(b"ORIGINAL")
+    expected_identity = inspect_audio_path_no_symlinks(audio_path)
+    audio_path.write_bytes(b"CHANGED-CONTENT")
+    imported = False
+
+    class _ImportSentinel(types.ModuleType):
+        def __getattr__(self, name: str) -> Any:
+            nonlocal imported
+            imported = True
+            raise AssertionError(name)
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio", _ImportSentinel("pyannote.audio"))
+
+    with pytest.raises(RuntimeError, match="시작 전 오디오가 변경"):
+        _run(
+            {
+                "model_name": "pyannote/test",
+                "audio_path": str(audio_path),
+                "audio_identity": list(expected_identity),
+                "output_path": str(output_path),
+                "huggingface_token": "hf_test",
+            }
+        )
+
+    assert imported is False
+    assert not output_path.exists()

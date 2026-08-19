@@ -61,6 +61,22 @@ def _parse_annotation(
 
 def _run(payload: dict[str, Any]) -> None:
     """stdin payload 기준으로 pyannote 화자분리를 실행한다."""
+    from steps.transcriber import inspect_audio_path_no_symlinks
+
+    model_name = str(payload["model_name"])
+    audio_path = Path(str(payload["audio_path"]))
+    output_path = Path(str(payload["output_path"]))
+    raw_identity = payload.get("audio_identity")
+    if (
+        not isinstance(raw_identity, list)
+        or len(raw_identity) != 5
+        or not all(isinstance(value, int) for value in raw_identity)
+    ):
+        raise RuntimeError("화자분리 worker audio identity가 유효하지 않습니다.")
+    expected_identity = tuple(raw_identity)
+    if inspect_audio_path_no_symlinks(audio_path) != expected_identity:
+        raise RuntimeError("화자분리 worker 시작 전 오디오가 변경되었습니다.")
+
     try:
         from pyannote.audio import Pipeline  # type: ignore[import-untyped]
     except ImportError as e:
@@ -71,9 +87,6 @@ def _run(payload: dict[str, Any]) -> None:
     except ImportError as e:
         raise RuntimeError("PyTorch가 설치되어 있지 않습니다.") from e
 
-    model_name = str(payload["model_name"])
-    audio_path = Path(str(payload["audio_path"]))
-    output_path = Path(str(payload["output_path"]))
     token = payload.get("huggingface_token")
     min_speakers = payload.get("min_speakers")
     max_speakers = payload.get("max_speakers")
@@ -81,9 +94,6 @@ def _run(payload: dict[str, Any]) -> None:
 
     if not token:
         raise RuntimeError("HuggingFace 토큰이 설정되지 않았습니다.")
-    if not audio_path.exists():
-        raise RuntimeError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
-
     pipeline = Pipeline.from_pretrained(model_name, token=str(token))
     if pipeline is None:
         raise RuntimeError(f"pyannote 파이프라인 로드 실패: {model_name}")
@@ -97,6 +107,8 @@ def _run(payload: dict[str, Any]) -> None:
     if max_speakers is not None:
         params["max_speakers"] = int(max_speakers)
 
+    if inspect_audio_path_no_symlinks(audio_path) != expected_identity:
+        raise RuntimeError("화자분리 worker 모델 로드 중 오디오가 변경되었습니다.")
     annotation = pipeline(str(audio_path), **params)
     segments, selected_output_mode = _parse_annotation(annotation, output_mode)
     result = {

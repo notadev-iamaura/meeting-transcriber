@@ -30,6 +30,21 @@ from steps.merger import MergedResult, MergedUtterance
 from steps.summarizer import SummaryResult
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
+
+def _denied_audio_admission(failure_kind_name: str) -> Any:
+    """STT A/B admission 매핑용 비수락 결과를 만든다."""
+    from core.audio_quality import AudioFailureKind, AudioQualityResult, AudioQualityStatus
+
+    media_invalid = failure_kind_name == "MEDIA_INVALID"
+    return AudioQualityResult(
+        status=AudioQualityStatus.REJECT if media_invalid else AudioQualityStatus.ERROR,
+        mean_volume_db=None,
+        duration_seconds=1.0 if media_invalid else None,
+        reason=f"admission denied: {failure_kind_name}",
+        failure_kind=getattr(AudioFailureKind, failure_kind_name),
+    )
+
+
 # ============================================================
 # 헬퍼: 최소 FastAPI 앱 생성 (lifespan 생략, 라우터만 등록)
 # ============================================================
@@ -67,6 +82,9 @@ def tmp_config(tmp_path: Path) -> AppConfig:
     cfg.paths.resolved_outputs_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.resolved_checkpoints_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.resolved_audio_input_dir.mkdir(parents=True, exist_ok=True)
+    # 기존 A/B 테스트 fixture는 최소 WAV 헤더만 사용하므로 gate 전용 테스트
+    # 외에는 미디어 품질 검증을 비활성화한다.
+    cfg.audio_quality.enabled = False
     return cfg
 
 
@@ -300,6 +318,26 @@ def async_client(app: FastAPI) -> httpx.AsyncClient:
 
 class TestPostLlmAbTest:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["llm", "stt"])
+    async def test_meeting_id_path_separator는_공통으로_400(
+        self,
+        async_client: httpx.AsyncClient,
+        endpoint: str,
+    ) -> None:
+        """LLM/STT 모두 direct-child가 아닌 ID를 공통으로 거부한다."""
+        body = _llm_body("valid/escape") if endpoint == "llm" else _stt_body("valid/escape")
+
+        response = await async_client.post(f"/api/ab-tests/{endpoint}", json=body)
+
+        assert response.status_code == 400
+
+    def test_한국어와_공백_meeting_id는_기존호환을_유지한다(self) -> None:
+        """watcher/Pipeline이 만드는 Unicode·공백 단일 요소를 A/B도 허용한다."""
+        from api.routers.ab_tests import _validate_meeting_id
+
+        _validate_meeting_id("회의 1")
+
+    @pytest.mark.asyncio
     async def test_해피_패스(
         self,
         async_client: httpx.AsyncClient,
@@ -345,6 +383,203 @@ class TestPostLlmAbTest:
         resp = await async_client.post("/api/ab-tests/llm", json=body)
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("artifact_name", ["merge.json", "diarize.json"])
+    async def test_LLM_AB는_source_artifact_symlink_target을_읽지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+        artifact_name: str,
+    ) -> None:
+        """merge/diarize final symlink는 test ID 생성 전 SECURITY_BLOCKED다."""
+        import api.routers.ab_tests as ab_routes
+
+        checkpoint_dir = tmp_config.paths.resolved_checkpoints_dir / meeting_id_with_merge
+        artifact = checkpoint_dir / artifact_name
+        if artifact.exists():
+            artifact.unlink()
+        external = tmp_config.paths.resolved_base_dir / f"external-{artifact_name}"
+        external.write_text('{"sentinel": "DO-NOT-READ"}', encoding="utf-8")
+        artifact.symlink_to(external)
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+
+        response = await async_client.post(
+            "/api/ab-tests/llm",
+            json=_llm_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        new_id.assert_not_called()
+        assert external.read_text(encoding="utf-8") == '{"sentinel": "DO-NOT-READ"}'
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    @pytest.mark.asyncio
+    async def test_LLM_AB는_checkpoint_중간_symlink를_따르지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """configured checkpoint 경로 중간 symlink는 외부 JSON 접근 전에 차단한다."""
+        import api.routers.ab_tests as ab_routes
+
+        meeting_id = "linked-checkpoint-meeting"
+        lexical_parent = tmp_config.paths.resolved_base_dir / "safe"
+        lexical_parent.mkdir()
+        external_root = tmp_config.paths.resolved_base_dir / "external-checkpoints"
+        external_meeting = external_root / "checkpoints" / meeting_id
+        external_meeting.mkdir(parents=True)
+        sentinel = external_meeting / "merge.json"
+        sentinel.write_text('{"sentinel": "DO-NOT-READ"}', encoding="utf-8")
+        (lexical_parent / "jump").symlink_to(external_root, target_is_directory=True)
+        tmp_config.paths.checkpoints_dir = "safe/jump/checkpoints"
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+
+        response = await async_client.post(
+            "/api/ab-tests/llm",
+            json=_llm_body(meeting_id),
+        )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        new_id.assert_not_called()
+        assert sentinel.read_text(encoding="utf-8") == '{"sentinel": "DO-NOT-READ"}'
+
+    @pytest.mark.asyncio
+    async def test_LLM_AB는_사용하지않는_diarize_schema에_결합되지않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        app: FastAPI,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        patch_llm_steps: dict[str, int],
+    ) -> None:
+        """LLM preflight는 diarize path 안전성만 확인하고 schema는 소비하지 않는다."""
+        app.state.model_manager = _DummyManager()
+        diarize_path = (
+            tmp_config.paths.resolved_checkpoints_dir / meeting_id_with_merge / "diarize.json"
+        )
+        diarize_path.write_text(
+            json.dumps({"segments": [{"future_field": 1}]}),
+            encoding="utf-8",
+        )
+
+        response = await async_client.post(
+            "/api/ab-tests/llm",
+            json=_llm_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 202
+        metadata = await _wait_for_task_completion(
+            tmp_config,
+            response.json()["test_id"],
+        )
+        assert metadata["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_LLM_AB는_malformed_merge를_ID생성전_422로_거부한다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """schema TypeError를 500으로 노출하거나 ghost metadata를 만들지 않는다."""
+        import api.routers.ab_tests as ab_routes
+
+        merge_path = (
+            tmp_config.paths.resolved_checkpoints_dir / meeting_id_with_merge / "merge.json"
+        )
+        merge_path.write_text(
+            json.dumps({"utterances": [{"unexpected": 1}]}),
+            encoding="utf-8",
+        )
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+
+        response = await async_client.post(
+            "/api/ab-tests/llm",
+            json=_llm_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 422
+        new_id.assert_not_called()
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    @pytest.mark.asyncio
+    async def test_LLM_AB_202직후에도_pending_metadata를_조회할수있다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """route는 background runner 시작 전에 metadata를 예약해 즉시 GET 404를 막는다."""
+        import api.routers.ab_tests as ab_routes
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_runner(**kwargs: Any) -> str:
+            entered.set()
+            await release.wait()
+            return str(kwargs["test_id"])
+
+        monkeypatch.setattr(ab_routes, "_runner_run_llm_ab_test", blocking_runner)
+
+        response = await async_client.post(
+            "/api/ab-tests/llm",
+            json=_llm_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 202
+        test_id = response.json()["test_id"]
+        detail = await async_client.get(f"/api/ab-tests/{test_id}")
+        assert detail.status_code == 200
+        assert detail.json()["metadata"]["status"] == "pending"
+        assert ab_test_store.read_metadata(tmp_config, test_id)["status"] == "pending"
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        release.set()
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["llm", "stt"])
+    async def test_AB_route는_이미_busy면_ID나_metadata없이_409(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+        endpoint: str,
+    ) -> None:
+        """이미 알려진 lock 점유는 route mutation 전에 동기 409로 응답한다."""
+        import api.routers.ab_tests as ab_routes
+
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+        lock = ab_test_runner._get_ab_test_lock()
+        await lock.acquire()
+        try:
+            response = await async_client.post(
+                f"/api/ab-tests/{endpoint}",
+                json=(
+                    _llm_body(meeting_id_with_merge)
+                    if endpoint == "llm"
+                    else _stt_body(meeting_id_with_merge)
+                ),
+            )
+        finally:
+            lock.release()
+
+        assert response.status_code == 409
+        new_id.assert_not_called()
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
 
 # ============================================================
 # POST /api/ab-tests/stt
@@ -387,6 +622,155 @@ class TestPostSttAbTest:
         }
         resp = await async_client.post("/api/ab-tests/stt", json=body)
         assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure_kind_name", "expected_status"),
+        [
+            ("MEDIA_INVALID", 422),
+            ("SOURCE_BUSY", 409),
+            ("INFRA_UNAVAILABLE", 503),
+            ("SECURITY_BLOCKED", 400),
+        ],
+    )
+    async def test_STT_AB는_audio_ACCEPT_전에_task를_생성하지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        app: FastAPI,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_kind_name: str,
+        expected_status: int,
+    ) -> None:
+        """A/B 요청은 비수락 오디오에 test id나 runner task를 만들면 안 된다."""
+        import api.routers.ab_tests as ab_routes
+        import core.audio_quality as audio_quality
+
+        admission = MagicMock(return_value=_denied_audio_admission(failure_kind_name))
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        runner = AsyncMock(return_value=None)
+        monkeypatch.setattr(audio_quality, "validate_audio_quality", admission)
+        monkeypatch.setattr(ab_routes, "validate_audio_quality", admission, raising=False)
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+        monkeypatch.setattr(ab_routes, "_runner_run_stt_ab_test", runner)
+        tmp_config.audio_quality.enabled = True
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == expected_status
+        assert failure_kind_name in response.json()["detail"]
+        admission.assert_called_once()
+        new_id.assert_not_called()
+        runner.assert_not_called()
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    @pytest.mark.asyncio
+    async def test_STT_AB는_gate_disabled여도_symlink_target을_열지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """quality 정책을 꺼도 최종 symlink는 task 생성 전에 SECURITY_BLOCKED다."""
+        import api.routers.ab_tests as ab_routes
+
+        wav_path = tmp_config.paths.resolved_audio_input_dir / f"{meeting_id_with_merge}.wav"
+        external = tmp_config.paths.resolved_base_dir / "external.wav"
+        external.write_bytes(b"do not open")
+        wav_path.unlink()
+        wav_path.symlink_to(external)
+        validate = MagicMock(side_effect=AssertionError("symlink target must not be decoded"))
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "validate_audio_quality", validate)
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        validate.assert_not_called()
+        new_id.assert_not_called()
+        assert external.read_bytes() == b"do not open"
+
+    @pytest.mark.asyncio
+    async def test_STT_AB는_gate중_변경된_파일을_409로_보류한다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """full gate 전후 fingerprint가 달라지면 task ID를 만들지 않는다."""
+        import api.routers.ab_tests as ab_routes
+        from core.audio_quality import AudioQualityResult, AudioQualityStatus
+
+        wav_path = tmp_config.paths.resolved_audio_input_dir / f"{meeting_id_with_merge}.wav"
+
+        def mutate_during_gate(*args: Any, **kwargs: Any) -> AudioQualityResult:
+            wav_path.write_bytes(wav_path.read_bytes() + b"changed")
+            return AudioQualityResult(
+                status=AudioQualityStatus.ACCEPT,
+                mean_volume_db=-20.0,
+                duration_seconds=30.0,
+            )
+
+        validate = MagicMock(side_effect=mutate_during_gate)
+        new_id = MagicMock(return_value="ab_20260409-143000_deadbeef")
+        monkeypatch.setattr(ab_routes, "validate_audio_quality", validate)
+        monkeypatch.setattr(ab_routes, "_runner_new_test_id", new_id)
+        tmp_config.audio_quality.enabled = True
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        validate.assert_called_once()
+        new_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_202후_runner_재검증실패도_metadata_failed로_조회된다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """route→runner 사이 source 변경이 반환된 test_id를 영구 404로 만들지 않는다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        def fail_runner_reinspection(*args: Any, **kwargs: Any) -> None:
+            raise AudioAdmissionError(
+                "source changed after route admission",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+
+        monkeypatch.setattr(
+            "core.ab_test_runner._inspect_stt_audio_source",
+            fail_runner_reinspection,
+        )
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 202
+        test_id = response.json()["test_id"]
+        metadata = await _wait_for_task_completion(tmp_config, test_id)
+        assert metadata["status"] == "failed"
+        assert "SOURCE_BUSY" in metadata["error"]
 
 
 # ============================================================

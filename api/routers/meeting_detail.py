@@ -7,10 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
-import re
+import os
+import stat
 import threading
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,20 +24,56 @@ from pydantic import BaseModel, Field
 from api.dependencies import get_job_queue as _get_job_queue
 from api.dependencies import get_outputs_dir as _get_outputs_dir
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioQualityStatus,
+    validate_audio_quality,
+)
 from core.io_utils import atomic_write_json as _atomic_write_json
 from core.io_utils import atomic_write_text as _atomic_write_text
-from steps.embedder import IndexPurgeError, purge_meeting_index
+from core.job_queue import (
+    RETRANSCRIBE_OUTPUT_FILES,
+    JobQueueError,
+    _entry_stat,
+    _move_entry_checked,
+    _open_child_directory,
+    _open_pinned_retranscribe_root,
+    _require_open_entry_identity,
+    _restore_checked_moves,
+    _rollback_retranscribe_staging_fds,
+    _verify_pinned_retranscribe_root,
+    cleanup_retranscribe_staging,
+    lexical_root_no_symlinks,
+    parse_retranscribe_claim,
+    retranscribe_staging_paths,
+    rollback_retranscribe_staging,
+)
+from steps.embedder import IndexPurgeError, IndexPurgeResult, purge_meeting_index
+from steps.transcriber import (
+    AudioAdmissionError,
+    AudioFileIdentity,
+    EmptyAudioError,
+    inspect_audio_path_no_symlinks,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+class _RetranscribeStagingIntegrityError(HTTPException):
+    """staging root identity 변경으로 durable claim을 유지해야 하는 충돌."""
+
+    def __init__(self, detail: str, *, restore_via_open_fds: bool = True) -> None:
+        super().__init__(status_code=409, detail=detail)
+        self.restore_via_open_fds = restore_via_open_fds
+
+
 class _JsonFileCache:
     """JSON 파일을 mtime 기반으로 캐싱하는 스레드 안전 캐시."""
 
     def __init__(self, max_size: int = 64) -> None:
-        self._cache: dict[str, tuple[int, int, Any]] = {}
+        self._cache: dict[str, tuple[tuple[int, int, int, int, int], Any]] = {}
         self._max_size = max_size
         self._lock = threading.Lock()
 
@@ -41,14 +81,13 @@ class _JsonFileCache:
         """캐시된 JSON 데이터를 반환한다. 변경 시 자동 갱신한다."""
         key = str(file_path)
         stat = file_path.stat()
-        current_mtime_ns = stat.st_mtime_ns
-        current_size = stat.st_size
+        current_identity = _file_identity(stat)
 
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
-                cached_mtime_ns, cached_size, cached_data = cached
-                if cached_mtime_ns == current_mtime_ns and cached_size == current_size:
+                cached_identity, cached_data = cached
+                if cached_identity == current_identity:
                     return cached_data
 
         with open(file_path, encoding="utf-8") as f:
@@ -58,8 +97,35 @@ class _JsonFileCache:
             if len(self._cache) >= self._max_size and key not in self._cache:
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
-            self._cache[key] = (current_mtime_ns, current_size, data)
+            self._cache[key] = (current_identity, data)
 
+        return data
+
+    def get_from_fd(
+        self,
+        file_path: Path,
+        file_fd: int,
+        file_stat: os.stat_result,
+    ) -> Any:
+        """이미 no-follow로 연 descriptor에서만 JSON을 읽고 캐시한다."""
+        key = str(file_path)
+        current_identity = _file_identity(file_stat)
+
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached_identity, cached_data = cached
+                if cached_identity == current_identity:
+                    return cached_data
+
+        with os.fdopen(os.dup(file_fd), encoding="utf-8") as opened_file:
+            data = json.load(opened_file)
+
+        with self._lock:
+            if len(self._cache) >= self._max_size and key not in self._cache:
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[key] = (current_identity, data)
         return data
 
     def invalidate(self, file_path: Path) -> None:
@@ -70,13 +136,16 @@ class _JsonFileCache:
 
 _json_cache = _JsonFileCache()
 
-_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
-
 
 def _validate_meeting_id(meeting_id: str) -> None:
-    """meeting_id 형식을 검증한다 (path traversal 방지)."""
-    parts = re.split(r"[\\/]+", meeting_id)
-    if not _MEETING_ID_PATTERN.match(meeting_id) or any(part in {"", ".", ".."} for part in parts):
+    """단일 path segment meeting_id 계약을 검증한다."""
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or "\x00" in meeting_id
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
@@ -106,15 +175,266 @@ def _get_config(request: Request) -> Any:
     return config
 
 
-def _read_pipeline_state_for_response(config: Any, meeting_id: str) -> dict[str, Any] | None:
-    """응답 보정용 pipeline_state.json 을 읽는다."""
-    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
-    if not state_path.is_file():
-        return None
+_AUDIO_FAILURE_HTTP_STATUS = {
+    AudioFailureKind.MEDIA_INVALID: 422,
+    AudioFailureKind.SOURCE_BUSY: 409,
+    AudioFailureKind.INFRA_UNAVAILABLE: 503,
+    AudioFailureKind.SECURITY_BLOCKED: 400,
+}
+
+
+def _configured_lexical_path(config: Any, child_attribute: str | None = None) -> Path:
+    """raw path config를 resolve하지 않고 no-follow 검증한 절대 경로로 만든다."""
+    try:
+        paths = config.paths
+        # 실제 AppConfig는 raw 값을 항상 제공한다. 테스트·임베디드 호출자가
+        # 기존 resolved_* 계약만 제공하는 경우에도 같은 containment 검증을
+        # 적용해 하위 호환을 유지한다.
+        raw_base = getattr(paths, "base_dir", None)
+        if raw_base is None:
+            raw_base = paths.resolved_base_dir
+        base = lexical_root_no_symlinks(Path(raw_base))
+        if child_attribute is None:
+            return base
+        raw_child = getattr(paths, child_attribute, None)
+        if raw_child is None:
+            raw_child = getattr(paths, f"resolved_{child_attribute}")
+        configured_child = Path(str(raw_child)).expanduser()
+        raw_path = configured_child if configured_child.is_absolute() else base / configured_child
+        child = lexical_root_no_symlinks(raw_path)
+    except JobQueueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SECURITY_BLOCKED: 안전하지 않은 설정 경로입니다: {exc}",
+        ) from exc
+    if not child.is_relative_to(base):
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 설정 경로가 base_dir 밖에 있습니다.",
+        )
+    return child
+
+
+def _require_audio_in_config_base(config: Any, audio_path: Path) -> Path:
+    """오디오 lexical 경로가 raw base_dir 내부인지 확인한다."""
+    base = _configured_lexical_path(config)
+    raw = audio_path.expanduser()
+    if "\x00" in str(raw) or ".." in raw.parts:
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 안전하지 않은 오디오 경로입니다.",
+        )
+    candidate = raw.absolute()
+    if not candidate.is_relative_to(base):
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 오디오 파일이 설정된 base_dir 밖에 있습니다.",
+        )
+    return candidate
+
+
+async def _inspect_audio_identity(
+    audio_path: Path,
+    *,
+    changed_is_busy: bool,
+) -> AudioFileIdentity:
+    """공통 no-follow 검사를 실행하고 typed HTTP 오류로 변환한다."""
+    try:
+        return await asyncio.to_thread(inspect_audio_path_no_symlinks, audio_path)
+    except AudioAdmissionError as exc:
+        raise HTTPException(
+            status_code=_AUDIO_FAILURE_HTTP_STATUS[exc.failure_kind],
+            detail=f"{exc.failure_kind.name}: {exc}",
+        ) from exc
+    except EmptyAudioError as exc:
+        status = 409 if changed_is_busy else 422
+        failure = "SOURCE_BUSY" if changed_is_busy else "MEDIA_INVALID"
+        raise HTTPException(status_code=status, detail=f"{failure}: {exc}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=f"SOURCE_BUSY: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"INFRA_UNAVAILABLE: {exc}") from exc
+
+
+async def _require_audio_identity_unchanged(
+    audio_path: Path,
+    expected_identity: AudioFileIdentity,
+) -> None:
+    """claim 이후 source swap을 staging 전에 차단한다."""
+    current_identity = await _inspect_audio_identity(audio_path, changed_is_busy=True)
+    if current_identity != expected_identity:
+        raise HTTPException(
+            status_code=409,
+            detail="SOURCE_BUSY: 검증 후 오디오 파일 identity가 변경되었습니다.",
+        )
+
+
+async def _require_audio_quality_accept(config: Any, audio_path: Path) -> AudioFileIdentity:
+    """no-follow identity와 활성화된 품질 gate를 HTTP 오류로 변환한다."""
+    audio_path = _require_audio_in_config_base(config, audio_path)
+    before_identity = await _inspect_audio_identity(audio_path, changed_is_busy=False)
+
+    quality_config = getattr(config, "audio_quality", None)
+    if quality_config is None or getattr(quality_config, "enabled", False) is not True:
+        return before_identity
 
     try:
-        data = _json_cache.get(state_path)
+        result = await asyncio.to_thread(
+            validate_audio_quality,
+            audio_path,
+            min_mean_db=quality_config.min_mean_volume_db,
+            min_duration_s=quality_config.min_duration_seconds,
+            expected_identity=before_identity,
+            decode_timeout_base_seconds=quality_config.decode_timeout_base_seconds,
+            decode_timeout_factor=quality_config.decode_timeout_factor,
+            decode_timeout_cap_seconds=quality_config.decode_timeout_cap_seconds,
+        )
     except Exception as exc:
+        try:
+            after_identity = await _inspect_audio_identity(
+                audio_path,
+                changed_is_busy=True,
+            )
+        except HTTPException as identity_exc:
+            raise identity_exc from exc
+        if after_identity != before_identity:
+            raise HTTPException(
+                status_code=409,
+                detail="SOURCE_BUSY: 품질 검증 중 오디오 파일 identity가 변경되었습니다.",
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"INFRA_UNAVAILABLE: 오디오 품질 검증 실행 실패: {exc}",
+        ) from exc
+
+    after_identity = await _inspect_audio_identity(audio_path, changed_is_busy=True)
+    if after_identity != before_identity:
+        raise HTTPException(
+            status_code=409,
+            detail="SOURCE_BUSY: 검증 중 오디오 파일 identity가 변경되었습니다.",
+        )
+    if result.status is AudioQualityStatus.ACCEPT:
+        return after_identity
+
+    failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+    raise HTTPException(
+        status_code=_AUDIO_FAILURE_HTTP_STATUS[failure_kind],
+        detail=f"{failure_kind.name}: {result.reason or '오디오 품질 검증 비수락'}",
+    )
+
+
+def _file_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    """파일 내용과 directory entry 경합을 감지할 identity를 반환한다."""
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _read_pipeline_state_json_pinned(config: Any, meeting_id: str) -> Any | None:
+    """pinned checkpoint root와 이미 연 file descriptor에서 pipeline state를 읽는다."""
+    _validate_meeting_id(meeting_id)
+    checkpoints_root = _configured_lexical_path(config, "checkpoints_dir")
+    state_path = _lexical_artifact_path(
+        checkpoints_root,
+        meeting_id,
+        "pipeline_state.json",
+    )
+    try:
+        lexical, root_fd, root_identity = _open_pinned_retranscribe_root(
+            checkpoints_root,
+            create=False,
+        )
+    except JobQueueError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            return None
+        raise
+
+    meeting_fd: int | None = None
+    state_fd: int | None = None
+    try:
+        meeting_stat = _entry_stat(root_fd, meeting_id)
+        if meeting_stat is None:
+            _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+            return None
+        if not stat.S_ISDIR(meeting_stat.st_mode):
+            raise JobQueueError("pipeline state 회의 경로가 안전한 디렉터리가 아닙니다")
+        meeting_fd, opened_meeting = _open_child_directory(root_fd, meeting_id)
+        state_stat = _entry_stat(meeting_fd, "pipeline_state.json")
+        if state_stat is None:
+            _require_open_entry_identity(root_fd, meeting_id, opened_meeting)
+            _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+            return None
+        if not stat.S_ISREG(state_stat.st_mode):
+            raise JobQueueError("pipeline_state.json이 안전한 일반 파일이 아닙니다")
+
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise JobQueueError("O_NOFOLLOW를 지원하지 않아 pipeline state를 읽을 수 없습니다")
+        try:
+            state_fd = os.open(
+                "pipeline_state.json",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | int(no_follow),
+                dir_fd=meeting_fd,
+            )
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
+                raise JobQueueError("pipeline_state.json entry가 여는 중 교체되었습니다") from exc
+            raise
+        opened_state = os.fstat(state_fd)
+        if not stat.S_ISREG(opened_state.st_mode) or _file_identity(
+            opened_state
+        ) != _file_identity(state_stat):
+            raise JobQueueError("pipeline_state.json entry가 여는 중 변경되었습니다")
+        data = _json_cache.get_from_fd(state_path, state_fd, opened_state)
+        after_fd = os.fstat(state_fd)
+        try:
+            after_entry = os.stat(
+                "pipeline_state.json",
+                dir_fd=meeting_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            raise JobQueueError("pipeline_state.json이 조회 중 변경되었습니다") from exc
+        if _file_identity(after_fd) != _file_identity(opened_state) or _file_identity(
+            after_entry
+        ) != _file_identity(opened_state):
+            raise JobQueueError("pipeline_state.json이 조회 중 변경되었습니다")
+        _require_open_entry_identity(root_fd, meeting_id, opened_meeting)
+        _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+        return data
+    finally:
+        if state_fd is not None:
+            os.close(state_fd)
+        if meeting_fd is not None:
+            os.close(meeting_fd)
+        os.close(root_fd)
+
+
+def _read_pipeline_state_for_response(config: Any, meeting_id: str) -> dict[str, Any] | None:
+    """응답 보정용 pipeline_state.json 을 descriptor-relative 방식으로 읽는다."""
+    try:
+        data = _read_pipeline_state_json_pinned(config, meeting_id)
+    except JobQueueError as exc:
+        message = str(exc)
+        if "변경" in message or "교체" in message:
+            raise HTTPException(
+                status_code=409,
+                detail="pipeline_state.json이 조회 중 변경되었습니다.",
+            ) from exc
+        if "안전" in message or "O_NOFOLLOW" in message:
+            raise HTTPException(
+                status_code=400,
+                detail="pipeline_state.json이 안전한 일반 파일이 아닙니다.",
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"pipeline state 경로 상태 확인 실패: {exc}",
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
         logger.warning(f"pipeline_state.json 응답 보정 읽기 실패: {meeting_id}, error={exc}")
         return None
 
@@ -123,17 +443,33 @@ def _read_pipeline_state_for_response(config: Any, meeting_id: str) -> dict[str,
 
 def _has_transcript_artifact(config: Any, meeting_id: str) -> bool:
     """회의 전사 탭을 구성할 수 있는 산출물이 있는지 확인한다."""
-    outputs_dir = config.paths.resolved_outputs_dir
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
+    checkpoints_dir = _configured_lexical_path(config, "checkpoints_dir")
     candidates = (
-        outputs_dir / meeting_id / "corrected.json",
-        checkpoints_dir / meeting_id / "correct.json",
-        checkpoints_dir / meeting_id / "merge.json",
+        _lexical_artifact_path(outputs_dir, meeting_id, "corrected.json"),
+        _lexical_artifact_path(checkpoints_dir, meeting_id, "correct.json"),
+        _lexical_artifact_path(checkpoints_dir, meeting_id, "merge.json"),
     )
-    return any(path.is_file() for path in candidates)
+    for path in candidates:
+        try:
+            candidate_stat = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"전사 산출물 경로 상태 확인 실패: {exc}",
+            ) from exc
+        if stat.S_ISREG(candidate_stat.st_mode):
+            return True
+        raise HTTPException(
+            status_code=400,
+            detail=f"전사 산출물이 안전한 일반 파일이 아닙니다: {path}",
+        )
+    return False
 
 
-async def _purge_meeting_search_index(config: Any, meeting_id: str, operation: str) -> None:
+async def _purge_meeting_search_index(config: Any, meeting_id: str, operation: str) -> Any:
     """회의 삭제/재전사 전 검색 인덱스를 정리하고 실패 시 HTTP 500으로 중단한다."""
     try:
         result = await asyncio.to_thread(purge_meeting_index, config, meeting_id)
@@ -156,6 +492,577 @@ async def _purge_meeting_search_index(config: Any, meeting_id: str, operation: s
         result.chroma_deleted,
         result.fts_deleted,
     )
+    return result
+
+
+def _path_contains(parent: Path, candidate: Path) -> bool:
+    """candidate가 parent 자신 또는 하위 경로인지 반환한다."""
+    return candidate == parent or candidate.is_relative_to(parent)
+
+
+def _lexical_artifact_path(root: Path, *parts: str) -> Path:
+    """root 하위 artifact 경로를 resolve하지 않고 no-follow 검사한다."""
+    try:
+        root_path = lexical_root_no_symlinks(root)
+    except JobQueueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"안전하지 않은 재전사 산출물 root입니다: {exc}",
+        ) from exc
+    candidate = root_path.joinpath(*parts)
+    if not candidate.is_relative_to(root_path):
+        raise HTTPException(status_code=400, detail="유효하지 않은 재전사 산출물 경로입니다.")
+
+    current = root_path
+    for index, component in enumerate(candidate.relative_to(root_path).parts):
+        current /= component
+        try:
+            entry_stat = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"재전사 산출물 경로 상태 확인 실패: {current} ({exc})",
+            ) from exc
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise HTTPException(
+                status_code=400,
+                detail=f"재전사 산출물 경로에 심볼릭 링크를 사용할 수 없습니다: {current}",
+            )
+        is_final = index == len(candidate.relative_to(root_path).parts) - 1
+        if not is_final and not stat.S_ISDIR(entry_stat.st_mode):
+            raise HTTPException(
+                status_code=400,
+                detail=f"재전사 산출물 상위 경로가 디렉터리가 아닙니다: {current}",
+            )
+    return candidate
+
+
+def _reattach_open_directory(
+    parent_fd: int,
+    opened_fd: int,
+    canonical_name: str,
+    opened_identity: os.stat_result,
+    token: str,
+) -> None:
+    """이동된 열린 디렉터리를 같은 부모의 canonical 이름으로 재부착한다."""
+    current = _entry_stat(parent_fd, canonical_name)
+    if current is not None:
+        if (current.st_dev, current.st_ino) == (
+            opened_identity.st_dev,
+            opened_identity.st_ino,
+        ):
+            return
+        raise JobQueueError(f"canonical 디렉터리 이름이 이미 교체되었습니다: {canonical_name}")
+
+    opened_current = os.fstat(opened_fd)
+    if not stat.S_ISDIR(opened_current.st_mode) or (
+        opened_current.st_dev,
+        opened_current.st_ino,
+    ) != (opened_identity.st_dev, opened_identity.st_ino):
+        raise JobQueueError(f"열린 디렉터리 identity가 변경되었습니다: {canonical_name}")
+
+    candidates: list[tuple[str, os.stat_result]] = []
+    for candidate_name in os.listdir(parent_fd):
+        try:
+            candidate = os.stat(
+                candidate_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        if (candidate.st_dev, candidate.st_ino) == (
+            opened_current.st_dev,
+            opened_current.st_ino,
+        ):
+            candidates.append((candidate_name, candidate))
+    if len(candidates) != 1:
+        raise JobQueueError(
+            f"열린 디렉터리의 재부착 경로를 단일하게 확정할 수 없습니다: {canonical_name}"
+        )
+
+    displaced_name, displaced_identity = candidates[0]
+    _move_entry_checked(
+        parent_fd,
+        parent_fd,
+        displaced_name,
+        displaced_identity,
+        token,
+        destination_name=canonical_name,
+    )
+    _require_open_entry_identity(parent_fd, canonical_name, opened_current)
+
+
+def _stage_retranscribe_artifacts(
+    config: Any,
+    meeting_id: str,
+    audio_path: Path,
+    token: str,
+) -> None:
+    """재전사 대상 산출물을 동일 FS staging 경로로 원자 이동한다.
+
+    원본 오디오가 삭제 대상 안에 있으면 안전하게 요청을 거부한다. 단계 중 하나라도
+    실패하면 이미 이동한 항목을 즉시 원위치한다.
+    """
+    checkpoints_root = _configured_lexical_path(config, "checkpoints_dir")
+    outputs_root = _configured_lexical_path(config, "outputs_dir")
+    checkpoint_dir = _lexical_artifact_path(checkpoints_root, meeting_id)
+    checkpoint_stage, output_stage_path = retranscribe_staging_paths(
+        checkpoints_root,
+        outputs_root,
+        meeting_id,
+        token,
+    )
+    _lexical_artifact_path(checkpoints_root, checkpoint_stage.name)
+    _lexical_artifact_path(outputs_root, output_stage_path.name)
+
+    audio_lexical = audio_path.expanduser().absolute()
+    if _path_contains(checkpoint_dir, audio_lexical):
+        raise HTTPException(
+            status_code=409,
+            detail="원본 오디오가 체크포인트 디렉토리 안에 있어 안전하게 재전사할 수 없습니다.",
+        )
+
+    checkpoints_lexical, checkpoints_fd, checkpoints_identity = _open_pinned_retranscribe_root(
+        checkpoints_root, create=True
+    )
+    outputs_lexical: Path | None = None
+    outputs_fd: int | None = None
+    outputs_identity: os.stat_result | None = None
+    checkpoint_source_fd: int | None = None
+    checkpoint_stage_fd: int | None = None
+    output_source_fd: int | None = None
+    output_stage_fd: int | None = None
+    opened_output_stage: os.stat_result | None = None
+    moved_output_entries: dict[str, os.stat_result] = {}
+    mutation_started = False
+    try:
+        outputs_lexical, outputs_fd, outputs_identity = _open_pinned_retranscribe_root(
+            outputs_root,
+            create=True,
+        )
+        if (
+            _entry_stat(checkpoints_fd, checkpoint_stage.name) is not None
+            or _entry_stat(outputs_fd, output_stage_path.name) is not None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="동일한 재전사 staging token이 이미 존재합니다.",
+            )
+
+        checkpoint_stat = _entry_stat(checkpoints_fd, meeting_id)
+        if checkpoint_stat is not None:
+            if not stat.S_ISDIR(checkpoint_stat.st_mode):
+                raise HTTPException(
+                    status_code=400, detail="checkpoint 경로가 디렉터리가 아닙니다."
+                )
+            checkpoint_source_fd, opened_checkpoint = _open_child_directory(
+                checkpoints_fd,
+                meeting_id,
+            )
+            _require_open_entry_identity(checkpoints_fd, meeting_id, opened_checkpoint)
+            os.mkdir(checkpoint_stage.name, mode=0o700, dir_fd=checkpoints_fd)
+            mutation_started = True
+            checkpoint_stage_fd, opened_checkpoint_stage = _open_child_directory(
+                checkpoints_fd,
+                checkpoint_stage.name,
+            )
+            checkpoint_entries = os.listdir(checkpoint_source_fd)
+            initial_checkpoint_entries: dict[str, os.stat_result] = {}
+            moved_checkpoint_entries: dict[str, os.stat_result] = {}
+            try:
+                for name in checkpoint_entries:
+                    entry = os.stat(
+                        name,
+                        dir_fd=checkpoint_source_fd,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(entry.st_mode):
+                        raise JobQueueError(
+                            f"checkpoint staging entry가 심볼릭 링크입니다: {name}"
+                        )
+                    initial_checkpoint_entries[name] = entry
+                for name, expected in initial_checkpoint_entries.items():
+                    moved_checkpoint_entries[name] = _move_entry_checked(
+                        checkpoint_source_fd,
+                        checkpoint_stage_fd,
+                        name,
+                        expected,
+                        token,
+                    )
+                    try:
+                        _require_open_entry_identity(
+                            checkpoints_fd,
+                            meeting_id,
+                            opened_checkpoint,
+                        )
+                    except JobQueueError as source_error:
+                        try:
+                            _reattach_open_directory(
+                                checkpoints_fd,
+                                checkpoint_source_fd,
+                                meeting_id,
+                                opened_checkpoint,
+                                token,
+                            )
+                        except (OSError, JobQueueError) as reattach_error:
+                            raise _RetranscribeStagingIntegrityError(
+                                "checkpoint source entry가 이동되어 durable staging "
+                                f"복구가 필요합니다: {reattach_error}",
+                                restore_via_open_fds=False,
+                            ) from source_error
+                        raise _RetranscribeStagingIntegrityError(
+                            "checkpoint source entry가 staging 중 이동되어 "
+                            "정확한 inode를 재부착한 후 중단했습니다."
+                        ) from source_error
+                    try:
+                        _require_open_entry_identity(
+                            checkpoints_fd,
+                            checkpoint_stage.name,
+                            opened_checkpoint_stage,
+                        )
+                    except JobQueueError as stage_error:
+                        raise _RetranscribeStagingIntegrityError(
+                            "checkpoint stage entry가 staging 중 이동되어 중단했습니다."
+                        ) from stage_error
+            except BaseException as operation_error:
+                restore_via_open_fds = (
+                    not isinstance(
+                        operation_error,
+                        _RetranscribeStagingIntegrityError,
+                    )
+                    or operation_error.restore_via_open_fds
+                )
+                if restore_via_open_fds:
+                    try:
+                        _restore_checked_moves(
+                            checkpoint_stage_fd,
+                            checkpoint_source_fd,
+                            moved_checkpoint_entries,
+                            token,
+                        )
+                        _require_open_entry_identity(
+                            checkpoints_fd,
+                            meeting_id,
+                            os.fstat(checkpoint_source_fd),
+                        )
+                        current_stage = _entry_stat(checkpoints_fd, checkpoint_stage.name)
+                        if current_stage is not None and (
+                            current_stage.st_dev,
+                            current_stage.st_ino,
+                        ) == (
+                            opened_checkpoint_stage.st_dev,
+                            opened_checkpoint_stage.st_ino,
+                        ):
+                            os.rmdir(checkpoint_stage.name, dir_fd=checkpoints_fd)
+                    except (OSError, JobQueueError) as restore_error:
+                        raise JobQueueError(
+                            f"checkpoint staging entry 원복 실패: {restore_error}"
+                        ) from operation_error
+                raise
+
+        output_stat = _entry_stat(outputs_fd, meeting_id)
+        if output_stat is not None:
+            if not stat.S_ISDIR(output_stat.st_mode):
+                raise HTTPException(
+                    status_code=400,
+                    detail="output 경로가 디렉터리가 아닙니다.",
+                )
+            output_source_fd, opened_output = _open_child_directory(outputs_fd, meeting_id)
+            for filename in RETRANSCRIBE_OUTPUT_FILES:
+                source_stat = _entry_stat(output_source_fd, filename)
+                if source_stat is None:
+                    continue
+                if not stat.S_ISREG(source_stat.st_mode):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"재전사 산출물이 일반 파일이 아닙니다: {filename}",
+                    )
+                if outputs_lexical / meeting_id / filename == audio_lexical:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"원본 오디오와 재전사 산출물 경로가 충돌합니다: {filename}",
+                    )
+                if output_stage_fd is None:
+                    os.mkdir(output_stage_path.name, mode=0o700, dir_fd=outputs_fd)
+                    mutation_started = True
+                    output_stage_fd, opened_output_stage = _open_child_directory(
+                        outputs_fd,
+                        output_stage_path.name,
+                    )
+                if opened_output_stage is None:
+                    raise JobQueueError("output stage identity를 확정할 수 없습니다")
+                moved_output_entries[filename] = _move_entry_checked(
+                    output_source_fd,
+                    output_stage_fd,
+                    filename,
+                    source_stat,
+                    token,
+                )
+                try:
+                    _require_open_entry_identity(
+                        outputs_fd,
+                        output_stage_path.name,
+                        opened_output_stage,
+                    )
+                except JobQueueError as stage_error:
+                    raise _RetranscribeStagingIntegrityError(
+                        "output stage entry가 staging 중 이동되어 중단했습니다."
+                    ) from stage_error
+            _require_open_entry_identity(outputs_fd, meeting_id, opened_output)
+
+        _verify_pinned_retranscribe_root(
+            checkpoints_lexical,
+            checkpoints_fd,
+            checkpoints_identity,
+        )
+        _verify_pinned_retranscribe_root(outputs_lexical, outputs_fd, outputs_identity)
+        if output_stage_fd is not None and opened_output_stage is not None:
+            try:
+                _require_open_entry_identity(
+                    outputs_fd,
+                    output_stage_path.name,
+                    opened_output_stage,
+                )
+            except JobQueueError as stage_error:
+                raise _RetranscribeStagingIntegrityError(
+                    "output stage entry가 성공 반환 직전 이동되어 중단했습니다."
+                ) from stage_error
+    except BaseException as operation_error:
+        if (
+            moved_output_entries
+            and output_stage_fd is not None
+            and output_source_fd is not None
+            and outputs_fd is not None
+        ):
+            try:
+                _restore_checked_moves(
+                    output_stage_fd,
+                    output_source_fd,
+                    moved_output_entries,
+                    token,
+                )
+                moved_output_entries.clear()
+                _require_open_entry_identity(
+                    outputs_fd,
+                    meeting_id,
+                    os.fstat(output_source_fd),
+                )
+            except (OSError, JobQueueError) as restore_error:
+                raise JobQueueError(
+                    f"output staging entry FD 원복 실패: {restore_error}"
+                ) from operation_error
+        if mutation_started and outputs_fd is not None:
+            try:
+                _rollback_retranscribe_staging_fds(
+                    checkpoints_fd,
+                    outputs_fd,
+                    meeting_id,
+                    token,
+                )
+            except Exception as rollback_error:
+                raise JobQueueError(
+                    f"재전사 staging 실패 후 descriptor rollback 실패: {rollback_error}"
+                ) from operation_error
+        if isinstance(operation_error, _RetranscribeStagingIntegrityError):
+            raise
+        if isinstance(operation_error, JobQueueError):
+            status_code = (
+                409 if "변경" in str(operation_error) or "교체" in str(operation_error) else 400
+            )
+            raise HTTPException(
+                status_code=status_code, detail=str(operation_error)
+            ) from operation_error
+        raise
+    finally:
+        if checkpoint_stage_fd is not None:
+            os.close(checkpoint_stage_fd)
+        if output_stage_fd is not None:
+            os.close(output_stage_fd)
+        if output_source_fd is not None:
+            os.close(output_source_fd)
+        if checkpoint_source_fd is not None:
+            os.close(checkpoint_source_fd)
+        if outputs_fd is not None:
+            os.close(outputs_fd)
+        os.close(checkpoints_fd)
+
+
+def _write_retranscribe_recovery_marker(
+    config: Any,
+    meeting_id: str,
+    reason: str,
+    purge_result: Any,
+) -> None:
+    """인덱스 purge 이후 marker를 pinned checkpoint root에 no-clobber 기록한다."""
+    checkpoints_root = _configured_lexical_path(config, "checkpoints_dir")
+    marker_path = _lexical_artifact_path(
+        checkpoints_root,
+        meeting_id,
+        "reindex_required.json",
+    )
+    payload = json.dumps(
+        {
+            "meeting_id": meeting_id,
+            "reason": reason,
+            "chroma_deleted": int(getattr(purge_result, "chroma_deleted", 0) or 0),
+            "fts_deleted": int(getattr(purge_result, "fts_deleted", 0) or 0),
+            "created_at": datetime.now().isoformat(),
+            "recommended_action": f"POST /api/meetings/{meeting_id}/reindex",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    encoded = f"{payload}\n".encode()
+    lexical, root_fd, root_identity = _open_pinned_retranscribe_root(
+        checkpoints_root,
+        create=True,
+    )
+    meeting_fd: int | None = None
+    temp_fd: int | None = None
+    temp_name: str | None = None
+    temp_identity: os.stat_result | None = None
+    marker_owned = False
+    created_meeting = False
+    try:
+        meeting_stat = _entry_stat(root_fd, meeting_id)
+        if meeting_stat is None:
+            os.mkdir(meeting_id, mode=0o700, dir_fd=root_fd)
+            created_meeting = True
+            os.fsync(root_fd)
+        meeting_fd, opened_meeting = _open_child_directory(root_fd, meeting_id)
+        existing_marker = _entry_stat(meeting_fd, marker_path.name)
+        if existing_marker is not None:
+            if not stat.S_ISREG(existing_marker.st_mode):
+                raise JobQueueError("reindex recovery marker가 안전한 일반 파일이 아닙니다")
+            _require_open_entry_identity(root_fd, meeting_id, opened_meeting)
+            _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+            return
+
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise JobQueueError("O_NOFOLLOW를 지원하지 않아 recovery marker를 쓸 수 없습니다")
+        for _ in range(100):
+            candidate = f".reindex-required-{uuid.uuid4().hex}.tmp"
+            try:
+                temp_fd = os.open(
+                    candidate,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | int(no_follow),
+                    0o600,
+                    dir_fd=meeting_fd,
+                )
+            except FileExistsError:
+                continue
+            temp_name = candidate
+            break
+        if temp_fd is None or temp_name is None:
+            raise JobQueueError("reindex recovery marker 임시 이름을 할당하지 못했습니다")
+
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(temp_fd, remaining)
+            if written <= 0:
+                raise OSError("reindex recovery marker write가 진행되지 않았습니다")
+            remaining = remaining[written:]
+        os.fsync(temp_fd)
+        temp_identity = os.fstat(temp_fd)
+        temp_entry = os.stat(temp_name, dir_fd=meeting_fd, follow_symlinks=False)
+        if not stat.S_ISREG(temp_identity.st_mode) or _file_identity(temp_entry) != _file_identity(
+            temp_identity
+        ):
+            raise JobQueueError("reindex recovery marker temp identity가 변경되었습니다")
+
+        try:
+            os.link(
+                temp_name,
+                marker_path.name,
+                src_dir_fd=meeting_fd,
+                dst_dir_fd=meeting_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            existing_marker = os.stat(
+                marker_path.name,
+                dir_fd=meeting_fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(existing_marker.st_mode):
+                raise JobQueueError("동시 생성된 recovery marker가 일반 파일이 아닙니다") from exc
+        else:
+            marker_owned = True
+            published_entry = os.stat(
+                marker_path.name,
+                dir_fd=meeting_fd,
+                follow_symlinks=False,
+            )
+            if (published_entry.st_dev, published_entry.st_ino) != (
+                temp_identity.st_dev,
+                temp_identity.st_ino,
+            ):
+                raise JobQueueError("reindex recovery marker publish identity 검증 실패")
+
+        current_temp = os.stat(temp_name, dir_fd=meeting_fd, follow_symlinks=False)
+        if (current_temp.st_dev, current_temp.st_ino) != (
+            temp_identity.st_dev,
+            temp_identity.st_ino,
+        ):
+            raise JobQueueError("reindex recovery marker temp entry가 교체되었습니다")
+        os.unlink(temp_name, dir_fd=meeting_fd)
+        temp_name = None
+        os.fsync(meeting_fd)
+        _require_open_entry_identity(root_fd, meeting_id, opened_meeting)
+        _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+    except BaseException:
+        if meeting_fd is not None:
+            if marker_owned and temp_identity is not None:
+                try:
+                    current = os.stat(
+                        marker_path.name,
+                        dir_fd=meeting_fd,
+                        follow_symlinks=False,
+                    )
+                    if (current.st_dev, current.st_ino) == (
+                        temp_identity.st_dev,
+                        temp_identity.st_ino,
+                    ):
+                        os.unlink(marker_path.name, dir_fd=meeting_fd)
+                except OSError:
+                    pass
+            if temp_name is not None and temp_identity is not None:
+                try:
+                    current = os.stat(temp_name, dir_fd=meeting_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == (
+                        temp_identity.st_dev,
+                        temp_identity.st_ino,
+                    ):
+                        os.unlink(temp_name, dir_fd=meeting_fd)
+                except OSError:
+                    pass
+        if created_meeting:
+            removed_meeting = False
+            try:
+                os.rmdir(meeting_id, dir_fd=root_fd)
+                removed_meeting = True
+            except OSError:
+                pass
+            if removed_meeting:
+                try:
+                    os.fsync(root_fd)
+                except OSError:
+                    pass
+        raise
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if meeting_fd is not None:
+            os.close(meeting_fd)
+        os.close(root_fd)
 
 
 def _build_meeting_item(
@@ -484,6 +1391,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
     """
     from core.job_queue import InvalidTransitionError, JobNotFoundError, MaxRetriesExceededError
 
+    _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
 
     try:
@@ -521,6 +1429,9 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
                     f"{status_detail}"
                 ),
             )
+
+        # 완료 산출물 복구가 아니라 실제 파이프라인 재실행일 때만 admission을 요구한다.
+        await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # 재시도 실행 (job_id 기반)
         updated_job = await asyncio.to_thread(queue.queue.retry_job, job.id)
@@ -572,6 +1483,7 @@ async def transcribe_meeting(
     """
     from core.job_queue import InvalidTransitionError, JobNotFoundError, JobStatus
 
+    _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
 
     try:
@@ -587,32 +1499,34 @@ async def transcribe_meeting(
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        # 이슈 J: failed 상태에서도 force=true 이면 재시도 허용
-        if job.status == JobStatus.FAILED.value and force:
-            logger.info(
-                f"failed 상태 강제 재시도: {meeting_id} (job_id={job.id}, "
-                f"retry_count={job.retry_count})"
-            )
-            # failed → recorded 로 되돌린 뒤 아래 공통 경로에서 queued 로 전이
-            job = await asyncio.to_thread(
-                queue.queue.force_set_status,
-                job.id,
-                JobStatus.RECORDED,
-                "",
-            )
-
-        if job.status != JobStatus.RECORDED.value:
+        force_failed = job.status == JobStatus.FAILED.value and force
+        if job.status != JobStatus.RECORDED.value and not force_failed:
             detail = f"전사를 시작할 수 없는 상태입니다: {job.status} (recorded 상태만 가능)"
             if job.status == JobStatus.FAILED.value:
                 # 힌트: force=true 로 재시도 가능
                 detail += ". 실패한 회의를 재시도하려면 ?force=true 를 붙여 요청하세요."
             raise HTTPException(status_code=409, detail=detail)
 
-        updated_job = await asyncio.to_thread(
-            queue.queue.update_status,
-            job.id,
-            JobStatus.QUEUED,
-        )
+        config = _get_config(request)
+        await _require_audio_quality_accept(config, Path(job.audio_path))
+
+        # failed → queued 를 한 번의 조건부 UPDATE로 수행해 recorded 중간 상태를
+        # 다른 워커가 관찰하거나 선점할 수 없게 한다.
+        if force_failed:
+            logger.info(
+                f"failed 상태 강제 재시도: {meeting_id} (job_id={job.id}, "
+                f"retry_count={job.retry_count})"
+            )
+            updated_job = await asyncio.to_thread(
+                queue.queue.queue_failed_job,
+                job.id,
+            )
+        else:
+            updated_job = await asyncio.to_thread(
+                queue.queue.update_status,
+                job.id,
+                JobStatus.QUEUED,
+            )
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
         job_processor = getattr(request.app.state, "job_processor", None)
@@ -752,7 +1666,7 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
     completed/failed 상태의 작업을 대상으로:
         1. ChromaDB/FTS5 의 stale 청크 삭제
         2. 체크포인트 디렉토리 전체 삭제 (pipeline_state.json 포함)
-        3. 출력 디렉토리의 corrected.json/summary.md 삭제 (오디오는 보존)
+        3. 출력 디렉토리의 전사·요약 산출물 staging (오디오는 보존)
         4. job 상태를 queued 로 강제 전환 (retry_count 0 으로 리셋)
 
     Args:
@@ -765,10 +1679,9 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
     Raises:
         HTTPException: 회의를 찾을 수 없을 때 (404), 재전사 불가 상태 (409)
     """
-    import shutil
+    from core.job_queue import InvalidTransitionError, JobNotFoundError, JobStatus
 
-    from core.job_queue import InvalidTransitionError, JobNotFoundError
-
+    _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
     config = getattr(request.app.state, "config", None)
     if config is None:
@@ -782,28 +1695,162 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        # 1) 검색 인덱스 삭제. 실패하면 산출물/DB 상태를 건드리지 않는다.
-        await _purge_meeting_search_index(config, meeting_id, "재전사")
+        allowed_statuses = {JobStatus.COMPLETED.value, JobStatus.FAILED.value}
+        if job.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "재전사를 시작할 수 없는 상태입니다: "
+                    f"{job.status} (completed 또는 failed 상태만 가능)"
+                ),
+            )
 
-        # 2) 체크포인트 디렉토리 삭제
-        checkpoints_dir = config.paths.resolved_checkpoints_dir / meeting_id
-        if checkpoints_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, checkpoints_dir)
-            logger.info(f"재전사: 체크포인트 삭제 — {checkpoints_dir}")
+        checkpoints_root = _configured_lexical_path(config, "checkpoints_dir")
+        outputs_root = _configured_lexical_path(config, "outputs_dir")
+        audio_path = _require_audio_in_config_base(config, Path(job.audio_path))
+        admission_identity = await _require_audio_quality_accept(config, audio_path)
 
-        # 3) 출력 파일 삭제 (오디오/녹음본은 보존)
-        outputs_meeting_dir = config.paths.resolved_outputs_dir / meeting_id
-        if outputs_meeting_dir.exists():
-            for fname in ("corrected.json", "summary.md"):
-                fpath = outputs_meeting_dir / fname
-                if fpath.exists():
-                    try:
-                        await asyncio.to_thread(fpath.unlink)
-                    except OSError as exc:
-                        logger.warning(f"재전사: {fname} 삭제 실패: {exc}")
+        # admission 이후에도 상태가 그대로인지 조건부 UPDATE로 확인하고 예약한다.
+        # 예약 상태(recording)는 일반 retry/transcribe/batch가 큐에 넣을 수 없어
+        # 파일 staging/purge와 다른 요청의 상태 전이가 경합하지 않는다.
+        claim_token = uuid.uuid4().hex
+        await asyncio.to_thread(
+            queue.queue.claim_for_retranscribe,
+            job.id,
+            claim_token,
+        )
 
-        # 4) job 상태 강제 리셋
-        updated_job = await asyncio.to_thread(queue.queue.reset_for_retranscribe, job.id)
+        purge_result: Any | None = None
+        try:
+            # 품질 검증과 claim 사이에 source가 교체될 수 있으므로 destructive
+            # staging 직전에 동일 identity인지 다시 확인한다.
+            await _require_audio_identity_unchanged(audio_path, admission_identity)
+            await asyncio.to_thread(
+                queue.queue.update_retranscribe_claim_phase,
+                job.id,
+                claim_token,
+                "staging",
+            )
+            # 로컬 산출물은 삭제하지 않고 같은 파일시스템의 숨김 staging 경로로
+            # rename한다. 이후 단계가 실패하면 원자 rename으로 복구할 수 있다.
+            await asyncio.to_thread(
+                _stage_retranscribe_artifacts,
+                config,
+                meeting_id,
+                audio_path,
+                claim_token,
+            )
+
+            # staging 완료 뒤 인덱스를 purge하고, 마지막에 claim을 queued로 commit한다.
+            await asyncio.to_thread(
+                queue.queue.update_retranscribe_claim_phase,
+                job.id,
+                claim_token,
+                "purging",
+            )
+            purge_result = await _purge_meeting_search_index(config, meeting_id, "재전사")
+            await asyncio.to_thread(
+                queue.queue.update_retranscribe_claim_phase,
+                job.id,
+                claim_token,
+                "committing",
+            )
+            # queued 공개 전에 이전 세대 staging을 엄격히 지운다. 중간 실패 시
+            # committing claim을 유지해 startup recovery가 멱등하게 이어서 정리한다.
+            await asyncio.to_thread(
+                cleanup_retranscribe_staging,
+                checkpoints_root,
+                outputs_root,
+                meeting_id,
+                claim_token,
+            )
+            updated_job = await asyncio.to_thread(
+                queue.queue.reset_for_retranscribe,
+                job.id,
+                claim_token,
+            )
+        except BaseException as operation_error:
+            recovery_errors: list[str] = []
+            durable_phase: str | None = None
+            preserve_integrity_claim = isinstance(
+                operation_error,
+                _RetranscribeStagingIntegrityError,
+            )
+            try:
+                claimed_job = await asyncio.to_thread(queue.queue.get_job, job.id)
+                durable_claim = parse_retranscribe_claim(
+                    str(getattr(claimed_job, "requested_action", ""))
+                )
+                if durable_claim is not None and durable_claim.token == claim_token:
+                    durable_phase = durable_claim.phase
+                else:
+                    recovery_errors.append("재전사 durable claim을 확인할 수 없습니다")
+            except Exception as claim_read_error:
+                recovery_errors.append(f"재전사 claim phase 조회 실패: {claim_read_error}")
+
+            # committing은 purge가 완료된 뒤의 roll-forward 전용 상태다. cleanup이나
+            # finalize가 실패해도 산출물을 rollback하지 않고 startup recovery가
+            # strict cleanup → queued finalize 순서로 이어간다.
+            if durable_phase == "committing":
+                if not isinstance(operation_error, Exception):
+                    raise
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "재전사 commit을 완료하지 못해 startup 복구 대기 상태로 보존했습니다: "
+                        f"{operation_error}"
+                    ),
+                ) from operation_error
+
+            rollback_succeeded = False
+            if durable_phase in {"claimed", "staging", "purging"}:
+                try:
+                    await asyncio.to_thread(
+                        rollback_retranscribe_staging,
+                        checkpoints_root,
+                        outputs_root,
+                        meeting_id,
+                        claim_token,
+                    )
+                    rollback_succeeded = True
+                except Exception as rollback_error:
+                    recovery_errors.append(str(rollback_error))
+
+            marker_succeeded = durable_phase != "purging"
+            if rollback_succeeded and durable_phase == "purging":
+                try:
+                    await asyncio.to_thread(
+                        _write_retranscribe_recovery_marker,
+                        config,
+                        meeting_id,
+                        f"재전사 commit 실패: {operation_error}",
+                        purge_result or IndexPurgeResult(meeting_id=meeting_id),
+                    )
+                    marker_succeeded = True
+                except Exception as marker_error:
+                    recovery_errors.append(f"reindex marker 기록 실패: {marker_error}")
+
+            # 파일 rollback과 (purging이면) recovery marker가 durable해진 뒤에만
+            # completed/failed 상태를 다시 노출한다.
+            if rollback_succeeded and marker_succeeded and not preserve_integrity_claim:
+                try:
+                    await asyncio.to_thread(
+                        queue.queue.restore_retranscribe_claim,
+                        job.id,
+                        claim_token,
+                    )
+                except Exception as restore_error:
+                    recovery_errors.append(f"job claim 복구 실패: {restore_error}")
+
+            if recovery_errors:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"재전사 실패 후 복구가 완전하지 않습니다: {operation_error}; "
+                        + "; ".join(recovery_errors)
+                    ),
+                ) from operation_error
+            raise
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
         job_processor = getattr(request.app.state, "job_processor", None)
@@ -859,8 +1906,16 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
     if config is None:
         raise HTTPException(status_code=503, detail="설정이 초기화되지 않았습니다.")
 
-    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
-    if not state_path.exists():
+    try:
+        loaded = await asyncio.to_thread(_read_pipeline_state_json_pinned, config, meeting_id)
+    except (JobQueueError, OSError, json.JSONDecodeError) as e:
+        logger.exception(f"pipeline_state.json 읽기 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"파이프라인 상태를 읽을 수 없습니다: {e}",
+        ) from e
+
+    if loaded is None:
         return {
             "status": "missing",
             "step_results": [],
@@ -869,17 +1924,7 @@ async def get_pipeline_state(request: Request, meeting_id: str) -> dict[str, Any
             "total_elapsed_seconds": 0.0,
         }
 
-    try:
-        data = cast(
-            dict[str, Any],
-            await asyncio.to_thread(lambda: json.loads(state_path.read_text(encoding="utf-8"))),
-        )
-    except (OSError, json.JSONDecodeError) as e:
-        logger.exception(f"pipeline_state.json 읽기 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"파이프라인 상태를 읽을 수 없습니다: {e}",
-        ) from e
+    data = cast(dict[str, Any], loaded)
 
     # 편의: 총 소요시간 계산 (step_results 의 elapsed_seconds 합산)
     step_results = data.get("step_results", []) or []
@@ -919,21 +1964,19 @@ def _find_meeting_audio_path(config: Any, meeting_id: str) -> Path | None:
     Returns:
         실제 존재하는 오디오 파일 Path, 못 찾으면 None.
     """
-    state_path = config.paths.resolved_checkpoints_dir / meeting_id / "pipeline_state.json"
-    if state_path.is_file():
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            data = {}
+    try:
+        loaded_state = _read_pipeline_state_json_pinned(config, meeting_id)
+        data = loaded_state if isinstance(loaded_state, dict) else {}
+    except (JobQueueError, OSError, json.JSONDecodeError):
+        data = {}
 
-        # wav_path 가 회의록 시간축과 일치하므로 우선 사용
-        for key in ("wav_path", "audio_path"):
-            value = data.get(key) if isinstance(data, dict) else None
-            if isinstance(value, str) and value:
-                candidate = Path(value)
-                if candidate.is_file() and candidate.suffix.lower() in _PLAYABLE_AUDIO_EXTS:
-                    return candidate
+    # wav_path 가 회의록 시간축과 일치하므로 우선 사용
+    for key in ("wav_path", "audio_path"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            candidate = Path(value)
+            if candidate.is_file() and candidate.suffix.lower() in _PLAYABLE_AUDIO_EXTS:
+                return candidate
 
     # 폴백: outputs/{id}/ 디렉토리 글롭
     outputs_root = config.paths.resolved_outputs_dir / meeting_id
@@ -1113,6 +2156,7 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     from core.job_queue import JobNotFoundError
     from core.quarantine import QuarantineError, move_to_quarantine
 
+    _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
     config = _get_config(request)
 
@@ -1128,8 +2172,42 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
-        # 삭제 전 audio_path 확보 (DB 삭제 이후에도 파일을 찾을 수 있도록 먼저 스냅샷)
+        # 삭제 전 audio_path와 identity를 no-follow로 확보한다. raw base/quarantine
+        # 경로도 destructive 작업 전에 검사해 symlink target으로 이동하지 않는다.
         audio_path_str = getattr(job, "audio_path", None)
+        audio_path: Path | None = None
+        audio_identity: AudioFileIdentity | None = None
+        quarantine_dir = _configured_lexical_path(config, "audio_quarantine_subdir")
+        if audio_path_str:
+            audio_path = _require_audio_in_config_base(config, Path(audio_path_str))
+            try:
+                audio_identity = await asyncio.to_thread(
+                    inspect_audio_path_no_symlinks,
+                    audio_path,
+                )
+            except FileNotFoundError:
+                audio_path = None
+            except EmptyAudioError:
+                # helper가 모든 path component와 final regular-file 여부를 이미
+                # no-follow 검사했다. 빈 파일도 안전하게 격리할 identity를 만든다.
+                empty_stat = await asyncio.to_thread(audio_path.lstat)
+                audio_identity = (
+                    empty_stat.st_dev,
+                    empty_stat.st_ino,
+                    empty_stat.st_size,
+                    empty_stat.st_mtime_ns,
+                    empty_stat.st_ctime_ns,
+                )
+            except AudioAdmissionError as exc:
+                raise HTTPException(
+                    status_code=_AUDIO_FAILURE_HTTP_STATUS[exc.failure_kind],
+                    detail=f"{exc.failure_kind.name}: {exc}",
+                ) from exc
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"INFRA_UNAVAILABLE: {exc}",
+                ) from exc
 
         # 검색 인덱스 삭제. 실패하면 DB 레코드와 오디오 파일을 보존한다.
         await _purge_meeting_search_index(config, meeting_id, "삭제")
@@ -1140,23 +2218,21 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
 
         # 오디오 파일 quarantine 이동 (best-effort)
         # watcher 재감지 루프를 끊기 위해 DB 삭제 직후에 수행한다.
-        if audio_path_str:
-            audio_path = Path(audio_path_str)
-            if audio_path.exists():
-                try:
-                    quarantine_dir = config.paths.resolved_audio_quarantine_dir
-                    new_path = await asyncio.to_thread(
-                        move_to_quarantine,
-                        audio_path,
-                        quarantine_dir,
-                        reason=f"사용자 삭제: meeting_id={meeting_id}",
-                    )
-                    logger.info(f"오디오 파일 격리 완료: {audio_path} → {new_path}")
-                except QuarantineError as e:
-                    # 파일 이동 실패해도 DB 삭제는 이미 성공 — 경고만 남기고 진행
-                    logger.warning(f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}")
-            else:
-                logger.debug(f"오디오 파일이 이미 존재하지 않음: {audio_path}")
+        if audio_path is not None and audio_identity is not None:
+            try:
+                new_path = await asyncio.to_thread(
+                    move_to_quarantine,
+                    audio_path,
+                    quarantine_dir,
+                    reason=f"사용자 삭제: meeting_id={meeting_id}",
+                    expected_identity=audio_identity,
+                )
+                logger.info(f"오디오 파일 격리 완료: {audio_path} → {new_path}")
+            except QuarantineError as e:
+                # 파일 이동 실패해도 DB 삭제는 이미 성공 — 경고만 남기고 진행
+                logger.warning(f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}")
+        elif audio_path_str:
+            logger.debug(f"오디오 파일이 이미 존재하지 않음: {audio_path_str}")
 
         return {"message": f"회의가 삭제되었습니다: {meeting_id}"}
     except HTTPException:

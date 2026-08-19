@@ -72,6 +72,7 @@ class TestConfigYamlParsing:
         assert config.embedding.batch_size == 64
         assert config.search.vector_weight == 0.6
         assert config.server.port == 8765
+        assert config.watcher.file_ready_timeout_seconds == 30.0
         # 환각 필터링 설정 검증
         assert config.hallucination_filter.enabled is True
         # 벤치마크 결과에 따라 0.9 로 상향 (docs/BENCHMARK.md §6 · config.yaml 주석 참조)
@@ -121,6 +122,30 @@ class TestConfigYamlParsing:
             ),
             (default.embedding.batch_size, loaded.embedding.batch_size),
             (default.pipeline.min_disk_free_gb, loaded.pipeline.min_disk_free_gb),
+            (
+                default.audio_quality.min_duration_seconds,
+                loaded.audio_quality.min_duration_seconds,
+            ),
+            (
+                default.audio_quality.decode_timeout_base_seconds,
+                loaded.audio_quality.decode_timeout_base_seconds,
+            ),
+            (
+                default.audio_quality.decode_timeout_factor,
+                loaded.audio_quality.decode_timeout_factor,
+            ),
+            (
+                default.audio_quality.decode_timeout_cap_seconds,
+                loaded.audio_quality.decode_timeout_cap_seconds,
+            ),
+            (
+                default.recording.min_duration_seconds,
+                loaded.recording.min_duration_seconds,
+            ),
+            (
+                default.watcher.file_ready_timeout_seconds,
+                loaded.watcher.file_ready_timeout_seconds,
+            ),
             (default.hallucination_filter.enabled, loaded.hallucination_filter.enabled),
             (default.text_postprocessing.enabled, loaded.text_postprocessing.enabled),
             (default.number_normalization.enabled, loaded.number_normalization.enabled),
@@ -546,7 +571,7 @@ class TestRecordingConfig:
         assert rc.sample_rate == 16000
         assert rc.channels == 1
         assert rc.max_duration_seconds == 14400
-        assert rc.min_duration_seconds == 5
+        assert rc.min_duration_seconds == 30
         assert rc.ffmpeg_graceful_timeout_seconds == 10
 
     def test_커스텀_값(self) -> None:
@@ -802,7 +827,21 @@ def test_AudioQualityConfig_기본값():
     c = AudioQualityConfig()
     assert c.enabled is True
     assert c.min_mean_volume_db == -40.0
-    assert c.min_duration_seconds == 5.0
+    assert c.min_duration_seconds == 30.0
+    assert c.decode_timeout_base_seconds == 60.0
+    assert c.decode_timeout_factor == 0.25
+    assert c.decode_timeout_cap_seconds == 900.0
+
+
+def test_AudioQualityConfig_decode_timeout_cap은_base_이상():
+    """full-decode timeout cap이 base보다 작은 설정은 거부한다."""
+    from config import AudioQualityConfig
+
+    with pytest.raises(ValidationError, match="decode_timeout_cap_seconds"):
+        AudioQualityConfig(
+            decode_timeout_base_seconds=120.0,
+            decode_timeout_cap_seconds=60.0,
+        )
 
 
 def test_PathsConfig에_audio_quarantine_subdir_포함():
@@ -829,6 +868,35 @@ def test_WatcherConfig에_excluded_subdirs_포함():
 
     c = WatcherConfig()
     assert "audio_quarantine" in c.excluded_subdirs
+
+
+def test_WatcherConfig_file_ready_timeout_기본값과_커스텀값():
+    """0-byte/growing writer의 총 readiness 대기는 config로 유한하게 관리한다."""
+    from config import WatcherConfig
+
+    assert WatcherConfig().file_ready_timeout_seconds == 30.0
+    assert WatcherConfig(file_ready_timeout_seconds=7.5).file_ready_timeout_seconds == 7.5
+
+
+def test_WatcherConfig_timeout은_debounce와_check_interval_합_이상이어야_함():
+    """총 readiness timeout이 최소 1회의 안정화 관찰보다 짧을 수 없다."""
+    from pydantic import ValidationError
+
+    from config import WatcherConfig
+
+    with pytest.raises(ValidationError, match="debounce_seconds.*check_interval_seconds"):
+        WatcherConfig(
+            debounce_seconds=2.0,
+            check_interval_seconds=0.5,
+            file_ready_timeout_seconds=2.4,
+        )
+
+    valid = WatcherConfig(
+        debounce_seconds=2.0,
+        check_interval_seconds=0.5,
+        file_ready_timeout_seconds=2.5,
+    )
+    assert valid.file_ready_timeout_seconds == 2.5
 
 
 def test_PipelineConfig에_dynamic_timeout_설정():

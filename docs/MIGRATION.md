@@ -4,6 +4,74 @@
 
 ---
 
+## 짧은·손상 오디오 차단 강화 (2026-08-18)
+
+전사할 가치가 낮은 짧은 파일과 길이·볼륨을 정상 측정할 수 없는 손상 파일이
+STT 단계에서 `오류`를 만들지 않도록 오디오 품질 게이트를 fail-closed로 변경했다.
+
+| 항목 | 기존 | 변경 후 |
+|---|---|---|
+| 전사 큐 최소 실제 재생 시간 | 5초 | 30초 |
+| 앱 녹음 최소 경과 시간 | 5초 | 30초 |
+| 품질 측정 `ERROR` | 큐 등록 허용 | 큐/STT 차단; 파일 결함이 확정된 경우만 격리 |
+
+```yaml
+audio_quality:
+  enabled: true
+  min_duration_seconds: 30.0
+  decode_timeout_base_seconds: 60.0
+  decode_timeout_factor: 0.25
+  decode_timeout_cap_seconds: 900.0
+
+recording:
+  min_duration_seconds: 30    # 앱 자체 녹음 경과시간, 미달 시 임시 파일 파기
+
+watcher:
+  file_ready_timeout_seconds: 30  # growing/open-writer readiness 최대 대기
+```
+
+- `audio_quality.min_duration_seconds`는 16 kHz mono full-decode sample count와 성공한
+  ffprobe duration 중 더 짧은 값을 기준으로 쓴다. 잘린 파일은 decode가,
+  AAC 등의 encoder padding은 probe가 보수적으로 막는다. ffprobe 길이를 확정할 수
+  없으면 decoded-short/저볼륨처럼 파일 결함을 증명할 수 있는 경우만 거부하고,
+  정상으로 추측해 ACCEPT하지 않는다. ffmpeg progress time은 판정에 쓰지 않는다.
+- OGG/Vorbis처럼 컨테이너가 입력 경계를 granule 단위로 양자화하는 형식은 원래 생성
+  명령의 소수점이 아니라 저장된 미디어에 표현된 effective duration을 기준으로 한다.
+- full-decode timeout은 duration hint가 있으면
+  `min(cap, max(base, base + duration × factor))`, hint가 없으면 `cap`을 쓴다.
+- 동일 프로세스에서 identity와 gate 설정이 모두 같은 파일의 ACCEPT 결과만 bounded LRU로
+  재사용한다. 비수락·예외·변경된 파일은 cache하지 않는다.
+- `recording.min_duration_seconds`는 앱 자체 녹음을 더 일찍 정리하는 경과시간 기준이다.
+- `REJECT`와 `MEDIA_INVALID`로 확정된 파일만
+  `~/.meeting-transcriber/audio_quarantine/`으로 이동한다. `SOURCE_BUSY`,
+  `INFRA_UNAVAILABLE`, `SECURITY_BLOCKED`는 원본을 보존하고 재시도/운영자 확인
+  대상으로 남긴다.
+- 입력·격리·체크포인트·출력 경로의 symlink는 지원하지 않으며 target을 읽거나 이동하지
+  않는다. writable 파일은 `watcher.file_ready_timeout_seconds` 안에서 readiness를
+  확인하고, 계속 열려 있으면 원본을 보존한 채 한 번 지연 재검사한다.
+- `/api/uploads`는 입력 디렉터리를 no-follow로 열고 임의 이름의 0600 temp inode를
+  완전히 기록·fsync한 뒤 same-directory hardlink로 무덮어쓰기 publish한다. 기존 파일이나
+  symlink를 덮어쓰지 않으며, API가 직접 queue에 넣지 않고 watcher가 최종 admission을 맡는다.
+- 이미 큐에 있거나 재시도되는 파일도 `PipelineManager`와 `Transcriber`의 최종 gate에서
+  다시 검사하여 STT 모델 실행 전에 차단한다. 레거시 queued/failed row는 원래 실행 의도를
+  DB hold payload에 보존한 뒤 재감사한다.
+- 레거시 row의 확정된 미디어 거부는 DB에 source identity와 예약 quarantine 경로를 먼저
+  journal로 남긴 뒤 exact move와 CAS delete를 수행한다. 중간에 앱이 종료되면 startup이
+  source-only/quarantine-only 상태를 멱등 복구하며, 양쪽 존재·양쪽 없음·identity 불일치는
+  추측하지 않고 파일과 row를 보존한다.
+- retry/force/re-transcribe/STT A/B/batch API는 상태나 산출물을 바꾸기 전에 같은 gate를
+  실행한다. 응답은 `MEDIA_INVALID=422`, `SOURCE_BUSY=409`,
+  `INFRA_UNAVAILABLE=503`, `SECURITY_BLOCKED=400`으로 구분한다.
+- 재전사는 `claimed → staging → purging → committing` 상태를 DB에 남기며, 실패·앱 종료 시
+  기존 산출물 rollback 또는 commit 재개를 수행한다. admission 실패 시 기존 산출물과
+  검색 인덱스는 변경하지 않는다. 산출물 stage/rollback/cleanup과 checkpoint state 읽기,
+  reindex recovery marker 쓰기는 pinned directory/file descriptor 안에서 수행한다.
+- `audio_quality.enabled: false`는 duration/volume full-decode 정책만 우회한다. no-follow
+  경로, 일반 파일, source identity, writer readiness 검사는 계속 적용된다.
+- 설정 변경은 앱 재시작 후 반영된다.
+
+---
+
 ## Phase 1 크래시 방지 (2026-04-21 병합, PR #5)
 
 > 2026-04-21 MLX Metal SIGSEGV 크래시 방지를 위한 Defense-in-Depth 적용.

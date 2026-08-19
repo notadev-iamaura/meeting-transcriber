@@ -15,19 +15,29 @@ STT 전사기 모듈 (Speech-to-Text Transcriber Module)
 from __future__ import annotations
 
 import asyncio
+import errno
 import inspect
 import json
 import logging
+import os
+import stat
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from config import AppConfig, get_config
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioQualityStatus,
+    validate_audio_quality,
+)
 from core.io_utils import atomic_write_json
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.preflight import run_preflight
-from core.retry_policy import TranscriptionTimeoutError
+from core.retry_policy import NonRetryableError, TranscriptionTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +147,172 @@ class TranscriptionError(Exception):
     """전사 처리 중 발생하는 에러의 기본 클래스."""
 
 
+class AudioAdmissionError(TranscriptionError, NonRetryableError):
+    """STT 진입 전 오디오 admission gate가 차단한 비재시도 입력 오류."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: AudioFailureKind,
+    ) -> None:
+        self.failure_kind = failure_kind
+        super().__init__(message)
+
+
 class ModelNotAvailableError(TranscriptionError):
     """mlx-whisper 모델을 로드할 수 없을 때 발생한다."""
 
 
 class EmptyAudioError(TranscriptionError):
     """오디오 파일이 비어있거나 전사 결과가 없을 때 발생한다."""
+
+
+AudioFileIdentity = tuple[int, int, int, int, int]
+
+
+def _open_audio_path_no_symlinks(
+    audio_path: Path,
+) -> tuple[int, AudioFileIdentity]:
+    """openat dirfd chain으로 경로를 고정해 오디오 fd와 identity를 반환한다."""
+    lexical_path = audio_path.expanduser().absolute()
+    parts = lexical_path.parts[1:] if lexical_path.is_absolute() else lexical_path.parts
+    if not lexical_path.is_absolute() or not parts or ".." in parts:
+        raise AudioAdmissionError(
+            f"유효하지 않은 오디오 경로입니다: {audio_path}",
+            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        file_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NONBLOCK"):
+        file_flags |= os.O_NONBLOCK
+
+    def _raise_open_error(
+        parent_fd: int,
+        component: str,
+        current: Path,
+        *,
+        is_final: bool,
+        error: OSError,
+    ) -> NoReturn:
+        """openat 실패를 target을 따르지 않는 typed admission 오류로 변환한다."""
+        try:
+            entry_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"오디오 파일을 찾을 수 없습니다: {audio_path}") from exc
+        except OSError as exc:
+            raise AudioAdmissionError(
+                f"오디오 경로 상태를 확인할 수 없습니다: {current} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise AudioAdmissionError(
+                f"심볼릭 링크 오디오는 허용되지 않습니다: {current}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            ) from error
+
+        if not is_final and not stat.S_ISDIR(entry_stat.st_mode):
+            raise AudioAdmissionError(
+                f"오디오 경로의 상위 요소가 디렉터리가 아닙니다: {current}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            ) from error
+        if is_final and not stat.S_ISREG(entry_stat.st_mode):
+            raise FileNotFoundError(f"오디오 경로가 일반 파일이 아닙니다: {audio_path}") from error
+
+        # ELOOP/ENOTDIR 이외의 접근·자원 오류는 입력 자체가 아니라 인프라 문제다.
+        if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+            raise AudioAdmissionError(
+                f"오디오 경로 상태를 확인할 수 없습니다: {current} ({error})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from error
+        raise AudioAdmissionError(
+            f"오디오 경로를 안전하게 열 수 없습니다: {current} ({error})",
+            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+        ) from error
+
+    current_fd: int | None = None
+    final_fd: int | None = None
+    current_path = Path(lexical_path.anchor)
+    try:
+        try:
+            current_fd = os.open(lexical_path.anchor, directory_flags)
+        except OSError as exc:
+            raise AudioAdmissionError(
+                f"오디오 경로 root를 열 수 없습니다: {lexical_path.anchor} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+
+        for component in parts[:-1]:
+            current_path /= component
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except OSError as exc:
+                _raise_open_error(
+                    current_fd,
+                    component,
+                    current_path,
+                    is_final=False,
+                    error=exc,
+                )
+            os.close(current_fd)
+            current_fd = next_fd
+
+        final_component = parts[-1]
+        current_path /= final_component
+        try:
+            final_fd = os.open(final_component, file_flags, dir_fd=current_fd)
+        except OSError as exc:
+            _raise_open_error(
+                current_fd,
+                final_component,
+                current_path,
+                is_final=True,
+                error=exc,
+            )
+        final_stat = os.fstat(final_fd)
+        if not stat.S_ISREG(final_stat.st_mode):
+            raise FileNotFoundError(f"오디오 경로가 일반 파일이 아닙니다: {audio_path}")
+        if final_stat.st_size == 0:
+            raise EmptyAudioError(f"오디오 파일이 비어있습니다: {audio_path}")
+        identity: AudioFileIdentity = (
+            final_stat.st_dev,
+            final_stat.st_ino,
+            final_stat.st_size,
+            final_stat.st_mtime_ns,
+            final_stat.st_ctime_ns,
+        )
+        owned_fd = final_fd
+        final_fd = None
+        return owned_fd, identity
+    finally:
+        if final_fd is not None:
+            os.close(final_fd)
+        if current_fd is not None:
+            os.close(current_fd)
+
+
+def inspect_audio_path_no_symlinks(audio_path: Path) -> AudioFileIdentity:
+    """openat dirfd chain으로 경로를 고정해 오디오 파일 identity를 반환한다."""
+    audio_fd, identity = _open_audio_path_no_symlinks(audio_path)
+    os.close(audio_fd)
+    return identity
+
+
+@contextmanager
+def open_audio_path_no_symlinks(
+    audio_path: Path,
+) -> Iterator[tuple[int, AudioFileIdentity]]:
+    """안전하게 고정한 read-only 오디오 fd와 identity를 context로 제공한다."""
+    audio_fd, identity = _open_audio_path_no_symlinks(audio_path)
+    try:
+        yield audio_fd, identity
+    finally:
+        os.close(audio_fd)
 
 
 class Transcriber:
@@ -236,7 +406,7 @@ class Transcriber:
                 f"mlx-whisper 초기화 중 MLX/Metal 런타임 오류가 발생했습니다. {e}"
             ) from e
 
-    def _validate_audio(self, audio_path: Path) -> None:
+    def _validate_audio(self, audio_path: Path) -> AudioFileIdentity:
         """오디오 파일의 유효성을 검증한다.
 
         Args:
@@ -246,14 +416,75 @@ class Transcriber:
             FileNotFoundError: 파일이 존재하지 않거나 파일이 아닐 때
             EmptyAudioError: 파일 크기가 0일 때
         """
-        if not audio_path.exists():
-            raise FileNotFoundError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
+        return inspect_audio_path_no_symlinks(audio_path)
 
-        if not audio_path.is_file():
-            raise FileNotFoundError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
+    def _assert_audio_identity(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> None:
+        """품질 검사 전후 오디오가 동일한 일반 파일인지 확인한다."""
+        try:
+            current_identity = self._validate_audio(audio_path)
+        except AudioAdmissionError:
+            raise
+        except (EmptyAudioError, FileNotFoundError) as exc:
+            raise AudioAdmissionError(
+                f"오디오 파일이 품질 검증 중 사라지거나 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            ) from exc
 
-        if audio_path.stat().st_size == 0:
-            raise EmptyAudioError(f"오디오 파일이 비어있습니다: {audio_path}")
+        if current_identity != expected_identity:
+            raise AudioAdmissionError(
+                f"오디오 파일이 품질 검증 중 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+
+    async def _require_audio_quality_accept(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> None:
+        """공통 품질 gate가 활성화된 경우 ACCEPT만 모델 단계로 보낸다."""
+        quality_config = getattr(self._config, "audio_quality", None)
+        if quality_config is None or getattr(quality_config, "enabled", False) is not True:
+            # gate 비활성화는 품질 정책만 우회한다. 최초 lstat 이후 경로가
+            # 바뀌지 않았다는 보안/identity 계약은 항상 유지한다.
+            self._assert_audio_identity(audio_path, expected_identity)
+            return
+
+        try:
+            result = await asyncio.to_thread(
+                validate_audio_quality,
+                audio_path,
+                min_mean_db=quality_config.min_mean_volume_db,
+                min_duration_s=quality_config.min_duration_seconds,
+                expected_identity=expected_identity,
+                decode_timeout_base_seconds=quality_config.decode_timeout_base_seconds,
+                decode_timeout_factor=quality_config.decode_timeout_factor,
+                decode_timeout_cap_seconds=quality_config.decode_timeout_cap_seconds,
+            )
+        except Exception as exc:
+            try:
+                self._assert_audio_identity(audio_path, expected_identity)
+            except AudioAdmissionError as identity_exc:
+                raise identity_exc from exc
+            raise AudioAdmissionError(
+                f"오디오 품질을 검증할 수 없습니다: {audio_path} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+
+        self._assert_audio_identity(audio_path, expected_identity)
+
+        if result.status is AudioQualityStatus.ACCEPT:
+            return
+
+        failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+        reason = result.reason or "오디오 품질 검증 비수락"
+        raise AudioAdmissionError(
+            f"오디오 품질 검증 거부 ({failure_kind.name}): {reason}",
+            failure_kind=failure_kind,
+        )
 
     @staticmethod
     def _normalize_korean_text(text: str) -> str:
@@ -456,7 +687,8 @@ class Transcriber:
             TranscriptionError: 전사 처리 중 오류 발생 시
             TranscriptionTimeoutError: 타임아웃 시 (재시도 금지, NonRetryableError)
         """
-        self._validate_audio(audio_path)
+        audio_identity = self._validate_audio(audio_path)
+        await self._require_audio_quality_accept(audio_path, audio_identity)
 
         logger.info(f"전사 시작: {audio_path.name} (beam_size={self._beam_size})")
 
@@ -470,9 +702,14 @@ class Transcriber:
         )
 
         try:
+            # 모델 로드 대기 중 교체되는 입력을 최대한 일찍 차단한다.
+            self._assert_audio_identity(audio_path, audio_identity)
             async with self._manager.acquire(
                 "whisper", self._load_whisper_module
             ) as whisper_module:
+                # acquire()가 모델을 로드하는 동안에도 파일이 바뀔 수 있으므로
+                # mlx-whisper가 경로를 열기 직전에 다시 확인한다.
+                self._assert_audio_identity(audio_path, audio_identity)
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
                 raw_result = await self._transcribe_with_fallback(
                     whisper_module,
@@ -491,6 +728,8 @@ class Transcriber:
                 f"재시도 시 MLX Metal 크래시 위험으로 즉시 실패 처리."
             ) from e
         except ModelNotAvailableError:
+            raise
+        except AudioAdmissionError:
             raise
         except Exception as e:
             raise TranscriptionError(f"전사 처리 중 오류 발생: {audio_path} — {e}") from e

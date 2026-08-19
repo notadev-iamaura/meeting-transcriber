@@ -416,6 +416,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 6. **rumps는 메인 스레드**, FastAPI는 데몬 스레드
 7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
+9. **짧거나 측정 불가능한 오디오는 전사 금지** — `audio_quality.min_duration_seconds` 기본 30초. 16 kHz mono full-decode sample count와 성공한 ffprobe duration 중 더 짧은 값으로 경계를 판정한다. 파일 자체 결함이 확정된 `MEDIA_INVALID`만 `audio_quarantine/`으로 격리하고, 길이를 확정할 수 없는 인프라·busy·보안 실패는 원본을 보존한 채 큐/STT 진입을 차단한다. 입력 및 저장 경로의 symlink는 지원하지 않는다.
 
 ### 파이프라인 흐름
 

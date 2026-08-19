@@ -31,6 +31,14 @@ from config import AppConfig, get_config
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.runtime_safety import pyannote_offline_cache_issue
 from steps.diarization_process_guard import ZoomPauseGuard, terminate_process
+from steps.transcriber import (
+    AudioAdmissionError,
+    AudioFileIdentity,
+    inspect_audio_path_no_symlinks,
+)
+from steps.transcriber import (
+    EmptyAudioError as TranscriberEmptyAudioError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +362,7 @@ class Diarizer:
                 raise
         return pipeline
 
-    def _validate_audio(self, audio_path: Path) -> None:
+    def _validate_audio(self, audio_path: Path) -> AudioFileIdentity:
         """오디오 파일의 유효성을 검증한다.
 
         Args:
@@ -364,16 +372,42 @@ class Diarizer:
             FileNotFoundError: 파일이 존재하지 않을 때
             EmptyAudioError: 파일 크기가 0일 때
         """
-        if not audio_path.exists():
-            raise FileNotFoundError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
+        try:
+            return inspect_audio_path_no_symlinks(audio_path)
+        except TranscriberEmptyAudioError as exc:
+            raise EmptyAudioError(str(exc)) from exc
 
-        if not audio_path.is_file():
-            raise FileNotFoundError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
+    def _assert_audio_identity(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> None:
+        """모델/worker가 열기 직전까지 동일한 no-follow 파일인지 확인한다."""
+        try:
+            current_identity = self._validate_audio(audio_path)
+        except AudioAdmissionError:
+            raise
+        except (EmptyAudioError, FileNotFoundError) as exc:
+            from core.audio_quality import AudioFailureKind
 
-        if audio_path.stat().st_size == 0:
-            raise EmptyAudioError(f"오디오 파일이 비어있습니다: {audio_path}")
+            raise AudioAdmissionError(
+                f"화자분리 오디오가 검사 중 사라지거나 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            ) from exc
+        if current_identity != expected_identity:
+            from core.audio_quality import AudioFailureKind
 
-    def _run_pipeline(self, pipeline: Any, audio_path: Path) -> Any:
+            raise AudioAdmissionError(
+                f"화자분리 오디오가 검사 중 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+
+    def _run_pipeline(
+        self,
+        pipeline: Any,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> Any:
         """pyannote 파이프라인을 실행한다 (동기, 스레드에서 호출).
 
         PERF: 화자분리 진행 상태를 중간 로깅하여 장시간 작업의 진행 상황을 파악한다.
@@ -393,8 +427,9 @@ class Diarizer:
         if self._max_speakers is not None:
             params["max_speakers"] = self._max_speakers
 
-        # 파일 크기로 예상 소요 시간 안내
-        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        self._assert_audio_identity(audio_path, expected_identity)
+        # 최초 secure fstat의 파일 크기로 예상 소요 시간 안내
+        file_size_mb = expected_identity[2] / (1024 * 1024)
         logger.info(
             f"화자분리 실행: {audio_path.name} | "
             f"파일 크기: {file_size_mb:.1f}MB | "
@@ -403,6 +438,7 @@ class Diarizer:
         )
 
         start_time = _time.monotonic()
+        self._assert_audio_identity(audio_path, expected_identity)
         result = pipeline(str(audio_path), **params)
         elapsed = _time.monotonic() - start_time
 
@@ -419,13 +455,19 @@ class Diarizer:
             and hasattr(signal, "SIGCONT")
         )
 
-    def _build_worker_payload(self, audio_path: Path, output_path: Path) -> dict[str, Any]:
+    def _build_worker_payload(
+        self,
+        audio_path: Path,
+        output_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> dict[str, Any]:
         """worker 프로세스에 전달할 JSON payload 를 생성한다."""
         token = self._validate_token()
         self._validate_offline_cache()
         return {
             "model_name": self._model_name,
             "audio_path": str(audio_path),
+            "audio_identity": list(expected_identity),
             "output_path": str(output_path),
             "min_speakers": self._min_speakers,
             "max_speakers": self._max_speakers,
@@ -433,8 +475,14 @@ class Diarizer:
             "output_mode": self._output_mode,
         }
 
-    async def _run_zoom_protected_worker(self, audio_path: Path) -> DiarizationResult:
+    async def _run_zoom_protected_worker(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity | None = None,
+    ) -> DiarizationResult:
         """별도 worker 프로세스에서 화자분리를 실행하고 Zoom 중에는 일시정지한다."""
+        if expected_identity is None:
+            expected_identity = self._validate_audio(audio_path)
         self._validate_token()
         process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
         detection_backend = getattr(
@@ -455,20 +503,32 @@ class Diarizer:
                 "Zoom 회의가 지속되어 화자분리 worker 시작 대기가 시간 초과되었습니다."
             ) from e
 
+        self._assert_audio_identity(audio_path, expected_identity)
         async with self._manager.acquire("pyannote", self._reserve_external_worker_slot):
-            return await self._run_zoom_protected_worker_with_guard(audio_path, guard)
+            self._assert_audio_identity(audio_path, expected_identity)
+            return await self._run_zoom_protected_worker_with_guard(
+                audio_path,
+                guard,
+                expected_identity,
+            )
 
     async def _run_zoom_protected_worker_with_guard(
         self,
         audio_path: Path,
         guard: ZoomPauseGuard,
+        expected_identity: AudioFileIdentity,
     ) -> DiarizationResult:
         """이미 ModelLoadManager 슬롯을 확보한 상태에서 worker를 실행한다."""
 
         with tempfile.TemporaryDirectory(prefix="meeting-transcriber-diarize-") as tmpdir:
             output_path = Path(tmpdir) / "diarization.json"
             stderr_path = Path(tmpdir) / "worker.stderr.log"
-            payload = self._build_worker_payload(audio_path, output_path)
+            self._assert_audio_identity(audio_path, expected_identity)
+            payload = self._build_worker_payload(
+                audio_path,
+                output_path,
+                expected_identity,
+            )
             env = os.environ.copy()
             root = str(Path(__file__).resolve().parents[1])
             env["PYTHONPATH"] = (
@@ -612,12 +672,12 @@ class Diarizer:
             TokenNotConfiguredError: HuggingFace 토큰이 없을 때
             DiarizationError: 화자분리 처리 중 오류 또는 타임아웃 발생 시
         """
-        self._validate_audio(audio_path)
+        audio_identity = self._validate_audio(audio_path)
 
         logger.info(f"화자분리 시작: {audio_path.name}")
 
         if self._should_use_zoom_protected_worker():
-            result = await self._run_zoom_protected_worker(audio_path)
+            result = await self._run_zoom_protected_worker(audio_path, audio_identity)
             if not result.segments:
                 raise EmptyAudioError(
                     "화자를 식별할 수 없습니다. "
@@ -632,12 +692,19 @@ class Diarizer:
             return result
 
         try:
+            self._assert_audio_identity(audio_path, audio_identity)
             async with self._manager.acquire("pyannote", self._load_pipeline) as pipeline:
+                self._assert_audio_identity(audio_path, audio_identity)
                 # 화자분리를 별도 스레드에서 실행 (CPU 집약 작업)
                 # 타임아웃으로 무한 대기 방지 (STAB-029)
                 try:
                     annotation = await asyncio.wait_for(
-                        asyncio.to_thread(self._run_pipeline, pipeline, audio_path),
+                        asyncio.to_thread(
+                            self._run_pipeline,
+                            pipeline,
+                            audio_path,
+                            audio_identity,
+                        ),
                         timeout=self._timeout_seconds,
                     )
                 except TimeoutError as e:
@@ -648,6 +715,8 @@ class Diarizer:
         except (ModelNotAvailableError, TokenNotConfiguredError):
             raise
         except DiarizationError:
+            raise
+        except AudioAdmissionError:
             raise
         except Exception as e:
             raise DiarizationError(f"화자분리 중 오류가 발생했습니다: {e}") from e

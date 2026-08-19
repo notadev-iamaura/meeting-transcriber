@@ -22,27 +22,43 @@ Phase 1 범위 제한:
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
 import json
 import logging
 import math
+import os
 import re
+import stat
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from config import AppConfig
 from core import ab_test_store
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioQualityStatus,
+    validate_audio_quality,
+)
 from core.model_manager import ModelLoadManager, get_model_manager
 from steps.corrector import CorrectedResult, Corrector
-from steps.diarizer import DiarizationResult, Diarizer
-from steps.merger import MergedResult, Merger
+from steps.diarizer import DiarizationResult, DiarizationSegment, Diarizer
+from steps.merger import MergedResult, MergedUtterance, Merger
 from steps.summarizer import Summarizer, SummaryResult
-from steps.transcriber import Transcriber, TranscriptResult
+from steps.transcriber import (
+    AudioAdmissionError,
+    AudioFileIdentity,
+    EmptyAudioError,
+    Transcriber,
+    TranscriptResult,
+    inspect_audio_path_no_symlinks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +118,45 @@ def _get_ab_test_lock() -> asyncio.Lock:
         _ab_test_lock = asyncio.Lock()
         _ab_test_lock_loop = loop
     return _ab_test_lock
+
+
+def is_ab_test_busy() -> bool:
+    """현재 event loop에서 A/B slot이 점유 중인지 반환한다."""
+    return _get_ab_test_lock().locked()
+
+
+@asynccontextmanager
+async def _managed_ab_test_lock(
+    config: AppConfig,
+    test_id: str,
+    lock: asyncio.Lock,
+) -> AsyncIterator[None]:
+    """예약 metadata가 lock 대기/실행 취소에도 terminal 상태가 되게 한다."""
+    try:
+        async with lock:
+            yield
+    except asyncio.CancelledError:
+        try:
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="cancelled",
+                current_variant=None,
+                current_step=None,
+                completed_at=_now_iso(),
+                error="A/B 테스트 태스크가 lock 대기 또는 실행 중 취소되었습니다.",
+            )
+        except Exception as metadata_error:  # noqa: BLE001 - 원래 취소를 보존한다.
+            logger.error(
+                "취소된 A/B metadata 갱신 실패: test_id=%s, error=%s",
+                test_id,
+                metadata_error,
+            )
+        global _current_test_id
+        if _current_test_id == test_id:
+            _current_test_id = None
+        _pop_cancel(test_id)
+        raise
 
 
 # 현재 진행 중인 테스트 ID (취소 진단용)
@@ -297,13 +352,266 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
+def _lexical_configured_path(config: AppConfig, field_name: str, fallback: Path) -> Path:
+    """base_dir symlink를 resolve로 숨기지 않은 설정 경로를 반환한다."""
+    raw_base = getattr(config.paths, "base_dir", None)
+    raw_child = getattr(config.paths, field_name, None)
+    if isinstance(raw_base, (str, Path)) and isinstance(raw_child, (str, Path)):
+        lexical_base = Path(raw_base).expanduser().absolute()
+        child = Path(raw_child).expanduser()
+        if child == Path(".") or ".." in child.parts or "\x00" in str(child):
+            raise AudioAdmissionError(
+                f"{field_name}은 base_dir 하위 상대경로여야 합니다: {raw_child!r}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        candidate = child.absolute() if child.is_absolute() else (lexical_base / child).absolute()
+        try:
+            relative = candidate.relative_to(lexical_base)
+        except ValueError as exc:
+            raise AudioAdmissionError(
+                f"{field_name}이 base_dir 밖을 가리킵니다: {candidate}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            ) from exc
+        if not relative.parts:
+            raise AudioAdmissionError(
+                f"{field_name}은 base_dir의 직접/하위 경로여야 합니다",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        return candidate
+    return Path(fallback).expanduser().absolute()
+
+
+def _validate_source_meeting_id(meeting_id: str) -> None:
+    """A/B 원본 ID가 안전한 단일 경로 요소인지 검증한다."""
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "\x00" in meeting_id
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or Path(meeting_id).name != meeting_id
+    ):
+        raise AudioAdmissionError(
+            f"유효하지 않은 A/B 회의 ID입니다: {meeting_id!r}",
+            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+        )
+
+
+def _read_json_artifact_no_symlinks(
+    artifact_path: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], AudioFileIdentity]:
+    """openat/O_NOFOLLOW로 JSON artifact를 target 경로를 따라가지 않고 읽는다."""
+    lexical_path = artifact_path.expanduser().absolute()
+    parts = lexical_path.parts[1:] if lexical_path.is_absolute() else lexical_path.parts
+    if not lexical_path.is_absolute() or not parts or ".." in parts:
+        raise AudioAdmissionError(
+            f"유효하지 않은 {label} 경로입니다: {artifact_path}",
+            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        file_flags |= os.O_CLOEXEC
+
+    def _raise_open_error(
+        parent_fd: int,
+        component: str,
+        current_path: Path,
+        *,
+        is_final: bool,
+        error: OSError,
+    ) -> NoReturn:
+        try:
+            entry_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"{label}을 찾을 수 없습니다: {artifact_path}") from exc
+        except OSError as exc:
+            raise AudioAdmissionError(
+                f"{label} 경로 상태를 확인할 수 없습니다: {current_path} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise AudioAdmissionError(
+                f"{label} 경로에 심볼릭 링크를 사용할 수 없습니다: {current_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            ) from error
+        expected_mode = stat.S_ISREG if is_final else stat.S_ISDIR
+        if not expected_mode(entry_stat.st_mode):
+            raise AudioAdmissionError(
+                f"{label} 경로 요소가 안전한 일반 파일/디렉터리가 아닙니다: {current_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            ) from error
+        failure_kind = (
+            AudioFailureKind.SECURITY_BLOCKED
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}
+            else AudioFailureKind.INFRA_UNAVAILABLE
+        )
+        raise AudioAdmissionError(
+            f"{label} 경로를 안전하게 열 수 없습니다: {current_path} ({error})",
+            failure_kind=failure_kind,
+        ) from error
+
+    current_fd: int | None = None
+    final_fd: int | None = None
+    current_path = Path(lexical_path.anchor)
+    try:
+        current_fd = os.open(lexical_path.anchor, directory_flags)
+        for component in parts[:-1]:
+            current_path /= component
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except OSError as exc:
+                _raise_open_error(
+                    current_fd,
+                    component,
+                    current_path,
+                    is_final=False,
+                    error=exc,
+                )
+            os.close(current_fd)
+            current_fd = next_fd
+
+        current_path /= parts[-1]
+        try:
+            final_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+        except OSError as exc:
+            _raise_open_error(
+                current_fd,
+                parts[-1],
+                current_path,
+                is_final=True,
+                error=exc,
+            )
+        final_stat = os.fstat(final_fd)
+        if not stat.S_ISREG(final_stat.st_mode):
+            raise AudioAdmissionError(
+                f"{label}이 일반 파일이 아닙니다: {artifact_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        owned_fd = final_fd
+        final_fd = None
+        with os.fdopen(owned_fd, encoding="utf-8") as artifact_file:
+            payload = json.load(artifact_file)
+            after_stat = os.fstat(artifact_file.fileno())
+        before_identity: AudioFileIdentity = (
+            final_stat.st_dev,
+            final_stat.st_ino,
+            final_stat.st_size,
+            final_stat.st_mtime_ns,
+            final_stat.st_ctime_ns,
+        )
+        after_identity: AudioFileIdentity = (
+            after_stat.st_dev,
+            after_stat.st_ino,
+            after_stat.st_size,
+            after_stat.st_mtime_ns,
+            after_stat.st_ctime_ns,
+        )
+        if after_identity != before_identity:
+            raise AudioAdmissionError(
+                f"{label}이 읽는 동안 변경되었습니다: {artifact_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+    except AudioAdmissionError:
+        raise
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise AudioAdmissionError(
+            f"{label}을 안전하게 읽을 수 없습니다: {artifact_path} ({exc})",
+            failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+        ) from exc
+    finally:
+        if final_fd is not None:
+            os.close(final_fd)
+        if current_fd is not None:
+            os.close(current_fd)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} JSON root가 object가 아닙니다: {artifact_path}")
+    return payload, before_identity
+
+
+def _read_merged_checkpoint_no_symlinks(
+    merge_path: Path,
+) -> tuple[MergedResult, AudioFileIdentity]:
+    """merge checkpoint를 no-follow fd에서 파싱한다."""
+    payload, identity = _read_json_artifact_no_symlinks(merge_path, label="merge checkpoint")
+    try:
+        utterances = [MergedUtterance(**item) for item in payload.get("utterances", [])]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"유효하지 않은 merge checkpoint schema: {merge_path}") from exc
+    return (
+        MergedResult(
+            utterances=utterances,
+            num_speakers=payload.get("num_speakers", 0),
+            audio_path=payload.get("audio_path", ""),
+            unknown_count=payload.get("unknown_count", 0),
+        ),
+        identity,
+    )
+
+
+def _read_diarize_checkpoint_no_symlinks(
+    diarize_path: Path,
+) -> tuple[DiarizationResult, AudioFileIdentity]:
+    """diarize checkpoint를 no-follow fd에서 파싱한다."""
+    payload, identity = _read_json_artifact_no_symlinks(
+        diarize_path,
+        label="diarize checkpoint",
+    )
+    try:
+        segments = [DiarizationSegment(**item) for item in payload.get("segments", [])]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"유효하지 않은 diarize checkpoint schema: {diarize_path}") from exc
+    return (
+        DiarizationResult(
+            segments=segments,
+            num_speakers=payload.get("num_speakers", 0),
+            audio_path=payload.get("audio_path", ""),
+            model_name=payload.get("model_name", ""),
+            output_mode=payload.get("output_mode", "regular"),
+        ),
+        identity,
+    )
+
+
 def _resolve_meeting_dir(config: AppConfig, meeting_id: str) -> Path:
     """본 파이프라인의 `checkpoints/{meeting_id}/` 디렉터리 경로를 반환한다.
 
     A/B 테스트에 필요한 중간 산출물(merge.json, diarize.json, transcribe.json)은
     checkpoints/ 에 저장된다. outputs/ 에는 최종 산출물(corrected.json, summary.md)만 있다.
     """
-    return config.paths.resolved_checkpoints_dir / meeting_id
+    _validate_source_meeting_id(meeting_id)
+    checkpoints_root = _lexical_configured_path(
+        config,
+        "checkpoints_dir",
+        config.paths.resolved_checkpoints_dir,
+    )
+    return checkpoints_root / meeting_id
+
+
+def inspect_llm_ab_source(
+    config: AppConfig,
+    meeting_id: str,
+) -> tuple[Path, AudioFileIdentity]:
+    """LLM A/B source snapshot의 기존 artifact를 no-follow로 검증한다."""
+    meeting_dir = _resolve_meeting_dir(config, meeting_id)
+    merge_path = meeting_dir / "merge.json"
+    _merged, identity = _read_merged_checkpoint_no_symlinks(merge_path)
+    try:
+        _read_json_artifact_no_symlinks(
+            meeting_dir / "diarize.json",
+            label="diarize checkpoint",
+        )
+    except FileNotFoundError:
+        pass
+    return merge_path, identity
 
 
 def _resolve_wav_path(config: AppConfig, meeting_id: str) -> Path:
@@ -311,7 +619,106 @@ def _resolve_wav_path(config: AppConfig, meeting_id: str) -> Path:
 
     WAV 는 audio_input/{meeting_id}.wav 에 저장된다 (pipeline 의 audio_converter 가 변환한 결과).
     """
-    return config.paths.resolved_audio_input_dir / f"{meeting_id}.wav"
+    _validate_source_meeting_id(meeting_id)
+    audio_input_root = _lexical_configured_path(
+        config,
+        "audio_input_dir",
+        config.paths.resolved_audio_input_dir,
+    )
+    return audio_input_root / f"{meeting_id}.wav"
+
+
+def _inspect_stt_audio_source(
+    config: AppConfig,
+    meeting_id: str,
+) -> tuple[Path, AudioFileIdentity]:
+    """STT A/B 원본이 audio_input의 안전한 직접 자식인지 검사한다."""
+    _validate_source_meeting_id(meeting_id)
+
+    audio_input_dir = _lexical_configured_path(
+        config,
+        "audio_input_dir",
+        config.paths.resolved_audio_input_dir,
+    )
+    wav_path = _resolve_wav_path(config, meeting_id).expanduser().absolute()
+    if wav_path.parent != audio_input_dir:
+        raise AudioAdmissionError(
+            f"STT A/B 오디오는 audio_input의 직접 자식이어야 합니다: {wav_path}",
+            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+        )
+
+    try:
+        identity = inspect_audio_path_no_symlinks(wav_path)
+    except EmptyAudioError as exc:
+        raise AudioAdmissionError(
+            str(exc),
+            failure_kind=AudioFailureKind.MEDIA_INVALID,
+        ) from exc
+    return wav_path, identity
+
+
+def _assert_stt_audio_identity(
+    wav_path: Path,
+    expected_identity: AudioFileIdentity,
+) -> None:
+    """STT A/B 원본이 admission 이후 동일한 일반 파일인지 재확인한다."""
+    try:
+        current_identity = inspect_audio_path_no_symlinks(wav_path)
+    except AudioAdmissionError:
+        raise
+    except (EmptyAudioError, FileNotFoundError) as exc:
+        raise AudioAdmissionError(
+            f"STT A/B 오디오가 검사 중 사라지거나 변경되었습니다: {wav_path}",
+            failure_kind=AudioFailureKind.SOURCE_BUSY,
+        ) from exc
+
+    if current_identity != expected_identity:
+        raise AudioAdmissionError(
+            f"STT A/B 오디오가 검사 중 변경되었습니다: {wav_path}",
+            failure_kind=AudioFailureKind.SOURCE_BUSY,
+        )
+
+
+async def _require_stt_audio_admission(
+    config: AppConfig,
+    wav_path: Path,
+    expected_identity: AudioFileIdentity,
+) -> None:
+    """정책 설정과 무관한 identity 검사 후, 활성화된 full gate를 적용한다."""
+    _assert_stt_audio_identity(wav_path, expected_identity)
+    quality_config = getattr(config, "audio_quality", None)
+    if quality_config is None or getattr(quality_config, "enabled", False) is not True:
+        _assert_stt_audio_identity(wav_path, expected_identity)
+        return
+
+    try:
+        admission = await asyncio.to_thread(
+            validate_audio_quality,
+            wav_path,
+            min_mean_db=quality_config.min_mean_volume_db,
+            min_duration_s=quality_config.min_duration_seconds,
+            expected_identity=expected_identity,
+            decode_timeout_base_seconds=quality_config.decode_timeout_base_seconds,
+            decode_timeout_factor=quality_config.decode_timeout_factor,
+            decode_timeout_cap_seconds=quality_config.decode_timeout_cap_seconds,
+        )
+    except Exception as exc:
+        _assert_stt_audio_identity(wav_path, expected_identity)
+        raise AudioAdmissionError(
+            f"오디오 품질 검증 실패: {exc}",
+            failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+        ) from exc
+
+    _assert_stt_audio_identity(wav_path, expected_identity)
+    if admission.status is AudioQualityStatus.ACCEPT:
+        return
+
+    failure_kind = admission.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+    reason = admission.reason or "오디오 품질 검증 비수락"
+    raise AudioAdmissionError(
+        f"오디오 품질 검증 거부 ({failure_kind.name}): {reason}",
+        failure_kind=failure_kind,
+    )
 
 
 def _write_metrics_file(dir_path: Path, metrics: dict[str, Any]) -> None:
@@ -410,6 +817,84 @@ def _init_metadata(
     }
 
 
+def reserve_stt_ab_test(
+    config: AppConfig,
+    *,
+    test_id: str,
+    source_meeting_id: str,
+    wav_path: Path,
+    variant_a: ModelSpec,
+    variant_b: ModelSpec,
+    allow_diarize_rerun: bool,
+) -> None:
+    """API가 202를 반환하기 전에 조회 가능한 STT pending metadata를 예약한다."""
+    if not ab_test_store.is_valid_test_id(test_id):
+        raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+    meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
+    ab_test_store.create_test_dir(config, test_id)
+    ab_test_store.write_metadata(
+        config,
+        test_id,
+        _init_metadata(
+            test_id=test_id,
+            test_type="stt",
+            source_meeting_id=source_meeting_id,
+            source_snapshot={
+                "merge_json_path": str(meeting_dir / "merge.json"),
+                "wav_path": str(wav_path),
+                "diarize_json_path": None,
+            },
+            variant_a=variant_a,
+            variant_b=variant_b,
+            scope={"allow_diarize_rerun": allow_diarize_rerun},
+        ),
+    )
+
+
+def reserve_llm_ab_test(
+    config: AppConfig,
+    *,
+    test_id: str,
+    source_meeting_id: str,
+    merge_path: Path,
+    variant_a: ModelSpec,
+    variant_b: ModelSpec,
+    scope: LlmScope,
+) -> None:
+    """API가 202를 반환하기 전 조회 가능한 LLM pending metadata를 예약한다."""
+    if not ab_test_store.is_valid_test_id(test_id):
+        raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+    meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
+    diarize_path = meeting_dir / "diarize.json"
+    try:
+        _read_json_artifact_no_symlinks(
+            diarize_path,
+            label="diarize checkpoint",
+        )
+        safe_diarize_path: str | None = str(diarize_path)
+    except FileNotFoundError:
+        safe_diarize_path = None
+
+    ab_test_store.create_test_dir(config, test_id)
+    ab_test_store.write_metadata(
+        config,
+        test_id,
+        _init_metadata(
+            test_id=test_id,
+            test_type="llm",
+            source_meeting_id=source_meeting_id,
+            source_snapshot={
+                "merge_json_path": str(merge_path),
+                "wav_path": str(_resolve_wav_path(config, source_meeting_id)),
+                "diarize_json_path": safe_diarize_path,
+            },
+            variant_a=variant_a,
+            variant_b=variant_b,
+            scope={"correct": scope.correct, "summarize": scope.summarize},
+        ),
+    )
+
+
 # ============================================================
 # LLM A/B 러너
 # ============================================================
@@ -493,6 +978,8 @@ async def run_llm_ab_test(
     ws_broadcaster: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     model_manager: ModelLoadManager | None = None,
     test_id: str | None = None,
+    expected_merge_identity: AudioFileIdentity | None = None,
+    metadata_reserved: bool = False,
 ) -> str:
     """기존 회의의 `merge.json` 을 입력으로 LLM 2종의 교정/요약을 순차 실행한다.
 
@@ -519,57 +1006,72 @@ async def run_llm_ab_test(
     if variant_a.model_id == variant_b.model_id and variant_a.backend == variant_b.backend:
         raise ValueError("variant_a 와 variant_b 가 동일합니다.")
 
-    lock = _get_ab_test_lock()
-    if lock.locked():
-        raise RuntimeError("다른 A/B 테스트가 이미 진행 중입니다.")
-
-    meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
-    merge_path = meeting_dir / "merge.json"
-    if not merge_path.exists():
-        raise FileNotFoundError(
-            f"merge.json 이 없습니다: {merge_path}. 소스 회의를 먼저 처리해야 합니다."
-        )
-
-    mm = model_manager or get_model_manager()
     # test_id 선점: API 레이어가 202 응답에 포함시킬 ID 를 외부에서 주입할 수 있다.
     if test_id is None:
+        if metadata_reserved:
+            raise ValueError("metadata_reserved에는 test_id가 필요합니다.")
         test_id = new_test_id()
     elif not ab_test_store.is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
 
-    # Race condition 방지: lock 획득 전에 pending 상태의 초기 metadata 를 먼저 기록한다.
-    # asyncio.create_task() 로 발사된 코루틴이 실제로 lock 을 획득하기 전에
-    # 프론트엔드가 GET /api/ab-tests/{test_id} 를 호출하면 FileNotFoundError 가
-    # 발생해 404 를 반환하는 race condition 을 이 방식으로 차단한다.
-    ab_test_store.create_test_dir(config, test_id)
-    initial_metadata = _init_metadata(
-        test_id=test_id,
-        test_type="llm",
-        source_meeting_id=source_meeting_id,
-        source_snapshot={
-            "merge_json_path": str(merge_path.resolve()),
-            "wav_path": str(_resolve_wav_path(config, source_meeting_id).resolve()),
-            "diarize_json_path": str((meeting_dir / "diarize.json").resolve())
-            if (meeting_dir / "diarize.json").exists()
-            else None,
-        },
-        variant_a=variant_a,
-        variant_b=variant_b,
-        scope={"correct": scope.correct, "summarize": scope.summarize},
-    )
-    # status 는 _init_metadata 기본값인 "pending" 유지 — lock 획득 후 "running" 으로 갱신
-    ab_test_store.write_metadata(config, test_id, initial_metadata)
+    metadata_available = metadata_reserved
+    try:
+        meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
+        merge_path = meeting_dir / "merge.json"
+        merged, current_merge_identity = _read_merged_checkpoint_no_symlinks(merge_path)
+        if (
+            expected_merge_identity is not None
+            and current_merge_identity != expected_merge_identity
+        ):
+            raise AudioAdmissionError(
+                f"LLM A/B merge checkpoint가 요청 후 변경되었습니다: {merge_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+        if not metadata_reserved:
+            reserve_llm_ab_test(
+                config,
+                test_id=test_id,
+                source_meeting_id=source_meeting_id,
+                merge_path=merge_path,
+                variant_a=variant_a,
+                variant_b=variant_b,
+                scope=scope,
+            )
+            metadata_available = True
 
-    async with lock:
+        lock = _get_ab_test_lock()
+        if lock.locked():
+            raise RuntimeError("다른 A/B 테스트가 이미 진행 중입니다.")
+    except asyncio.CancelledError:
+        if metadata_available:
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="cancelled",
+                completed_at=_now_iso(),
+                error="A/B 테스트 태스크가 시작 전 취소되었습니다.",
+            )
+        raise
+    except Exception as exc:
+        if metadata_available:
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="failed",
+                completed_at=_now_iso(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
+
+    mm = model_manager or get_model_manager()
+
+    async with _managed_ab_test_lock(config, test_id, lock):
         global _current_test_id
         _current_test_id = test_id
 
         test_dir = ab_test_store.resolve_test_dir(config, test_id)
         # lock 획득 후 상태를 "running" 으로 갱신
         ab_test_store.update_metadata(config, test_id, status="running")
-
-        # 소스 merge 체크포인트 로드 (한 번만)
-        merged = MergedResult.from_checkpoint(merge_path)
 
         variant_success: dict[str, dict[str, Any]] = {}
         variant_errors: dict[str, str] = {}
@@ -689,6 +1191,7 @@ async def _ensure_diarize(
     model_manager: ModelLoadManager,
     meeting_dir: Path,
     wav_path: Path,
+    expected_identity: AudioFileIdentity,
     allow_diarize_rerun: bool,
 ) -> DiarizationResult:
     """diarize 체크포인트를 로드하거나, 허용 시 1회 재실행한다.
@@ -698,13 +1201,15 @@ async def _ensure_diarize(
         wav_path: audio_input/{meeting_id}.wav 경로 (재실행 시 필요)
     """
     ckpt = meeting_dir / "diarize.json"
-    if ckpt.exists():
+    try:
+        cached_result, _identity = _read_diarize_checkpoint_no_symlinks(ckpt)
         logger.info(f"diarize 체크포인트 재사용: {ckpt}")
-        return DiarizationResult.from_checkpoint(ckpt)
+        return cached_result
+    except FileNotFoundError:
+        pass
     # 체크포인트 없음 → 자동으로 1회 실행 (미전사 회의에서 필수)
     logger.info("diarize 체크포인트 없음 → 화자분리 자동 실행")
-    if not wav_path.exists():
-        raise FileNotFoundError(f"WAV 파일이 없습니다: {wav_path}")
+    _assert_stt_audio_identity(wav_path, expected_identity)
     diarizer = Diarizer(config, model_manager)
     return await diarizer.diarize(wav_path)
 
@@ -715,6 +1220,7 @@ async def _run_stt_variant(
     model_manager: ModelLoadManager,
     spec: ModelSpec,
     wav_path: Path,
+    expected_identity: AudioFileIdentity,
     cached_diarize: DiarizationResult,
     variant_dir: Path,
 ) -> dict[str, Any]:
@@ -726,6 +1232,7 @@ async def _run_stt_variant(
     elapsed: dict[str, float] = {}
     temp_cfg = _build_stt_temp_config(config, spec)
 
+    _assert_stt_audio_identity(wav_path, expected_identity)
     await _force_unload_llm(model_manager)
 
     # VAD 전처리: 음성 구간만 추출하여 무음 환각 방지 (pipeline.py 와 동일)
@@ -746,6 +1253,7 @@ async def _run_stt_variant(
         except Exception as e:
             logger.warning(f"A/B STT VAD 실패, 전체 오디오로 폴백: {e}")
 
+    _assert_stt_audio_identity(wav_path, expected_identity)
     t0 = time.perf_counter()
     transcriber = Transcriber(temp_cfg, model_manager)
     transcript: TranscriptResult = await transcriber.transcribe(
@@ -787,6 +1295,7 @@ async def run_stt_ab_test(
     ws_broadcaster: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     model_manager: ModelLoadManager | None = None,
     test_id: str | None = None,
+    metadata_reserved: bool = False,
 ) -> str:
     """STT 모델 2종을 순차 실행하고 결과를 격리 저장한다.
 
@@ -811,78 +1320,127 @@ async def run_stt_ab_test(
     if variant_a.model_id == variant_b.model_id:
         raise ValueError("variant_a 와 variant_b 가 동일합니다.")
 
-    lock = _get_ab_test_lock()
-    if lock.locked():
-        raise RuntimeError("다른 A/B 테스트가 이미 진행 중입니다.")
-
-    meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
-    wav_path = _resolve_wav_path(config, source_meeting_id)
-    if not wav_path.exists():
-        raise FileNotFoundError(f"WAV 파일이 없습니다: {wav_path}")
-
-    mm = model_manager or get_model_manager()
     # test_id 선점: API 레이어가 202 응답에 포함시킬 ID 를 외부에서 주입할 수 있다.
     if test_id is None:
+        if metadata_reserved:
+            raise ValueError("metadata_reserved에는 test_id가 필요합니다.")
         test_id = new_test_id()
     elif not ab_test_store.is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+
+    try:
+        wav_path, expected_identity = _inspect_stt_audio_source(config, source_meeting_id)
+        await _require_stt_audio_admission(config, wav_path, expected_identity)
+        meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
+    except asyncio.CancelledError:
+        if metadata_reserved:
+            try:
+                ab_test_store.update_metadata(
+                    config,
+                    test_id,
+                    status="cancelled",
+                    current_variant=None,
+                    current_step=None,
+                    completed_at=_now_iso(),
+                    error="A/B STT admission 대기 중 태스크가 취소되었습니다.",
+                )
+            except Exception as metadata_error:  # noqa: BLE001 - 원래 취소를 보존한다.
+                logger.error(
+                    "취소된 STT A/B metadata 갱신 실패: test_id=%s, error=%s",
+                    test_id,
+                    metadata_error,
+                )
+        _pop_cancel(test_id)
+        raise
+    except Exception as exc:
+        if metadata_reserved:
+            failure_kind = getattr(exc, "failure_kind", None)
+            error_prefix = (
+                f"{failure_kind.name}: " if isinstance(failure_kind, AudioFailureKind) else ""
+            )
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="failed",
+                completed_at=_now_iso(),
+                error=f"{error_prefix}{type(exc).__name__}: {exc}",
+            )
+        raise
+
+    mm = model_manager or get_model_manager()
 
     # Race condition 방지: lock 획득 전에 pending 상태의 초기 metadata 를 먼저 기록한다.
     # asyncio.create_task() 로 발사된 코루틴이 실제로 lock 을 획득하기 전에
     # 프론트엔드가 GET /api/ab-tests/{test_id} 를 호출하면 FileNotFoundError 가
     # 발생해 404 를 반환하는 race condition 을 이 방식으로 차단한다.
     # diarize 경로는 lock 진입 후에 결정되므로 일단 None 으로 기록하고 갱신한다.
-    ab_test_store.create_test_dir(config, test_id)
-    initial_metadata = _init_metadata(
-        test_id=test_id,
-        test_type="stt",
-        source_meeting_id=source_meeting_id,
-        source_snapshot={
-            "merge_json_path": str((meeting_dir / "merge.json").resolve()),
-            "wav_path": str(wav_path.resolve()),
-            "diarize_json_path": None,  # diarize 확보 후 갱신됨
-        },
-        variant_a=variant_a,
-        variant_b=variant_b,
-        scope={"allow_diarize_rerun": allow_diarize_rerun},
-    )
-    # status 는 _init_metadata 기본값인 "pending" 유지 — lock 획득 후 "running" 으로 갱신
-    ab_test_store.write_metadata(config, test_id, initial_metadata)
+    if not metadata_reserved:
+        reserve_stt_ab_test(
+            config,
+            test_id=test_id,
+            source_meeting_id=source_meeting_id,
+            wav_path=wav_path,
+            variant_a=variant_a,
+            variant_b=variant_b,
+            allow_diarize_rerun=allow_diarize_rerun,
+        )
 
-    async with lock:
+    lock = _get_ab_test_lock()
+    if lock.locked():
+        busy_error = RuntimeError("다른 A/B 테스트가 이미 진행 중입니다.")
+        ab_test_store.update_metadata(
+            config,
+            test_id,
+            status="failed",
+            current_variant=None,
+            current_step=None,
+            completed_at=_now_iso(),
+            error=f"RuntimeError: {busy_error}",
+        )
+        raise busy_error
+
+    async with _managed_ab_test_lock(config, test_id, lock):
         global _current_test_id
         _current_test_id = test_id
 
         test_dir = ab_test_store.resolve_test_dir(config, test_id)
 
-        # diarize 캐시 확보 (variant 전에 1회)
-        cached_diarize = await _ensure_diarize(
-            config=config,
-            model_manager=mm,
-            meeting_dir=meeting_dir,
-            wav_path=wav_path,
-            allow_diarize_rerun=allow_diarize_rerun,
-        )
-
-        # diarize 경로 확정 후 metadata 갱신 + 상태 "running" 으로 전환
-        diarize_path = meeting_dir / "diarize.json"
-        ab_test_store.update_metadata(
-            config,
-            test_id,
-            status="running",
-            source_snapshot={
-                "merge_json_path": str((meeting_dir / "merge.json").resolve()),
-                "wav_path": str(wav_path.resolve()),
-                "diarize_json_path": (
-                    str(diarize_path.resolve()) if diarize_path.exists() else None
-                ),
-            },
-        )
-
-        variant_errors: dict[str, str] = {}
-        variant_success: dict[str, dict[str, Any]] = {}
-
         try:
+            # lock 대기 중 바뀐 원본을 모델/diarize가 열기 전에 다시 차단한다.
+            _assert_stt_audio_identity(wav_path, expected_identity)
+
+            # diarize 캐시 확보 (variant 전에 1회). 실제 재실행 직전에도 helper가
+            # 동일 identity를 다시 확인한다.
+            cached_diarize = await _ensure_diarize(
+                config=config,
+                model_manager=mm,
+                meeting_dir=meeting_dir,
+                wav_path=wav_path,
+                expected_identity=expected_identity,
+                allow_diarize_rerun=allow_diarize_rerun,
+            )
+
+            # diarize 경로 확정 후 metadata 갱신 + 상태 "running" 으로 전환
+            diarize_path = meeting_dir / "diarize.json"
+            try:
+                _read_diarize_checkpoint_no_symlinks(diarize_path)
+                safe_diarize_path: str | None = str(diarize_path)
+            except FileNotFoundError:
+                safe_diarize_path = None
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="running",
+                source_snapshot={
+                    "merge_json_path": str(meeting_dir / "merge.json"),
+                    "wav_path": str(wav_path),
+                    "diarize_json_path": safe_diarize_path,
+                },
+            )
+
+            variant_errors: dict[str, str] = {}
+            variant_success: dict[str, dict[str, Any]] = {}
+
             for variant, spec in (("A", variant_a), ("B", variant_b)):
                 if _is_cancelled(test_id):
                     ab_test_store.update_metadata(
@@ -920,6 +1478,7 @@ async def run_stt_ab_test(
                         model_manager=mm,
                         spec=spec,
                         wav_path=wav_path,
+                        expected_identity=expected_identity,
                         cached_diarize=cached_diarize,
                         variant_dir=variant_dir,
                     )
@@ -966,12 +1525,25 @@ async def run_stt_ab_test(
             )
             return test_id
 
+        except asyncio.CancelledError:
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="cancelled",
+                current_variant=None,
+                current_step=None,
+                completed_at=_now_iso(),
+                error="A/B 테스트 태스크가 취소되었습니다.",
+            )
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("STT A/B 테스트 실행 중 예외")
             ab_test_store.update_metadata(
                 config,
                 test_id,
                 status="failed",
+                current_variant=None,
+                current_step=None,
                 completed_at=_now_iso(),
                 error=str(exc),
             )

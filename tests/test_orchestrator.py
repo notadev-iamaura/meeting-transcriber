@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.job_queue import JobStatus, RetranscribeClaim
 from core.orchestrator import JobProcessor
 
 pytestmark = pytest.mark.asyncio
@@ -34,7 +36,9 @@ def mock_job_queue() -> AsyncMock:
     """비동기 작업 큐 목(Mock)을 생성한다."""
     queue = AsyncMock()
     queue.get_pending_jobs = AsyncMock(return_value=[])
+    queue.get_all_jobs = AsyncMock(return_value=[])
     queue.update_status = AsyncMock()
+    queue.queue = MagicMock()
     return queue
 
 
@@ -86,6 +90,22 @@ def _make_job(
     job.status = status
     job.requested_action = ""
     return job
+
+
+def _claim_action(
+    *,
+    token: str = "claim-token",
+    phase: str = "staging",
+    original_status: str = "completed",
+    original_action: str = "full",
+) -> str:
+    """테스트용 versioned 재전사 claim payload를 만든다."""
+    return RetranscribeClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        token=token,
+        phase=phase,
+    ).to_requested_action()
 
 
 @pytest.fixture
@@ -196,6 +216,229 @@ class TestJobProcessorStartStop:
         """실행 중이 아닐 때 stop()을 호출해도 안전해야 한다."""
         await processor.stop()  # 시작하지 않은 상태에서 stop
         assert processor.is_running is False
+
+
+class TestRecoverRetranscribeClaim:
+    """startup 시 중단된 재전사 transaction 복구 계약."""
+
+    @pytest.mark.parametrize(
+        ("phase", "expected_order"),
+        [
+            ("claimed", ["rollback", "restore"]),
+            ("staging", ["rollback", "restore"]),
+            ("purging", ["rollback", "marker", "restore"]),
+            ("committing", ["cleanup", "finalize"]),
+        ],
+    )
+    async def test_파일원복과_marker후에만_DB원상태를_복구한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+        phase: str,
+        expected_order: list[str],
+    ) -> None:
+        """claim phase별 복구 순서가 filesystem → marker → token CAS여야 한다."""
+        job = _make_job(status="recording")
+        job.requested_action = _claim_action(phase=phase)
+        mock_job_queue.get_all_jobs.return_value = [job]
+        mock_pipeline._config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
+        mock_pipeline._config.paths.resolved_outputs_dir = tmp_path / "outputs"
+        order: list[str] = []
+        mock_job_queue.queue.restore_retranscribe_claim.side_effect = lambda *_args: order.append(
+            "restore"
+        )
+        mock_job_queue.queue.reset_for_retranscribe.side_effect = lambda *_args: order.append(
+            "finalize"
+        )
+
+        with (
+            patch(
+                "core.orchestrator.rollback_retranscribe_staging",
+                side_effect=lambda *_args: order.append("rollback"),
+            ) as rollback,
+            patch.object(
+                processor,
+                "_write_retranscribe_recovery_marker",
+                side_effect=lambda *_args: order.append("marker"),
+            ) as marker,
+            patch(
+                "core.orchestrator.cleanup_retranscribe_staging",
+                side_effect=lambda *_args: order.append("cleanup"),
+            ) as cleanup,
+        ):
+            await processor._recover_orphaned_jobs()
+
+        assert order == expected_order
+        if phase == "committing":
+            rollback.assert_not_called()
+            cleanup.assert_called_once_with(
+                tmp_path / "checkpoints",
+                tmp_path / "outputs",
+                job.meeting_id,
+                "claim-token",
+            )
+        else:
+            rollback.assert_called_once_with(
+                tmp_path / "checkpoints",
+                tmp_path / "outputs",
+                job.meeting_id,
+                "claim-token",
+            )
+            cleanup.assert_not_called()
+        if phase == "purging":
+            marker.assert_called_once()
+            assert marker.call_args.args[0] == tmp_path / "checkpoints"
+        else:
+            marker.assert_not_called()
+        if phase == "committing":
+            mock_job_queue.queue.restore_retranscribe_claim.assert_not_called()
+            mock_job_queue.queue.reset_for_retranscribe.assert_called_once_with(
+                job.id,
+                "claim-token",
+            )
+        else:
+            mock_job_queue.queue.restore_retranscribe_claim.assert_called_once_with(
+                job.id,
+                "claim-token",
+            )
+            mock_job_queue.queue.reset_for_retranscribe.assert_not_called()
+        mock_job_queue.queue.force_set_status.assert_not_called()
+
+    @pytest.mark.parametrize("configured_child", ["../outside", "/tmp/outside"])
+    async def test_recovery_storage_root는_base_dir_밖을_거부한다(
+        self,
+        tmp_path: Path,
+        configured_child: str,
+    ) -> None:
+        """startup recovery도 traversal·absolute-outside storage 설정을 사용하지 않는다."""
+        from config import AppConfig, PathsConfig
+
+        base = tmp_path.resolve() / "base"
+        base.mkdir()
+        config = AppConfig().model_copy(
+            update={
+                "paths": PathsConfig(
+                    base_dir=str(base),
+                    checkpoints_dir=configured_child,
+                )
+            }
+        )
+
+        with pytest.raises(ValueError, match="base_dir"):
+            JobProcessor._configured_storage_root(
+                config,
+                "checkpoints_dir",
+                config.paths.resolved_checkpoints_dir,
+            )
+
+    async def test_recovery_marker는_symlink_target을_덮어쓰지_않는다(
+        self,
+        processor: JobProcessor,
+        tmp_path: Path,
+    ) -> None:
+        """purging recovery marker final symlink는 외부 target mutation 전에 차단한다."""
+        from core.audio_quality import AudioFailureKind
+        from core.pipeline import InvalidInputError
+
+        checkpoints_root = tmp_path.resolve() / "checkpoints"
+        meeting_id = "safe-meeting"
+        meeting_dir = checkpoints_root / meeting_id
+        meeting_dir.mkdir(parents=True)
+        external = tmp_path.resolve() / "external-marker.json"
+        external.write_text("KEEP", encoding="utf-8")
+        (meeting_dir / "reindex_required.json").symlink_to(external)
+        claim = RetranscribeClaim(
+            original_status="completed",
+            original_requested_action="full",
+            token="claim-token",
+            phase="purging",
+        )
+
+        with pytest.raises(InvalidInputError) as exc_info:
+            processor._write_retranscribe_recovery_marker(
+                checkpoints_root,
+                meeting_id,
+                claim,
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert external.read_text(encoding="utf-8") == "KEEP"
+
+    async def test_committing_partial_cleanup실패는_claim유지후_다음_startup에_재개한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """strict cleanup 중단은 rollback하지 않고 멱등 cleanup→finalize로 이어진다."""
+        job = _make_job(status="recording")
+        job.requested_action = _claim_action(phase="committing")
+        mock_job_queue.get_all_jobs.return_value = [job]
+        mock_pipeline._config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
+        mock_pipeline._config.paths.resolved_outputs_dir = tmp_path / "outputs"
+
+        with patch(
+            "core.orchestrator.cleanup_retranscribe_staging",
+            side_effect=[OSError("partial cleanup"), None],
+        ) as cleanup:
+            await processor._recover_orphaned_jobs()
+            mock_job_queue.queue.reset_for_retranscribe.assert_not_called()
+            await processor._recover_orphaned_jobs()
+
+        assert cleanup.call_count == 2
+        mock_job_queue.queue.reset_for_retranscribe.assert_called_once_with(
+            job.id,
+            "claim-token",
+        )
+        mock_job_queue.queue.restore_retranscribe_claim.assert_not_called()
+
+    async def test_claim_rollback실패는_DB를_유지하고_다른_orphan은_계속_복구한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """산출물 원복 실패를 queued 전환으로 숨기지 않고 scan은 계속한다."""
+        claim_job = _make_job(job_id=1, status="recording")
+        claim_job.requested_action = _claim_action(phase="staging")
+        normal_job = _make_job(job_id=2, status="transcribing")
+        mock_job_queue.get_all_jobs.return_value = [claim_job, normal_job]
+        mock_pipeline._config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
+        mock_pipeline._config.paths.resolved_outputs_dir = tmp_path / "outputs"
+
+        with patch(
+            "core.orchestrator.rollback_retranscribe_staging",
+            side_effect=OSError("rollback failed"),
+        ):
+            await processor._recover_orphaned_jobs()
+
+        mock_job_queue.queue.restore_retranscribe_claim.assert_not_called()
+        mock_job_queue.queue.force_set_status.assert_called_once_with(
+            normal_job.id,
+            JobStatus.QUEUED,
+            error_message="",
+        )
+
+    async def test_일반_recording은_재전사_claim으로_오인하지_않는다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """versioned marker가 없는 실제 recording job은 startup이 변경하지 않는다."""
+        recording = _make_job(status="recording")
+        recording.requested_action = "record"
+        mock_job_queue.get_all_jobs.return_value = [recording]
+
+        with patch("core.orchestrator.rollback_retranscribe_staging") as rollback:
+            await processor._recover_orphaned_jobs()
+
+        rollback.assert_not_called()
+        mock_job_queue.queue.restore_retranscribe_claim.assert_not_called()
+        mock_job_queue.queue.force_set_status.assert_not_called()
 
 
 # === Cycle 3: _get_next_job ===
@@ -480,6 +723,47 @@ class TestProcessJobFailure:
         calls = mock_job_queue.update_status.call_args_list
         status_values = [c[0][1] for c in calls]
         assert "failed" in status_values
+
+    async def test_입력_품질_차단은_failed_대신_recorded로_보류한다(
+        self,
+        mock_pipeline: AsyncMock,
+        mock_thermal: AsyncMock,
+        mock_ws_manager: AsyncMock,
+    ) -> None:
+        """InvalidInputError는 사용자 오류 카드 없이 recorded로 되돌려야 한다."""
+        from core.job_queue import JobStatus
+        from core.pipeline import InvalidInputError
+
+        force_calls: list[tuple[int, Any, str]] = []
+        raw_queue = MagicMock()
+        raw_queue.force_set_status = MagicMock(
+            side_effect=lambda job_id, status, error_message="": force_calls.append(
+                (job_id, status, error_message)
+            )
+        )
+        queue = AsyncMock()
+        queue.update_status = AsyncMock()
+        queue.queue = raw_queue
+        processor = JobProcessor(
+            job_queue=queue,
+            pipeline=mock_pipeline,
+            thermal_manager=mock_thermal,
+            ws_manager=mock_ws_manager,
+            poll_interval=0.1,
+        )
+        job = _make_job(job_id=17, meeting_id="invalid_audio")
+        mock_pipeline.run.side_effect = InvalidInputError("30초 미만 오디오")
+
+        await processor._process_job(job)
+
+        assert force_calls == [(17, JobStatus.RECORDED, "")]
+        status_values = [call.args[1] for call in queue.update_status.call_args_list]
+        assert "failed" not in status_values
+        event_types = [
+            call.args[0].event_type for call in mock_ws_manager.broadcast_event.call_args_list
+        ]
+        assert "job_failed" not in event_types
+        mock_thermal.notify_job_completed.assert_called_once()
 
     async def test_실패시_에러_메시지_전달(
         self,

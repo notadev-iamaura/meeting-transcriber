@@ -17,7 +17,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -391,6 +391,27 @@ class TestAudioValidation:
         # 예외가 발생하지 않아야 한다
         diarizer._validate_audio(sample_audio)
 
+    def test_symlink는_pyannote가_target을_열기전에_차단한다(
+        self,
+        mock_config,
+        mock_manager,
+        sample_audio,
+        tmp_path,
+    ):
+        """Diarizer 자체 backstop도 final symlink를 no-follow 거부한다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        manager, _ = mock_manager
+        linked = tmp_path / "linked.wav"
+        linked.symlink_to(sample_audio)
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            diarizer._validate_audio(linked)
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+
 
 # === Annotation 파싱 테스트 ===
 
@@ -572,7 +593,7 @@ class TestDiarize:
             result = await diarizer.diarize(sample_audio)
 
         assert result is worker_result
-        run_worker.assert_awaited_once_with(sample_audio)
+        run_worker.assert_awaited_once_with(sample_audio, ANY)
         manager.acquire.assert_not_called()
 
     @pytest.mark.asyncio
@@ -605,7 +626,7 @@ class TestDiarize:
         assert result is worker_result
         fake_guard.wait_until_idle.assert_awaited_once()
         manager.acquire.assert_called_once_with("pyannote", diarizer._reserve_external_worker_slot)
-        run_worker.assert_awaited_once_with(sample_audio, fake_guard)
+        run_worker.assert_awaited_once_with(sample_audio, fake_guard, ANY)
 
     @pytest.mark.asyncio
     async def test_Zoom_보호_worker_시작_대기는_타임아웃된다(
@@ -642,6 +663,41 @@ class TestDiarize:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
         with pytest.raises(FileNotFoundError):
             await diarizer.diarize(tmp_path / "no_file.wav")
+
+    @pytest.mark.asyncio
+    async def test_model_acquire중_source교체는_pipeline호출전에_차단한다(
+        self,
+        mock_config,
+        sample_audio,
+        tmp_path,
+    ):
+        """pyannote 모델 적재 중 symlink swap돼도 외부 target을 열지 않는다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        external = tmp_path / "external.wav"
+        external.write_bytes(b"EXTERNAL")
+        pyannote = MagicMock()
+
+        class _MutatingContext:
+            async def __aenter__(self):
+                sample_audio.unlink()
+                sample_audio.symlink_to(external)
+                return pyannote
+
+            async def __aexit__(self, *args):
+                return False
+
+        manager = MagicMock()
+        manager.acquire.return_value = _MutatingContext()
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            await diarizer.diarize(sample_audio)
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        pyannote.assert_not_called()
+        assert external.read_bytes() == b"EXTERNAL"
 
     @pytest.mark.asyncio
     async def test_빈_결과시_EmptyAudioError(self, mock_config, mock_manager, sample_audio):

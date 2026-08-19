@@ -12,11 +12,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -441,3 +444,381 @@ class TestUploadEndpoint:
         # 정확히 413 이 오지 않을 수 있다 — 우리는 헤더 사전 검증 로직만 보장한다.
         # 실패해도 400 (빈 본문 인식) 이상은 나와야 함.
         assert response.status_code in (400, 413)
+
+    def test_raw_base_dir_symlink는_외부로_업로드하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """raw base_dir symlink target에 업로드 바이트를 쓰지 않는다."""
+        external = tmp_path / "external"
+        external.mkdir()
+        configured_base = tmp_path / "configured-base"
+        configured_base.symlink_to(external, target_is_directory=True)
+        app = _make_test_app(configured_base)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "escape.wav"},
+                content=b"must-not-leave-base",
+            )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        assert not (external / "audio_input" / "escape.wav").exists()
+
+    def test_audio_input_dir_symlink는_외부로_업로드하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """audio_input directory symlink을 따라 외부 target에 쓰지 않는다."""
+        external = tmp_path / "external"
+        external.mkdir()
+        audio_input = tmp_path / "audio_input"
+        audio_input.symlink_to(external, target_is_directory=True)
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "escape.wav"},
+                content=b"must-not-follow-input-link",
+            )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        assert not (external / "escape.wav").exists()
+
+    @pytest.mark.parametrize("configured_child", ["../outside", "ABSOLUTE"])
+    def test_audio_input_dir_base_escape는_외부에_쓰지_않음(
+        self,
+        tmp_path: Path,
+        configured_child: str,
+    ) -> None:
+        """absolute/부모 traversal 설정은 base_dir 밖 쓰기 전에 차단된다."""
+        base = tmp_path / "base"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        app = _make_test_app(base)
+        app.state.config.paths.audio_input_dir = (
+            str(outside) if configured_child == "ABSOLUTE" else configured_child
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "escape.wav"},
+                content=b"must-stay-contained",
+            )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        assert not (outside / "escape.wav").exists()
+
+    def test_predictable_part_symlink를_따라_victim을_덮어쓰지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """legacy `{final}.part` symlink가 있어도 target을 열거나 이동하지 않는다."""
+        audio_input = tmp_path / "audio_input"
+        audio_input.mkdir()
+        victim = tmp_path / "victim.txt"
+        victim.write_bytes(b"sentinel")
+        legacy_part = audio_input / "victim.wav.part"
+        legacy_part.symlink_to(victim)
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "victim.wav"},
+                content=b"safe-upload",
+            )
+
+        assert response.status_code == 201
+        assert victim.read_bytes() == b"sentinel"
+        assert legacy_part.is_symlink()
+        assert (audio_input / "victim.wav").read_bytes() == b"safe-upload"
+
+    def test_dangling_final_symlink는_보존하고_다음_이름으로_publish(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """dangling symlink도 존재하는 충돌로 보고 절대 덮어쓰지 않는다."""
+        audio_input = tmp_path / "audio_input"
+        audio_input.mkdir()
+        dangling = audio_input / "collision.wav"
+        dangling.symlink_to(tmp_path / "missing-target.wav")
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "collision.wav"},
+                content=b"new-audio",
+            )
+
+        assert response.status_code == 201
+        assert response.json()["filename"] == "collision (1).wav"
+        assert dangling.is_symlink()
+        assert os.readlink(dangling) == str(tmp_path / "missing-target.wav")
+        assert (audio_input / "collision (1).wav").read_bytes() == b"new-audio"
+
+    def test_publish_TOCTOU_충돌은_기존_파일을_보존하고_재시도(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """publish 순간 선점된 final을 덮어쓰지 않고 다음 이름을 쓴다."""
+        audio_input = tmp_path / "audio_input"
+        audio_input.mkdir()
+        app = _make_test_app(tmp_path)
+        real_link = os.link
+        collided = False
+
+        def inject_collision(
+            src: str,
+            dst: str,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
+            nonlocal collided
+            if dst == "race.wav" and not collided:
+                assert dst_dir_fd is not None
+                collided = True
+                racer_fd = os.open(
+                    dst,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
+                try:
+                    os.write(racer_fd, b"racer-wins")
+                finally:
+                    os.close(racer_fd)
+            real_link(
+                src,
+                dst,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.uploads.os.link",
+                side_effect=inject_collision,
+            ),
+        ):
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "race.wav"},
+                content=b"uploader-loses-first-name",
+            )
+
+        assert response.status_code == 201
+        assert collided is True
+        assert (audio_input / "race.wav").read_bytes() == b"racer-wins"
+        assert response.json()["filename"] == "race (1).wav"
+        assert (audio_input / "race (1).wav").read_bytes() == b"uploader-loses-first-name"
+
+    def test_stream_예외_시_자신이_만든_part를_정리(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """client disconnect/예외로 불완전 본문이 끝나면 temp inode만 정리한다."""
+        config = _make_test_config(tmp_path)
+
+        async def broken_stream() -> Any:
+            yield b"partial"
+            raise RuntimeError("client disconnected")
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(config=config)),
+            headers={"x-filename": "broken.wav"},
+            stream=broken_stream,
+        )
+
+        from api.routers.uploads import upload_audio
+
+        with pytest.raises(RuntimeError, match="client disconnected"):
+            asyncio.run(upload_audio(request))
+
+        audio_input = tmp_path / "audio_input"
+        assert not list(audio_input.glob("*.part"))
+        assert not (audio_input / "broken.wav").exists()
+
+    @pytest.mark.asyncio
+    async def test_stream_중에는_지원_확장자_final이_노출되지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """body가 완료되기 전에 watcher 대상 final 파일을 노출하지 않는다."""
+        config = _make_test_config(tmp_path)
+        first_chunk_written = asyncio.Event()
+        release_stream = asyncio.Event()
+
+        async def paused_stream() -> Any:
+            yield b"first-"
+            first_chunk_written.set()
+            await release_stream.wait()
+            yield b"second"
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(config=config)),
+            headers={"x-filename": "streaming.wav"},
+            stream=paused_stream,
+        )
+
+        from api.routers.uploads import upload_audio
+
+        task = asyncio.create_task(upload_audio(request))
+        await first_chunk_written.wait()
+        audio_input = tmp_path / "audio_input"
+        assert not list(audio_input.glob("*.wav"))
+        parts = list(audio_input.glob("*.part"))
+        assert len(parts) == 1
+        assert parts[0].name.startswith(".upload-")
+        assert parts[0].stat().st_mode & 0o777 == 0o600
+
+        release_stream.set()
+        result = await task
+        assert result.filename == "streaming.wav"
+        assert (audio_input / "streaming.wav").read_bytes() == b"first-second"
+        assert not list(audio_input.glob("*.part"))
+
+    @pytest.mark.asyncio
+    async def test_stream_cancelled_error는_publish_전_part만_정리(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """request 취소는 최초 temp inode를 정리하고 final을 만들지 않는다."""
+        config = _make_test_config(tmp_path)
+        waiting = asyncio.Event()
+
+        async def cancellable_stream() -> Any:
+            yield b"partial"
+            waiting.set()
+            await asyncio.Future()
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(config=config)),
+            headers={"x-filename": "cancelled.wav"},
+            stream=cancellable_stream,
+        )
+
+        from api.routers.uploads import upload_audio
+
+        task = asyncio.create_task(upload_audio(request))
+        await waiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        audio_input = tmp_path / "audio_input"
+        assert not list(audio_input.glob("*.part"))
+        assert not (audio_input / "cancelled.wav").exists()
+
+    @pytest.mark.asyncio
+    async def test_link_성공_뒤_cancelled_error는_final을_지우지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """publish link 이후 취소는 roll-forward하고 part만 정리한다."""
+        config = _make_test_config(tmp_path)
+
+        async def complete_stream() -> Any:
+            yield b"durable-final"
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(config=config)),
+            headers={"x-filename": "roll-forward.wav"},
+            stream=complete_stream,
+        )
+
+        from api.routers import uploads
+
+        real_verify = uploads._verify_directory_identity
+        verification_count = 0
+
+        def cancel_after_link(*args: Any, **kwargs: Any) -> None:
+            nonlocal verification_count
+            verification_count += 1
+            if verification_count == 3:
+                raise asyncio.CancelledError
+            real_verify(*args, **kwargs)
+
+        with patch(
+            "api.routers.uploads._verify_directory_identity",
+            side_effect=cancel_after_link,
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await uploads.upload_audio(request)
+
+        audio_input = tmp_path / "audio_input"
+        assert (audio_input / "roll-forward.wav").read_bytes() == b"durable-final"
+        assert not list(audio_input.glob("*.part"))
+
+    def test_short_malformed_upload은_엔드포인트에서_큐를_우회하지_않음(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """업로드 API는 저장만 하고 품질 gate/큐 진입은 watcher에 맡긴다."""
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            async_add = AsyncMock()
+            app.state.job_queue.add_job = async_add
+            with patch.object(app.state.job_queue.queue, "add_job") as sync_add:
+                response = client.post(
+                    "/api/uploads",
+                    headers={"X-Filename": "too-short.wav"},
+                    content=b"not-a-real-wave",
+                )
+
+            async_add.assert_not_awaited()
+            sync_add.assert_not_called()
+
+        assert response.status_code == 201
+        assert (tmp_path / "audio_input" / "too-short.wav").read_bytes() == b"not-a-real-wave"
+
+    def test_publish_event_유실_시_startup_scan이_final을_등록(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """hard-link create event를 못 받아도 재기동 scan이 final을 gate 후 등록한다."""
+        from core.audio_quality import AudioQualityResult, AudioQualityStatus
+        from core.watcher import FolderWatcher
+
+        app = _make_test_app(tmp_path)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/uploads",
+                headers={"X-Filename": "startup-scan.wav"},
+                content=b"complete-upload",
+            )
+            assert response.status_code == 201
+
+            watcher = FolderWatcher(
+                async_job_queue=app.state.job_queue,
+                config=app.state.config,
+            )
+            watcher._debounce_seconds = 0
+            watcher._confirm_closed_unchanged = AsyncMock(return_value=True)
+            watcher._audio_validator = MagicMock(
+                return_value=AudioQualityResult(
+                    status=AudioQualityStatus.ACCEPT,
+                    mean_volume_db=-20.0,
+                    duration_seconds=60.0,
+                    reason="",
+                )
+            )
+
+            registered = asyncio.run(watcher.scan_existing())
+            job = app.state.job_queue.queue.get_job_by_meeting_id("startup-scan")
+
+        assert len(registered) == 1
+        assert job is not None
+        assert job.status == "recorded"

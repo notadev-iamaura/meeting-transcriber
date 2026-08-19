@@ -19,17 +19,56 @@ API 라우터 테스트 모듈 (API Routes Test Module)
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
 from steps.embedder import IndexPurgeError, IndexPurgeResult
 
 # === 헬퍼 ===
+
+
+def test_legacy_summarize_batch_validator는_공백_한국어_single_segment를_허용() -> None:
+    """watcher가 만든 회의 ID를 legacy summarize-batch도 동일하게 받는다."""
+    from api.routes import _validate_meeting_id
+
+    _validate_meeting_id("회의 1")
+
+
+@pytest.mark.parametrize("meeting_id", ["", ".", "..", "a/b", r"a\b", "a\x00b"])
+def test_legacy_summarize_batch_validator는_비정상_segment를_거부(
+    meeting_id: str,
+) -> None:
+    """path traversal에 쓰일 수 있는 ID는 기존처럼 400으로 차단한다."""
+    from fastapi import HTTPException
+
+    from api.routes import _validate_meeting_id
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_meeting_id(meeting_id)
+
+    assert exc_info.value.status_code == 400
+
+
+def _denied_audio_admission(failure_kind_name: str) -> Any:
+    """API admission 상태 매핑 테스트용 비수락 결과를 생성한다."""
+    from core.audio_quality import AudioFailureKind, AudioQualityResult, AudioQualityStatus
+
+    media_invalid = failure_kind_name == "MEDIA_INVALID"
+    return AudioQualityResult(
+        status=AudioQualityStatus.REJECT if media_invalid else AudioQualityStatus.ERROR,
+        mean_volume_db=None,
+        duration_seconds=1.0 if media_invalid else None,
+        reason=f"admission denied: {failure_kind_name}",
+        failure_kind=getattr(AudioFailureKind, failure_kind_name),
+    )
 
 
 def _make_test_config(tmp_path: Path) -> AppConfig:
@@ -41,10 +80,14 @@ def _make_test_config(tmp_path: Path) -> AppConfig:
     Returns:
         테스트용 AppConfig 인스턴스
     """
-    return AppConfig(
+    config = AppConfig(
         paths=PathsConfig(base_dir=str(tmp_path)),
         server=ServerConfig(host="127.0.0.1", port=8765, log_level="warning"),
     )
+    # API 단위 테스트의 기존 가짜 audio_path는 실제 미디어가 아니다. admission
+    # 계약 전용 테스트만 품질 게이트를 다시 켜서 상태 매핑을 검증한다.
+    config.audio_quality.enabled = False
+    return config
 
 
 def _make_test_app(tmp_path: Path) -> Any:
@@ -77,6 +120,54 @@ def _make_test_app(tmp_path: Path) -> Any:
         app = create_app(config, runtime_profile="api-test")
 
     return app
+
+
+def _make_audio_file(tmp_path: Path, filename: str) -> Path:
+    """raw base_dir 안에 no-follow admission을 통과할 테스트 오디오를 만든다."""
+    audio_path = tmp_path / "audio_input" / filename
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    audio_path.write_bytes(b"audio-sentinel")
+    return audio_path
+
+
+def _install_retranscribe_claim_mocks(queue: Any, original_job: MockJob) -> MagicMock:
+    """versioned 재전사 claim/phase를 모사하고 durable 조회 mock을 반환한다."""
+    from core.job_queue import JobStatus, RetranscribeClaim
+
+    durable_job = MockJob(
+        original_job.id,
+        original_job.meeting_id,
+        original_job.audio_path,
+        JobStatus.RECORDING.value,
+        retry_count=original_job.retry_count,
+        error_message=original_job.error_message,
+    )
+    durable_job.requested_action = ""  # type: ignore[attr-defined]
+    token_box: dict[str, str] = {}
+
+    def _set_payload(token: str, phase: str) -> None:
+        durable_job.requested_action = RetranscribeClaim(  # type: ignore[attr-defined]
+            original_status=original_job.status,
+            original_requested_action="",
+            token=token,
+            phase=phase,
+        ).to_requested_action()
+
+    def _claim(_job_id: int, token: str) -> MockJob:
+        token_box["token"] = token
+        _set_payload(token, "claimed")
+        return durable_job
+
+    def _phase(_job_id: int, token: str, phase: str) -> MockJob:
+        assert token == token_box["token"]
+        _set_payload(token, phase)
+        return durable_job
+
+    queue.claim_for_retranscribe = MagicMock(side_effect=_claim)
+    queue.update_retranscribe_claim_phase = MagicMock(side_effect=_phase)
+    queue.get_job = MagicMock(return_value=durable_job)
+    queue.restore_retranscribe_claim = MagicMock(return_value=original_job)
+    return queue.restore_retranscribe_claim
 
 
 def _install_search_engine_mock(
@@ -1656,6 +1747,46 @@ class TestRecordingEndpoints:
         assert data["is_recording"] is True
 
 
+# === 재처리 endpoint meeting_id 경계 ===
+
+
+@pytest.mark.parametrize("endpoint", ["retry", "transcribe", "re-transcribe"])
+def test_재처리_endpoint는_single_segment_meeting_id를_조회전에_검증한다(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    """백슬래시가 포함된 ID는 DB 조회나 파일 경로 계산 전에 400으로 거부한다."""
+    app = _make_test_app(tmp_path)
+
+    with TestClient(app) as client:
+        lookup = MagicMock()
+        app.state.job_queue._queue.get_job_by_meeting_id = lookup
+        response = client.post(f"/api/meetings/bad%5Cid/{endpoint}")
+
+    assert response.status_code == 400
+    lookup.assert_not_called()
+
+
+def test_meeting_detail_single_segment_contract는_한글과_공백을_허용한다(
+    tmp_path: Path,
+) -> None:
+    """watcher/pipeline 계약처럼 slash 없는 Unicode·공백 ID를 허용한다."""
+    app = _make_test_app(tmp_path)
+    meeting_id = "회의 1"
+    audio_path = _make_audio_file(tmp_path, "unicode-id.m4a")
+    recorded = MockJob(1, meeting_id, str(audio_path), "recorded")
+    queued = MockJob(1, meeting_id, str(audio_path), "queued")
+
+    with TestClient(app) as client:
+        queue = app.state.job_queue._queue
+        queue.get_job_by_meeting_id = MagicMock(return_value=recorded)
+        queue.update_status = MagicMock(return_value=queued)
+        response = client.post(f"/api/meetings/{meeting_id}/transcribe")
+
+    assert response.status_code == 200
+    assert response.json()["meeting_id"] == meeting_id
+
+
 # === TestRetryMeetingEndpoint ===
 
 
@@ -1665,12 +1796,13 @@ class TestRetryMeetingEndpoint:
     def test_재시도_성공(self, tmp_path: Path) -> None:
         """실패한 회의를 재시도하면 200과 업데이트된 정보를 반환한다."""
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "retry-success.m4a")
 
-        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed")
+        mock_job = MockJob(1, "meeting_001", str(audio_path), "failed")
         mock_retried = MockJob(
             1,
             "meeting_001",
-            "/audio/001.m4a",
+            str(audio_path),
             "queued",
             retry_count=1,
         )
@@ -1708,8 +1840,9 @@ class TestRetryMeetingEndpoint:
         from core.job_queue import InvalidTransitionError
 
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "retry-completed.m4a")
 
-        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "completed")
+        mock_job = MockJob(1, "meeting_001", str(audio_path), "completed")
 
         with TestClient(app) as client:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
@@ -1728,8 +1861,9 @@ class TestRetryMeetingEndpoint:
         from core.job_queue import MaxRetriesExceededError
 
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "retry-max.m4a")
 
-        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed", retry_count=3)
+        mock_job = MockJob(1, "meeting_001", str(audio_path), "failed", retry_count=3)
 
         with TestClient(app) as client:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
@@ -1768,6 +1902,120 @@ class TestRetryMeetingEndpoint:
         assert data["status"] == "completed"
         assert "completed" in data["status_detail"]
         queue.force_set_status.assert_called_once()
+        queue.retry_job.assert_not_called()
+
+    def test_재시도_완료상태_복구는_audio_gate보다_먼저_수행한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """실제 재실행이 필요 없는 completed 복구에는 오디오 검증을 요구하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retry_reconcile_before_gate"
+        _create_completed_pipeline_state(tmp_path, meeting_id)
+        failed_job = MockJob(1, meeting_id, "/missing/legacy.m4a", "failed", retry_count=1)
+        completed_job = MockJob(
+            1,
+            meeting_id,
+            "/missing/legacy.m4a",
+            "completed",
+            retry_count=1,
+        )
+        admission = MagicMock(side_effect=AssertionError("gate must not run"))
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock(return_value=completed_job)
+            queue.retry_job = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
+        admission.assert_not_called()
+        queue.force_set_status.assert_called_once()
+        queue.retry_job.assert_not_called()
+
+    def test_재시도_completed_reconcile은_pipeline_state_symlink를_읽지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """외부 completed JSON symlink가 failed job을 completed로 바꾸지 못한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retry_state_symlink"
+        checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+        checkpoint_dir.mkdir(parents=True)
+        external_state = tmp_path.parent / f"external-state-{tmp_path.name}.json"
+        external_state.write_text(
+            json.dumps({"status": "completed", "completed_steps": ["merge"]}),
+            encoding="utf-8",
+        )
+        (checkpoint_dir / "pipeline_state.json").symlink_to(external_state)
+        failed_job = MockJob(1, meeting_id, "/missing/audio.wav", "failed")
+
+        try:
+            with TestClient(app) as client:
+                queue = app.state.job_queue._queue
+                queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+                queue.force_set_status = MagicMock()
+                queue.retry_job = MagicMock()
+                response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+            assert response.status_code == 400
+            queue.force_set_status.assert_not_called()
+            queue.retry_job.assert_not_called()
+            assert external_state.read_text(encoding="utf-8").startswith("{")
+        finally:
+            external_state.unlink(missing_ok=True)
+
+    def test_재시도_completed_reconcile은_raw_base_symlink_target을_읽지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """resolved checkpoints가 유효해 보여도 raw base symlink는 먼저 거부한다."""
+        from api.server import create_app
+
+        external_base = tmp_path / "external-base"
+        external_base.mkdir()
+        base_link = tmp_path / "base-link"
+        base_link.symlink_to(external_base, target_is_directory=True)
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(base_link)),
+            server=ServerConfig(host="127.0.0.1", port=8765, log_level="warning"),
+        )
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+        ):
+            app = create_app(config, runtime_profile="api-test")
+        meeting_id = "meeting_retry_base_symlink"
+        state = external_base / "checkpoints" / meeting_id / "pipeline_state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        failed_job = MockJob(1, meeting_id, str(external_base / "audio.wav"), "failed")
+        cache_read = MagicMock(side_effect=AssertionError("external state must not be read"))
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail._json_cache.get", cache_read),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.force_set_status = MagicMock()
+            queue.retry_job = MagicMock()
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 400
+        cache_read.assert_not_called()
+        queue.force_set_status.assert_not_called()
         queue.retry_job.assert_not_called()
 
     def test_재시도_완료_산출물_복구_실패시_재처리하지_않는다(
@@ -1809,8 +2057,9 @@ class TestRetryMeetingEndpoint:
         transcript_path.write_text("{}", encoding="utf-8")
         summary_path.write_text("# summary", encoding="utf-8")
 
-        mock_job = MockJob(1, meeting_id, "/audio/retry.m4a", "failed", retry_count=1)
-        mock_retried = MockJob(1, meeting_id, "/audio/retry.m4a", "queued", retry_count=2)
+        audio_path = _make_audio_file(tmp_path, "retry-keep.m4a")
+        mock_job = MockJob(1, meeting_id, str(audio_path), "failed", retry_count=1)
+        mock_retried = MockJob(1, meeting_id, str(audio_path), "queued", retry_count=2)
 
         with TestClient(app) as client:
             queue = app.state.job_queue._queue
@@ -1827,6 +2076,162 @@ class TestRetryMeetingEndpoint:
         assert transcript_path.exists()
         assert summary_path.exists()
 
+    @pytest.mark.parametrize(
+        ("failure_kind_name", "expected_status"),
+        [
+            ("MEDIA_INVALID", 422),
+            ("SOURCE_BUSY", 409),
+            ("INFRA_UNAVAILABLE", 503),
+            ("SECURITY_BLOCKED", 400),
+        ],
+    )
+    def test_재시도는_audio_ACCEPT_전에_job과_산출물을_변경하지_않는다(
+        self,
+        tmp_path: Path,
+        failure_kind_name: str,
+        expected_status: int,
+    ) -> None:
+        """비수락 오디오는 retry_count 증가나 queued 전이 전에 HTTP로 거부한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"retry_gate_{failure_kind_name.lower()}"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        checkpoint_path = tmp_path / "checkpoints" / meeting_id / "transcribe.json"
+        output_path = tmp_path / "outputs" / meeting_id / "corrected.json"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio-sentinel")
+        checkpoint_path.write_text("checkpoint-sentinel", encoding="utf-8")
+        output_path.write_text("output-sentinel", encoding="utf-8")
+
+        failed_job = MockJob(
+            71,
+            meeting_id,
+            str(audio_path),
+            "failed",
+            retry_count=1,
+            error_message="old failure",
+        )
+        admission = MagicMock(return_value=_denied_audio_admission(failure_kind_name))
+
+        with (
+            TestClient(app) as client,
+            patch("core.audio_quality.validate_audio_quality", admission),
+            patch(
+                "api.routers.meeting_detail.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.retry_job = MagicMock()
+            queue.force_set_status = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == expected_status
+        assert failure_kind_name in response.json()["detail"]
+        admission.assert_called_once()
+        admission_kwargs = admission.call_args.kwargs
+        audio_stat = audio_path.lstat()
+        assert admission_kwargs["expected_identity"] == (
+            audio_stat.st_dev,
+            audio_stat.st_ino,
+            audio_stat.st_size,
+            audio_stat.st_mtime_ns,
+            audio_stat.st_ctime_ns,
+        )
+        assert admission_kwargs["decode_timeout_base_seconds"] == (
+            app.state.config.audio_quality.decode_timeout_base_seconds
+        )
+        assert admission_kwargs["decode_timeout_factor"] == (
+            app.state.config.audio_quality.decode_timeout_factor
+        )
+        assert admission_kwargs["decode_timeout_cap_seconds"] == (
+            app.state.config.audio_quality.decode_timeout_cap_seconds
+        )
+        queue.retry_job.assert_not_called()
+        queue.force_set_status.assert_not_called()
+        assert failed_job.status == "failed"
+        assert failed_job.retry_count == 1
+        assert failed_job.error_message == "old failure"
+        assert checkpoint_path.read_text(encoding="utf-8") == "checkpoint-sentinel"
+        assert output_path.read_text(encoding="utf-8") == "output-sentinel"
+
+    def test_재시도_gate예외중_source가_바뀌면_503대신_409이고_DB무변경(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """validator 예외와 source swap이 겹치면 identity 원인을 우선 보존한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "retry_gate_exception_swap"
+        audio_path = _make_audio_file(tmp_path, "retry-gate-exception-swap.wav")
+        failed_job = MockJob(
+            72,
+            meeting_id,
+            str(audio_path),
+            "failed",
+            retry_count=1,
+            error_message="old failure",
+        )
+
+        def mutate_then_fail(*args: Any, **kwargs: Any) -> None:
+            audio_path.write_bytes(audio_path.read_bytes() + b"changed")
+            raise RuntimeError("decoder crashed after source swap")
+
+        admission = MagicMock(side_effect=mutate_then_fail)
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail.validate_audio_quality", admission),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.retry_job = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        queue.retry_job.assert_not_called()
+        assert failed_job.status == "failed"
+        assert failed_job.retry_count == 1
+        assert failed_job.error_message == "old failure"
+
+    def test_재시도_gate비수락중_source가_바뀌어도_409가_우선한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """stale REJECT보다 pre/post identity 불일치가 우선해야 한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "retry_gate_reject_swap"
+        audio_path = _make_audio_file(tmp_path, "retry-gate-reject-swap.wav")
+        failed_job = MockJob(73, meeting_id, str(audio_path), "failed", retry_count=1)
+
+        def mutate_then_reject(*args: Any, **kwargs: Any) -> Any:
+            audio_path.write_bytes(audio_path.read_bytes() + b"changed")
+            return _denied_audio_admission("MEDIA_INVALID")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.validate_audio_quality",
+                side_effect=mutate_then_reject,
+            ),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.retry_job = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/retry")
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        queue.retry_job.assert_not_called()
+
 
 # === TestDeleteMeetingEndpoint ===
 
@@ -1837,8 +2242,9 @@ class TestDeleteMeetingEndpoint:
     def test_삭제_성공(self, tmp_path: Path) -> None:
         """회의 삭제 성공 시 200과 확인 메시지를 반환한다."""
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "delete-failed.m4a")
 
-        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "failed")
+        mock_job = MockJob(1, "meeting_001", str(audio_path), "failed")
 
         with TestClient(app) as client:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
@@ -1867,8 +2273,9 @@ class TestDeleteMeetingEndpoint:
     def test_완료된_회의_삭제_성공(self, tmp_path: Path) -> None:
         """완료된 회의도 삭제할 수 있다."""
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "delete-completed.m4a")
 
-        mock_job = MockJob(1, "meeting_001", "/audio/001.m4a", "completed")
+        mock_job = MockJob(1, "meeting_001", str(audio_path), "completed")
 
         with TestClient(app) as client:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
@@ -1879,6 +2286,162 @@ class TestDeleteMeetingEndpoint:
             response = client.delete("/api/meetings/meeting_001")
 
         assert response.status_code == 200
+
+    def test_삭제는_audio_identity를_검증해_quarantine에_전달한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """source swap을 막는 expected identity와 raw quarantine 경로를 사용한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_delete_identity"
+        audio_path = _make_audio_file(tmp_path, "delete-identity.wav")
+        audio_stat = audio_path.lstat()
+        expected_identity = (
+            audio_stat.st_dev,
+            audio_stat.st_ino,
+            audio_stat.st_size,
+            audio_stat.st_mtime_ns,
+            audio_stat.st_ctime_ns,
+        )
+        move = MagicMock(return_value=tmp_path / "audio_quarantine" / audio_path.name)
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ),
+            patch("core.quarantine.move_to_quarantine", move),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), "completed")
+            )
+            queue.delete_job = MagicMock()
+            response = client.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 200
+        move.assert_called_once_with(
+            audio_path,
+            tmp_path / "audio_quarantine",
+            reason=f"사용자 삭제: meeting_id={meeting_id}",
+            expected_identity=expected_identity,
+        )
+
+    def test_삭제_audio_symlink는_target과_DB를_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """source final symlink를 따라 외부 파일을 격리하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_delete_source_symlink"
+        target = tmp_path.parent / f"delete-target-{tmp_path.name}.wav"
+        target.write_bytes(b"external-sentinel")
+        audio_path = tmp_path / "audio_input" / "linked.wav"
+        audio_path.parent.mkdir(parents=True)
+        audio_path.symlink_to(target)
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        try:
+            with (
+                TestClient(app) as client,
+                patch("api.routers.meeting_detail.purge_meeting_index", purge),
+            ):
+                queue = app.state.job_queue._queue
+                queue.get_job_by_meeting_id = MagicMock(
+                    return_value=MockJob(1, meeting_id, str(audio_path), "completed")
+                )
+                queue.delete_job = MagicMock()
+                response = client.delete(f"/api/meetings/{meeting_id}")
+
+            assert response.status_code == 400
+            assert "SECURITY_BLOCKED" in response.json()["detail"]
+            purge.assert_not_called()
+            queue.delete_job.assert_not_called()
+            assert target.read_bytes() == b"external-sentinel"
+        finally:
+            target.unlink(missing_ok=True)
+
+    def test_삭제_quarantine_symlink는_external_sink와_DB를_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """raw quarantine child symlink를 resolved destination으로 신뢰하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_delete_quarantine_symlink"
+        audio_path = _make_audio_file(tmp_path, "delete-quarantine.wav")
+        external_sink = tmp_path.parent / f"quarantine-sink-{tmp_path.name}"
+        external_sink.mkdir()
+        (tmp_path / "audio_quarantine").symlink_to(
+            external_sink,
+            target_is_directory=True,
+        )
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        try:
+            with (
+                TestClient(app) as client,
+                patch("api.routers.meeting_detail.purge_meeting_index", purge),
+            ):
+                queue = app.state.job_queue._queue
+                queue.get_job_by_meeting_id = MagicMock(
+                    return_value=MockJob(1, meeting_id, str(audio_path), "completed")
+                )
+                queue.delete_job = MagicMock()
+                response = client.delete(f"/api/meetings/{meeting_id}")
+
+            assert response.status_code == 400
+            purge.assert_not_called()
+            queue.delete_job.assert_not_called()
+            assert audio_path.read_bytes() == b"audio-sentinel"
+            assert list(external_sink.iterdir()) == []
+        finally:
+            external_sink.rmdir()
+
+    def test_삭제_raw_base_symlink는_external_source를_읽거나_옮기지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """resolved quarantine/source가 정상이어도 symlink base 자체를 거부한다."""
+        from api.server import create_app
+
+        external_base = tmp_path / "delete-external-base"
+        external_base.mkdir()
+        base_link = tmp_path / "delete-base-link"
+        base_link.symlink_to(external_base, target_is_directory=True)
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(base_link)),
+            server=ServerConfig(host="127.0.0.1", port=8765, log_level="warning"),
+        )
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+        ):
+            app = create_app(config, runtime_profile="api-test")
+        audio_path = external_base / "audio_input" / "external.wav"
+        audio_path.parent.mkdir(parents=True)
+        audio_path.write_bytes(b"external-audio")
+        meeting_id = "meeting_delete_base_symlink"
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+        inspect = MagicMock()
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+            patch("api.routers.meeting_detail.inspect_audio_path_no_symlinks", inspect),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), "completed")
+            )
+            queue.delete_job = MagicMock()
+            response = client.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 400
+        inspect.assert_not_called()
+        purge.assert_not_called()
+        queue.delete_job.assert_not_called()
+        assert audio_path.read_bytes() == b"external-audio"
 
     def test_삭제는_검색인덱스_정리_후_DB삭제(self, tmp_path: Path) -> None:
         """삭제 시 stale 검색 인덱스를 먼저 정리한 뒤 DB 레코드를 삭제한다."""
@@ -2270,34 +2833,36 @@ class TestTranscribeMeetingEndpoint:
         assert "force=true" in detail  # 힌트 포함
 
     def test_transcribe_failed_상태_force_true_재시도(self, tmp_path: Path) -> None:
-        """failed 상태에서 force=true 이면 recorded 로 되돌린 뒤 queued 로 전이한다."""
+        """failed 상태에서 force=true 이면 중간 상태 없이 queued 로 원자 전이한다."""
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "transcribe-retry.m4a")
 
-        failed_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "failed")
-        recorded_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "recorded")
-        queued_job = MockJob(1, "meeting_retry", "/audio/retry.m4a", "queued")
+        failed_job = MockJob(1, "meeting_retry", str(audio_path), "failed")
+        queued_job = MockJob(1, "meeting_retry", str(audio_path), "queued")
 
         with TestClient(app) as client:
             queue = app.state.job_queue._queue
             queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
-            queue.force_set_status = MagicMock(return_value=recorded_job)
-            queue.update_status = MagicMock(return_value=queued_job)
+            queue.queue_failed_job = MagicMock(return_value=queued_job)
+            queue.force_set_status = MagicMock()
+            queue.update_status = MagicMock()
 
             response = client.post("/api/meetings/meeting_retry/transcribe?force=true")
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "queued"
-        # force_set_status 가 failed → recorded 로 호출되었는지 확인
-        queue.force_set_status.assert_called_once()
-        queue.update_status.assert_called_once()
+        queue.queue_failed_job.assert_called_once_with(1)
+        queue.force_set_status.assert_not_called()
+        queue.update_status.assert_not_called()
 
     def test_transcribe_recorded_상태_정상(self, tmp_path: Path) -> None:
         """recorded 상태에서는 force 여부와 무관하게 정상 전이한다."""
         app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "transcribe-recorded.m4a")
 
-        recorded_job = MockJob(1, "meeting_ok", "/audio/ok.m4a", "recorded")
-        queued_job = MockJob(1, "meeting_ok", "/audio/ok.m4a", "queued")
+        recorded_job = MockJob(1, "meeting_ok", str(audio_path), "recorded")
+        queued_job = MockJob(1, "meeting_ok", str(audio_path), "queued")
 
         with TestClient(app) as client:
             queue = app.state.job_queue._queue
@@ -2327,9 +2892,108 @@ class TestTranscribeMeetingEndpoint:
         # force=true 라도 failed 가 아니므로 force_set_status 는 호출되지 않음
         queue.force_set_status.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("failure_kind_name", "expected_status"),
+        [
+            ("MEDIA_INVALID", 422),
+            ("SOURCE_BUSY", 409),
+            ("INFRA_UNAVAILABLE", 503),
+            ("SECURITY_BLOCKED", 400),
+        ],
+    )
+    def test_force_transcribe는_audio_ACCEPT_전에_failed_job을_변경하지_않는다(
+        self,
+        tmp_path: Path,
+        failure_kind_name: str,
+        expected_status: int,
+    ) -> None:
+        """force=true여도 admission 통과 전에 failed→recorded 전이를 하면 안 된다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"force_gate_{failure_kind_name.lower()}"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        output_path = tmp_path / "outputs" / meeting_id / "corrected.json"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio-sentinel")
+        output_path.write_text("output-sentinel", encoding="utf-8")
+        failed_job = MockJob(
+            72,
+            meeting_id,
+            str(audio_path),
+            "failed",
+            retry_count=2,
+            error_message="old failure",
+        )
+        admission = MagicMock(return_value=_denied_audio_admission(failure_kind_name))
+
+        with (
+            TestClient(app) as client,
+            patch("core.audio_quality.validate_audio_quality", admission),
+            patch(
+                "api.routers.meeting_detail.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.queue_failed_job = MagicMock()
+            queue.force_set_status = MagicMock()
+            queue.update_status = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/transcribe?force=true")
+
+        assert response.status_code == expected_status
+        assert failure_kind_name in response.json()["detail"]
+        admission.assert_called_once()
+        queue.queue_failed_job.assert_not_called()
+        queue.force_set_status.assert_not_called()
+        queue.update_status.assert_not_called()
+        assert failed_job.status == "failed"
+        assert failed_job.retry_count == 2
+        assert failed_job.error_message == "old failure"
+        assert output_path.read_text(encoding="utf-8") == "output-sentinel"
+
 
 class TestReTranscribeMeetingEndpoint:
     """POST /api/meetings/{meeting_id}/re-transcribe 엔드포인트 테스트."""
+
+    def test_재전사_real_queue_claim부터_queued_finalize까지_완료한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """실제 SQLite 큐에서도 CAS claim과 reset이 하나의 요청으로 연결된다."""
+        from core.job_queue import JobStatus
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_real_queue"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            job_id = queue.add_job(
+                meeting_id,
+                str(audio_path),
+                initial_status=JobStatus.COMPLETED.value,
+            )
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+            stored = queue.get_job(job_id)
+
+        assert response.status_code == 200
+        assert response.json()["status"] == JobStatus.QUEUED.value
+        assert stored.status == JobStatus.QUEUED.value
+        assert stored.requested_action == ""
+        assert audio_path.read_bytes() == b"audio"
 
     def test_재전사는_체크포인트와_결과파일을_삭제하고_queued로_초기화한다(
         self,
@@ -2345,10 +3009,14 @@ class TestReTranscribeMeetingEndpoint:
         state_path = ckpt_dir / "pipeline_state.json"
         transcript_path = out_dir / "corrected.json"
         summary_path = out_dir / "summary.md"
+        minutes_path = out_dir / "meeting_minutes.md"
+        summary_json_path = out_dir / "summary.json"
         audio_path = out_dir / "input.wav"
         state_path.write_text("{}", encoding="utf-8")
         transcript_path.write_text("{}", encoding="utf-8")
         summary_path.write_text("# summary", encoding="utf-8")
+        minutes_path.write_text("# legacy summary", encoding="utf-8")
+        summary_json_path.write_text('{"summary": "stale"}', encoding="utf-8")
         audio_path.write_bytes(b"audio")
 
         mock_job = MockJob(1, meeting_id, str(audio_path), "failed", retry_count=2)
@@ -2357,6 +3025,7 @@ class TestReTranscribeMeetingEndpoint:
         with TestClient(app) as client:
             queue = app.state.job_queue._queue
             queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_retranscribe_claim_mocks(queue, mock_job)
             queue.reset_for_retranscribe = MagicMock(return_value=mock_reset)
 
             response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
@@ -2365,9 +3034,12 @@ class TestReTranscribeMeetingEndpoint:
         data = response.json()
         assert data["status"] == "queued"
         assert data["retry_count"] == 0
-        assert not ckpt_dir.exists()
+        assert ckpt_dir.is_dir()
+        assert not list(ckpt_dir.iterdir())
         assert not transcript_path.exists()
         assert not summary_path.exists()
+        assert not minutes_path.exists()
+        assert not summary_json_path.exists()
         assert audio_path.exists()
 
     def test_재전사는_검색인덱스_정리_후_상태를_리셋한다(
@@ -2389,7 +3061,7 @@ class TestReTranscribeMeetingEndpoint:
             calls.append("purge")
             return IndexPurgeResult(meeting_id=meeting_id)
 
-        def _fake_reset(_job_id: int) -> MockJob:
+        def _fake_reset(_job_id: int, _token: str) -> MockJob:
             calls.append("reset")
             return mock_reset
 
@@ -2402,12 +3074,132 @@ class TestReTranscribeMeetingEndpoint:
         ):
             queue = app.state.job_queue._queue
             queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_retranscribe_claim_mocks(queue, mock_job)
             queue.reset_for_retranscribe = MagicMock(side_effect=_fake_reset)
 
             response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
 
         assert response.status_code == 200
         assert calls == ["purge", "reset"]
+
+    def test_재전사_claim_CAS_실패는_staging과_purge를_시작하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """조회 뒤 상태가 바뀐 race는 조건부 claim에서 막고 로컬 파일을 보존한다."""
+        from core.job_queue import InvalidTransitionError
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_claim_race"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        state_path = tmp_path / "checkpoints" / meeting_id / "pipeline_state.json"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        state_path.write_text("state", encoding="utf-8")
+        original_job = MockJob(1, meeting_id, str(audio_path), "completed")
+        stage = MagicMock()
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail._stage_retranscribe_artifacts", stage),
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=original_job)
+            queue.claim_for_retranscribe = MagicMock(
+                side_effect=InvalidTransitionError(1, "queued", "recording")
+            )
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 409
+        stage.assert_not_called()
+        purge.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        assert state_path.read_text(encoding="utf-8") == "state"
+        assert audio_path.read_bytes() == b"audio"
+
+    def test_재전사_claim후_audio_identity가_바뀌면_claim만_복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """gate→claim 사이 source swap은 staging/purge 전에 409로 종료한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_audio_swap"
+        audio_path = _make_audio_file(tmp_path, "retranscribe-swap.wav")
+        job = MockJob(1, meeting_id, str(audio_path), "completed")
+        first_identity = (1, 2, 3, 4, 5)
+        swapped_identity = (1, 9, 3, 10, 11)
+        stage = MagicMock()
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.inspect_audio_path_no_symlinks",
+                side_effect=[first_identity, swapped_identity],
+            ),
+            patch("api.routers.meeting_detail._stage_retranscribe_artifacts", stage),
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            restore = _install_retranscribe_claim_mocks(queue, job)
+            queue.reset_for_retranscribe = MagicMock()
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        stage.assert_not_called()
+        purge.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        restore.assert_called_once()
+        assert audio_path.read_bytes() == b"audio-sentinel"
+
+    @pytest.mark.parametrize(
+        "status",
+        ["recorded", "queued", "recording", "transcribing", "diarizing", "merging"],
+    )
+    def test_재전사는_completed_or_failed_아니면_어떤_정리도_시작하지_않는다(
+        self,
+        tmp_path: Path,
+        status: str,
+    ) -> None:
+        """진행 중/대기 상태의 산출물과 인덱스를 eligibility 검사 전에 지우지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"meeting_retranscribe_{status}"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        state_path = tmp_path / "checkpoints" / meeting_id / "pipeline_state.json"
+        output_path = tmp_path / "outputs" / meeting_id / "corrected.json"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        state_path.write_text("state", encoding="utf-8")
+        output_path.write_text("output", encoding="utf-8")
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status)
+            )
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 409
+        purge.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        assert audio_path.read_bytes() == b"audio"
+        assert state_path.read_text(encoding="utf-8") == "state"
+        assert output_path.read_text(encoding="utf-8") == "output"
 
     def test_재전사시_검색인덱스_정리_실패하면_산출물을_보존한다(
         self,
@@ -2440,6 +3232,7 @@ class TestReTranscribeMeetingEndpoint:
         ):
             queue = app.state.job_queue._queue
             queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_retranscribe_claim_mocks(queue, mock_job)
             queue.reset_for_retranscribe = MagicMock()
 
             response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
@@ -2450,6 +3243,1051 @@ class TestReTranscribeMeetingEndpoint:
         assert summary_path.exists()
         assert audio_path.exists()
         app.state.job_queue._queue.reset_for_retranscribe.assert_not_called()
+
+    def test_재전사_purging_복구는_rollback_marker_restore_순서다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """marker가 durable하기 전에 completed 상태를 다시 노출하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_recovery_order"
+        audio_path = _make_audio_file(tmp_path, "recovery-order.wav")
+        job = MockJob(1, meeting_id, str(audio_path), "completed")
+        calls: list[str] = []
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail._stage_retranscribe_artifacts"),
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("partial purge"),
+            ),
+            patch(
+                "api.routers.meeting_detail.rollback_retranscribe_staging",
+                side_effect=lambda *_args: calls.append("rollback"),
+            ),
+            patch(
+                "api.routers.meeting_detail._write_retranscribe_recovery_marker",
+                side_effect=lambda *_args: calls.append("marker"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            _install_retranscribe_claim_mocks(queue, job)
+            queue.restore_retranscribe_claim = MagicMock(
+                side_effect=lambda *_args: calls.append("restore") or job
+            )
+            queue.reset_for_retranscribe = MagicMock()
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        assert calls == ["rollback", "marker", "restore"]
+        queue.reset_for_retranscribe.assert_not_called()
+
+    def test_재전사_purging_marker실패는_claim을_유지한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """marker 기록 실패 뒤 DB original status를 노출하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_marker_fail"
+        audio_path = _make_audio_file(tmp_path, "marker-fail.wav")
+        job = MockJob(1, meeting_id, str(audio_path), "completed")
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail._stage_retranscribe_artifacts"),
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("partial purge"),
+            ),
+            patch("api.routers.meeting_detail.rollback_retranscribe_staging"),
+            patch(
+                "api.routers.meeting_detail._write_retranscribe_recovery_marker",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            restore = _install_retranscribe_claim_mocks(queue, job)
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        assert "marker" in response.json()["detail"]
+        restore.assert_not_called()
+
+    def test_재전사_committing_cleanup실패는_rollback없이_claim을_유지한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """purge 성공 뒤 cleanup 실패는 startup roll-forward 대상으로 남긴다."""
+        from core.job_queue import JobQueueError, parse_retranscribe_claim
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_cleanup_fail"
+        audio_path = _make_audio_file(tmp_path, "cleanup-fail.wav")
+        job = MockJob(1, meeting_id, str(audio_path), "completed")
+        rollback = MagicMock()
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail._stage_retranscribe_artifacts"),
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ),
+            patch(
+                "api.routers.meeting_detail.cleanup_retranscribe_staging",
+                side_effect=JobQueueError("cleanup blocked"),
+            ),
+            patch("api.routers.meeting_detail.rollback_retranscribe_staging", rollback),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            restore = _install_retranscribe_claim_mocks(queue, job)
+            queue.reset_for_retranscribe = MagicMock()
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        rollback.assert_not_called()
+        restore.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        claim = parse_retranscribe_claim(queue.get_job.return_value.requested_action)
+        assert claim is not None
+        assert claim.phase == "committing"
+
+    def test_재전사_DB_reset_실패는_committing_claim으로_rollforward를_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """strict cleanup 뒤 reset 실패는 old artifact를 되살리지 않고 claim을 유지한다."""
+        from core.job_queue import parse_retranscribe_claim
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_reset_rollback"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        state_path = tmp_path / "checkpoints" / meeting_id / "pipeline_state.json"
+        transcript_path = tmp_path / "outputs" / meeting_id / "corrected.json"
+        summary_path = tmp_path / "outputs" / meeting_id / "summary.md"
+        minutes_path = tmp_path / "outputs" / meeting_id / "meeting_minutes.md"
+        summary_json_path = tmp_path / "outputs" / meeting_id / "summary.json"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio-sentinel")
+        state_path.write_text("state-sentinel", encoding="utf-8")
+        transcript_path.write_text("transcript-sentinel", encoding="utf-8")
+        summary_path.write_text("summary-sentinel", encoding="utf-8")
+        minutes_path.write_text("minutes-sentinel", encoding="utf-8")
+        summary_json_path.write_text("summary-json-sentinel", encoding="utf-8")
+        original_job = MockJob(1, meeting_id, str(audio_path), "completed", retry_count=2)
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(
+                    meeting_id=meeting_id,
+                    chroma_deleted=2,
+                    fts_deleted=2,
+                ),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=original_job)
+            _install_retranscribe_claim_mocks(queue, original_job)
+            queue.reset_for_retranscribe = MagicMock(side_effect=RuntimeError("DB locked"))
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        assert audio_path.read_bytes() == b"audio-sentinel"
+        assert not state_path.exists()
+        assert not transcript_path.exists()
+        assert not summary_path.exists()
+        assert not minutes_path.exists()
+        assert not summary_json_path.exists()
+        marker = state_path.parent / "reindex_required.json"
+        assert not marker.exists()
+        queue.restore_retranscribe_claim.assert_not_called()
+        durable = queue.get_job.return_value
+        claim = parse_retranscribe_claim(durable.requested_action)
+        assert claim is not None
+        assert claim.phase == "committing"
+
+    def test_재전사_output_symlink는_외부_산출물을_건드리지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """outputs/{id} 심링크가 base_dir 밖을 가리키면 purge 전에 차단한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_symlink"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        outside_dir = tmp_path.parent / f"outside_{tmp_path.name}"
+        outside_dir.mkdir()
+        outside_output = outside_dir / "corrected.json"
+        outside_output.write_text("external-sentinel", encoding="utf-8")
+        outputs_root = tmp_path / "outputs"
+        outputs_root.mkdir(parents=True, exist_ok=True)
+        (outputs_root / meeting_id).symlink_to(outside_dir, target_is_directory=True)
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        try:
+            with (
+                TestClient(app) as client,
+                patch("api.routers.meeting_detail.purge_meeting_index", purge),
+            ):
+                queue = app.state.job_queue._queue
+                queue.get_job_by_meeting_id = MagicMock(
+                    return_value=MockJob(1, meeting_id, str(audio_path), "completed")
+                )
+                _install_retranscribe_claim_mocks(
+                    queue,
+                    MockJob(1, meeting_id, str(audio_path), "completed"),
+                )
+                queue.reset_for_retranscribe = MagicMock()
+
+                response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+            assert response.status_code == 400, response.text
+            purge.assert_not_called()
+            queue.reset_for_retranscribe.assert_not_called()
+            assert outside_output.read_text(encoding="utf-8") == "external-sentinel"
+            assert audio_path.exists()
+        finally:
+            outside_output.unlink(missing_ok=True)
+            outside_dir.rmdir()
+
+    def test_재전사_final_artifact_symlink는_내부_victim을_이동하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """final corrected.json symlink target을 staging으로 replace하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_final_symlink"
+        audio_path = _make_audio_file(tmp_path, "final-symlink.wav")
+        victim_dir = tmp_path / "outputs" / "victim-meeting"
+        victim_dir.mkdir(parents=True)
+        victim = victim_dir / "corrected.json"
+        victim.write_text("victim-sentinel", encoding="utf-8")
+        meeting_output = tmp_path / "outputs" / meeting_id
+        meeting_output.mkdir(parents=True)
+        (meeting_output / "corrected.json").symlink_to(victim)
+        job = MockJob(1, meeting_id, str(audio_path), "completed")
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            restore = _install_retranscribe_claim_mocks(queue, job)
+            queue.reset_for_retranscribe = MagicMock()
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 400, response.text
+        purge.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        restore.assert_called_once()
+        assert victim.read_text(encoding="utf-8") == "victim-sentinel"
+        assert (meeting_output / "corrected.json").is_symlink()
+
+    def test_재전사_staging_중간실패는_이미_이동한_산출물을_rollback한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """두 번째 rename 실패 시 첫 번째 파일과 job claim을 원상 복구한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_retranscribe_unlink_fail"
+        out_dir = tmp_path / "outputs" / meeting_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = out_dir / "corrected.json"
+        summary_path = out_dir / "summary.md"
+        audio_path = out_dir / "input.wav"
+        transcript_path.write_text("{}", encoding="utf-8")
+        summary_path.write_text("summary", encoding="utf-8")
+        audio_path.write_bytes(b"audio")
+        mock_job = MockJob(1, meeting_id, str(audio_path), "completed", retry_count=1)
+        original_rename = os.rename
+        failed = False
+
+        def _failing_rename(
+            source: str | Path,
+            target: str | Path,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            nonlocal failed
+            if source == "summary.md" and not failed:
+                failed = True
+                raise OSError("read-only filesystem")
+            original_rename(
+                source,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ),
+            patch("api.routers.meeting_detail.os.rename", _failing_rename),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_retranscribe_claim_mocks(queue, mock_job)
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 500
+        queue.restore_retranscribe_claim.assert_called_once()
+        queue.reset_for_retranscribe.assert_not_called()
+        assert transcript_path.exists()
+        assert summary_path.exists()
+        assert audio_path.exists()
+
+    def test_재전사_checkpoint_staging_intermediate_swap은_외부를_이동하지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """checkpoint 검증과 rename 사이 root swap이 외부 rename으로 이어지지 않는다."""
+        from api.routers.meeting_detail import _stage_retranscribe_artifacts
+
+        config = _make_test_config(tmp_path)
+        config.paths.checkpoints_dir = "safe/checkpoints"
+        config.paths.outputs_dir = "outputs"
+        meeting_id = "checkpoint-intermediate-swap"
+        token = "checkpoint-swap-token"
+        safe = tmp_path / "safe"
+        local_meeting = safe / "checkpoints" / meeting_id
+        local_meeting.mkdir(parents=True)
+        (local_meeting / "pipeline_state.json").write_bytes(b"local")
+        (tmp_path / "outputs").mkdir()
+        audio_path = _make_audio_file(tmp_path, "checkpoint-swap.wav")
+
+        outside = tmp_path / "outside"
+        outside_meeting = outside / "checkpoints" / meeting_id
+        outside_meeting.mkdir(parents=True)
+        external_sentinel = outside_meeting / "pipeline_state.json"
+        external_sentinel.write_bytes(b"external-sentinel")
+        sentinel_before = external_sentinel.stat()
+        safe_original = tmp_path / "safe-original"
+        original_mkdir = os.mkdir
+        swapped = False
+
+        def swap_before_stage_mkdir(
+            path: str | Path,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal swapped
+            if (
+                path == f".retranscribe-{meeting_id}-{token}-checkpoints"
+                and dir_fd is not None
+                and not swapped
+            ):
+                swapped = True
+                safe.rename(safe_original)
+                safe.symlink_to(outside, target_is_directory=True)
+            original_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(
+            "api.routers.meeting_detail.os.mkdir",
+            swap_before_stage_mkdir,
+        )
+
+        try:
+            _stage_retranscribe_artifacts(
+                config,
+                meeting_id,
+                audio_path,
+                token,
+            )
+        except (HTTPException, OSError):
+            pass
+
+        assert swapped is True
+        sentinel_after = external_sentinel.stat()
+        assert external_sentinel.read_bytes() == b"external-sentinel"
+        assert (sentinel_after.st_dev, sentinel_after.st_ino) == (
+            sentinel_before.st_dev,
+            sentinel_before.st_ino,
+        )
+        assert (
+            safe_original / "checkpoints" / meeting_id / "pipeline_state.json"
+        ).read_bytes() == b"local"
+
+    def test_재전사_checkpoint_forward_staging은_rename중_child교체를_publish하지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """checkpoint child가 rename 호출 중 바뀌면 stage 게시 없이 중단한다."""
+        from api.routers.meeting_detail import _stage_retranscribe_artifacts
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "checkpoint-forward-entry-swap"
+        token = "forward-entry-swap-token"
+        meeting_dir = tmp_path / "checkpoints" / meeting_id
+        meeting_dir.mkdir(parents=True)
+        source_path = meeting_dir / "pipeline_state.json"
+        source_path.write_bytes(b"expected-checkpoint")
+        original_recovery_path = meeting_dir / "pipeline_state.expected.json"
+        (tmp_path / "outputs").mkdir()
+        audio_path = _make_audio_file(tmp_path, "forward-entry-swap.wav")
+        stage_path = tmp_path / "checkpoints" / f".retranscribe-{meeting_id}-{token}-checkpoints"
+        original_rename = os.rename
+        injected = False
+
+        def replace_during_child_rename(
+            source: str | Path,
+            target: str | Path,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+        ) -> None:
+            nonlocal injected
+            if (
+                source == "pipeline_state.json"
+                and target == "pipeline_state.json"
+                and src_dir_fd is not None
+                and dst_dir_fd is not None
+                and src_dir_fd != dst_dir_fd
+                and not injected
+            ):
+                injected = True
+                original_rename(
+                    source,
+                    original_recovery_path.name,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=src_dir_fd,
+                )
+                replacement_fd = os.open(
+                    source,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=src_dir_fd,
+                )
+                try:
+                    os.write(replacement_fd, b"foreign-checkpoint")
+                finally:
+                    os.close(replacement_fd)
+            original_rename(
+                source,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+
+        monkeypatch.setattr(
+            "api.routers.meeting_detail.os.rename",
+            replace_during_child_rename,
+        )
+
+        with pytest.raises(HTTPException) as caught:
+            _stage_retranscribe_artifacts(config, meeting_id, audio_path, token)
+
+        assert caught.value.status_code == 409
+        assert injected is True
+        assert not stage_path.exists()
+        assert source_path.read_bytes() == b"foreign-checkpoint"
+        assert original_recovery_path.read_bytes() == b"expected-checkpoint"
+
+    def test_재전사_output_stage_entry가_이동되면_FD로_원복하고_claim을_유지(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """열린 output stage의 root entry가 변경되면 성공으로 게시하지 않는다."""
+        from api.routers import meeting_detail
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "output-stage-entry-displaced"
+        output_dir = tmp_path / "outputs" / meeting_id
+        output_dir.mkdir(parents=True)
+        corrected = output_dir / "corrected.json"
+        corrected.write_bytes(b"expected-output")
+        audio_path = _make_audio_file(tmp_path, "output-stage-entry-displaced.wav")
+        mock_job = MockJob(91, meeting_id, str(audio_path), "completed")
+        stage_paths: list[tuple[Path, Path]] = []
+        real_move = meeting_detail._move_entry_checked
+        displaced = False
+
+        def move_then_displace_stage(
+            source_fd: int,
+            destination_fd: int,
+            name: str,
+            expected: os.stat_result,
+            token: str,
+            *,
+            destination_name: str | None = None,
+        ) -> os.stat_result:
+            nonlocal displaced
+            moved = real_move(
+                source_fd,
+                destination_fd,
+                name,
+                expected,
+                token,
+                destination_name=destination_name,
+            )
+            if name == "corrected.json" and not displaced:
+                displaced = True
+                stage = tmp_path / "outputs" / f".retranscribe-{meeting_id}-{token}-outputs"
+                displaced_stage = stage.with_name(f"{stage.name}.displaced")
+                stage.rename(displaced_stage)
+                stage_paths.append((stage, displaced_stage))
+            return moved
+
+        monkeypatch.setattr(
+            meeting_detail,
+            "_move_entry_checked",
+            move_then_displace_stage,
+        )
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ) as purge,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            restore = _install_retranscribe_claim_mocks(queue, mock_job)
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 409
+        assert displaced is True
+        assert corrected.read_bytes() == b"expected-output"
+        assert stage_paths
+        stage, displaced_stage = stage_paths[0]
+        assert not stage.exists()
+        assert displaced_stage.is_dir()
+        assert not list(displaced_stage.iterdir())
+        purge.assert_not_called()
+        restore.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+
+    def test_재전사_checkpoint_source_entry가_이동되면_정확한_inode를_재부착(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """checkpoint source root 변경을 성공 rollback으로 잘못 보고하지 않는다."""
+        from api.routers import meeting_detail
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "checkpoint-source-entry-displaced"
+        checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+        checkpoint_dir.mkdir(parents=True)
+        pipeline_state = checkpoint_dir / "pipeline_state.json"
+        pipeline_state.write_bytes(b"expected-checkpoint")
+        audio_path = _make_audio_file(tmp_path, "checkpoint-source-entry-displaced.wav")
+        mock_job = MockJob(92, meeting_id, str(audio_path), "completed")
+        displaced_source = checkpoint_dir.with_name(f"{meeting_id}.displaced")
+        real_move = meeting_detail._move_entry_checked
+        displaced = False
+
+        def move_then_displace_source(
+            source_fd: int,
+            destination_fd: int,
+            name: str,
+            expected: os.stat_result,
+            token: str,
+            *,
+            destination_name: str | None = None,
+        ) -> os.stat_result:
+            nonlocal displaced
+            moved = real_move(
+                source_fd,
+                destination_fd,
+                name,
+                expected,
+                token,
+                destination_name=destination_name,
+            )
+            if name == "pipeline_state.json" and not displaced:
+                displaced = True
+                checkpoint_dir.rename(displaced_source)
+            return moved
+
+        monkeypatch.setattr(
+            meeting_detail,
+            "_move_entry_checked",
+            move_then_displace_source,
+        )
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=meeting_id),
+            ) as purge,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            restore = _install_retranscribe_claim_mocks(queue, mock_job)
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == 409
+        assert displaced is True
+        assert pipeline_state.read_bytes() == b"expected-checkpoint"
+        assert not displaced_source.exists()
+        purge.assert_not_called()
+        restore.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+
+    def test_재전사_output_stage_mkdir_intermediate_swap은_외부를_이동하지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """stage exists-check과 mkdir 사이 root swap이 외부 산출물을 건드리지 않는다."""
+        from api.routers.meeting_detail import _stage_retranscribe_artifacts
+
+        config = _make_test_config(tmp_path)
+        config.paths.checkpoints_dir = "checkpoints"
+        config.paths.outputs_dir = "safe/outputs"
+        meeting_id = "output-intermediate-swap"
+        token = "output-swap-token"
+        (tmp_path / "checkpoints").mkdir()
+        safe = tmp_path / "safe"
+        local_meeting = safe / "outputs" / meeting_id
+        local_meeting.mkdir(parents=True)
+        (local_meeting / "corrected.json").write_bytes(b"local")
+        audio_path = _make_audio_file(tmp_path, "output-swap.wav")
+
+        outside = tmp_path / "outside"
+        outside_meeting = outside / "outputs" / meeting_id
+        outside_meeting.mkdir(parents=True)
+        external_sentinel = outside_meeting / "corrected.json"
+        external_sentinel.write_bytes(b"external-sentinel")
+        sentinel_before = external_sentinel.stat()
+        safe_original = tmp_path / "safe-original"
+        stage_name = f".retranscribe-{meeting_id}-{token}-outputs"
+        original_mkdir = os.mkdir
+        swapped = False
+
+        def swap_before_mkdir(
+            path: str | Path,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> None:
+            nonlocal swapped
+            if path == stage_name and dir_fd is not None and not swapped:
+                swapped = True
+                safe.rename(safe_original)
+                safe.symlink_to(outside, target_is_directory=True)
+            original_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr("api.routers.meeting_detail.os.mkdir", swap_before_mkdir)
+
+        try:
+            _stage_retranscribe_artifacts(
+                config,
+                meeting_id,
+                audio_path,
+                token,
+            )
+        except (HTTPException, OSError):
+            pass
+
+        assert swapped is True
+        sentinel_after = external_sentinel.stat()
+        assert external_sentinel.read_bytes() == b"external-sentinel"
+        assert (sentinel_after.st_dev, sentinel_after.st_ino) == (
+            sentinel_before.st_dev,
+            sentinel_before.st_ino,
+        )
+        assert (safe_original / "outputs" / meeting_id / "corrected.json").read_bytes() == b"local"
+
+    def test_pipeline_state_final_swap은_외부_JSON을_읽지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """lstat 후 final symlink swap이 있어도 external JSON fd를 열지 않는다."""
+        from fastapi import HTTPException
+
+        from api.routers import meeting_detail
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "pipeline-state-final-swap"
+        state_path = tmp_path / "checkpoints" / meeting_id / "pipeline_state.json"
+        state_path.parent.mkdir(parents=True)
+        local_payload = {"status": "completed", "origin": "local"}
+        external_payload = {"status": "failed", "origin": "external"}
+        state_path.write_text(json.dumps(local_payload), encoding="utf-8")
+        external_state = tmp_path / "external-state.json"
+        external_state.write_text(json.dumps(external_payload), encoding="utf-8")
+        original_state = state_path.with_name("pipeline_state.original.json")
+        meeting_detail._json_cache.invalidate(state_path)
+        cache_before = dict(meeting_detail._json_cache._cache)
+        swapped = False
+
+        real_get_from_fd = meeting_detail._json_cache.get_from_fd
+
+        def swap_after_file_open(
+            path: Path,
+            file_fd: int,
+            file_stat: os.stat_result,
+        ) -> Any:
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                state_path.rename(original_state)
+                state_path.symlink_to(external_state)
+            return real_get_from_fd(path, file_fd, file_stat)
+
+        loaded_payloads: list[Any] = []
+        real_json_load = json.load
+
+        def track_json_load(file_obj: Any, *args: Any, **kwargs: Any) -> Any:
+            payload = real_json_load(file_obj, *args, **kwargs)
+            loaded_payloads.append(payload)
+            return payload
+
+        monkeypatch.setattr(meeting_detail._json_cache, "get_from_fd", swap_after_file_open)
+        monkeypatch.setattr("api.routers.meeting_detail.json.load", track_json_load)
+
+        try:
+            result = meeting_detail._read_pipeline_state_for_response(config, meeting_id)
+        except HTTPException:
+            result = None
+
+        assert swapped is True
+        assert loaded_payloads, (
+            f"result={result!r}, state_is_symlink={state_path.is_symlink()}, "
+            f"state_target={state_path.readlink() if state_path.is_symlink() else None}, "
+            f"cache_before={cache_before!r}, "
+            f"cache_after={meeting_detail._json_cache._cache!r}, "
+            f"logs={caplog.text}"
+        )
+        assert external_payload not in loaded_payloads
+        if result is not None:
+            assert result == local_payload
+
+    def test_pipeline_state_validation후_entry교체는_409로_실패(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """descriptor open 직전 final entry 교체는 외부 JSON을 읽지 않고 중단한다."""
+        from api.routers import meeting_detail
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "pipeline-state-before-open-swap"
+        state_path = tmp_path / "checkpoints" / meeting_id / "pipeline_state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"origin":"local"}', encoding="utf-8")
+        original_state = state_path.with_name("pipeline_state.original.json")
+        external_state = tmp_path / "external-state-before-open.json"
+        external_state.write_text('{"origin":"external"}', encoding="utf-8")
+        external_before = external_state.stat()
+        meeting_detail._json_cache.invalidate(state_path)
+        real_open = os.open
+        swapped = False
+        loaded = MagicMock(wraps=json.load)
+
+        def swap_before_open(
+            path: str | Path,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal swapped
+            if path == "pipeline_state.json" and dir_fd is not None and not swapped:
+                swapped = True
+                state_path.rename(original_state)
+                state_path.symlink_to(external_state)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr("api.routers.meeting_detail.os.open", swap_before_open)
+        monkeypatch.setattr("api.routers.meeting_detail.json.load", loaded)
+
+        with pytest.raises(HTTPException) as caught:
+            meeting_detail._read_pipeline_state_for_response(config, meeting_id)
+
+        assert caught.value.status_code == 409
+        assert swapped is True
+        loaded.assert_not_called()
+        external_after = external_state.stat()
+        assert external_state.read_text(encoding="utf-8") == '{"origin":"external"}'
+        assert (external_after.st_dev, external_after.st_ino) == (
+            external_before.st_dev,
+            external_before.st_ino,
+        )
+        assert original_state.read_text(encoding="utf-8") == '{"origin":"local"}'
+
+    def test_reindex_marker_root_swap은_외부와_기존파일을_변경하지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """marker publish 직전 root 교체는 pinned fd에서 감지하고 새 marker를 회수한다."""
+        from api.routers.meeting_detail import _write_retranscribe_recovery_marker
+        from core.job_queue import JobQueueError
+
+        config = _make_test_config(tmp_path)
+        config.paths.checkpoints_dir = "safe/checkpoints"
+        meeting_id = "marker-root-swap"
+        safe = tmp_path / "safe"
+        local_meeting = safe / "checkpoints" / meeting_id
+        local_meeting.mkdir(parents=True)
+        local_sentinel = local_meeting / "pipeline_state.json"
+        local_sentinel.write_bytes(b"local-state")
+
+        outside = tmp_path / "outside"
+        outside_meeting = outside / "checkpoints" / meeting_id
+        outside_meeting.mkdir(parents=True)
+        external_marker = outside_meeting / "reindex_required.json"
+        external_marker.write_bytes(b"external-marker")
+        external_before = external_marker.stat()
+        safe_original = tmp_path / "safe-original"
+        real_link = os.link
+        swapped = False
+
+        def swap_before_publish(
+            source: str | Path,
+            target: str | Path,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
+            nonlocal swapped
+            if target == "reindex_required.json" and not swapped:
+                swapped = True
+                safe.rename(safe_original)
+                safe.symlink_to(outside, target_is_directory=True)
+            real_link(
+                source,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+
+        monkeypatch.setattr("api.routers.meeting_detail.os.link", swap_before_publish)
+
+        with pytest.raises(JobQueueError, match="root"):
+            _write_retranscribe_recovery_marker(
+                config,
+                meeting_id,
+                "injected recovery",
+                IndexPurgeResult(meeting_id=meeting_id, chroma_deleted=1, fts_deleted=1),
+            )
+
+        assert swapped is True
+        external_after = external_marker.stat()
+        assert external_marker.read_bytes() == b"external-marker"
+        assert (external_after.st_dev, external_after.st_ino) == (
+            external_before.st_dev,
+            external_before.st_ino,
+        )
+        restored_local = safe_original / "checkpoints" / meeting_id
+        assert (restored_local / "pipeline_state.json").read_bytes() == b"local-state"
+        assert not (restored_local / "reindex_required.json").exists()
+        assert not list(restored_local.glob(".reindex-required-*.tmp"))
+
+    def test_reindex_marker_publish직후_entry교체는_foreign_marker를_삭제하지_않음(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """publish 후 교체된 marker는 temp inode 소유가 아니므로 cleanup하지 않는다."""
+        from api.routers.meeting_detail import _write_retranscribe_recovery_marker
+        from core.job_queue import JobQueueError
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "marker-publish-handoff"
+        meeting_dir = tmp_path / "checkpoints" / meeting_id
+        meeting_dir.mkdir(parents=True)
+        sentinel = meeting_dir / "pipeline_state.json"
+        sentinel.write_bytes(b"existing-state")
+        marker = meeting_dir / "reindex_required.json"
+        owned_backup = meeting_dir / "reindex_required.owned-after-link.json"
+        real_link = os.link
+        real_rename = os.rename
+        injected = False
+
+        def replace_after_publish(
+            source: str | Path,
+            target: str | Path,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
+            nonlocal injected
+            real_link(
+                source,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+            if target == marker.name and not injected:
+                injected = True
+                assert dst_dir_fd is not None
+                real_rename(
+                    target,
+                    owned_backup.name,
+                    src_dir_fd=dst_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                foreign_fd = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
+                try:
+                    os.write(foreign_fd, b"foreign-marker")
+                finally:
+                    os.close(foreign_fd)
+
+        monkeypatch.setattr("api.routers.meeting_detail.os.link", replace_after_publish)
+
+        with pytest.raises(JobQueueError, match="publish identity"):
+            _write_retranscribe_recovery_marker(
+                config,
+                meeting_id,
+                "injected recovery",
+                IndexPurgeResult(meeting_id=meeting_id, chroma_deleted=1, fts_deleted=1),
+            )
+
+        assert injected is True
+        assert sentinel.read_bytes() == b"existing-state"
+        assert marker.read_bytes() == b"foreign-marker"
+        assert owned_backup.is_file()
+        assert not list(meeting_dir.glob(".reindex-required-*.tmp"))
+
+    def test_reindex_marker_parent_fsync실패는_기존파일을_보존(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """새 meeting dir의 parent fsync 실패는 빈 entry를 회수하고 기존 데이터를 보존한다."""
+        from api.routers.meeting_detail import _write_retranscribe_recovery_marker
+
+        config = _make_test_config(tmp_path)
+        checkpoint_root = tmp_path / "checkpoints"
+        checkpoint_root.mkdir()
+        sibling = checkpoint_root / "existing-meeting"
+        sibling.mkdir()
+        sentinel = sibling / "pipeline_state.json"
+        sentinel.write_bytes(b"existing-state")
+        meeting_id = "marker-fsync-failure"
+
+        def fail_fsync(_file_fd: int) -> None:
+            raise OSError("injected directory fsync failure")
+
+        monkeypatch.setattr("api.routers.meeting_detail.os.fsync", fail_fsync)
+
+        with pytest.raises(OSError, match="injected directory fsync failure"):
+            _write_retranscribe_recovery_marker(
+                config,
+                meeting_id,
+                "injected recovery",
+                IndexPurgeResult(meeting_id=meeting_id),
+            )
+
+        assert sentinel.read_bytes() == b"existing-state"
+        assert not (checkpoint_root / meeting_id).exists()
+
+    @pytest.mark.parametrize(
+        ("failure_kind_name", "expected_status"),
+        [
+            ("MEDIA_INVALID", 422),
+            ("SOURCE_BUSY", 409),
+            ("INFRA_UNAVAILABLE", 503),
+            ("SECURITY_BLOCKED", 400),
+        ],
+    )
+    def test_재전사는_audio_ACCEPT_전에_모든_기존상태를_보존한다(
+        self,
+        tmp_path: Path,
+        failure_kind_name: str,
+        expected_status: int,
+    ) -> None:
+        """비수락이면 인덱스·체크포인트·출력·job을 하나도 purge하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"retranscribe_gate_{failure_kind_name.lower()}"
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        ckpt_dir = tmp_path / "checkpoints" / meeting_id
+        out_dir = tmp_path / "outputs" / meeting_id
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state_path = ckpt_dir / "pipeline_state.json"
+        transcript_path = out_dir / "corrected.json"
+        summary_path = out_dir / "summary.md"
+        audio_path.write_bytes(b"audio-sentinel")
+        state_path.write_text("state-sentinel", encoding="utf-8")
+        transcript_path.write_text("transcript-sentinel", encoding="utf-8")
+        summary_path.write_text("summary-sentinel", encoding="utf-8")
+
+        completed_job = MockJob(
+            73,
+            meeting_id,
+            str(audio_path),
+            "completed",
+            retry_count=2,
+            error_message="",
+        )
+        admission = MagicMock(return_value=_denied_audio_admission(failure_kind_name))
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id=meeting_id))
+
+        with (
+            TestClient(app) as client,
+            patch("core.audio_quality.validate_audio_quality", admission),
+            patch(
+                "api.routers.meeting_detail.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                purge,
+            ),
+        ):
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=completed_job)
+            queue.reset_for_retranscribe = MagicMock()
+
+            response = client.post(f"/api/meetings/{meeting_id}/re-transcribe")
+
+        assert response.status_code == expected_status
+        assert failure_kind_name in response.json()["detail"]
+        admission.assert_called_once()
+        purge.assert_not_called()
+        queue.reset_for_retranscribe.assert_not_called()
+        assert completed_job.status == "completed"
+        assert completed_job.retry_count == 2
+        assert audio_path.read_bytes() == b"audio-sentinel"
+        assert state_path.read_text(encoding="utf-8") == "state-sentinel"
+        assert transcript_path.read_text(encoding="utf-8") == "transcript-sentinel"
+        assert summary_path.read_text(encoding="utf-8") == "summary-sentinel"
 
 
 class TestGetMeetingAudio:

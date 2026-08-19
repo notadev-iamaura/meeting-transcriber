@@ -239,7 +239,10 @@ class AudioConverter:
             "-y",  # 덮어쓰기 허용
             "-i",
             str(input_path),  # 입력 파일
+            "-map",
+            "0:a:0",  # 품질 게이트와 동일하게 첫 번째 오디오 스트림 고정
             "-vn",  # 비디오 스트림 제거
+            "-sn",  # 자막 스트림 제거
             "-acodec",
             "pcm_s16le",  # 16비트 PCM 리틀엔디안
             "-ar",

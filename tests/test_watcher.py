@@ -18,7 +18,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,7 +35,21 @@ from core.watcher import (
     WatchDirectoryError,
     WatcherError,
     _AudioFileHandler,
+    _OpenWriterState,
 )
+
+_REAL_WRITER_PROBE = FolderWatcher._probe_writable_open
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_writer_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """일반 watcher 단위 테스트에서 시스템 lsof 실행시간 변동을 제거한다."""
+    monkeypatch.setattr(
+        FolderWatcher,
+        "_probe_writable_open",
+        AsyncMock(return_value=_OpenWriterState.CLEAR),
+    )
+
 
 # === 테스트 픽스처 ===
 
@@ -49,7 +67,11 @@ def _make_config(tmp_path: Path) -> MagicMock:
     # paths 설정
     watch_dir = tmp_path / "audio_input"
     watch_dir.mkdir(exist_ok=True)
+    config.paths.resolved_base_dir = tmp_path
     config.paths.resolved_audio_input_dir = watch_dir
+    config.paths.resolved_audio_quarantine_dir = tmp_path / "audio_quarantine"
+    config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
+    config.paths.resolved_outputs_dir = tmp_path / "outputs"
 
     # audio 설정
     config.audio.supported_input_formats = ["wav", "mp3", "m4a", "flac", "ogg", "webm"]
@@ -57,8 +79,39 @@ def _make_config(tmp_path: Path) -> MagicMock:
     # watcher 설정
     config.watcher.debounce_seconds = 0.3  # 테스트용 짧은 대기 시간
     config.watcher.check_interval_seconds = 0.1  # 테스트용 짧은 확인 간격
+    config.watcher.file_ready_timeout_seconds = 1.0
+    config.watcher.excluded_subdirs = ["audio_quarantine"]
+
+    # 일반 watcher 단위 테스트는 품질 게이트와 독립적으로 큐 동작을 검증한다.
+    config.audio_quality.enabled = False
 
     return config
+
+
+def _quality_result(
+    status: object,
+    *,
+    failure_kind: str,
+    quarantine_safe: bool,
+    reason: str,
+) -> SimpleNamespace:
+    """신규 admission 분류 계약을 표현하는 watcher 테스트 double을 만든다."""
+    # production enum이 아직 RED 단계에 없더라도 테스트 모듈 자체는 수집 가능하게
+    # 유지한다. enum이 추가된 뒤에는 실제 enum 값으로 watcher 분기까지 검증한다.
+    from core import audio_quality
+
+    failure_kind_type = getattr(audio_quality, "AudioFailureKind", None)
+    typed_failure_kind = (
+        failure_kind_type(failure_kind) if failure_kind_type is not None else failure_kind
+    )
+    return SimpleNamespace(
+        status=status,
+        failure_kind=typed_failure_kind,
+        quarantine_safe=quarantine_safe,
+        mean_volume_db=None,
+        duration_seconds=None,
+        reason=reason,
+    )
 
 
 @pytest_asyncio.fixture
@@ -79,8 +132,7 @@ async def watcher(tmp_path: Path, job_queue: AsyncJobQueue) -> FolderWatcher:
     w = FolderWatcher(async_job_queue=job_queue, config=config)
     yield w
     # 테스트 후 정리
-    if w.is_watching:
-        await w.stop()
+    await w.stop()
 
 
 # === 초기화 테스트 ===
@@ -223,6 +275,32 @@ class TestAudioFileHandler:
         mock_run.assert_called_once()
         assert scheduled[0][1] is mock_loop
 
+    def test_처리중_파일의_modified_이벤트도_재검사를_예약(self) -> None:
+        """writer가 이어 쓰면 modified 이벤트가 dirty 재검사를 일으켜야 한다."""
+        mock_callback = AsyncMock()
+        mock_loop = MagicMock()
+        handler = _AudioFileHandler(
+            supported_extensions={".wav"},
+            on_new_file=mock_callback,
+            loop=mock_loop,
+        )
+        event = MagicMock(is_directory=False, src_path="/tmp/meeting.wav")
+
+        scheduled: list[tuple[object, object]] = []
+
+        def _fake_schedule(coro: object, loop: object) -> MagicMock:
+            scheduled.append((coro, loop))
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_fake_schedule) as mock_run:
+            handler.on_modified(event)
+
+        mock_run.assert_called_once()
+        assert scheduled[0][1] is mock_loop
+
 
 # === meeting_id 생성 테스트 ===
 
@@ -244,6 +322,7 @@ class TestMeetingIdGeneration:
         """한국어 파일명이 meeting_id로 올바르게 변환되는지 확인한다."""
         assert watcher._generate_meeting_id(Path("/tmp/3월_정기회의.wav")) == "3월_정기회의"
         assert watcher._generate_meeting_id(Path("/tmp/팀미팅.mp3")) == "팀미팅"
+        assert watcher._generate_meeting_id(Path("/tmp/회의 1.wav")) == "회의 1"
 
 
 # === debounce 테스트 ===
@@ -286,6 +365,192 @@ class TestDebounce:
         await write_task
 
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_영바이트_파일은_유한시간_후_보존하고_큐에_넣지_않음(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """0-byte/open writer 대기는 deadline을 넘어 무한 루프가 되면 안 된다."""
+        test_file = tmp_path / "audio_input" / "empty-writer.wav"
+        test_file.write_bytes(b"")
+        watcher._debounce_seconds = 0.01
+        watcher._check_interval = 0.005
+        watcher._file_ready_timeout_seconds = 0.05
+
+        await asyncio.wait_for(watcher._handle_new_file(test_file), timeout=0.3)
+
+        assert test_file.exists()
+        job = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "empty-writer",
+        )
+        assert job is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("returncode", "stdout", "stderr", "expected"),
+        [
+            (0, "p123\nf4\naw\n", "", _OpenWriterState.BUSY),
+            (0, "p123\nf4\nau\n", "", _OpenWriterState.BUSY),
+            (0, "p123\nf4\nar\n", "", _OpenWriterState.CLEAR),
+            (1, "", "", _OpenWriterState.CLEAR),
+            (0, "p123\nf4\n", "", _OpenWriterState.INDETERMINATE),
+        ],
+    )
+    async def test_lsof_access_mode를_fail_closed로_분류(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        expected: _OpenWriterState,
+    ) -> None:
+        """aw/au만 busy, ar/holder 없음만 clear이고 나머지는 보류한다."""
+        source = tmp_path / "audio_input" / "probe.wav"
+        source.write_bytes(b"audio")
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        run = MagicMock(return_value=completed)
+        monkeypatch.setattr(Path, "is_file", lambda path: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(os, "access", lambda path, mode: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = await _REAL_WRITER_PROBE(watcher, source, timeout=0.5)
+
+        assert result is expected
+        command = run.call_args.args[0]
+        assert command[-3:] == ["a", "--", str(source)]
+
+    @pytest.mark.asyncio
+    async def test_lsof_timeout은_INDETERMINATE로_원본보존(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """lsof timeout을 holder 없음으로 오인하지 않는다."""
+        source = tmp_path / "audio_input" / "probe-timeout.wav"
+        source.write_bytes(b"audio")
+        monkeypatch.setattr(Path, "is_file", lambda path: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(os, "access", lambda path, mode: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.TimeoutExpired(cmd="lsof", timeout=0.1)),
+        )
+
+        result = await _REAL_WRITER_PROBE(watcher, source, timeout=0.1)
+
+        assert result is _OpenWriterState.INDETERMINATE
+
+    @pytest.mark.asyncio
+    async def test_고정_lsof_부재시_PATH_fallback을_실행하지_않는다(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """system lsof 부재는 PATH 도구를 신뢰하지 않고 보류한다."""
+        source = tmp_path / "audio_input" / "probe-no-system-lsof.wav"
+        source.write_bytes(b"audio")
+        which = MagicMock(return_value="/attacker/path/lsof")
+        run = MagicMock()
+        monkeypatch.setattr(Path, "is_file", lambda path: False)
+        monkeypatch.setattr(shutil, "which", which)
+        monkeypatch.setattr(subprocess, "run", run)
+
+        result = await _REAL_WRITER_PROBE(watcher, source, timeout=0.1)
+
+        assert result is _OpenWriterState.INDETERMINATE
+        which.assert_not_called()
+        run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_쓰기_fd가_열린_파일은_품질게이트_disabled여도_SOURCE_BUSY(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """크기가 멈췄어도 writable fd가 열려 있으면 원본 보존·재시도 대상이다."""
+        test_file = tmp_path / "audio_input" / "paused-writer.wav"
+        test_file.write_bytes(b"initial audio bytes")
+        watcher._debounce_seconds = 0.01
+        watcher._check_interval = 0.005
+        watcher._file_ready_timeout_seconds = 0.2
+        monkeypatch.setattr(
+            watcher,
+            "_probe_writable_open",
+            AsyncMock(return_value=_OpenWriterState.BUSY),
+        )
+
+        with test_file.open("ab") as writer:
+            writer.write(b"more")
+            writer.flush()
+            await asyncio.wait_for(watcher._handle_new_file(test_file), timeout=1.0)
+            assert test_file.exists()
+            job = await asyncio.to_thread(
+                job_queue.queue.get_job_by_meeting_id,
+                "paused-writer",
+            )
+            assert job is None
+
+    @pytest.mark.asyncio
+    async def test_pending중_modified는_dirty로_남아_종료후_한번_재검사(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """첫 readiness가 busy여도 처리 중 들어온 변경을 잃지 않아야 한다."""
+        test_file = tmp_path / "audio_input" / "dirty-retry.wav"
+        test_file.write_bytes(b"audio")
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+        calls = 0
+
+        async def _fake_wait(path: Path) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                await release_first.wait()
+                return False
+            second_started.set()
+            return True
+
+        monkeypatch.setattr(watcher, "_wait_for_stable_size", _fake_wait)
+
+        first_task = asyncio.create_task(watcher._handle_new_file(test_file))
+        await asyncio.wait_for(first_started.wait(), timeout=0.2)
+        await watcher._handle_new_file(test_file)
+        release_first.set()
+        await first_task
+
+        await asyncio.wait_for(second_started.wait(), timeout=0.5)
+        for _ in range(20):
+            job = await asyncio.to_thread(
+                job_queue.queue.get_job_by_meeting_id,
+                "dirty-retry",
+            )
+            if job is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert calls == 2
+        assert job is not None
 
 
 # === 작업 큐 등록 테스트 ===
@@ -755,7 +1020,7 @@ def test_excluded_path_인지_판정(monkeypatch, tmp_path):
 async def test_품질_게이트_reject_시_quarantine_이동_후_큐등록_안함(monkeypatch, tmp_path):
     """저볼륨 파일은 quarantine으로 이동되고 큐에 들어가지 않는다."""
     from config import AppConfig, AudioQualityConfig, PathsConfig, WatcherConfig
-    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.audio_quality import AudioQualityStatus
     from core.job_queue import AsyncJobQueue, JobQueue
     from core.watcher import FolderWatcher
 
@@ -777,11 +1042,11 @@ async def test_품질_게이트_reject_시_quarantine_이동_후_큐등록_안�
     watcher = FolderWatcher(async_queue, config=config)
 
     # validator를 REJECT 반환하도록 monkeypatch
-    def fake_validator(path: Path) -> AudioQualityResult:
-        return AudioQualityResult(
-            status=AudioQualityStatus.REJECT,
-            mean_volume_db=-48.0,
-            duration_seconds=600.0,
+    def fake_validator(path: Path, **_kwargs: object) -> SimpleNamespace:
+        return _quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
             reason="저볼륨 테스트",
         )
 
@@ -835,7 +1100,7 @@ async def test_품질_게이트_accept_시_정상_큐등록(monkeypatch, tmp_pat
     await async_queue.initialize()
     watcher = FolderWatcher(async_queue, config=config)
 
-    def fake_validator(path: Path) -> AudioQualityResult:
+    def fake_validator(path: Path, **_kwargs: object) -> AudioQualityResult:
         return AudioQualityResult(
             status=AudioQualityStatus.ACCEPT,
             mean_volume_db=-25.0,
@@ -863,10 +1128,69 @@ async def test_품질_게이트_accept_시_정상_큐등록(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path):
-    """ffmpeg 측정 실패(ERROR)는 보수적으로 큐에 등록한다 (판단 보류)."""
-    from config import AppConfig, PathsConfig
+async def test_watcher_validator에_identity와_configured_decode_timeout을_전달(
+    tmp_path: Path,
+) -> None:
+    """watcher 품질 검증은 공통 cache identity와 timeout 설정을 그대로 쓴다."""
+    from config import AppConfig, AudioQualityConfig, PathsConfig
     from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+    source = watch_dir / "configured-timeout.wav"
+    source.write_bytes(b"audio")
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(tmp_path)),
+        audio_quality=AudioQualityConfig(
+            min_mean_volume_db=-37.5,
+            min_duration_seconds=31.0,
+            decode_timeout_base_seconds=7.0,
+            decode_timeout_factor=0.75,
+            decode_timeout_cap_seconds=19.0,
+        ),
+    )
+    queue = AsyncJobQueue(JobQueue(db_path=tmp_path / "pipeline.db"))
+    await queue.initialize()
+    watcher = FolderWatcher(queue, config=config)
+    inspected = watcher._inspect_input_file(source)
+    assert inspected is not None
+    _, fingerprint = inspected
+    received: dict[str, object] = {}
+
+    def validator(path: Path, **kwargs: object) -> AudioQualityResult:
+        received["path"] = path
+        received.update(kwargs)
+        return AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=31.0,
+        )
+
+    watcher._audio_validator = validator
+
+    valid, result, validated = await watcher._validate_unchanged(source, fingerprint)
+
+    assert valid is True
+    assert result is not None and result.status is AudioQualityStatus.ACCEPT
+    assert validated == fingerprint
+    assert received == {
+        "path": source,
+        "min_mean_db": -37.5,
+        "min_duration_s": 31.0,
+        "expected_identity": fingerprint.as_tuple(),
+        "decode_timeout_base_seconds": 7.0,
+        "decode_timeout_factor": 0.75,
+        "decode_timeout_cap_seconds": 19.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_품질_게이트_infra_error_시_원본_보존_후_큐등록_안함(monkeypatch, tmp_path):
+    """도구 부재/timeout ERROR는 격리하지 않고 fail-closed로 보존한다."""
+    from config import AppConfig, PathsConfig
+    from core.audio_quality import AudioQualityStatus
     from core.job_queue import AsyncJobQueue, JobQueue
     from core.watcher import FolderWatcher
 
@@ -882,11 +1206,11 @@ async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path
     await async_queue.initialize()
     watcher = FolderWatcher(async_queue, config=config)
 
-    def fake_validator(path: Path) -> AudioQualityResult:
-        return AudioQualityResult(
-            status=AudioQualityStatus.ERROR,
-            mean_volume_db=None,
-            duration_seconds=None,
+    def fake_validator(path: Path, **_kwargs: object) -> SimpleNamespace:
+        return _quality_result(
+            AudioQualityStatus.ERROR,
+            failure_kind="infra_unavailable",
+            quarantine_safe=False,
             reason="측정 실패",
         )
 
@@ -899,14 +1223,55 @@ async def test_품질_게이트_error_시_보수적_통과(monkeypatch, tmp_path
 
     await watcher._handle_new_file(file)
 
-    # ERROR는 REJECT가 아니므로 큐에 등록되어야 함
+    quarantine_dir = config.paths.resolved_audio_quarantine_dir
+    assert file.exists()
+    assert not (quarantine_dir / "unknown.wav").exists()
+
     import asyncio
 
     job = await asyncio.to_thread(
         async_queue.queue.get_job_by_meeting_id,
         "unknown",
     )
-    assert job is not None
+    assert job is None
+
+
+@pytest.mark.asyncio
+async def test_품질_validator_예외_시_원본_보존_후_큐등록_안함(monkeypatch, tmp_path):
+    """내부 validator 예외는 원본을 보존하되 fail-closed로 큐 등록을 막는다."""
+    from config import AppConfig, PathsConfig
+    from core.job_queue import AsyncJobQueue, JobQueue
+    from core.watcher import FolderWatcher
+
+    watch_dir = tmp_path / "audio_input"
+    watch_dir.mkdir()
+    file = watch_dir / "broken.wav"
+    file.write_bytes(b"x")
+
+    config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+    async_queue = AsyncJobQueue(JobQueue(db_path=tmp_path / "pipeline.db"))
+    await async_queue.initialize()
+    watcher = FolderWatcher(async_queue, config=config)
+
+    def failing_validator(path: Path, **_kwargs: object) -> None:
+        raise RuntimeError("validator bug")
+
+    monkeypatch.setattr(watcher, "_audio_validator", failing_validator)
+
+    async def fake_stable(self, path):
+        return True
+
+    monkeypatch.setattr(FolderWatcher, "_wait_for_stable_size", fake_stable)
+
+    await watcher._handle_new_file(file)
+
+    assert file.exists()
+    assert not (config.paths.resolved_audio_quarantine_dir / "broken.wav").exists()
+    job = await asyncio.to_thread(
+        async_queue.queue.get_job_by_meeting_id,
+        "broken",
+    )
+    assert job is None
 
 
 # === Cleanup 1 (2026-04-21): scan_existing() 품질 게이트 누수 방지 ===
@@ -921,17 +1286,17 @@ async def test_scan_existing이_저볼륨_파일을_quarantine으로_이동(
     Phase 1 최종 리뷰 Important #1: scan_existing 이 _handle_new_file 의
     품질 게이트를 우회하는 누수. 재기동 경로에서도 크래시 파일 재진입 차단.
     """
-    from core.audio_quality import AudioQualityResult, AudioQualityStatus
+    from core.audio_quality import AudioQualityStatus
 
     watch_dir = tmp_path / "audio_input"
     bad_file = watch_dir / "bad_meeting.wav"
     bad_file.write_bytes(b"x" * 100)
 
-    def fake_validator(path):
-        return AudioQualityResult(
-            status=AudioQualityStatus.REJECT,
-            mean_volume_db=-48.0,
-            duration_seconds=600.0,
+    def fake_validator(path: Path, **_kwargs: object) -> SimpleNamespace:
+        return _quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
             reason="저볼륨: mean=-48.0dB < -40.0dB",
         )
 
@@ -966,7 +1331,7 @@ async def test_scan_existing_accept_시_정상_등록(
     good_file = watch_dir / "good.wav"
     good_file.write_bytes(b"x")
 
-    def fake_accept(path):
+    def fake_accept(path: Path, **_kwargs: object) -> AudioQualityResult:
         return AudioQualityResult(
             status=AudioQualityStatus.ACCEPT,
             mean_volume_db=-25.0,
@@ -979,3 +1344,917 @@ async def test_scan_existing_accept_시_정상_등록(
     ids = await watcher.scan_existing()
 
     assert len(ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_infra_error_시_원본_보존(
+    watcher: FolderWatcher, job_queue: AsyncJobQueue, tmp_path: Path, monkeypatch
+):
+    """재기동 스캔의 인프라 ERROR는 원본을 보존하고 큐에 넣지 않는다."""
+    from core.audio_quality import AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    bad_file = watch_dir / "corrupt.wav"
+    bad_file.write_bytes(b"x")
+
+    def fake_validator(path: Path, **_kwargs: object) -> SimpleNamespace:
+        return _quality_result(
+            AudioQualityStatus.ERROR,
+            failure_kind="infra_unavailable",
+            quarantine_safe=False,
+            reason="측정 실패: ffmpeg timeout",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", fake_validator)
+    quarantine_dir = tmp_path / "audio_quarantine"
+    monkeypatch.setattr(watcher, "_quarantine_dir", quarantine_dir)
+
+    ids = await watcher.scan_existing()
+
+    assert ids == []
+    assert bad_file.exists()
+    assert not (quarantine_dir / "corrupt.wav").exists()
+    job = await asyncio.to_thread(
+        job_queue.queue.get_job_by_meeting_id,
+        "corrupt",
+    )
+    assert job is None
+
+
+# === Fail-closed admission + startup cleanup RED 계약 ===
+
+
+@pytest.mark.asyncio
+async def test_new_event_input_symlink는_target을_검사하거나_이동하지_않음(
+    tmp_path: Path,
+    job_queue: AsyncJobQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """입력 symlink는 SECURITY_BLOCKED이며 링크와 외부 target 모두 보존한다."""
+    from core.audio_quality import AudioQualityStatus
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    config = _make_config(base_dir)
+    watcher = FolderWatcher(job_queue, config=config)
+    target = tmp_path / "external-target.wav"
+    original = b"external source must survive"
+    target.write_bytes(original)
+    link = config.paths.resolved_audio_input_dir / "linked.wav"
+    link.symlink_to(target)
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="short",
+        )
+    )
+    monkeypatch.setattr(watcher, "_audio_validator", validator)
+
+    async def _stable(path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(watcher, "_wait_for_stable_size", _stable)
+
+    await watcher._handle_new_file(link)
+
+    assert link.is_symlink()
+    assert target.read_bytes() == original
+    validator.assert_not_called()
+    assert await job_queue.get_all_jobs() == []
+    quarantine_dir = config.paths.resolved_audio_quarantine_dir
+    assert not quarantine_dir.exists() or list(quarantine_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_input_symlink는_target을_검사하거나_이동하지_않음(
+    tmp_path: Path,
+    job_queue: AsyncJobQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """startup scan도 is_file/resolve로 symlink target을 따라가면 안 된다."""
+    from core.audio_quality import AudioQualityStatus
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    config = _make_config(base_dir)
+    watcher = FolderWatcher(job_queue, config=config)
+    target = tmp_path / "external-scan-target.wav"
+    original = b"scan must not touch external target"
+    target.write_bytes(original)
+    link = config.paths.resolved_audio_input_dir / "linked-scan.wav"
+    link.symlink_to(target)
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="short",
+        )
+    )
+    monkeypatch.setattr(watcher, "_audio_validator", validator)
+
+    assert await watcher.scan_existing() == []
+
+    assert link.is_symlink()
+    assert target.read_bytes() == original
+    validator.assert_not_called()
+    assert await job_queue.get_all_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_confirmed_corrupt만_quarantine_safe로_격리(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """실제 decode가 media-invalid로 확정된 ERROR만 복구 가능한 격리 대상이다."""
+    from core.audio_quality import AudioQualityStatus
+
+    bad_file = tmp_path / "audio_input" / "decoded-corrupt.wav"
+    bad_file.write_bytes(b"malformed")
+    monkeypatch.setattr(
+        watcher,
+        "_audio_validator",
+        MagicMock(
+            return_value=_quality_result(
+                AudioQualityStatus.ERROR,
+                failure_kind="media_invalid",
+                quarantine_safe=True,
+                reason="invalid data found when processing input",
+            )
+        ),
+    )
+
+    assert await watcher.scan_existing() == []
+
+    assert not bad_file.exists()
+    moved = list((tmp_path / "audio_quarantine").glob("decoded-corrupt*.wav"))
+    assert len(moved) == 1
+    assert await job_queue.get_all_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_scan_existing_격리실패후에도_다음_valid_파일을_계속_등록(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """파일 하나의 quarantine OSError가 startup 전체 scan을 중단하면 안 된다."""
+    from core.audio_quality import AudioQualityStatus
+
+    watch_dir = tmp_path / "audio_input"
+    invalid = watch_dir / "a-invalid.wav"
+    valid = watch_dir / "z-valid.wav"
+    invalid.write_bytes(b"invalid")
+    valid.write_bytes(b"valid")
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_bytes(b"block quarantine mkdir")
+    monkeypatch.setattr(watcher, "_quarantine_dir", blocker / "audio_quarantine")
+
+    def _validate(path: Path, **_kwargs: object) -> SimpleNamespace:
+        if path.name == invalid.name:
+            return _quality_result(
+                AudioQualityStatus.REJECT,
+                failure_kind="media_invalid",
+                quarantine_safe=True,
+                reason="short",
+            )
+        return _quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+
+    monkeypatch.setattr(watcher, "_audio_validator", _validate)
+
+    ids = await watcher.scan_existing()
+
+    assert invalid.exists()
+    assert len(ids) == 1
+    valid_job = await asyncio.to_thread(
+        job_queue.queue.get_job_by_meeting_id,
+        "z-valid",
+    )
+    assert valid_job is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_status", ["recorded", "queued", "failed"])
+async def test_scan_existing_legacy_no_artifact_media_invalid은_격리후_row삭제(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_status: str,
+) -> None:
+    """UI 오류를 남기는 legacy invalid row는 격리 성공과 원자적으로 정리한다."""
+    from core.audio_quality import AudioQualityStatus
+
+    source = tmp_path / "audio_input" / f"legacy-{legacy_status}.wav"
+    payload = f"legacy-{legacy_status}".encode()
+    source.write_bytes(payload)
+    await job_queue.add_job(source.stem, str(source), initial_status=legacy_status)
+    monkeypatch.setattr(
+        watcher,
+        "_audio_validator",
+        MagicMock(
+            return_value=_quality_result(
+                AudioQualityStatus.REJECT,
+                failure_kind="media_invalid",
+                quarantine_safe=True,
+                reason="decoded duration < 30 seconds",
+            )
+        ),
+    )
+
+    assert await watcher.scan_existing() == []
+
+    assert not source.exists()
+    quarantined = list((tmp_path / "audio_quarantine").glob(f"{source.stem}*.wav"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == payload
+    row = await asyncio.to_thread(
+        job_queue.queue.get_job_by_meeting_id,
+        source.stem,
+    )
+    assert row is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["handle", "scan"])
+@pytest.mark.parametrize("claim_status", ["recording", "recorded"])
+async def test_retranscribe_claim은_invalid_source여도_legacy_audit에서_보존(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    entrypoint: str,
+    claim_status: str,
+) -> None:
+    """startup recovery가 소유한 재전사 claim·staging을 watcher가 삭제하지 않는다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.job_queue import parse_retranscribe_claim, retranscribe_staging_paths
+
+    meeting_id = f"retranscribe-claim-{entrypoint}"
+    source = tmp_path / "audio_input" / f"{meeting_id}.wav"
+    payload = b"invalid source after retranscribe crash"
+    source.write_bytes(payload)
+    job_id = await job_queue.add_job(
+        meeting_id,
+        str(source),
+        initial_status="completed",
+    )
+    token = f"claim-{entrypoint}"
+    await asyncio.to_thread(
+        job_queue.queue.claim_for_retranscribe,
+        job_id,
+        token,
+    )
+    await asyncio.to_thread(
+        job_queue.queue.update_retranscribe_claim_phase,
+        job_id,
+        token,
+        "staging",
+    )
+
+    if claim_status == "recorded":
+        # nominal public claim은 ``recording``이지만, 이전 버전/부분
+        # 마이그레이션에서 durable payload가 ``recorded`` row에 남아도
+        # watcher가 legacy row로 오인해 삭제하면 안 된다.
+        connection = job_queue.queue._ensure_connection()
+        with job_queue.queue._write_lock:
+            connection.execute(
+                "UPDATE jobs SET status = ? WHERE id = ?",
+                ("recorded", job_id),
+            )
+            connection.commit()
+
+    checkpoint_stage, output_stage = retranscribe_staging_paths(
+        tmp_path / "checkpoints",
+        tmp_path / "outputs",
+        meeting_id,
+        token,
+    )
+    checkpoint_stage.mkdir(parents=True)
+    (checkpoint_stage / "pipeline_state.json").write_text("{}", encoding="utf-8")
+    output_stage.mkdir(parents=True)
+    (output_stage / "summary.md").write_text("기존 요약", encoding="utf-8")
+
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="decoded duration < 30 seconds",
+        )
+    )
+    watcher._audio_validator = validator
+
+    if entrypoint == "handle":
+        await watcher._handle_new_file(source)
+    else:
+        assert await watcher.scan_existing() == []
+
+    preserved = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    claim = parse_retranscribe_claim(preserved.requested_action)
+    assert preserved.status == claim_status
+    assert claim is not None
+    assert claim.token == token
+    assert source.read_bytes() == payload
+    assert (checkpoint_stage / "pipeline_state.json").exists()
+    assert (output_stage / "summary.md").read_text(encoding="utf-8") == "기존 요약"
+    assert not (tmp_path / "audio_quarantine").exists()
+    validator.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protected_kind", ["completed", "transcript", "output"])
+async def test_scan_existing_completed_또는_산출물보유_job은_자동정리하지_않음(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_kind: str,
+) -> None:
+    """사용자 산출물이 있는 job은 startup audit가 원본/DB를 파괴하지 않는다."""
+    from core.audio_quality import AudioQualityStatus
+
+    meeting_id = f"protected-{protected_kind}"
+    source = tmp_path / "audio_input" / f"{meeting_id}.wav"
+    original = b"protected source"
+    source.write_bytes(original)
+    status = "completed" if protected_kind == "completed" else "recorded"
+    await job_queue.add_job(meeting_id, str(source), initial_status=status)
+    if protected_kind == "transcript":
+        checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "transcribe.json").write_text("{}", encoding="utf-8")
+    elif protected_kind == "output":
+        output_dir = tmp_path / "outputs" / meeting_id
+        output_dir.mkdir(parents=True)
+        (output_dir / "meeting_minutes.md").write_text("minutes", encoding="utf-8")
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="short",
+        )
+    )
+    monkeypatch.setattr(watcher, "_audio_validator", validator)
+
+    assert await watcher.scan_existing() == []
+
+    assert source.read_bytes() == original
+    row = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, meeting_id)
+    assert row is not None
+    assert row.status == status
+    validator.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_status", ["recorded", "queued", "failed"])
+async def test_scan_existing_legacy_infra는_source_row보존하고_recorded로_해제(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_status: str,
+) -> None:
+    """infra 불능은 격리/삭제하지 않고 UI failed·자동 실행 상태만 해제한다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.job_queue import JobStatus
+
+    meeting_id = f"infra-{legacy_status}"
+    source = tmp_path / "audio_input" / f"{meeting_id}.wav"
+    original = b"valid but validator infra unavailable"
+    source.write_bytes(original)
+    job_id = await job_queue.add_job(meeting_id, str(source), initial_status=legacy_status)
+    if legacy_status == "failed":
+        await asyncio.to_thread(
+            job_queue.queue.force_set_status,
+            job_id,
+            JobStatus.FAILED,
+            "stale media error",
+        )
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ERROR,
+            failure_kind="infra_unavailable",
+            quarantine_safe=False,
+            reason="ffmpeg unavailable",
+        )
+    )
+    monkeypatch.setattr(watcher, "_audio_validator", validator)
+
+    assert await watcher.scan_existing() == []
+
+    assert source.read_bytes() == original
+    assert not (tmp_path / "audio_quarantine").exists()
+    row = await asyncio.to_thread(job_queue.queue.get_job_by_meeting_id, meeting_id)
+    assert row is not None
+    assert row.status == "recorded"
+    assert row.error_message == ""
+    validator.assert_called_once()
+
+
+# === Watcher/quarantine no-follow + final readiness 2차 RED 계약 ===
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "audio_input_dir",
+        "audio_quarantine_subdir",
+        "checkpoints_dir",
+        "outputs_dir",
+    ],
+)
+@pytest.mark.parametrize("unsafe_path", ["../outside", "/tmp/meeting-transcriber-outside"])
+def test_watcher_설정_하위경로는_base_dir_밖을_허용하지_않음(
+    tmp_path: Path,
+    field_name: str,
+    unsafe_path: str,
+) -> None:
+    """validation을 우회한 config도 watcher 경계에서 containment한다."""
+    config = _make_config(tmp_path)
+    config.paths.base_dir = str(tmp_path)
+    setattr(config.paths, field_name, unsafe_path)
+
+    with pytest.raises(WatcherError, match="base_dir"):
+        FolderWatcher(MagicMock(), config=config)
+
+
+def test_watcher_설정_하위경로의_nested_상대경로는_허용(
+    tmp_path: Path,
+) -> None:
+    """중첩된 정상 상대경로는 기존 커스텀 구성 호환성을 유지한다."""
+    from config import AppConfig, PathsConfig
+
+    config = AppConfig(
+        paths=PathsConfig(
+            base_dir=str(tmp_path),
+            audio_input_dir="media/incoming",
+            audio_quarantine_subdir="hold/quarantine",
+            checkpoints_dir="state/checkpoints",
+            outputs_dir="state/outputs",
+        ),
+        audio_quality={"enabled": False},
+    )
+
+    watcher = FolderWatcher(MagicMock(), config=config)
+
+    assert watcher.watch_dir == tmp_path / "media" / "incoming"
+    assert watcher._quarantine_dir == tmp_path / "hold" / "quarantine"
+    assert watcher._checkpoints_dir == tmp_path / "state" / "checkpoints"
+    assert watcher._outputs_dir == tmp_path / "state" / "outputs"
+
+
+@pytest.mark.asyncio
+async def test_watch_root_중간_component_symlink는_외부_파일을_검사하지_않음(
+    tmp_path: Path,
+    job_queue: AsyncJobQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """watch root의 중간 symlink를 따라 external file을 등록하지 않는다."""
+    from config import AppConfig, PathsConfig
+    from core.audio_quality import AudioQualityStatus
+
+    base = tmp_path / "base"
+    base.mkdir()
+    external = tmp_path / "external"
+    external_audio = external / "audio_input"
+    external_audio.mkdir(parents=True)
+    target = external_audio / "escape.wav"
+    target.write_bytes(b"external")
+    (base / "linked").symlink_to(external, target_is_directory=True)
+    config = AppConfig(
+        paths=PathsConfig(base_dir=str(base), audio_input_dir="linked/audio_input"),
+        audio_quality={"enabled": False},
+    )
+    watcher = FolderWatcher(job_queue, config=config)
+    validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+    )
+    watcher._audio_validator = validator
+
+    await watcher._handle_new_file(target)
+
+    validator.assert_not_called()
+    assert await job_queue.get_all_jobs() == []
+    assert target.read_bytes() == b"external"
+
+
+@pytest.mark.asyncio
+async def test_dotdot_stem_audio는_meeting_id로_등록하지_않음(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`...wav`의 stem `..`를 DB/path meeting_id로 허용하지 않는다."""
+    source = tmp_path / "audio_input" / "...wav"
+    source.write_bytes(b"audio")
+    monkeypatch.setattr(watcher, "_wait_for_stable_size", AsyncMock(return_value=True))
+
+    await watcher._handle_new_file(source)
+
+    assert await job_queue.get_all_jobs() == []
+    assert source.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admission", ["accept", "reject"])
+async def test_validation_후_queue_quarantine_직전_writer를_다시_확인(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    admission: str,
+) -> None:
+    """validation 후 writer가 다시 열리면 queue와 quarantine 모두 금지한다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.watcher import _OpenWriterState
+
+    source = tmp_path / "audio_input" / f"final-{admission}.wav"
+    source.write_bytes(b"audio")
+    status = AudioQualityStatus.ACCEPT if admission == "accept" else AudioQualityStatus.REJECT
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            status,
+            failure_kind="media_invalid",
+            quarantine_safe=admission == "reject",
+            reason="short" if admission == "reject" else "",
+        )
+    )
+    monkeypatch.setattr(watcher, "_wait_for_stable_size", AsyncMock(return_value=True))
+    probe = AsyncMock(return_value=_OpenWriterState.BUSY)
+    monkeypatch.setattr(watcher, "_probe_writable_open", probe)
+
+    await watcher._handle_new_file(source)
+
+    probe.assert_awaited()
+    assert source.exists()
+    assert await job_queue.get_all_jobs() == []
+    assert not (tmp_path / "audio_quarantine").exists()
+
+
+@pytest.mark.asyncio
+async def test_open_writer_timeout은_close_event_없어도_한번만_deferred_retry(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """timeout 후 close-only 시나리오를 위해 1회만 유한 재검사한다."""
+    from core.watcher import _OpenWriterState
+
+    source = tmp_path / "audio_input" / "close-only.wav"
+    source.write_bytes(b"audio")
+    calls = 0
+
+    async def _wait(path: Path) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            watcher._close_retry_paths.add(path)
+            return False
+        return True
+
+    monkeypatch.setattr(watcher, "_wait_for_stable_size", _wait)
+    monkeypatch.setattr(
+        watcher,
+        "_probe_writable_open",
+        AsyncMock(return_value=_OpenWriterState.CLEAR),
+    )
+    await watcher._handle_new_file(source)
+
+    for _ in range(50):
+        row = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "close-only",
+        )
+        if row is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert calls == 2
+    assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_live_queued_job은_audit_중_recorded로_hold하고_ACCEPT시_의도를_복원(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """live event의 기존 queued row도 검증하되 검증 중 자동 처리를 막는다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.watcher import _OpenWriterState
+
+    source = tmp_path / "audio_input" / "queued-audit.wav"
+    source.write_bytes(b"audio")
+    job_id = await job_queue.add_job("queued-audit", str(source), initial_status="recorded")
+    await asyncio.to_thread(job_queue.queue.queue_job, job_id, "full")
+    statuses_seen: list[str] = []
+
+    def _validate(path: Path, **_kwargs: object) -> SimpleNamespace:
+        row = job_queue.queue.get_job(job_id)
+        statuses_seen.append(row.status)
+        return _quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+
+    watcher._audio_validator = _validate
+    monkeypatch.setattr(watcher, "_wait_for_stable_size", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        watcher,
+        "_probe_writable_open",
+        AsyncMock(return_value=_OpenWriterState.CLEAR),
+    )
+
+    await watcher._handle_new_file(source)
+
+    row = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    assert statuses_seen == ["recorded"]
+    assert row.status == "queued"
+    assert row.requested_action == "full"
+
+
+@pytest.mark.asyncio
+async def test_scan_queued_job도_audit_중_hold하고_ACCEPT시_의도를_복원(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+) -> None:
+    """startup scan의 queued row도 검증 중 실행을 막고 원래 action을 복원한다."""
+    from core.audio_quality import AudioQualityStatus
+
+    source = tmp_path / "audio_input" / "scan-queued-audit.wav"
+    source.write_bytes(b"audio")
+    job_id = await job_queue.add_job(
+        "scan-queued-audit",
+        str(source),
+        initial_status="recorded",
+    )
+    await asyncio.to_thread(job_queue.queue.queue_job, job_id, "transcribe")
+    statuses_seen: list[str] = []
+
+    def _validate(path: Path, **_kwargs: object) -> SimpleNamespace:
+        statuses_seen.append(job_queue.queue.get_job(job_id).status)
+        return _quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+
+    watcher._audio_validator = _validate
+
+    assert await watcher.scan_existing() == []
+
+    row = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    assert statuses_seen == ["recorded"]
+    assert row.status == "queued"
+    assert row.requested_action == "transcribe"
+
+
+@pytest.mark.asyncio
+async def test_audio_admission_hold는_재시작_후에도_queued_의도를_복원(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+) -> None:
+    """SOURCE_BUSY hold는 메모리가 사라져도 DB payload로 queued action을 복원한다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.job_queue import parse_audio_admission_hold
+
+    source = tmp_path / "audio_input" / "restart-queued.wav"
+    source.write_bytes(b"audio")
+    job_id = await job_queue.add_job(
+        "restart-queued",
+        str(source),
+        initial_status="recorded",
+    )
+    await asyncio.to_thread(job_queue.queue.queue_job, job_id, "full")
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ERROR,
+            failure_kind="source_busy",
+            quarantine_safe=False,
+            reason="writer state indeterminate",
+        )
+    )
+
+    assert await watcher.scan_existing() == []
+    held = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    hold = parse_audio_admission_hold(held.requested_action)
+    assert held.status == "recorded"
+    assert hold is not None
+    assert hold.original_status == "queued"
+    assert hold.original_requested_action == "full"
+
+    restarted = FolderWatcher(async_job_queue=job_queue, config=watcher._config)
+    restarted._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+    )
+    try:
+        assert await restarted.scan_existing() == []
+    finally:
+        await restarted.stop()
+
+    restored = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    assert restored.status == "queued"
+    assert restored.requested_action == "full"
+
+
+@pytest.mark.asyncio
+async def test_audio_admission_hold는_failed_origin을_재시작_후_recorded로_정상화(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+) -> None:
+    """infra hold의 failed origin은 재감사 ACCEPT 후 failed UI 없이 recorded가 된다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.job_queue import JobStatus, parse_audio_admission_hold
+
+    source = tmp_path / "audio_input" / "restart-failed.wav"
+    source.write_bytes(b"audio")
+    job_id = await job_queue.add_job(
+        "restart-failed",
+        str(source),
+        initial_status="recorded",
+    )
+    await asyncio.to_thread(
+        job_queue.queue.force_set_status,
+        job_id,
+        JobStatus.FAILED,
+        "old failure",
+    )
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ERROR,
+            failure_kind="infra_unavailable",
+            quarantine_safe=False,
+            reason="ffmpeg unavailable",
+        )
+    )
+
+    assert await watcher.scan_existing() == []
+    held = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    hold = parse_audio_admission_hold(held.requested_action)
+    assert held.status == "recorded"
+    assert hold is not None
+    assert hold.original_status == "failed"
+
+    restarted = FolderWatcher(async_job_queue=job_queue, config=watcher._config)
+    restarted._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.ACCEPT,
+            failure_kind="media_invalid",
+            quarantine_safe=False,
+            reason="",
+        )
+    )
+    try:
+        assert await restarted.scan_existing() == []
+    finally:
+        await restarted.stop()
+
+    restored = await asyncio.to_thread(job_queue.queue.get_job, job_id)
+    assert restored.status == "recorded"
+    assert restored.requested_action == ""
+    assert restored.error_message == ""
+
+
+@pytest.mark.asyncio
+async def test_scan_artifact_allowlist에_없는_DSStore_inputwav는_자동정리를_막지_않음(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """의미 없는 output 파일만으로 media-invalid legacy row를 과보존하지 않는다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.watcher import _OpenWriterState
+
+    meeting_id = "allowlist-cleanup"
+    source = tmp_path / "audio_input" / f"{meeting_id}.wav"
+    source.write_bytes(b"invalid")
+    await job_queue.add_job(meeting_id, str(source), initial_status="recorded")
+    output = tmp_path / "outputs" / meeting_id
+    output.mkdir(parents=True)
+    (output / ".DS_Store").write_bytes(b"metadata")
+    (output / "input.wav").write_bytes(b"copy")
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="short",
+        )
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_probe_writable_open",
+        AsyncMock(return_value=_OpenWriterState.CLEAR),
+    )
+
+    await watcher.scan_existing()
+
+    assert not source.exists()
+    assert (
+        await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            meeting_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_scan_summary_json_산출물은_legacy_media_invalid_자동정리에서_보존(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+) -> None:
+    """API fallback 산출물인 summary.json만 있어도 원본과 row를 보존한다."""
+    from core.audio_quality import AudioQualityStatus
+
+    meeting_id = "summary-json-preserved"
+    source = tmp_path / "audio_input" / f"{meeting_id}.wav"
+    source.write_bytes(b"invalid")
+    job_id = await job_queue.add_job(
+        meeting_id,
+        str(source),
+        initial_status="recorded",
+    )
+    output = tmp_path / "outputs" / meeting_id
+    output.mkdir(parents=True)
+    (output / "summary.json").write_text('{"summary": "기존 요약"}', encoding="utf-8")
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="short",
+        )
+    )
+
+    assert await watcher.scan_existing() == []
+
+    assert source.exists()
+    assert await asyncio.to_thread(job_queue.queue.get_job, job_id) is not None
+    watcher._audio_validator.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_zero_byte_closed는_timeout_대기_없이_즉시_검증·격리(
+    watcher: FolderWatcher,
+    job_queue: AsyncJobQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """writer가 없는 0-byte를 file_ready_timeout 동안 대기하지 않는다."""
+    from core.audio_quality import AudioQualityStatus
+    from core.watcher import _OpenWriterState
+
+    source = tmp_path / "audio_input" / "zero.wav"
+    source.touch()
+    watcher._file_ready_timeout_seconds = 5.0
+    watcher._audio_validator = MagicMock(
+        return_value=_quality_result(
+            AudioQualityStatus.REJECT,
+            failure_kind="media_invalid",
+            quarantine_safe=True,
+            reason="zero-byte",
+        )
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_probe_writable_open",
+        AsyncMock(return_value=_OpenWriterState.CLEAR),
+    )
+
+    await asyncio.wait_for(watcher._handle_new_file(source), timeout=0.3)
+
+    assert not source.exists()
+    assert await job_queue.get_all_jobs() == []

@@ -280,6 +280,10 @@ class TestConvert:
         result = converter.convert(sample_audio, output_dir)
         assert result == output_path
         assert mock_run.call_count == 2  # ffmpeg + 출력 ffprobe 검증
+        convert_cmd = mock_run.call_args_list[0].args[0]
+        map_index = convert_cmd.index("-map")
+        assert convert_cmd[map_index : map_index + 2] == ["-map", "0:a:0"]
+        assert "-sn" in convert_cmd
 
     @patch("shutil.which", return_value="/usr/bin/mock")
     @patch("subprocess.run")

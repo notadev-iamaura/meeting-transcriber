@@ -23,9 +23,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from config import AppConfig, PathsConfig, ServerConfig
+from core.audio_quality import AudioFailureKind, AudioQualityResult, AudioQualityStatus
 
 # === 헬퍼 ===
 
@@ -39,10 +41,14 @@ def _make_test_config(tmp_path: Path) -> AppConfig:
     Returns:
         AppConfig 인스턴스
     """
-    return AppConfig(
+    config = AppConfig(
         paths=PathsConfig(base_dir=str(tmp_path)),
         server=ServerConfig(host="127.0.0.1", port=8765, log_level="warning"),
     )
+    # 기존 라우터 단위 테스트의 더미 바이트는 실제 미디어가 아니다. admission
+    # 전용 테스트에서만 활성화하여 기존 분류/큐잉 계약과 독립적으로 검증한다.
+    config.audio_quality.enabled = False
+    return config
 
 
 def _make_test_app(tmp_path: Path) -> Any:
@@ -275,7 +281,7 @@ class TestBatchActionFilter:
                     status="recorded",
                 ),
             )
-            app.state.job_queue._queue.queue_job = MagicMock()
+            app.state.job_queue._queue.queue_jobs_atomically = MagicMock()
             # audio_path 가 실제로 존재해야 JobQueue 큐잉 후보가 된다.
             (tmp_path / "fake.wav").write_bytes(b"\x00" * 16)
 
@@ -293,7 +299,7 @@ class TestBatchActionFilter:
         # merge 완료 회의는 skipped
         assert "meeting_with_merge" not in data["meeting_ids"]
         # transcribe 항목은 직접 실행하지 않고 JobProcessor 큐에 들어간다.
-        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "transcribe")
+        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
         mock_pipeline.run.assert_not_called()
 
     def test_batch_summarize_all_filters_summary_done(self, tmp_path: Path) -> None:
@@ -362,7 +368,7 @@ class TestBatchActionFilter:
                     status="recorded",
                 ),
             )
-            app.state.job_queue._queue.queue_job = MagicMock()
+            app.state.job_queue._queue.queue_jobs_atomically = MagicMock()
             (tmp_path / "fake.wav").write_bytes(b"\x00" * 16)
 
             response = client.post(
@@ -377,7 +383,7 @@ class TestBatchActionFilter:
         assert set(data["meeting_ids"]) == {"m_no_merge", "m_no_summary"}
         assert data["matched"] == 3
         assert data["skipped"] == 1
-        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "full")
+        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "full")
 
     def test_batch_full_skips_already_summarized(self, tmp_path: Path) -> None:
         """action=full: merge + summary 둘 다 있는 회의는 skip."""
@@ -562,7 +568,7 @@ class TestBatchScope:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
                 side_effect=lambda mid: job_by_id.get(mid)
             )
-            app.state.job_queue._queue.queue_job = MagicMock()
+            app.state.job_queue._queue.queue_jobs_atomically = MagicMock()
 
             response = client.post(
                 "/api/meetings/batch",
@@ -575,7 +581,7 @@ class TestBatchScope:
         assert data["queued"] == 1
         assert data["skipped"] == 3
         assert data["meeting_ids"] == ["m_recorded"]
-        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "transcribe")
+        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
         mock_pipeline.run.assert_not_called()
 
     def test_batch_scope_selected_uses_provided_ids(self, tmp_path: Path) -> None:
@@ -758,7 +764,7 @@ class TestBatchBackgroundExecution:
             app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
                 return_value=MockJob(1, "m_no_merge", str(audio), status="recorded"),
             )
-            app.state.job_queue._queue.queue_job = MagicMock()
+            app.state.job_queue._queue.queue_jobs_atomically = MagicMock()
 
             response = client.post(
                 "/api/meetings/batch",
@@ -769,7 +775,7 @@ class TestBatchBackgroundExecution:
         assert response.status_code == 200
 
         # m_no_merge → JobProcessor 큐에 full 의도로 등록
-        app.state.job_queue._queue.queue_job.assert_called_once_with(1, "full")
+        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "full")
         mock_pipeline.run.assert_not_called()
 
         # m_no_summary → run_llm_steps 호출
@@ -949,10 +955,612 @@ class TestBatchIntegration:
             finally:
                 outside.unlink(missing_ok=True)
 
-        # base_dir 외부라 사전 제외 → queued=0, status="no_targets"
-        assert response.status_code == 200
-        data = response.json()
-        assert data["matched"] == 1
-        assert data["queued"] == 0
-        assert data["skipped"] == 1
+        # base_dir 외부 경로는 typed SECURITY 오류로 fail-closed 한다.
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
         assert not mock_pipeline.run.called
+
+    @pytest.mark.parametrize(
+        ("failure_kind", "quality_status", "expected_status"),
+        [
+            (AudioFailureKind.MEDIA_INVALID, AudioQualityStatus.REJECT, 422),
+            (AudioFailureKind.SOURCE_BUSY, AudioQualityStatus.ERROR, 409),
+            (AudioFailureKind.INFRA_UNAVAILABLE, AudioQualityStatus.ERROR, 503),
+            (AudioFailureKind.SECURITY_BLOCKED, AudioQualityStatus.ERROR, 400),
+        ],
+    )
+    def test_batch_transcribe는_비수락_audio를_상태별_HTTP로_거부한다(
+        self,
+        tmp_path: Path,
+        failure_kind: AudioFailureKind,
+        quality_status: AudioQualityStatus,
+        expected_status: int,
+    ) -> None:
+        """품질 gate 비수락은 job을 failed로 거치지 않고 명시적 HTTP 오류를 낸다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"m_quality_{failure_kind.value}"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"invalid-media")
+        rejected = AudioQualityResult(
+            status=quality_status,
+            mean_volume_db=None,
+            duration_seconds=2.0,
+            reason="too short",
+            failure_kind=failure_kind,
+        )
+        admission = MagicMock(return_value=rejected)
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meetings_batch.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == expected_status
+        assert failure_kind.name in response.json()["detail"]
+        admission.assert_called_once()
+        admission_kwargs = admission.call_args.kwargs
+        audio_stat = audio_path.lstat()
+        assert admission_kwargs["expected_identity"] == (
+            audio_stat.st_dev,
+            audio_stat.st_ino,
+            audio_stat.st_size,
+            audio_stat.st_mtime_ns,
+            audio_stat.st_ctime_ns,
+        )
+        assert admission_kwargs["decode_timeout_base_seconds"] == (
+            app.state.config.audio_quality.decode_timeout_base_seconds
+        )
+        assert admission_kwargs["decode_timeout_factor"] == (
+            app.state.config.audio_quality.decode_timeout_factor
+        )
+        assert admission_kwargs["decode_timeout_cap_seconds"] == (
+            app.state.config.audio_quality.decode_timeout_cap_seconds
+        )
+        queue.queue_jobs_atomically.assert_not_called()
+
+    def test_batch_transcribe는_queue직전에_audio를_다시_검증한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """선정 이후 파일 변경 race를 줄이기 위해 큐 UPDATE 직전 두 번째 gate를 거친다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "m_quality_recheck"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"valid-media")
+        accepted = AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=30.0,
+        )
+        admission = MagicMock(return_value=accepted)
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meetings_batch.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["meeting_ids"] == [meeting_id]
+        assert admission.call_count == 2
+        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+
+    def test_batch_gate예외중_source가_바뀌면_503대신_409이고_DB무변경(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """validator 예외 뒤 identity 변경은 infra가 아니라 SOURCE_BUSY로 매핑한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "m_quality_exception_swap"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"valid-media")
+
+        def mutate_then_fail(*args: Any, **kwargs: Any) -> None:
+            audio_path.write_bytes(audio_path.read_bytes() + b"changed")
+            raise RuntimeError("decoder crashed after source swap")
+
+        admission = MagicMock(side_effect=mutate_then_fail)
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meetings_batch.validate_audio_quality", admission),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            job = MockJob(1, meeting_id, str(audio_path), status="recorded")
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        queue.queue_jobs_atomically.assert_not_called()
+        assert job.status == "recorded"
+
+    def test_batch_gate비수락중_source가_바뀌어도_409가_우선한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """stale MEDIA REJECT보다 pre/post identity 불일치를 우선한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "m_quality_reject_swap"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"valid-media")
+        rejected = AudioQualityResult(
+            status=AudioQualityStatus.REJECT,
+            mean_volume_db=None,
+            duration_seconds=2.0,
+            reason="too short",
+            failure_kind=AudioFailureKind.MEDIA_INVALID,
+        )
+
+        def mutate_then_reject(*args: Any, **kwargs: Any) -> AudioQualityResult:
+            audio_path.write_bytes(audio_path.read_bytes() + b"changed")
+            return rejected
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meetings_batch.validate_audio_quality",
+                side_effect=mutate_then_reject,
+            ),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            job = MockJob(1, meeting_id, str(audio_path), status="recorded")
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        queue.queue_jobs_atomically.assert_not_called()
+        assert job.status == "recorded"
+
+    def test_batch_queue직전_audio가_busy로_바뀌면_job을_변경하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """preflight 통과 후 writer가 다시 열면 409를 반환하고 recorded를 보존한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "m_quality_busy_race"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"media")
+        accepted = AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=30.0,
+        )
+        busy = AudioQualityResult(
+            status=AudioQualityStatus.ERROR,
+            mean_volume_db=None,
+            duration_seconds=None,
+            reason="writer is open",
+            failure_kind=AudioFailureKind.SOURCE_BUSY,
+        )
+        admission = MagicMock(side_effect=[accepted, busy])
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meetings_batch.validate_audio_quality",
+                admission,
+            ),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            job = MockJob(1, meeting_id, str(audio_path), status="recorded")
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 409
+        assert "SOURCE_BUSY" in response.json()["detail"]
+        assert admission.call_count == 2
+        queue.queue_jobs_atomically.assert_not_called()
+        assert job.status == "recorded"
+
+    def test_batch_여러건_preflight중_하나가_거부되면_아무_job도_queue하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """전체 admission이 끝나기 전에는 앞선 ACCEPT 항목도 DB mutation하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_ids = ("a_quality_accept", "z_quality_reject")
+        jobs: dict[str, MockJob] = {}
+        for index, meeting_id in enumerate(meeting_ids, start=1):
+            _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+            audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(b"media")
+            jobs[meeting_id] = MockJob(index, meeting_id, str(audio_path), status="recorded")
+
+        accepted = AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=30.0,
+        )
+        rejected = AudioQualityResult(
+            status=AudioQualityStatus.REJECT,
+            mean_volume_db=None,
+            duration_seconds=2.0,
+            reason="too short",
+            failure_kind=AudioFailureKind.MEDIA_INVALID,
+        )
+        admission = MagicMock(side_effect=[accepted, rejected])
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meetings_batch.validate_audio_quality", admission),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                side_effect=lambda meeting_id: jobs.get(meeting_id)
+            )
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 422
+        assert admission.call_count == 2
+        queue.queue_jobs_atomically.assert_not_called()
+        assert {job.status for job in jobs.values()} == {"recorded"}
+
+    def test_batch_transcribe는_quality_disabled면_validator를_호출하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """audio_quality.enabled=false는 기존 큐잉 동작을 그대로 유지한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "m_quality_disabled"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"legacy-dummy")
+        admission = MagicMock()
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meetings_batch.validate_audio_quality",
+                admission,
+                create=True,
+            ),
+        ):
+            _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 200
+        admission.assert_not_called()
+        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+
+    @pytest.mark.parametrize(
+        ("path_kind", "expected_status", "failure_name"),
+        [
+            ("symlink", 400, "SECURITY_BLOCKED"),
+            ("zero", 422, "MEDIA_INVALID"),
+            ("missing", 409, "SOURCE_BUSY"),
+            ("infra", 503, "INFRA_UNAVAILABLE"),
+        ],
+    )
+    def test_batch_resolver_actual_path_failure는_typed_HTTP이고_DB무변경이다(
+        self,
+        tmp_path: Path,
+        path_kind: str,
+        expected_status: int,
+        failure_name: str,
+    ) -> None:
+        """resolver가 symlink/zero/missing/infra 오류를 skip으로 삼키지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"m_actual_{path_kind}"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        inspect_patch: Any
+        if path_kind == "symlink":
+            target = audio_path.parent / "target.wav"
+            target.write_bytes(b"target-sentinel")
+            audio_path.symlink_to(target)
+            inspect_patch = MagicMock(wraps=None)
+        elif path_kind == "zero":
+            audio_path.write_bytes(b"")
+            inspect_patch = None
+        elif path_kind == "missing":
+            inspect_patch = None
+        else:
+            audio_path.write_bytes(b"media")
+            inspect_patch = MagicMock(side_effect=OSError("stat unavailable"))
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+            if path_kind == "infra":
+                with patch(
+                    "api.routers.meetings_batch.inspect_audio_path_no_symlinks",
+                    inspect_patch,
+                ):
+                    response = client.post(
+                        "/api/meetings/batch",
+                        json={"action": "transcribe", "scope": "all"},
+                    )
+            else:
+                response = client.post(
+                    "/api/meetings/batch",
+                    json={"action": "transcribe", "scope": "all"},
+                )
+
+        assert response.status_code == expected_status
+        assert failure_name in response.json()["detail"]
+        queue.queue_jobs_atomically.assert_not_called()
+        if path_kind == "symlink":
+            assert target.read_bytes() == b"target-sentinel"
+
+    def test_batch_모든_2차검사가_끝나기전에는_첫_job도_queue하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """두 번째 항목의 즉시 recheck 409가 첫 항목을 queued로 남기지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_ids = ("a_recheck_accept", "z_recheck_busy")
+        jobs: dict[str, MockJob] = {}
+        for index, meeting_id in enumerate(meeting_ids, start=1):
+            _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+            audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(b"media")
+            jobs[meeting_id] = MockJob(index, meeting_id, str(audio_path), status="recorded")
+
+        accepted = AudioQualityResult(
+            status=AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=30.0,
+        )
+        busy = AudioQualityResult(
+            status=AudioQualityStatus.ERROR,
+            mean_volume_db=None,
+            duration_seconds=None,
+            reason="writer reopened",
+            failure_kind=AudioFailureKind.SOURCE_BUSY,
+        )
+        admission = MagicMock(side_effect=[accepted, accepted, accepted, busy])
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meetings_batch.validate_audio_quality", admission),
+        ):
+            _setup_pipeline_mock(app)
+            app.state.config.audio_quality.enabled = True
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(side_effect=jobs.get)
+            queue.queue_jobs_atomically = MagicMock()
+
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 409
+        assert admission.call_count == 4
+        queue.queue_jobs_atomically.assert_not_called()
+        assert {job.status for job in jobs.values()} == {"recorded"}
+
+    def test_batch_raw_base_symlink는_external_target을_읽지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """resolved_base_dir가 정상이어도 raw base symlink이면 admission 전에 차단한다."""
+        from api.server import create_app
+
+        external = tmp_path / "external-base"
+        external.mkdir()
+        base_link = tmp_path / "base-link"
+        base_link.symlink_to(external, target_is_directory=True)
+        config = AppConfig(
+            paths=PathsConfig(base_dir=str(base_link)),
+            server=ServerConfig(host="127.0.0.1", port=8765, log_level="warning"),
+        )
+        with (
+            patch("search.hybrid_search.HybridSearchEngine", return_value=MagicMock()),
+            patch("search.chat.ChatEngine", return_value=MagicMock()),
+        ):
+            app = create_app(config, runtime_profile="api-test")
+        inspect = MagicMock()
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meetings_batch.inspect_audio_path_no_symlinks", inspect),
+        ):
+            _setup_pipeline_mock(app)
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "all"},
+            )
+
+        assert response.status_code == 400
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        inspect.assert_not_called()
+
+    def test_batch_단일segment_한글공백_meeting_id를_허용한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """watcher/pipeline과 동일하게 slash 없는 Unicode·공백 ID를 허용한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "회의 1"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / "meeting.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"media")
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+            response = client.post(
+                "/api/meetings/batch",
+                json={
+                    "action": "transcribe",
+                    "scope": "selected",
+                    "meeting_ids": [meeting_id],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["meeting_ids"] == [meeting_id]
+        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+
+    def test_batch_recent의_dot_segment_job은_분류전에_skip한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """DB에서 온 recent 후보도 selected와 같은 단일-segment 계약을 쓴다."""
+        app = _make_test_app(tmp_path)
+        recent = datetime.now().isoformat()
+        invalid = MockJob(1, "..", str(tmp_path / "audio.wav"), created_at=recent)
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=[invalid])
+            response = client.post(
+                "/api/meetings/batch",
+                json={"action": "transcribe", "scope": "recent", "hours": 24},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "no_targets"
+        assert response.json()["queued"] == 0
+
+    def test_batch_checkpoint_root_symlink는_external_tree를_스캔하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """resolved checkpoints target 대신 raw child symlink를 차단한다."""
+        app = _make_test_app(tmp_path)
+        external = tmp_path.parent / f"batch-checkpoints-{tmp_path.name}"
+        external.mkdir()
+        sentinel = external / "sentinel"
+        sentinel.write_text("keep", encoding="utf-8")
+        (tmp_path / "checkpoints").symlink_to(external, target_is_directory=True)
+
+        try:
+            with TestClient(app) as client:
+                _setup_pipeline_mock(app)
+                response = client.post(
+                    "/api/meetings/batch",
+                    json={"action": "transcribe", "scope": "all"},
+                )
+
+            assert response.status_code == 400
+            assert "SECURITY_BLOCKED" in response.json()["detail"]
+            assert sentinel.read_text(encoding="utf-8") == "keep"
+        finally:
+            sentinel.unlink(missing_ok=True)
+            external.rmdir()
+
+    def test_batch_final_merge_symlink는_target을_분류근거로_사용하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """외부 merge.json symlink가 summarize 대상을 만들 수 없다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_batch_merge_symlink"
+        checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+        checkpoint_dir.mkdir(parents=True)
+        target = tmp_path.parent / f"batch-merge-{tmp_path.name}.json"
+        target.write_text('{"utterances": []}', encoding="utf-8")
+        (checkpoint_dir / "merge.json").symlink_to(target)
+
+        try:
+            with TestClient(app) as client:
+                pipeline = _setup_pipeline_mock(app)
+                response = client.post(
+                    "/api/meetings/batch",
+                    json={
+                        "action": "summarize",
+                        "scope": "selected",
+                        "meeting_ids": [meeting_id],
+                    },
+                )
+
+            assert response.status_code == 400
+            assert "SECURITY_BLOCKED" in response.json()["detail"]
+            pipeline.run_llm_steps.assert_not_called()
+            assert target.read_text(encoding="utf-8") == '{"utterances": []}'
+        finally:
+            target.unlink(missing_ok=True)

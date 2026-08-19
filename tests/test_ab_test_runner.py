@@ -8,6 +8,7 @@ variant 부분 실패, 취소, diarize 체크포인트 분기를 monkeypatch 기
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 
 def _run(coro: Any) -> Any:
@@ -38,7 +39,10 @@ from core.ab_test_runner import (
     compute_winner_score,
     count_forbidden_patterns,
     determine_winner,
+    inspect_llm_ab_source,
     new_test_id,
+    reserve_llm_ab_test,
+    reserve_stt_ab_test,
     run_llm_ab_test,
     run_stt_ab_test,
 )
@@ -47,6 +51,21 @@ from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.merger import MergedResult, MergedUtterance
 from steps.summarizer import SummaryResult
 from steps.transcriber import TranscriptResult, TranscriptSegment
+
+
+def _denied_audio_admission(failure_kind_name: str) -> Any:
+    """STT 러너 preflight용 비수락 결과를 생성한다."""
+    from core.audio_quality import AudioFailureKind, AudioQualityResult, AudioQualityStatus
+
+    media_invalid = failure_kind_name == "MEDIA_INVALID"
+    return AudioQualityResult(
+        status=AudioQualityStatus.REJECT if media_invalid else AudioQualityStatus.ERROR,
+        mean_volume_db=None,
+        duration_seconds=1.0 if media_invalid else None,
+        reason=f"admission denied: {failure_kind_name}",
+        failure_kind=getattr(AudioFailureKind, failure_kind_name),
+    )
+
 
 # ============================================================
 # Fixtures
@@ -60,6 +79,8 @@ def tmp_config(tmp_path: Path) -> AppConfig:
     cfg = cfg.model_copy(update={"paths": PathsConfig(base_dir=str(tmp_path))})
     # outputs 디렉터리 생성
     cfg.paths.resolved_outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 기존 러너 테스트는 실제 미디어가 아닌 최소 바이트 fixture를 사용한다.
+    cfg.audio_quality.enabled = False
     return cfg
 
 
@@ -473,6 +494,78 @@ class TestLlmRunner:
                 )
             )
 
+    @pytest.mark.parametrize("configured_child", ["../outside", "/tmp/outside"])
+    def test_checkpoint_config는_base_dir_밖을_가리킬수없다(
+        self,
+        tmp_config: AppConfig,
+        dummy_manager: _DummyManager,
+        configured_child: str,
+    ) -> None:
+        """상위 traversal·외부 absolute checkpoint root는 source 접근 전에 차단한다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        tmp_config.paths.checkpoints_dir = configured_child
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            _run(
+                run_llm_ab_test(
+                    config=tmp_config,
+                    source_meeting_id="outside-meeting",
+                    variant_a=ModelSpec(label="A", model_id="model-a"),
+                    variant_b=ModelSpec(label="B", model_id="model-b"),
+                    scope=LlmScope(),
+                    model_manager=dummy_manager,
+                )
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    def test_base_dir_안의_absolute_checkpoint_config는_호환된다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+    ) -> None:
+        """기존 absolute-inside-base 설정은 안전한 경로로 계속 허용한다."""
+        inside_root = tmp_config.paths.resolved_checkpoints_dir
+        tmp_config.paths.checkpoints_dir = str(inside_root)
+
+        merge_path, _identity = inspect_llm_ab_source(
+            tmp_config,
+            meeting_with_merge,
+        )
+
+        assert merge_path == inside_root / meeting_with_merge / "merge.json"
+
+    def test_merge_checkpoint가_읽는동안_변경되면_SOURCE_BUSY(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """fd로 pin한 JSON도 in-place write가 겹치면 snapshot으로 승인하지 않는다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        merge_path = tmp_config.paths.resolved_checkpoints_dir / meeting_with_merge / "merge.json"
+        original_load = ab_test_runner.json.load
+
+        def mutate_after_load(handle: Any) -> Any:
+            payload = original_load(handle)
+            merge_path.write_text(
+                merge_path.read_text(encoding="utf-8") + " ",
+                encoding="utf-8",
+            )
+            return payload
+
+        monkeypatch.setattr(ab_test_runner.json, "load", mutate_after_load)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            inspect_llm_ab_source(tmp_config, meeting_with_merge)
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SOURCE_BUSY
+
 
 # ============================================================
 # STT 러너
@@ -480,6 +573,247 @@ class TestLlmRunner:
 
 
 class TestSttRunner:
+    def test_metadata_reserved_STT_admission취소는_cancelled로_종결한다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """route 예약 뒤 full admission await 취소가 pending ghost를 남기지 않는다."""
+        planned_id = "ab_20260409-143000_cafebabe"
+        variant_a = ModelSpec(label="A", model_id="stt-a")
+        variant_b = ModelSpec(label="B", model_id="stt-b")
+        wav_path, _identity = ab_test_runner._inspect_stt_audio_source(
+            tmp_config,
+            meeting_with_merge,
+        )
+        reserve_stt_ab_test(
+            tmp_config,
+            test_id=planned_id,
+            source_meeting_id=meeting_with_merge,
+            wav_path=wav_path,
+            variant_a=variant_a,
+            variant_b=variant_b,
+            allow_diarize_rerun=True,
+        )
+
+        async def scenario() -> None:
+            entered = asyncio.Event()
+
+            async def blocking_admission(*args: Any, **kwargs: Any) -> None:
+                entered.set()
+                await asyncio.Event().wait()
+
+            monkeypatch.setattr(
+                ab_test_runner,
+                "_require_stt_audio_admission",
+                blocking_admission,
+            )
+            task = asyncio.create_task(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=variant_a,
+                    variant_b=variant_b,
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                    metadata_reserved=True,
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        _run(scenario())
+        metadata = ab_test_store.read_metadata(tmp_config, planned_id)
+        assert metadata["status"] == "cancelled"
+        assert metadata["completed_at"] is not None
+
+    @pytest.mark.parametrize("configured_child", ["../outside", "/tmp/outside"])
+    def test_audio_input_config는_base_dir_밖을_가리킬수없다(
+        self,
+        tmp_config: AppConfig,
+        dummy_manager: _DummyManager,
+        configured_child: str,
+    ) -> None:
+        """STT A/B도 traversal·absolute-outside audio root를 preflight에서 차단한다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        tmp_config.paths.audio_input_dir = configured_child
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id="outside-meeting",
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                )
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    @pytest.mark.parametrize(
+        "failure_kind_name",
+        [
+            "MEDIA_INVALID",
+            "SOURCE_BUSY",
+            "INFRA_UNAVAILABLE",
+            "SECURITY_BLOCKED",
+        ],
+    )
+    def test_run_stt_ab_test는_audio_ACCEPT_전에_산출물을_만들지_않는다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_kind_name: str,
+    ) -> None:
+        """runner 직접 호출도 metadata·diarize·STT보다 먼저 공통 gate를 실행한다."""
+        import core.audio_quality as audio_quality
+
+        planned_id = "ab_20260409-143000_deadbeef"
+        validate = MagicMock(return_value=_denied_audio_admission(failure_kind_name))
+        ensure_diarize = AsyncMock(
+            side_effect=AssertionError(f"preflight bypassed: {failure_kind_name}")
+        )
+        run_variant = AsyncMock(
+            side_effect=AssertionError(f"STT started before admission: {failure_kind_name}")
+        )
+        monkeypatch.setattr(audio_quality, "validate_audio_quality", validate)
+        monkeypatch.setattr(
+            ab_test_runner,
+            "validate_audio_quality",
+            validate,
+            raising=False,
+        )
+        monkeypatch.setattr(ab_test_runner, "_ensure_diarize", ensure_diarize)
+        monkeypatch.setattr(ab_test_runner, "_run_stt_variant", run_variant)
+        tmp_config.audio_quality.enabled = True
+
+        with pytest.raises(Exception, match=failure_kind_name):
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                )
+            )
+
+        validate.assert_called_once()
+        ensure_diarize.assert_not_called()
+        run_variant.assert_not_called()
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests" / planned_id).exists()
+
+    def test_run_stt_ab_test는_중간_symlink_target을_열지_않는다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+    ) -> None:
+        """audio_input 경로 중간 symlink는 gate disabled에서도 SECURITY_BLOCKED다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        base_dir = tmp_config.paths.resolved_base_dir
+        external_input = base_dir / "external" / "input"
+        external_input.mkdir(parents=True)
+        external_wav = external_input / f"{meeting_with_merge}.wav"
+        external_wav.write_bytes(b"external audio")
+        (base_dir / "jump").symlink_to(base_dir / "external", target_is_directory=True)
+        tmp_config.paths.audio_input_dir = "jump/input"
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                )
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert external_wav.read_bytes() == b"external audio"
+        assert not (base_dir / "ab_tests").exists()
+
+    def test_base_dir_symlink도_resolve로_숨기지_않고_차단한다(
+        self,
+        tmp_path: Path,
+        dummy_manager: _DummyManager,
+    ) -> None:
+        """raw base_dir가 symlink면 외부 audio_input target을 열지 않는다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        external_base = tmp_path.resolve() / "external-base"
+        external_input = external_base / "audio_input"
+        external_input.mkdir(parents=True)
+        meeting_id = "external-meeting"
+        external_wav = external_input / f"{meeting_id}.wav"
+        external_wav.write_bytes(b"EXTERNAL")
+        linked_base = tmp_path.resolve() / "linked-base"
+        linked_base.symlink_to(external_base, target_is_directory=True)
+        config = AppConfig().model_copy(update={"paths": PathsConfig(base_dir=str(linked_base))})
+        config.audio_quality.enabled = False
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            _run(
+                run_stt_ab_test(
+                    config=config,
+                    source_meeting_id=meeting_id,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                )
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert external_wav.read_bytes() == b"EXTERNAL"
+
+    def test_diarize예외도_metadata와_모듈상태를_final_cleanup한다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """variant 이전 diarize 실패도 pending/current/cancel 상태를 남기지 않는다."""
+        planned_id = "ab_20260409-143000_deadbeef"
+        ensure_diarize = AsyncMock(side_effect=RuntimeError("diarize boom"))
+        monkeypatch.setattr(ab_test_runner, "_ensure_diarize", ensure_diarize)
+        ab_test_runner._cancel_requests.add(planned_id)
+
+        with pytest.raises(RuntimeError, match="diarize boom"):
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                )
+            )
+
+        meta = ab_test_store.read_metadata(tmp_config, planned_id)
+        assert meta["status"] == "failed"
+        assert meta["current_variant"] is None
+        assert meta["current_step"] is None
+        assert "diarize boom" in meta["error"]
+        assert ab_test_runner._current_test_id is None
+        assert planned_id not in ab_test_runner._cancel_requests
+
     def test_run_stt_ab_test_diarize_체크포인트_없으면_자동실행(
         self,
         tmp_config: AppConfig,
@@ -592,6 +926,145 @@ class TestSttRunner:
 
 
 class TestLock:
+    @pytest.mark.parametrize("test_type", ["llm", "stt"])
+    def test_reserved_lock_acquire취소는_cancelled로_종결한다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+        test_type: str,
+    ) -> None:
+        """locked() 확인 뒤 acquire에서 취소되어도 metadata는 terminal 상태다."""
+        planned_id = (
+            "ab_20260409-143000_a11ce001" if test_type == "llm" else "ab_20260409-143000_a11ce002"
+        )
+        entered = asyncio.Event()
+
+        class BlockingLock:
+            def locked(self) -> bool:
+                return False
+
+            async def __aenter__(self) -> None:
+                entered.set()
+                await asyncio.Event().wait()
+
+            async def __aexit__(self, *args: Any) -> None:
+                return None
+
+        fake_lock = BlockingLock()
+        monkeypatch.setattr(ab_test_runner, "_get_ab_test_lock", lambda: fake_lock)
+
+        async def scenario() -> None:
+            if test_type == "llm":
+                operation = run_llm_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="llm-a"),
+                    variant_b=ModelSpec(label="B", model_id="llm-b"),
+                    scope=LlmScope(),
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                )
+            else:
+                operation = run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                )
+            task = asyncio.create_task(operation)
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        _run(scenario())
+        metadata = ab_test_store.read_metadata(tmp_config, planned_id)
+        assert metadata["status"] == "cancelled"
+        assert metadata["completed_at"] is not None
+
+    @pytest.mark.parametrize("test_type", ["llm", "stt"])
+    def test_route예약후_lock_race는_pending을_failed로_종료한다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        test_type: str,
+    ) -> None:
+        """route busy check 뒤 생긴 경합도 반환된 ID를 pending으로 남기지 않는다."""
+        planned_id = (
+            "ab_20260409-143000_deadbeef" if test_type == "llm" else "ab_20260409-143000_feedface"
+        )
+        variant_a = ModelSpec(label="A", model_id=f"{test_type}-a")
+        variant_b = ModelSpec(label="B", model_id=f"{test_type}-b")
+
+        async def scenario() -> None:
+            if test_type == "llm":
+                merge_path, expected_identity = inspect_llm_ab_source(
+                    tmp_config,
+                    meeting_with_merge,
+                )
+                reserve_llm_ab_test(
+                    tmp_config,
+                    test_id=planned_id,
+                    source_meeting_id=meeting_with_merge,
+                    merge_path=merge_path,
+                    variant_a=variant_a,
+                    variant_b=variant_b,
+                    scope=LlmScope(),
+                )
+            else:
+                wav_path, expected_identity = ab_test_runner._inspect_stt_audio_source(
+                    tmp_config,
+                    meeting_with_merge,
+                )
+                reserve_stt_ab_test(
+                    tmp_config,
+                    test_id=planned_id,
+                    source_meeting_id=meeting_with_merge,
+                    wav_path=wav_path,
+                    variant_a=variant_a,
+                    variant_b=variant_b,
+                    allow_diarize_rerun=True,
+                )
+
+            lock = ab_test_runner._get_ab_test_lock()
+            await lock.acquire()
+            try:
+                with pytest.raises(RuntimeError, match="이미 진행 중"):
+                    if test_type == "llm":
+                        await run_llm_ab_test(
+                            config=tmp_config,
+                            source_meeting_id=meeting_with_merge,
+                            variant_a=variant_a,
+                            variant_b=variant_b,
+                            scope=LlmScope(),
+                            model_manager=dummy_manager,
+                            test_id=planned_id,
+                            expected_merge_identity=expected_identity,
+                            metadata_reserved=True,
+                        )
+                    else:
+                        await run_stt_ab_test(
+                            config=tmp_config,
+                            source_meeting_id=meeting_with_merge,
+                            variant_a=variant_a,
+                            variant_b=variant_b,
+                            model_manager=dummy_manager,
+                            test_id=planned_id,
+                            metadata_reserved=True,
+                        )
+            finally:
+                lock.release()
+
+        _run(scenario())
+        metadata = ab_test_store.read_metadata(tmp_config, planned_id)
+        assert metadata["status"] == "failed"
+        assert "이미 진행 중" in metadata["error"]
+
     def test_ab_test_lock_직렬화(
         self,
         tmp_config: AppConfig,

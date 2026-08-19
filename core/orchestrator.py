@@ -15,10 +15,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from core.job_queue import JobStatus
+from core.io_utils import atomic_write_json
+from core.job_queue import (
+    JobStatus,
+    RetranscribeClaim,
+    cleanup_retranscribe_staging,
+    parse_audio_rejection_claim,
+    parse_retranscribe_claim,
+    rollback_retranscribe_staging,
+)
 from core.perf_stats import PerfStats
+from core.pipeline import InvalidInputError, PipelineManager
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +151,112 @@ class JobProcessor:
             logger.error(f"orphaned 작업 조회 실패: {e}")
             return
 
-        orphaned = [j for j in all_jobs if j.status in in_progress_statuses]
+        # watcher가 복구할 audio-rejection claim은 recording 상태를 durable
+        # transaction lock으로 사용한다. watcher가 비활성/실패한 startup에서도
+        # generic orphan 복구가 이 marker를 queued/recorded로 풀지 않도록 명시한다.
+        audio_rejection_claim_ids: set[int] = set()
+        for job in all_jobs:
+            if job.status != JobStatus.RECORDING.value:
+                continue
+            audio_rejection_claim = parse_audio_rejection_claim(
+                str(getattr(job, "requested_action", ""))
+            )
+            if audio_rejection_claim is None:
+                continue
+            audio_rejection_claim_ids.add(job.id)
+            logger.warning(
+                "중단된 audio rejection claim 보존: job_id=%s, meeting_id=%s, token=%s",
+                job.id,
+                job.meeting_id,
+                audio_rejection_claim.token,
+            )
+
+        # 재전사 claim은 일반 recording과 달리 원래 completed/failed 상태와
+        # staging 위치를 payload에 보존한다. 파일을 먼저 원복하고 token CAS로
+        # DB를 되돌려야 crash 시 산출물/상태가 함께 유실되지 않는다.
+        retranscribe_claims: list[tuple[Any, RetranscribeClaim]] = []
+        for job in all_jobs:
+            if job.status != JobStatus.RECORDING.value:
+                continue
+            claim = parse_retranscribe_claim(str(getattr(job, "requested_action", "")))
+            if claim is not None:
+                retranscribe_claims.append((job, claim))
+
+        for job, claim in retranscribe_claims:
+            try:
+                config = getattr(self._pipeline, "_config", None)
+                if config is None:
+                    raise RuntimeError("파이프라인 설정을 찾을 수 없습니다")
+                checkpoints_root = self._configured_storage_root(
+                    config,
+                    "checkpoints_dir",
+                    config.paths.resolved_checkpoints_dir,
+                )
+                outputs_root = self._configured_storage_root(
+                    config,
+                    "outputs_dir",
+                    config.paths.resolved_outputs_dir,
+                )
+                if claim.phase == "committing":
+                    await asyncio.to_thread(
+                        cleanup_retranscribe_staging,
+                        checkpoints_root,
+                        outputs_root,
+                        job.meeting_id,
+                        claim.token,
+                    )
+                    await asyncio.to_thread(
+                        self._job_queue.queue.reset_for_retranscribe,
+                        job.id,
+                        claim.token,
+                    )
+                    logger.warning(
+                        "중단된 재전사 commit 완료: meeting_id=%s, token=%s",
+                        job.meeting_id,
+                        claim.token,
+                    )
+                    continue
+                await asyncio.to_thread(
+                    rollback_retranscribe_staging,
+                    checkpoints_root,
+                    outputs_root,
+                    job.meeting_id,
+                    claim.token,
+                )
+                if claim.phase == "purging":
+                    await asyncio.to_thread(
+                        self._write_retranscribe_recovery_marker,
+                        checkpoints_root,
+                        job.meeting_id,
+                        claim,
+                    )
+                await asyncio.to_thread(
+                    self._job_queue.queue.restore_retranscribe_claim,
+                    job.id,
+                    claim.token,
+                )
+                logger.warning(
+                    "중단된 재전사 claim 복구: meeting_id=%s, phase=%s, status=%s",
+                    job.meeting_id,
+                    claim.phase,
+                    claim.original_status,
+                )
+            except Exception as e:
+                # 파일 원복/marker가 완결되지 않았다면 recording claim을 그대로
+                # 두어 다음 startup에서 다시 복구한다. queued로 덮어쓰지 않는다.
+                logger.error(
+                    "중단된 재전사 claim 복구 실패: job_id=%s, meeting_id=%s, phase=%s, error=%s",
+                    job.id,
+                    job.meeting_id,
+                    claim.phase,
+                    e,
+                )
+
+        orphaned = [
+            job
+            for job in all_jobs
+            if job.status in in_progress_statuses and job.id not in audio_rejection_claim_ids
+        ]
         if not orphaned:
             return
 
@@ -162,6 +278,66 @@ class JobProcessor:
                     f"meeting_id={job.meeting_id}, status={job.status}, error={e}"
                 )
         logger.info(f"orphaned 작업 복구 완료: {recovered}/{len(orphaned)}건")
+
+    @staticmethod
+    def _configured_storage_root(config: Any, field_name: str, fallback: Path) -> Path:
+        """resolve()가 숨긴 base symlink를 보존한 lexical storage root를 반환한다."""
+        raw_base = getattr(config.paths, "base_dir", None)
+        raw_child = getattr(config.paths, field_name, None)
+        if isinstance(raw_base, (str, Path)) and isinstance(raw_child, (str, Path)):
+            lexical_base = Path(raw_base).expanduser().absolute()
+            child = Path(raw_child).expanduser()
+            if child == Path(".") or ".." in child.parts or "\x00" in str(child):
+                raise ValueError(
+                    f"{field_name}은 base_dir 하위 상대경로여야 합니다: {raw_child!r}"
+                )
+            candidate = (
+                child.absolute() if child.is_absolute() else (lexical_base / child).absolute()
+            )
+            try:
+                relative = candidate.relative_to(lexical_base)
+            except ValueError as exc:
+                raise ValueError(f"{field_name}이 base_dir 밖을 가리킵니다: {candidate}") from exc
+            if not relative.parts:
+                raise ValueError(f"{field_name}은 base_dir 하위 경로여야 합니다")
+            return candidate
+        return Path(fallback).expanduser().absolute()
+
+    def _write_retranscribe_recovery_marker(
+        self,
+        checkpoints_root: Path,
+        meeting_id: str,
+        claim: RetranscribeClaim,
+    ) -> None:
+        """purge 진입 후 crash한 회의에 재색인 필요 marker를 원자 기록한다."""
+        PipelineManager._validate_meeting_id(meeting_id)
+        lexical_root = PipelineManager._validate_storage_directory(
+            checkpoints_root,
+            label="retranscribe recovery checkpoint root",
+        )
+        meeting_dir = lexical_root / meeting_id
+        if meeting_dir.parent != lexical_root:
+            raise InvalidInputError(f"유효하지 않은 회의 ID입니다: {meeting_id!r}")
+        PipelineManager._validate_storage_directory(
+            meeting_dir,
+            label="retranscribe recovery meeting",
+        )
+        marker_path = PipelineManager._validate_storage_artifact(
+            meeting_dir / "reindex_required.json",
+            label="retranscribe recovery marker",
+        )
+        atomic_write_json(
+            marker_path,
+            {
+                "meeting_id": meeting_id,
+                "reason": "재전사 index purge 도중 앱이 종료되어 재색인이 필요합니다.",
+                "claim_token": claim.token,
+                "claim_phase": claim.phase,
+                "created_at": datetime.now().isoformat(),
+                "recommended_action": f"POST /api/meetings/{meeting_id}/reindex",
+            },
+            backup=False,
+        )
 
     async def stop(self) -> None:
         """작업 루프를 중지한다.
@@ -536,6 +712,24 @@ class JobProcessor:
             )
             logger.info(f"작업 종료 중단 처리: job_id={job_id}, meeting_id={meeting_id}")
             raise
+
+        except InvalidInputError as e:
+            try:
+                await asyncio.to_thread(
+                    self._job_queue.queue.force_set_status,
+                    job_id,
+                    JobStatus.RECORDED,
+                    "",
+                )
+            except Exception as status_exc:
+                logger.error(
+                    f"입력 품질 보류 후 상태 복귀 실패: job_id={job_id}, error={status_exc}"
+                )
+            await self._thermal_manager.notify_job_completed()
+            logger.info(
+                f"입력 품질 검증 비수락으로 작업 보류: "
+                f"job_id={job_id}, meeting_id={meeting_id}, reason={e}"
+            )
 
         except Exception as e:
             # 실패 상태 업데이트

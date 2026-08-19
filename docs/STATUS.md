@@ -25,6 +25,45 @@
 
 ## 완료된 주요 작업
 
+### Audio Admission Hardening (2026-08-18)
+
+- 전사 최소 길이 기본값을 30초로 올리고 앱 녹음 조기 파기 기준도 30초로 맞췄습니다.
+  품질 gate는 성공한 ffprobe duration과 16 kHz mono full-decode sample duration 중
+  짧은 값을 사용하므로 잘린 파일, WebM preroll, AAC encoder padding을 보수적으로
+  처리합니다. 정확히 30초는 통과하며 저장 미디어가 30초 미만일 때만 길이 정책으로
+  거부합니다.
+- `MEDIA_INVALID`만 복구 가능한 `audio_quarantine/`으로 이동합니다. 도구 부재·timeout,
+  writable/growing source, symlink·경로 차단은 원본을 보존하고 queue/STT만 막습니다.
+  quarantine 이동은 no-follow, 동일 파일시스템, 고유 목적지, identity 재검증 계약을
+  사용해 외부 target 이동과 동일명 덮어쓰기를 방지합니다.
+- watcher는 생성·이동·수정 이벤트와 bounded readiness timeout을 사용합니다. 레거시
+  queued/failed 작업은 실행 의도를 durable hold payload에 저장한 뒤 재감사하여 입력
+  오류가 UI `failed` 상태로 반복되지 않게 합니다.
+- 기존 DB 작업의 미디어 거부는 `claim → exact quarantine move → CAS finalize` journal로
+  처리합니다. claim과 파일 이동 또는 DB 정리 사이 앱이 종료돼도 startup recovery가
+  source/quarantine inode를 대조해 멱등하게 완료하며, 모호한 상태에서는 양쪽을 보존합니다.
+- 브라우저 업로드는 raw `base_dir`부터 no-follow로 입력 디렉터리를 열고, 예측 불가능한
+  0600 temp inode를 완전히 기록·fsync한 뒤 same-directory hardlink로 무덮어쓰기
+  publish합니다. API는 직접 queue에 넣지 않으며 publish된 파일도 watcher의 동일 gate를
+  통과해야 합니다.
+- Pipeline/Transcriber 최종 장벽과 retry/force/re-transcribe/STT A/B/batch preflight가
+  같은 typed gate를 사용합니다. API는 media 422, busy 409, infra 503, security 400으로
+  구분하며 비수락 시 상태·검색 인덱스·기존 산출물을 먼저 변경하지 않습니다.
+- 재전사는 token CAS와 `claimed → staging → purging → committing` durable phase를
+  사용합니다. 앱 종료 또는 파일/인덱스 작업 실패 시 startup recovery가 rollback하거나
+  commit을 이어서 완료합니다. staging·rollback·checkpoint 조회와 recovery marker 기록은
+  열린 root/file descriptor 기준으로 수행합니다. batch queue mutation은 전체 preflight 뒤
+  단일 SQLite transaction으로 수행합니다.
+- full-decode timeout은 `audio_quality.decode_timeout_*` 설정으로 길이에 비례해 계산하며,
+  secure file identity와 gate 설정이 같은 ACCEPT 결과만 bounded process-local LRU에서
+  재사용합니다.
+
+오디오 admission 집중 검증:
+
+```bash
+pytest tests/test_audio_quality.py tests/test_audio_quality_real_media.py tests/test_audio_converter.py tests/test_quarantine.py tests/test_watcher.py tests/test_audio_admission_recovery.py tests/test_pipeline.py tests/test_transcriber.py tests/test_diarizer.py tests/test_diarization_worker.py tests/test_orchestrator.py tests/test_ab_test_api.py tests/test_ab_test_runner.py tests/test_routes.py tests/test_routes_home_dashboard.py tests/test_routes_meetings_batch.py tests/test_routes_reindex.py tests/test_job_queue.py tests/test_config.py -q
+```
+
 ### Backend Reliability Hardening (2026-06-20)
 
 - `/api/chat` 응답에 `llm_called`, `grounding_status`, `repair_actions`를 추가했습니다.

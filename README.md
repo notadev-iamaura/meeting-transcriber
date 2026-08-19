@@ -621,6 +621,29 @@ bash scripts/setup_launchagent.sh
 | `recording.prefer_system_audio` | BlackHole 우선 사용 | `true` |
 | `recording.sample_rate` | 샘플레이트 | `16000` |
 | `recording.max_duration_seconds` | 최대 녹음 시간 | `14400` (4시간) |
+| `recording.min_duration_seconds` | 앱 녹음 파일 조기 파기 기준 | `30`초 |
+| `audio_quality.min_duration_seconds` | 전사 큐 진입 최소 실제 재생 시간 | `30.0`초 |
+| `audio_quality.decode_timeout_base_seconds` | ffmpeg full-decode 최소 timeout | `60.0`초 |
+| `audio_quality.decode_timeout_factor` | 음성 길이 비례 timeout 계수 | `0.25` |
+| `audio_quality.decode_timeout_cap_seconds` | ffmpeg full-decode timeout 상한 | `900.0`초 |
+| `watcher.file_ready_timeout_seconds` | 쓰기 중인 입력 파일의 readiness 최대 대기 | `30.0`초 |
+
+`audio_quality.enabled: true`일 때 길이는 ffmpeg 16 kHz mono full-decode
+sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니다.
+이로써 잘린 파일과 codec padding을 둘 다 보수적으로 처리합니다. 저장된 미디어 기준
+30초 미만이거나 파일 자체의 손상이 확정된 음성은 전사 큐에 등록하지 않고
+`~/.meeting-transcriber/audio_quarantine/`으로 이동합니다. 도구 부재·timeout·source busy·
+보안 차단처럼 파일 결함을 확정할 수 없는 경우에는 원본을 보존하고 큐/STT 진입만
+차단합니다. 정확히 30초인 파일은 볼륨 조건을 만족하면 통과합니다.
+
+입력 파일이나 `audio_input`/`audio_quarantine` 등 설정 경로의 symlink는 지원하지
+않으며 외부 target을 읽거나 이동하지 않습니다. 쓰기 중인 파일은 readiness timeout 뒤에도
+원본을 보존하고 후속 변경 또는 재시작 때 다시 검사합니다. `audio_quality.enabled: false`는
+길이·볼륨 full-decode 정책만 끄며, 경로·일반 파일·쓰기 완료 안전 검사는 유지합니다.
+브라우저 업로드도 raw 설정 경로를 no-follow로 검증하고 완성된 임시 inode를 원자적으로
+무덮어쓰기 publish한 뒤, watcher의 같은 품질 gate를 거쳐야만 queue에 등록됩니다.
+기존 DB 작업을 격리할 때는 source identity와 예약 목적지를 journal에 먼저 기록하므로,
+격리 이동과 DB 정리 사이 앱이 종료돼도 다음 시작에서 안전하게 이어서 완료합니다.
 
 환경변수로 오버라이드 가능:
 

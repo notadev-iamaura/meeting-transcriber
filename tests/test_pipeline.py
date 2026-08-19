@@ -65,6 +65,11 @@ def mock_config(tmp_path: Path) -> MagicMock:
     config.audio.format = "wav"
     config.audio.supported_input_formats = ["wav", "mp3", "m4a"]
 
+    # 일반 파이프라인 단위 테스트는 가짜 오디오 바이트를 사용하므로 별도 입력
+    # 검증 테스트를 제외하고 실제 ffprobe 기반 품질 게이트를 비활성화한다.
+    config.audio_quality.enabled = False
+    config.audio_quality.min_duration_seconds = 30.0
+
     # stt 설정
     config.stt.model_name = "whisper-medium-ko-zeroth"
     config.stt.language = "ko"
@@ -390,7 +395,7 @@ class TestPipelineState:
     ) -> None:
         """쓰기 실패 시 기존 파일이 보존되는지 확인한다.
 
-        json.dump가 실패하면 원본 파일은 손상되지 않아야 한다.
+        공용 atomic writer가 실패하면 원본 파일은 손상되지 않아야 한다.
         """
         state = PipelineState(
             meeting_id="original",
@@ -403,9 +408,9 @@ class TestPipelineState:
         state.save(state_path)
         original_content = state_path.read_text(encoding="utf-8")
 
-        # json.dump가 실패하도록 모킹
+        # unique temp atomic write가 실패하도록 모킹
         with (
-            patch("core.pipeline.json.dump", side_effect=OSError("쓰기 실패")),
+            patch("core.pipeline.atomic_write_text", side_effect=OSError("쓰기 실패")),
             pytest.raises(IOError, match="쓰기 실패"),
         ):
             state.save(state_path)
@@ -447,7 +452,7 @@ class TestPipelineState:
             # 인자 확인: (임시 파일 경로, 최종 파일 경로)
             call_args = mock_replace.call_args[0]
             assert call_args[0].endswith(".tmp"), "os.replace의 소스가 .tmp 파일이 아닙니다"
-            assert call_args[1] == str(state_path), "os.replace의 대상이 올바르지 않습니다"
+            assert Path(call_args[1]) == state_path, "os.replace의 대상이 올바르지 않습니다"
 
 
 # === PipelineManager 입력 검증 테스트 ===
@@ -490,6 +495,426 @@ class TestPipelineManagerValidation:
         dir_path.mkdir()
         with pytest.raises(InvalidInputError, match="파일이 아닙니다"):
             await pipeline.run(dir_path)
+
+    @pytest.mark.asyncio
+    async def test_입력_symlink는_resolve전에_차단한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Pipeline은 target을 따라가기 전에 원 direntry의 symlink를 거부한다."""
+        original_audio = audio_file.read_bytes()
+        symlink_path = tmp_path / "linked-meeting.m4a"
+        symlink_path.symlink_to(audio_file)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크"):
+            await pipeline.run(symlink_path, meeting_id="blocked_symlink")
+
+        assert audio_file.read_bytes() == original_audio
+        assert not (tmp_path / "outputs" / "blocked_symlink").exists()
+
+    @pytest.mark.asyncio
+    async def test_입력의_중간_symlink도_외부_target전에_차단한다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """Pipeline은 경로 중간 요소의 symlink도 따라가지 않는다."""
+        safe_root = tmp_path.resolve()
+        external_dir = safe_root / "external"
+        external_dir.mkdir()
+        target = external_dir / "meeting.wav"
+        target.write_bytes(b"external audio")
+        jump = safe_root / "jump"
+        jump.symlink_to(external_dir, target_is_directory=True)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info:
+            await pipeline.run(jump / target.name, meeting_id="blocked_parent_symlink")
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert target.read_bytes() == b"external audio"
+
+    @pytest.mark.parametrize(
+        "meeting_id",
+        ["", ".", "..", "parent/child", r"parent\child", "bad\x00id"],
+    )
+    def test_meeting_id는_단일_경로요소만_허용한다(
+        self,
+        pipeline: PipelineManager,
+        meeting_id: str,
+    ) -> None:
+        """dot segment·구분자·NUL ID는 상태 경로 계산 전에 거부한다."""
+        with pytest.raises(InvalidInputError, match="유효하지 않은 회의 ID"):
+            pipeline.get_status(meeting_id)
+
+    @pytest.mark.parametrize("meeting_id", ["회의 1", "..."])
+    def test_안전한_한국어_공백_점_ID는_호환성을_유지한다(
+        self,
+        pipeline: PipelineManager,
+        meeting_id: str,
+    ) -> None:
+        """기존 한국어·공백 ID와 dot이 세 개인 단일 요소는 계속 허용한다."""
+        assert pipeline.get_status(meeting_id) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["run", "resume", "get_status"])
+    async def test_체크포인트_meeting_symlink는_state를_읽기전에_차단한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+        operation: str,
+    ) -> None:
+        """모든 public 상태 경로는 외부 checkpoint child를 따라가지 않는다."""
+        meeting_id = f"linked_state_{operation}"
+        external = tmp_path.resolve() / f"external_{operation}"
+        external.mkdir()
+        sentinel = external / "pipeline_state.json"
+        sentinel.write_text("EXTERNAL-SENTINEL", encoding="utf-8")
+        checkpoints = tmp_path.resolve() / "checkpoints"
+        checkpoints.mkdir(exist_ok=True)
+        (checkpoints / meeting_id).symlink_to(external, target_is_directory=True)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info:
+            if operation == "run":
+                await pipeline.run(audio_file, meeting_id=meeting_id)
+            elif operation == "resume":
+                await pipeline.resume(meeting_id)
+            else:
+                pipeline.get_status(meeting_id)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert sentinel.read_text(encoding="utf-8") == "EXTERNAL-SENTINEL"
+
+    @pytest.mark.asyncio
+    async def test_출력_meeting_symlink는_외부에_쓰기전에_차단한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """안전한 meeting_id라도 outputs direct child symlink는 허용하지 않는다."""
+        meeting_id = "linked_output"
+        external = tmp_path.resolve() / "external_output"
+        external.mkdir()
+        sentinel = external / "keep.txt"
+        sentinel.write_text("KEEP", encoding="utf-8")
+        outputs = tmp_path.resolve() / "outputs"
+        outputs.mkdir(exist_ok=True)
+        (outputs / meeting_id).symlink_to(external, target_is_directory=True)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info:
+            await pipeline.run(audio_file, meeting_id=meeting_id)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert sentinel.read_text(encoding="utf-8") == "KEEP"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["run", "resume", "get_status"])
+    async def test_pipeline_state_file_symlink는_외부파일을_읽지_않는다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+        operation: str,
+    ) -> None:
+        """안전한 checkpoint dir 안의 state symlink도 public 경로에서 거부한다."""
+        meeting_id = f"state_file_link_{operation}"
+        state_dir = tmp_path.resolve() / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        external_state = tmp_path.resolve() / f"external-state-{operation}.json"
+        external_state.write_text("EXTERNAL", encoding="utf-8")
+        (state_dir / "pipeline_state.json").symlink_to(external_state)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info:
+            if operation == "run":
+                await pipeline.run(audio_file, meeting_id=meeting_id)
+            elif operation == "resume":
+                await pipeline.resume(meeting_id)
+            else:
+                pipeline.get_status(meeting_id)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert external_state.read_text(encoding="utf-8") == "EXTERNAL"
+
+    def test_config_base_symlink는_resolved_path로_숨겨지지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Pipeline init은 raw base lexical 경로를 보존해 root symlink를 막는다."""
+        from config import AppConfig, PathsConfig
+
+        real_base = tmp_path.resolve() / "real-base"
+        real_base.mkdir()
+        linked_base = tmp_path.resolve() / "linked-base"
+        linked_base.symlink_to(real_base, target_is_directory=True)
+        config = AppConfig().model_copy(update={"paths": PathsConfig(base_dir=str(linked_base))})
+        guarded = PipelineManager(config, MagicMock())
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info:
+            guarded.get_status("safe-meeting")
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+
+    @pytest.mark.parametrize("field_name", ["outputs_dir", "checkpoints_dir"])
+    @pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
+    def test_storage_config는_base_dir_밖으로_escape할수없다(
+        self,
+        tmp_path: Path,
+        field_name: str,
+        escape_kind: str,
+    ) -> None:
+        """runtime root 계산은 traversal과 absolute-outside 설정을 거부한다."""
+        from config import AppConfig, PathsConfig
+        from core.audio_quality import AudioFailureKind
+
+        base = tmp_path.resolve() / "base"
+        base.mkdir()
+        outside = tmp_path.resolve() / "outside"
+        configured_child = "../outside" if escape_kind == "parent" else str(outside)
+        path_values = {field_name: configured_child}
+        config = AppConfig().model_copy(
+            update={
+                "paths": PathsConfig(
+                    base_dir=str(base),
+                    **path_values,
+                )
+            }
+        )
+
+        with pytest.raises(InvalidInputError) as exc_info:
+            PipelineManager(config, MagicMock())
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert not outside.exists()
+
+    def test_storage_config의_absolute_inside_base는_호환된다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """base 내부 absolute storage 설정은 기존 배포 호환을 위해 허용한다."""
+        from config import AppConfig, PathsConfig
+
+        base = tmp_path.resolve() / "base"
+        outputs = base / "custom-outputs"
+        checkpoints = base / "custom-checkpoints"
+        outputs.mkdir(parents=True)
+        checkpoints.mkdir()
+        config = AppConfig().model_copy(
+            update={
+                "paths": PathsConfig(
+                    base_dir=str(base),
+                    outputs_dir=str(outputs),
+                    checkpoints_dir=str(checkpoints),
+                )
+            }
+        )
+
+        guarded = PipelineManager(config, MagicMock())
+
+        assert guarded.get_status("회의 1") is None
+
+    @pytest.mark.asyncio
+    async def test_merge_checkpoint_symlink는_LLM_resume에서_읽지_않는다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """run_llm_steps도 final checkpoint artifact를 no-follow 검사한다."""
+        meeting_id = "linked_merge_file"
+        checkpoint_dir = tmp_path.resolve() / "checkpoints" / meeting_id
+        checkpoint_dir.mkdir(parents=True)
+        external_merge = tmp_path.resolve() / "external-merge.json"
+        external_merge.write_text('{"utterances": []}', encoding="utf-8")
+        (checkpoint_dir / "merge.json").symlink_to(external_merge)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크"):
+            await pipeline.run_llm_steps(meeting_id)
+
+        assert external_merge.read_text(encoding="utf-8") == '{"utterances": []}'
+
+    def test_checkpoint_delete는_symlink_target을_보존한다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """재실행용 checkpoint 삭제도 final symlink를 입력 오류로 거부한다."""
+        checkpoint_dir = tmp_path.resolve() / "checkpoints" / "delete_link"
+        checkpoint_dir.mkdir(parents=True)
+        external = tmp_path.resolve() / "external-delete.json"
+        external.write_text("KEEP", encoding="utf-8")
+        linked = checkpoint_dir / "correct.json"
+        linked.symlink_to(external)
+
+        with pytest.raises(InvalidInputError, match="심볼릭 링크"):
+            pipeline._delete_checkpoint_if_exists(linked)
+
+        assert external.read_text(encoding="utf-8") == "KEEP"
+
+    def test_state_save는_고정_tmp_symlink를_사용하지_않는다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """공격자가 만든 pipeline_state.tmp가 외부 파일 overwrite로 이어지지 않는다."""
+        meeting_id = "safe_atomic_state"
+        state_path = pipeline._get_state_path(meeting_id)
+        state_path.parent.mkdir(parents=True)
+        external = tmp_path.resolve() / "external-tmp-target"
+        external.write_text("KEEP", encoding="utf-8")
+        state_path.with_suffix(".tmp").symlink_to(external)
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/missing.wav",
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        )
+
+        pipeline._save_state(state, state_path)
+
+        assert state_path.is_file()
+        assert external.read_text(encoding="utf-8") == "KEEP"
+
+    @pytest.mark.asyncio
+    async def test_품질검사중_symlink교체는_외부_target_decode전에_차단한다(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """full gate 전후 identity가 달라지면 ACCEPT 결과도 무효다."""
+        import core.audio_quality as audio_quality
+
+        target = tmp_path / "external-target.wav"
+        target.write_bytes(b"DO-NOT-DECODE")
+        mock_config.audio_quality.enabled = True
+
+        def swap_to_symlink(*args: object, **kwargs: object) -> audio_quality.AudioQualityResult:
+            audio_file.unlink()
+            audio_file.symlink_to(target)
+            return audio_quality.AudioQualityResult(
+                status=audio_quality.AudioQualityStatus.ACCEPT,
+                mean_volume_db=-20.0,
+                duration_seconds=30.0,
+            )
+
+        identity = pipeline._validate_input(audio_file)
+        with (
+            patch("core.pipeline.validate_audio_quality", side_effect=swap_to_symlink),
+            pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info,
+        ):
+            await pipeline._validate_audio_duration(audio_file, identity)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert target.read_bytes() == b"DO-NOT-DECODE"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status_name", "failure_kind_name", "quarantine_safe", "reason"),
+        [
+            ("REJECT", "MEDIA_INVALID", True, "30초 미만"),
+            ("REJECT", "MEDIA_INVALID", True, "저볼륨"),
+            ("ERROR", "MEDIA_INVALID", True, "손상 미디어"),
+            ("ERROR", "INFRA_UNAVAILABLE", False, "ffmpeg unavailable"),
+        ],
+    )
+    async def test_파이프라인_full_gate는_모든_비수락을_산출물_생성전에_거부(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+        status_name: str,
+        failure_kind_name: str,
+        quarantine_safe: bool,
+        reason: str,
+    ) -> None:
+        """저볼륨·손상·인프라 오류 모두 Pipeline 입구의 full gate가 차단한다."""
+        import core.audio_quality as audio_quality
+
+        mock_config.audio_quality.enabled = True
+        mock_config.audio_quality.min_mean_volume_db = -40.0
+        admission = audio_quality.AudioQualityResult(
+            status=getattr(audio_quality.AudioQualityStatus, status_name),
+            mean_volume_db=-50.0 if reason == "저볼륨" else None,
+            duration_seconds=60.0 if reason == "저볼륨" else None,
+            reason=reason,
+            failure_kind=getattr(audio_quality.AudioFailureKind, failure_kind_name),
+        )
+        assert admission.quarantine_safe is quarantine_safe
+        validate = MagicMock(return_value=admission)
+        meeting_id = f"blocked_{failure_kind_name.lower()}_{status_name.lower()}"
+
+        with (
+            patch("core.audio_quality.validate_audio_quality", validate),
+            patch("core.pipeline.validate_audio_quality", validate, create=True),
+        ):
+            with pytest.raises(InvalidInputError, match=reason):
+                await pipeline.run(audio_file, meeting_id=meeting_id)
+
+        validate.assert_called_once()
+        assert not (tmp_path / "outputs" / meeting_id).exists()
+        assert not (tmp_path / "checkpoints" / meeting_id).exists()
+
+    @pytest.mark.asyncio
+    async def test_품질게이트_disabled면_검증함수를_호출하지_않는다(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """audio_quality.enabled=false는 기존 Pipeline 입력 경로를 유지한다."""
+        validate = MagicMock(side_effect=AssertionError("disabled gate must not run"))
+        mock_config.audio_quality.enabled = False
+        with (
+            patch("core.audio_quality.validate_audio_quality", validate),
+            patch("core.pipeline.validate_audio_quality", validate, create=True),
+        ):
+            identity = pipeline._validate_input(audio_file)
+            await pipeline._validate_audio_duration(audio_file, identity)
+
+        validate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_공통_gate_ACCEPT는_파이프라인_입력검증을_통과(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+    ) -> None:
+        """full gate의 ACCEPT 결과만 Pipeline 실행 자격을 부여한다."""
+        import core.audio_quality as audio_quality
+
+        mock_config.audio_quality.enabled = True
+        mock_config.audio_quality.min_mean_volume_db = -40.0
+        admission = audio_quality.AudioQualityResult(
+            status=audio_quality.AudioQualityStatus.ACCEPT,
+            mean_volume_db=-20.0,
+            duration_seconds=30.0,
+            reason="",
+        )
+        validate = MagicMock(return_value=admission)
+        with (
+            patch("core.audio_quality.validate_audio_quality", validate),
+            patch("core.pipeline.validate_audio_quality", validate, create=True),
+        ):
+            identity = pipeline._validate_input(audio_file)
+            await pipeline._validate_audio_duration(audio_file, identity)
+
+        validate.assert_called_once()
 
 
 # === PipelineManager 초기화 테스트 ===
@@ -639,6 +1064,44 @@ class TestPipelineManagerRun:
 
             assert exc_info.value.step == "transcribe"
             assert "재시도" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_AudioAdmissionError는_재시도나_failed상태없이_전파한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """Transcriber backstop 차단은 한 번만 실행되고 pending 상태로 보류된다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        wav_path = audio_file.parent / "admission_16k.wav"
+        wav_path.write_bytes(b"fake wav content")
+        admission_error = AudioAdmissionError(
+            "source changed",
+            failure_kind=AudioFailureKind.SOURCE_BUSY,
+        )
+        transcribe_mock = AsyncMock(side_effect=admission_error)
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_convert",
+                new_callable=AsyncMock,
+                return_value=wav_path,
+            ),
+            patch.object(pipeline, "_run_step_transcribe", transcribe_mock),
+            pytest.raises(InvalidInputError) as exc_info,
+        ):
+            await pipeline.run(audio_file, meeting_id="admission_backstop")
+
+        assert transcribe_mock.await_count == 1
+        assert exc_info.value.failure_kind is AudioFailureKind.SOURCE_BUSY
+        state = pipeline.get_status("admission_backstop")
+        assert state is not None
+        assert state.status == "pending"
+        assert state.error_message == ""
+        assert "transcribe" not in state.completed_steps
 
     @pytest.mark.asyncio
     async def test_step_failure_then_retry_success(
@@ -838,7 +1301,8 @@ class TestPipelineResume:
     ) -> None:
         """실패한 단계부터 재개할 수 있는지 확인한다."""
         meeting_id = "test_resume"
-        wav_path = audio_file.parent / "test_16k.wav"
+        wav_path = pipeline._get_output_dir(meeting_id) / "test_16k.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
         wav_path.write_bytes(b"fake wav content")
 
         # 먼저 convert 까지 성공 상태를 저장
@@ -966,6 +1430,244 @@ class TestPipelineResume:
 
         result = await pipeline.resume(meeting_id)
         assert result.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_completed_resume는_resource_guard전에_즉시_반환한다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """이미 완료된 상태를 low-disk 진단이 failed로 덮어쓰지 않는다."""
+        meeting_id = "completed_fast_return"
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(tmp_path / "deleted-original.wav"),
+            status="completed",
+            completed_steps=[step.value for step in PIPELINE_STEPS],
+            output_dir=str(tmp_path / "outputs" / meeting_id),
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+
+        with patch.object(
+            pipeline._resource_guard,
+            "check_all",
+            side_effect=AssertionError("completed resume must not inspect resources"),
+        ) as check_all:
+            result = await pipeline.resume(meeting_id)
+
+        assert result.status == "completed"
+        check_all.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_text_only_resume는_삭제된_원본을_gate하지_않는다(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """transcribe+diarize 완료 후 단계는 원본 없이 체크포인트 결과로 재개한다."""
+        meeting_id = "text_only_resume"
+        missing_original = tmp_path / "already-removed.m4a"
+        missing_wav = tmp_path / "already-removed.wav"
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(missing_original),
+            status="failed",
+            completed_steps=["convert", "transcribe", "diarize"],
+            wav_path=str(missing_wav),
+            output_dir=str(pipeline._get_output_dir(meeting_id)),
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+
+        mock_config.audio_quality.enabled = True
+        validate = MagicMock(side_effect=AssertionError("text-only resume must not gate audio"))
+        restored = (
+            missing_wav,
+            _make_mock_transcript(),
+            _make_mock_diarization(),
+            None,
+            None,
+            None,
+        )
+        with (
+            patch("core.pipeline.validate_audio_quality", validate),
+            patch.object(
+                pipeline,
+                "_restore_intermediate_results",
+                new_callable=AsyncMock,
+                return_value=restored,
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
+        ):
+            result = await pipeline.resume(meeting_id)
+
+        assert result.status == "completed"
+        validate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_diarize_resume는_state_wav_symlink를_gate한다(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """diarize가 남은 재개는 state.wav_path를 no-follow 검사한다."""
+        meeting_id = "resume_diarize_symlink"
+        linked_wav = pipeline._get_output_dir(meeting_id) / "linked-state.wav"
+        linked_wav.parent.mkdir(parents=True, exist_ok=True)
+        linked_wav.symlink_to(audio_file)
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(tmp_path / "missing-original.m4a"),
+            status="failed",
+            completed_steps=["convert", "transcribe"],
+            wav_path=str(linked_wav),
+            output_dir=str(pipeline._get_output_dir(meeting_id)),
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+        mock_config.audio_quality.enabled = True
+        validate = MagicMock(side_effect=AssertionError("symlink target must not be decoded"))
+
+        with (
+            patch("core.pipeline.validate_audio_quality", validate),
+            pytest.raises(InvalidInputError, match="심볼릭 링크") as exc_info,
+        ):
+            await pipeline.resume(meeting_id)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        validate.assert_not_called()
+        assert audio_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_audio_resume는_output밖_state_wav를_gate나_STT에_전달하지않는다(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """외부 regular WAV가 30초여도 configured meeting output 밖이면 즉시 차단한다."""
+        meeting_id = "resume_external_regular_wav"
+        external_wav = tmp_path / "external-30s.wav"
+        external_wav.write_bytes(b"EXTERNAL-WAV")
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(audio_file),
+            status="failed",
+            completed_steps=["convert"],
+            wav_path=str(external_wav),
+            output_dir=str(pipeline._get_output_dir(meeting_id)),
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+        mock_config.audio_quality.enabled = True
+        quality_gate = MagicMock(
+            side_effect=AssertionError("external WAV must not reach the quality gate")
+        )
+        transcribe = AsyncMock(side_effect=AssertionError("external WAV must not reach STT"))
+
+        with (
+            patch("core.pipeline.validate_audio_quality", quality_gate),
+            patch.object(pipeline, "_run_step_transcribe", transcribe),
+            pytest.raises(InvalidInputError, match="direct child") as exc_info,
+        ):
+            await pipeline.resume(meeting_id)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        quality_gate.assert_not_called()
+        transcribe.assert_not_called()
+        assert external_wav.read_bytes() == b"EXTERNAL-WAV"
+
+    @pytest.mark.asyncio
+    async def test_converter의_임의_external_regular_반환은_state저장전_차단한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """converter가 원본과 다른 output 외부 파일을 반환하면 신뢰하지 않는다."""
+        from steps.audio_converter import AudioConverter
+
+        output_dir = pipeline._get_output_dir("converter-external")
+        output_dir.mkdir(parents=True)
+        external = tmp_path / "attacker.wav"
+        external.write_bytes(b"EXTERNAL")
+
+        with (
+            patch.object(
+                AudioConverter,
+                "convert_async",
+                new_callable=AsyncMock,
+                return_value=external,
+            ),
+            pytest.raises(InvalidInputError, match="output 밖") as exc_info,
+        ):
+            await pipeline._run_step_convert(audio_file, output_dir)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert external.read_bytes() == b"EXTERNAL"
+
+    @pytest.mark.asyncio
+    async def test_이미_target_format인_원본_WAV도_output_snapshot으로_고정한다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """converter skip 반환은 안전한 fd 복제로 meeting output direct child가 된다."""
+        from steps.audio_converter import AudioConverter
+
+        source = tmp_path / "normalized.wav"
+        source.write_bytes(b"NORMALIZED-WAV")
+        output_dir = pipeline._get_output_dir("localized-normalized")
+        output_dir.mkdir(parents=True)
+
+        with patch.object(
+            AudioConverter,
+            "convert_async",
+            new_callable=AsyncMock,
+            return_value=source,
+        ):
+            localized = await pipeline._run_step_convert(source, output_dir)
+
+        assert localized.parent == output_dir
+        assert localized.name == "normalized_16k.wav"
+        assert localized.read_bytes() == b"NORMALIZED-WAV"
+        assert not localized.is_symlink()
 
 
 # === 체크포인트 비활성화 테스트 ===
@@ -1237,6 +1939,8 @@ class TestIndividualSteps:
         """변환 단계가 AudioConverter를 호출하는지 확인한다."""
         output_dir = tmp_path / "output"
         expected_wav = output_dir / "test_16k.wav"
+        output_dir.mkdir()
+        expected_wav.write_bytes(b"converted wav")
 
         mock_converter = MagicMock()
         mock_converter.convert_async = AsyncMock(return_value=expected_wav)
@@ -1257,15 +1961,24 @@ class TestIndividualSteps:
     async def test_run_step_transcribe_with_checkpoint(
         self,
         pipeline: PipelineManager,
+        mock_config: MagicMock,
         audio_file: Path,
         tmp_path: Path,
     ) -> None:
         """체크포인트가 있으면 전사를 건너뛰는지 확인한다."""
         checkpoint_path = tmp_path / "transcribe.json"
+        mock_config.audio_quality.enabled = True
 
         mock_result = _make_mock_transcript()
+        validate = MagicMock(
+            side_effect=AssertionError("checkpoint reuse must not re-run STT gate")
+        )
 
-        with patch("steps.transcriber.TranscriptResult") as MockTranscript:
+        with (
+            patch("steps.transcriber.TranscriptResult") as MockTranscript,
+            patch("core.audio_quality.validate_audio_quality", validate),
+            patch("core.pipeline.validate_audio_quality", validate, create=True),
+        ):
             MockTranscript.from_checkpoint.return_value = mock_result
             # 체크포인트 파일 생성
             checkpoint_path.write_text(
@@ -1279,6 +1992,39 @@ class TestIndividualSteps:
             )
 
         assert result == mock_result
+        validate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_step_transcribe가_변환후_30초_미만_wav를_거부(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """헤더 길이를 우회한 파일도 변환된 WAV 기준으로 STT 전에 차단한다."""
+        import core.audio_quality as audio_quality
+
+        mock_config.audio_quality.enabled = True
+        mock_config.audio_quality.min_mean_volume_db = -40.0
+        checkpoint_path = tmp_path / "missing-transcribe.json"
+        admission = audio_quality.AudioQualityResult(
+            status=audio_quality.AudioQualityStatus.REJECT,
+            mean_volume_db=None,
+            duration_seconds=1.55,
+            reason="너무 짧음",
+            failure_kind=audio_quality.AudioFailureKind.MEDIA_INVALID,
+        )
+        validate = MagicMock(return_value=admission)
+
+        with (
+            patch("core.audio_quality.validate_audio_quality", validate),
+            patch("core.pipeline.validate_audio_quality", validate, create=True),
+            pytest.raises(InvalidInputError, match="너무 짧아"),
+        ):
+            await pipeline._run_step_transcribe(audio_file, checkpoint_path)
+
+        validate.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_step_summarize_saves_markdown(
@@ -1926,7 +2672,8 @@ class TestE2ECheckpointResume:
     ) -> None:
         """파이프라인 실패 시 상태가 올바르게 저장되고 재개 가능한지 확인한다."""
         meeting_id = "e2e_fail_persist"
-        wav_path = audio_file.parent / "test_16k.wav"
+        wav_path = pipeline._get_output_dir(meeting_id) / "test_16k.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
         wav_path.write_bytes(b"fake wav content")
 
         # 1단계: convert 성공 → transcribe에서 실패

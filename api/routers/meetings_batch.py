@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -23,13 +23,22 @@ from api.dependencies import (
 from api.dependencies import (
     get_pipeline_manager as _get_pipeline_manager,
 )
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioQualityStatus,
+    validate_audio_quality,
+)
+from core.job_queue import JobQueueError, lexical_root_no_symlinks
+from steps.transcriber import (
+    AudioAdmissionError,
+    EmptyAudioError,
+    inspect_audio_path_no_symlinks,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# meeting_id 유효성 검증 정규식 (path traversal 방지)
-_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
 _IN_PROGRESS_STATUSES: frozenset[str] = frozenset(
     {
         "queued",
@@ -40,6 +49,12 @@ _IN_PROGRESS_STATUSES: frozenset[str] = frozenset(
         "embedding",
     }
 )
+_AUDIO_FAILURE_HTTP_STATUS = {
+    AudioFailureKind.MEDIA_INVALID: 422,
+    AudioFailureKind.SOURCE_BUSY: 409,
+    AudioFailureKind.INFRA_UNAVAILABLE: 503,
+    AudioFailureKind.SECURITY_BLOCKED: 400,
+}
 
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
@@ -67,7 +82,13 @@ def _validate_meeting_id(meeting_id: str) -> None:
     Raises:
         HTTPException: 유효하지 않은 형식일 때 (400)
     """
-    if not _MEETING_ID_PATTERN.match(meeting_id):
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or "\x00" in meeting_id
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
@@ -77,6 +98,194 @@ def _validate_meeting_id(meeting_id: str) -> None:
 def _get_sync_job_queue(queue: Any) -> Any | None:
     """AsyncJobQueue 또는 테스트 double 에서 동기 JobQueue 핸들을 반환한다."""
     return getattr(queue, "_queue", None) or getattr(queue, "queue", None)
+
+
+def _configured_lexical_path(config: Any, child_attribute: str | None = None) -> Path:
+    """raw base/child 설정을 resolve하지 않고 no-follow 검증한다."""
+    try:
+        base = lexical_root_no_symlinks(Path(config.paths.base_dir))
+        if child_attribute is None:
+            return base
+        configured_child = Path(str(getattr(config.paths, child_attribute))).expanduser()
+        raw_path = configured_child if configured_child.is_absolute() else base / configured_child
+        child = lexical_root_no_symlinks(raw_path)
+    except JobQueueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SECURITY_BLOCKED: 안전하지 않은 설정 경로입니다: {exc}",
+        ) from exc
+    if not child.is_relative_to(base):
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 설정 경로가 base_dir 밖에 있습니다.",
+        )
+    return child
+
+
+def _configured_lexical_base(config: Any) -> Path:
+    """raw base_dir를 no-follow 검증한다."""
+    return _configured_lexical_path(config)
+
+
+def _batch_artifact_path(root: Path, meeting_id: str, filename: str) -> Path:
+    """batch 분류 artifact의 intermediate/final symlink를 거부한다."""
+    candidate = root / meeting_id / filename
+    current = root
+    for index, component in enumerate((meeting_id, filename)):
+        current /= component
+        try:
+            entry_stat = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"INFRA_UNAVAILABLE: batch 산출물 상태 확인 실패: {exc}",
+            ) from exc
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise HTTPException(
+                status_code=400,
+                detail=f"SECURITY_BLOCKED: batch 산출물 symlink는 허용되지 않습니다: {current}",
+            )
+        if index == 0 and not stat.S_ISDIR(entry_stat.st_mode):
+            raise HTTPException(
+                status_code=400,
+                detail=f"SECURITY_BLOCKED: 회의 산출물 경로가 디렉터리가 아닙니다: {current}",
+            )
+    return candidate
+
+
+def _is_regular_batch_artifact(root: Path, meeting_id: str, filename: str) -> bool:
+    """artifact가 no-follow 일반 파일인지 반환한다."""
+    path = _batch_artifact_path(root, meeting_id, filename)
+    try:
+        entry_stat = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"INFRA_UNAVAILABLE: batch 산출물 상태 확인 실패: {exc}",
+        ) from exc
+    if not stat.S_ISREG(entry_stat.st_mode):
+        raise HTTPException(
+            status_code=400,
+            detail=f"SECURITY_BLOCKED: batch 산출물이 일반 파일이 아닙니다: {path}",
+        )
+    return True
+
+
+def _require_audio_in_base(config: Any, audio_path: Path) -> Path:
+    """audio_path를 lexical base 내부로 제한한다."""
+    raw = audio_path.expanduser()
+    if "\x00" in str(raw) or ".." in raw.parts:
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 안전하지 않은 오디오 경로입니다.",
+        )
+    candidate = raw.absolute()
+    base = _configured_lexical_base(config)
+    if not candidate.is_relative_to(base):
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 오디오 파일이 설정된 base_dir 밖에 있습니다.",
+        )
+    return candidate
+
+
+async def _require_audio_quality_accept(config: Any, audio_path: Path) -> None:
+    """활성화된 공통 오디오 gate를 실행하고 비수락 사유를 HTTP로 매핑한다."""
+    audio_path = _require_audio_in_base(config, audio_path)
+    try:
+        before_identity = await asyncio.to_thread(inspect_audio_path_no_symlinks, audio_path)
+    except AudioAdmissionError as exc:
+        raise HTTPException(
+            status_code=_AUDIO_FAILURE_HTTP_STATUS[exc.failure_kind],
+            detail=f"{exc.failure_kind.name}: {exc}",
+        ) from exc
+    except EmptyAudioError as exc:
+        raise HTTPException(status_code=422, detail=f"MEDIA_INVALID: {exc}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=f"SOURCE_BUSY: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"INFRA_UNAVAILABLE: {exc}") from exc
+
+    quality_config = getattr(config, "audio_quality", None)
+    if quality_config is None or getattr(quality_config, "enabled", False) is not True:
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            validate_audio_quality,
+            audio_path,
+            min_mean_db=quality_config.min_mean_volume_db,
+            min_duration_s=quality_config.min_duration_seconds,
+            expected_identity=before_identity,
+            decode_timeout_base_seconds=quality_config.decode_timeout_base_seconds,
+            decode_timeout_factor=quality_config.decode_timeout_factor,
+            decode_timeout_cap_seconds=quality_config.decode_timeout_cap_seconds,
+        )
+    except Exception as exc:
+        try:
+            after_identity = await asyncio.to_thread(
+                inspect_audio_path_no_symlinks,
+                audio_path,
+            )
+        except AudioAdmissionError as identity_exc:
+            raise HTTPException(
+                status_code=_AUDIO_FAILURE_HTTP_STATUS[identity_exc.failure_kind],
+                detail=f"{identity_exc.failure_kind.name}: {identity_exc}",
+            ) from exc
+        except (EmptyAudioError, FileNotFoundError) as identity_exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"SOURCE_BUSY: 검증 중 오디오 파일이 변경되었습니다: {identity_exc}",
+            ) from exc
+        except OSError as identity_exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"INFRA_UNAVAILABLE: {identity_exc}",
+            ) from exc
+        if after_identity != before_identity:
+            raise HTTPException(
+                status_code=409,
+                detail="SOURCE_BUSY: 품질 검증 중 오디오 파일 identity가 변경되었습니다.",
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"INFRA_UNAVAILABLE: 오디오 품질 검증 실행 실패: {exc}",
+        ) from exc
+
+    try:
+        after_identity = await asyncio.to_thread(
+            inspect_audio_path_no_symlinks,
+            audio_path,
+        )
+    except AudioAdmissionError as exc:
+        raise HTTPException(
+            status_code=_AUDIO_FAILURE_HTTP_STATUS[exc.failure_kind],
+            detail=f"{exc.failure_kind.name}: {exc}",
+        ) from exc
+    except (EmptyAudioError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"SOURCE_BUSY: 검증 중 오디오 파일이 변경되었습니다: {exc}",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"INFRA_UNAVAILABLE: {exc}") from exc
+    if after_identity != before_identity:
+        raise HTTPException(
+            status_code=409,
+            detail="SOURCE_BUSY: 검증 중 오디오 파일 identity가 변경되었습니다.",
+        )
+    if result.status is AudioQualityStatus.ACCEPT:
+        return
+
+    failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+    raise HTTPException(
+        status_code=_AUDIO_FAILURE_HTTP_STATUS[failure_kind],
+        detail=f"{failure_kind.name}: {result.reason or '오디오 품질 검증 비수락'}",
+    )
 
 
 class BatchActionRequest(BaseModel):
@@ -168,7 +377,7 @@ def _has_merge_checkpoint(checkpoints_dir: Path, meeting_id: str) -> bool:
     Returns:
         merge.json 이 있으면 True
     """
-    return (checkpoints_dir / meeting_id / "merge.json").is_file()
+    return _is_regular_batch_artifact(checkpoints_dir, meeting_id, "merge.json")
 
 
 def _has_summary_output(outputs_dir: Path, meeting_id: str) -> bool:
@@ -184,8 +393,15 @@ def _has_summary_output(outputs_dir: Path, meeting_id: str) -> bool:
     Returns:
         둘 중 하나라도 있으면 True
     """
-    out_dir = outputs_dir / meeting_id
-    return (out_dir / "summary.md").is_file() or (out_dir / "meeting_minutes.md").is_file()
+    return _is_regular_batch_artifact(
+        outputs_dir,
+        meeting_id,
+        "summary.md",
+    ) or _is_regular_batch_artifact(
+        outputs_dir,
+        meeting_id,
+        "meeting_minutes.md",
+    )
 
 
 def _classify_meeting_for_batch(
@@ -305,35 +521,45 @@ async def _resolve_audio_path(
 def _resolve_audio_path_from_job(
     job: Any,
     meeting_id: str,
-    base_dir_resolved: Path,
+    base_dir_lexical: Path,
 ) -> Path | None:
     """Job row 의 audio_path 를 base_dir 내부 실재 파일로 검증한다.
 
-    보안 (Phase 6 Medium-02): SQLite 직접 편집이나 심링크 공격으로 base_dir
-    외부 경로가 들어와도 파이프라인에 도달하지 못하도록 strict resolve 후
-    base_dir 하위 여부를 검증한다.
+    lexical 경로를 보존해 이후 no-follow 검사가 원래 direntry를 검사하게 한다.
+    먼저 resolve하면 base 내부 symlink가 target 일반 파일로 바뀌어 보안 gate를
+    우회할 수 있다.
     """
     if not getattr(job, "audio_path", None):
         return None
 
     try:
-        # strict=True 로 실재하지 않는 경로는 즉시 차단
-        candidate = Path(job.audio_path).resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        logger.warning(f"일괄 처리: audio_path resolve 실패 ({meeting_id}): {exc}")
-        return None
-
-    # 보안 Medium-02: base_dir 외부 경로 차단
-    try:
-        if not candidate.is_relative_to(base_dir_resolved):
-            logger.warning(
-                f"일괄 처리: audio_path 가 base_dir 외부를 가리킴 — 차단 "
-                f"({meeting_id}: {candidate})"
+        raw_candidate = Path(job.audio_path).expanduser()
+        if "\x00" in str(raw_candidate) or ".." in raw_candidate.parts:
+            raise HTTPException(
+                status_code=400,
+                detail="SECURITY_BLOCKED: 안전하지 않은 오디오 경로입니다.",
             )
-            return None
+        candidate = raw_candidate.absolute()
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning(f"일괄 처리: audio_path 정규화 실패 ({meeting_id}): {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"SECURITY_BLOCKED: 안전하지 않은 오디오 경로입니다: {exc}",
+        ) from exc
+
+    try:
+        if not candidate.is_relative_to(base_dir_lexical):
+            raise HTTPException(
+                status_code=400,
+                detail="SECURITY_BLOCKED: 오디오 파일이 설정된 base_dir 밖에 있습니다.",
+            )
     except ValueError:
-        # is_relative_to 가 OS/플랫폼에 따라 ValueError 를 낼 수 있음
-        return None
+        raise HTTPException(
+            status_code=400,
+            detail="SECURITY_BLOCKED: 오디오 경로와 base_dir가 호환되지 않습니다.",
+        ) from None
 
     return candidate
 
@@ -392,7 +618,14 @@ def _collect_candidate_ids_sync(
     elif scope == "all":
         if checkpoints_dir.is_dir():
             for cp_dir in sorted(checkpoints_dir.iterdir()):
-                if cp_dir.is_dir():
+                try:
+                    cp_stat = cp_dir.lstat()
+                except OSError as exc:
+                    logger.warning(
+                        "일괄 처리: checkpoint entry 상태 확인 실패 (%s): %s", cp_dir, exc
+                    )
+                    continue
+                if stat.S_ISDIR(cp_stat.st_mode):
                     candidate_ids.append(cp_dir.name)
 
     # Phase 3 Major #1: 순서 보존 dedupe
@@ -430,7 +663,9 @@ def _classify_eligibility_sync(
         # selected 는 엔드포인트에서 미리 _validate_meeting_id 로 검증됨.
         # selected 가 아닌 경우 (recent / all) 는 디스크 자료라 재검증 후 skip.
         if scope != "selected":
-            if not _MEETING_ID_PATTERN.match(mid):
+            try:
+                _validate_meeting_id(mid)
+            except HTTPException:
                 logger.warning(f"일괄 처리: 디스크에서 발견된 비정상 meeting_id 건너뜀: {mid!r}")
                 continue
 
@@ -459,11 +694,11 @@ async def _prepare_batch(
         )
     queue = _get_job_queue(request)
 
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
-    outputs_dir = config.paths.resolved_outputs_dir
-    # Phase 6 perf M-1: base_dir resolve 를 1회만 수행하여 _resolve_audio_path
-    # 호출 시마다 반복 계산하지 않는다.
-    base_dir_resolved = config.paths.resolved_base_dir
+    checkpoints_dir = _configured_lexical_path(config, "checkpoints_dir")
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
+    # raw base_dir를 resolve하기 전에 no-follow로 검사한다. symlink base가 외부
+    # target을 정상 경로처럼 보이게 하는 것을 차단한다.
+    base_dir_lexical = _configured_lexical_base(config)
 
     if body.scope == "selected":
         for mid in body.meeting_ids:
@@ -505,9 +740,12 @@ async def _prepare_batch(
             )
             continue
         if classification == "transcribe":
-            audio_path = _resolve_audio_path_from_job(job, mid, base_dir_resolved)
+            audio_path = _resolve_audio_path_from_job(job, mid, base_dir_lexical)
             if audio_path is None:
                 continue
+            # 실제 batch 큐 mutation 전에 전체 대상을 먼저 검증한다. 한 항목이
+            # 비수락이면 아직 어떤 job도 queued로 바뀌지 않은 상태에서 종료된다.
+            await _require_audio_quality_accept(config, audio_path)
             final_items.append((mid, classification, audio_path))
         else:
             final_items.append((mid, classification, None))
@@ -520,37 +758,40 @@ async def _prepare_batch(
     )
 
 
-async def _queue_transcribe_item(
+async def _recheck_transcribe_items(
     queue: Any,
-    meeting_id: str,
-    requested_action: str,
-) -> bool:
-    """전사 대상 회의를 JobProcessor 큐에 넣는다.
+    config: Any,
+    items: list[tuple[str, str, Path | None]],
+) -> list[tuple[str, int]]:
+    """모든 전사 항목을 queue mutation 전에 한 번 더 검증한다.
 
-    대상 산정 이후 상태가 바뀐 race 를 한 번 더 방어한다.
+    한 항목의 admission이 HTTP 오류를 내면 아직 어떤 job도 queued가 아니므로
+    batch 전체가 무변경 상태로 종료된다.
     """
-    from core.job_queue import JobQueueError
-
-    job = await _get_job_for_batch(queue, meeting_id)
-    if not _is_job_status_safe_for_batch(job, "transcribe"):
-        logger.info(
-            "일괄 처리 큐잉 건너뜀: 현재 작업 상태 부적합 (%s: %s)",
+    validated: list[tuple[str, int]] = []
+    for meeting_id, classification, expected_audio_path in items:
+        if classification != "transcribe" or expected_audio_path is None:
+            continue
+        job = await _get_job_for_batch(queue, meeting_id)
+        if not _is_job_status_safe_for_batch(job, "transcribe"):
+            logger.info(
+                "일괄 처리 큐잉 건너뜀: 현재 작업 상태 부적합 (%s: %s)",
+                meeting_id,
+                getattr(job, "status", None) if job is not None else None,
+            )
+            continue
+        assert job is not None
+        current_audio_path = _resolve_audio_path_from_job(
+            job,
             meeting_id,
-            getattr(job, "status", None) if job is not None else None,
+            _configured_lexical_base(config),
         )
-        return False
-
-    sync_queue = _get_sync_job_queue(queue)
-    if sync_queue is None or job is None:
-        logger.warning("일괄 처리 큐잉 실패: JobQueue 핸들 또는 job 없음 (%s)", meeting_id)
-        return False
-
-    try:
-        await asyncio.to_thread(sync_queue.queue_job, job.id, requested_action)
-        return True
-    except JobQueueError as exc:
-        logger.warning("일괄 처리 큐잉 실패: %s (%s)", meeting_id, exc)
-        return False
+        if current_audio_path is None or current_audio_path != expected_audio_path:
+            logger.warning("일괄 처리 큐잉 보류: audio_path 변경/소실 (%s)", meeting_id)
+            continue
+        await _require_audio_quality_accept(config, current_audio_path)
+        validated.append((meeting_id, int(job.id)))
+    return validated
 
 
 @router.post("/meetings/batch/preview", response_model=BatchPreviewResponse)
@@ -620,21 +861,40 @@ async def batch_action(
     # === 1. 의존성 로딩 ===
     pipeline = _get_pipeline_manager(request)
     queue = _get_job_queue(request)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
     prepared = await _prepare_batch(request, body)
     matched = prepared.matched
     skipped = prepared.skipped
 
-    background_items: list[tuple[str, str, Path | None]] = []
-    queued_ids: list[str] = []
-    for mid, classification, audio_path in prepared.items:
-        if classification == "transcribe":
-            if await _queue_transcribe_item(queue, mid, body.action):
-                queued_ids.append(mid)
-            else:
-                skipped += 1
-            continue
-        background_items.append((mid, classification, audio_path))
-        queued_ids.append(mid)
+    background_items = [item for item in prepared.items if item[1] != "transcribe"]
+    transcribe_items = [item for item in prepared.items if item[1] == "transcribe"]
+
+    # 모든 2차 admission을 끝낸 뒤에만 단일 DB transaction으로 큐잉한다.
+    # item N의 gate/CAS 실패가 item 1..N-1을 부분 queued로 남기지 않는다.
+    validated_transcribe = await _recheck_transcribe_items(queue, config, transcribe_items)
+    skipped += len(transcribe_items) - len(validated_transcribe)
+    queued_transcribe_ids: list[str] = []
+    if validated_transcribe:
+        from core.job_queue import JobQueueError
+
+        sync_queue = _get_sync_job_queue(queue)
+        if sync_queue is None:
+            skipped += len(validated_transcribe)
+        else:
+            try:
+                await asyncio.to_thread(
+                    sync_queue.queue_jobs_atomically,
+                    [job_id for _mid, job_id in validated_transcribe],
+                    body.action,
+                )
+                queued_transcribe_ids = [mid for mid, _job_id in validated_transcribe]
+            except JobQueueError as exc:
+                logger.warning("일괄 처리 원자 큐잉 실패 — 전체 rollback: %s", exc)
+                skipped += len(validated_transcribe)
+
+    queued_ids = queued_transcribe_ids + [mid for mid, _classification, _path in background_items]
 
     queued = len(queued_ids)
 

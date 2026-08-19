@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
-import asyncio
+import errno
 import logging
+import os
 import re
+import stat
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from core.quarantine import (
+    QuarantineError,
+    _lexical_absolute,
+    _open_directory_tree_no_follow,
+    _same_inode,
+    _same_validated_content,
+    _unlink_if_inode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +61,211 @@ _UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 # 파일명에서 안전한 문자만 허용 (path traversal · 제어문자 차단).
 # 한글/공백/대시/언더스코어/괄호/점은 허용하되 슬래시·백슬래시·NUL 은 거부.
 _FILENAME_FORBIDDEN_PATTERN = re.compile(r"[\x00-\x1f/\\]")
+
+
+class _UploadSecurityError(Exception):
+    """업로드 경로·inode 보안 계약 위반."""
+
+
+def _configured_upload_dir(config: Any) -> Path:
+    """raw base_dir에서 symlink를 해석하지 않고 입력 경로를 계산한다."""
+    raw_base = getattr(config.paths, "base_dir", None)
+    raw_child = getattr(config.paths, "audio_input_dir", None)
+    if not isinstance(raw_base, (str, Path)) or not isinstance(raw_child, (str, Path)):
+        raise _UploadSecurityError("base_dir/audio_input_dir 설정 형식이 올바르지 않습니다")
+
+    try:
+        base_dir = _lexical_absolute(Path(raw_base))
+    except QuarantineError as exc:
+        raise _UploadSecurityError(f"base_dir가 안전하지 않습니다: {exc}") from exc
+
+    raw_child_text = os.fspath(raw_child)
+    child = Path(raw_child)
+    if (
+        not raw_child_text
+        or raw_child_text in {".", ".."}
+        or raw_child_text.startswith("~")
+        or child.is_absolute()
+        or ".." in child.parts
+    ):
+        raise _UploadSecurityError("audio_input_dir는 base_dir 하위의 상대 경로여야 합니다")
+
+    try:
+        upload_dir = _lexical_absolute(base_dir / child)
+    except QuarantineError as exc:
+        raise _UploadSecurityError(f"audio_input_dir가 안전하지 않습니다: {exc}") from exc
+    if not upload_dir.is_relative_to(base_dir):
+        raise _UploadSecurityError("audio_input_dir가 base_dir 밖을 가리킵니다")
+    return upload_dir
+
+
+def _path_error_is_security_block(error: OSError) -> bool:
+    """no-follow 경로 열기에서 symlink/비디렉터리 차단인지 판별한다."""
+    return error.errno in {errno.ELOOP, errno.ENOTDIR}
+
+
+def _verify_directory_identity(
+    upload_dir: Path,
+    directory_fd: int,
+    expected: os.stat_result,
+) -> None:
+    """lexical 경로가 열어 둔 감시 디렉터리와 계속 같은지 확인한다."""
+    if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+        raise _UploadSecurityError("열린 업로드 경로가 디렉터리가 아닙니다")
+
+    reopened_fd: int | None = None
+    try:
+        reopened_fd = _open_directory_tree_no_follow(upload_dir, create=False)
+        reopened = os.fstat(reopened_fd)
+    except (OSError, QuarantineError) as exc:
+        raise _UploadSecurityError(f"업로드 디렉터리 재검증 실패: {exc}") from exc
+    finally:
+        if reopened_fd is not None:
+            os.close(reopened_fd)
+    if not _same_inode(expected, reopened):
+        raise _UploadSecurityError("업로드 도중 입력 디렉터리가 교체되었습니다")
+
+
+def _create_upload_temp(directory_fd: int) -> tuple[str, int, os.stat_result]:
+    """예측할 수 없는 0600 no-follow 임시 파일을 만든다."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise _UploadSecurityError("O_NOFOLLOW를 지원하지 않아 안전한 업로드가 불가합니다")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(no_follow) | getattr(os, "O_CLOEXEC", 0)
+    for _ in range(100):
+        name = f".upload-{uuid.uuid4().hex}.part"
+        try:
+            file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        except FileExistsError:
+            continue
+        created: os.stat_result | None = None
+        try:
+            created = os.fstat(file_fd)
+            os.fchmod(file_fd, 0o600)
+            created = os.fstat(file_fd)
+            if not stat.S_ISREG(created.st_mode):
+                raise _UploadSecurityError("업로드 임시 inode가 일반 파일이 아닙니다")
+            return name, file_fd, created
+        except BaseException:
+            if created is not None:
+                try:
+                    _unlink_if_inode(directory_fd, name, created)
+                except OSError:
+                    pass
+            os.close(file_fd)
+            raise
+    raise HTTPException(status_code=503, detail="업로드 임시 파일 이름을 할당하지 못했습니다.")
+
+
+def _write_all(file_fd: int, chunk: bytes) -> None:
+    """부분 write를 허용하지 않고 청크 전체를 파일 descriptor에 쓴다."""
+    remaining = memoryview(chunk)
+    while remaining:
+        count = os.write(file_fd, remaining)
+        if count <= 0:
+            raise OSError(errno.EIO, "업로드 파일 write가 진행되지 않았습니다")
+        remaining = remaining[count:]
+
+
+def _upload_candidate_names(filename: str) -> list[str]:
+    """무덮어쓰기 publish에서 순서대로 시도할 파일명을 반환한다."""
+    path = Path(filename)
+    names = [filename]
+    names.extend(f"{path.stem} ({index}){path.suffix}" for index in range(1, 1000))
+    return names
+
+
+def _publish_upload(
+    *,
+    upload_dir: Path,
+    directory_fd: int,
+    directory_identity: os.stat_result,
+    temp_name: str,
+    temp_fd: int,
+    temp_identity: os.stat_result,
+    filename: str,
+) -> str:
+    """완성된 temp inode를 same-directory hardlink로 무덮어쓰기 publish한다."""
+    _verify_directory_identity(upload_dir, directory_fd, directory_identity)
+    temp_entry = os.stat(temp_name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(temp_entry.st_mode) or not _same_validated_content(
+        temp_identity,
+        temp_entry,
+    ):
+        raise _UploadSecurityError("업로드 임시 파일이 publish 전 교체되었습니다")
+
+    published_name: str | None = None
+    for candidate_name in _upload_candidate_names(filename):
+        try:
+            os.link(
+                temp_name,
+                candidate_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            continue
+        published_name = candidate_name
+        break
+    if published_name is None:
+        raise HTTPException(status_code=409, detail="동일한 이름의 파일이 너무 많습니다.")
+
+    # 여기서부터는 roll-forward이다. link가 성공한 final은 후속 검증,
+    # fsync, 취소, cleanup 실패에서도 절대 삭제하지 않는다.
+    final_entry = os.stat(published_name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(final_entry.st_mode) or not _same_validated_content(
+        temp_identity,
+        final_entry,
+    ):
+        raise _UploadSecurityError("publish된 final inode identity 검증에 실패했습니다")
+
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise _UploadSecurityError("O_NOFOLLOW를 지원하지 않아 final 검증이 불가합니다")
+    final_fd = os.open(
+        published_name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | int(no_follow),
+        dir_fd=directory_fd,
+    )
+    try:
+        opened_final = os.fstat(final_fd)
+    finally:
+        os.close(final_fd)
+    if not stat.S_ISREG(opened_final.st_mode) or not _same_validated_content(
+        temp_identity,
+        opened_final,
+    ):
+        raise _UploadSecurityError("publish된 final 파일 열기 검증에 실패했습니다")
+
+    current_temp = os.fstat(temp_fd)
+    if not _same_validated_content(temp_identity, current_temp):
+        raise _UploadSecurityError("publish 중 업로드 inode 내용이 변경되었습니다")
+    _verify_directory_identity(upload_dir, directory_fd, directory_identity)
+    os.fsync(directory_fd)
+
+    if not _unlink_if_inode(directory_fd, temp_name, temp_identity):
+        raise _UploadSecurityError("임시 파일 entry가 다른 inode로 교체되었습니다")
+    _verify_directory_identity(upload_dir, directory_fd, directory_identity)
+    os.fsync(directory_fd)
+    return published_name
+
+
+def _cleanup_upload_temp(
+    directory_fd: int | None,
+    temp_name: str | None,
+    created_identity: os.stat_result | None,
+) -> None:
+    """실패/취소 시 자신이 만든 temp inode만 best-effort로 정리한다."""
+    if directory_fd is None or temp_name is None or created_identity is None:
+        return
+    try:
+        if _unlink_if_inode(directory_fd, temp_name, created_identity):
+            os.fsync(directory_fd)
+        else:
+            logger.error(f"업로드 temp cleanup inode 불일치: {temp_name}")
+    except OSError as exc:
+        logger.error(f"업로드 temp cleanup 실패: {temp_name} ({exc})")
 
 
 def _sanitize_upload_filename(raw: str, supported_exts: set[str]) -> str:
@@ -103,14 +320,14 @@ def _resolve_unique_upload_path(target_dir: Path, filename: str) -> Path:
         실제로 저장될 절대 경로 (중복 회피 적용 후).
     """
     candidate = target_dir / filename
-    if not candidate.exists():
+    if not candidate.exists() and not candidate.is_symlink():
         return candidate
 
     stem = candidate.stem
     suffix = candidate.suffix
     for i in range(1, 1000):
         alt = target_dir / f"{stem} ({i}){suffix}"
-        if not alt.exists():
+        if not alt.exists() and not alt.is_symlink():
             return alt
     # 비현실적 시나리오 — 1000 개 같은 이름이 쌓여 있을 때만 도달
     raise HTTPException(status_code=409, detail="동일한 이름의 파일이 너무 많습니다.")
@@ -141,7 +358,6 @@ async def upload_audio(request: Request) -> UploadResponse:
         HTTPException 500: 디스크 쓰기 실패.
     """
     config = _get_config(request)
-    audio_input_dir = config.paths.resolved_audio_input_dir
     supported_exts = {fmt.lower().lstrip(".") for fmt in config.audio.supported_input_formats}
 
     raw_filename = request.headers.get("x-filename")
@@ -172,60 +388,91 @@ async def upload_audio(request: Request) -> UploadResponse:
             # Content-Length 가 잘못된 경우는 본문 읽으며 실측에 의존
             pass
 
-    # 디렉토리 보장
-    try:
-        await asyncio.to_thread(audio_input_dir.mkdir, parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"입력 폴더 생성 실패: {e}",
-        ) from e
-
-    target_path = _resolve_unique_upload_path(audio_input_dir, filename)
-
-    # 본문을 스트리밍으로 받아 디스크에 직접 쓴다 — 대용량 파일 메모리 폭주 방지.
+    audio_input_dir: Path | None = None
+    directory_fd: int | None = None
+    directory_identity: os.stat_result | None = None
+    temp_name: str | None = None
+    temp_fd: int | None = None
+    created_identity: os.stat_result | None = None
+    published_name: str | None = None
     written = 0
-    tmp_path = target_path.with_suffix(target_path.suffix + ".part")
     try:
-        # 동기 파일 I/O 를 to_thread 로 위임하지 않고 그대로 사용하는 이유:
-        # FastAPI 의 request.stream() 은 비동기 제너레이터이므로 같은 코루틴에서
-        # 청크별로 받아야 한다. write 는 OS 캐시로 빠르게 끝나며,
-        # 청크 크기는 starlette 기본(64KB)이라 이벤트 루프 블로킹이 미미하다.
-        with open(tmp_path, "wb") as fp:
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                written += len(chunk)
-                if written > _UPLOAD_MAX_BYTES:
-                    fp.close()
-                    tmp_path.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"파일이 너무 큽니다 (최대 {_UPLOAD_MAX_BYTES // (1024**3)} GB)",
-                    )
-                fp.write(chunk)
+        audio_input_dir = _configured_upload_dir(config)
+        directory_fd = _open_directory_tree_no_follow(audio_input_dir, create=True)
+        directory_identity = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_identity.st_mode):
+            raise _UploadSecurityError("오디오 입력 경로가 디렉터리가 아닙니다")
+        _verify_directory_identity(audio_input_dir, directory_fd, directory_identity)
+
+        temp_name, temp_fd, created_identity = _create_upload_temp(directory_fd)
+
+        # stream을 다 소비하기 전에는 watcher 대상 final을 생성하지 않는다.
+        # CancelledError/BaseException은 finally에서 최초 temp inode만 정리한 뒤 전파된다.
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            written += len(chunk)
+            if written > _UPLOAD_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"파일이 너무 큽니다 (최대 {_UPLOAD_MAX_BYTES // (1024**3)} GB)",
+                )
+            _write_all(temp_fd, chunk)
 
         if written == 0:
-            tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="요청 본문이 비어 있습니다.")
 
-        # 원자적 rename — watcher 가 .part 파일은 무시하고, 최종 이름으로 등장
-        # 하는 순간을 새 파일 생성 이벤트로 감지한다.
-        tmp_path.rename(target_path)
-    except HTTPException:
-        # tmp_path 정리는 이미 위에서 처리됨
-        raise
-    except OSError as e:
-        # 미들 단계에서 깨진 .part 정리 (best-effort)
-        tmp_path.unlink(missing_ok=True)
-        logger.error(f"업로드 저장 실패: {target_path} — {e}")
-        raise HTTPException(status_code=500, detail=f"파일 저장 실패: {e}") from e
+        os.fsync(temp_fd)
+        completed_identity = os.fstat(temp_fd)
+        if (
+            not stat.S_ISREG(completed_identity.st_mode)
+            or not _same_inode(created_identity, completed_identity)
+            or completed_identity.st_size != written
+        ):
+            raise _UploadSecurityError("업로드 완료 파일 identity/size 검증에 실패했습니다")
 
+        published_name = _publish_upload(
+            upload_dir=audio_input_dir,
+            directory_fd=directory_fd,
+            directory_identity=directory_identity,
+            temp_name=temp_name,
+            temp_fd=temp_fd,
+            temp_identity=completed_identity,
+            filename=filename,
+        )
+        # publish 헬퍼가 inode를 확인하고 temp entry를 제거했다.
+        temp_name = None
+    except HTTPException:
+        raise
+    except (_UploadSecurityError, QuarantineError) as e:
+        logger.warning(f"업로드 경로/inode 보안 차단: {e}")
+        raise HTTPException(status_code=400, detail=f"SECURITY_BLOCKED: {e}") from e
+    except OSError as e:
+        if _path_error_is_security_block(e):
+            logger.warning(f"업로드 no-follow 경로 차단: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"SECURITY_BLOCKED: 안전하지 않은 업로드 경로입니다 ({e})",
+            ) from e
+        logger.error(f"업로드 저장 실패: {audio_input_dir} — {e}")
+        raise HTTPException(status_code=500, detail=f"파일 저장 실패: {e}") from e
+    finally:
+        _cleanup_upload_temp(directory_fd, temp_name, created_identity)
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+    assert audio_input_dir is not None
+    assert published_name is not None
+    target_path = audio_input_dir / published_name
     logger.info(
-        f"오디오 업로드 완료: filename={target_path.name}, size={written}, path={target_path}"
+        f"오디오 업로드 완료: filename={published_name}, size={written}, path={target_path}"
     )
-    return UploadResponse(
-        filename=target_path.name,
-        path=str(target_path),
-        size=written,
-    )
+    return UploadResponse(filename=published_name, path=str(target_path), size=written)

@@ -201,8 +201,33 @@ class AudioQualityConfig(BaseModel):
         description="허용 최소 mean_volume (dB)",
     )
     min_duration_seconds: float = Field(
-        default=5.0, ge=1.0, description="허용 최소 재생 시간 (초)"
+        default=30.0, ge=1.0, description="허용 최소 재생 시간 (초)"
     )
+    decode_timeout_base_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        le=3600.0,
+        description="ffmpeg full-decode 최소 timeout (초)",
+    )
+    decode_timeout_factor: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=10.0,
+        description="ffprobe duration에 곱할 full-decode timeout 계수",
+    )
+    decode_timeout_cap_seconds: float = Field(
+        default=900.0,
+        gt=0.0,
+        le=14400.0,
+        description="ffmpeg full-decode timeout 상한 (초)",
+    )
+
+    @model_validator(mode="after")
+    def validate_decode_timeout_range(self) -> AudioQualityConfig:
+        """full-decode timeout 상한이 최소값보다 작지 않은지 검증한다."""
+        if self.decode_timeout_cap_seconds < self.decode_timeout_base_seconds:
+            raise ValueError("decode_timeout_cap_seconds must be >= decode_timeout_base_seconds")
+        return self
 
 
 class TextPostprocessingConfig(BaseModel):
@@ -650,10 +675,26 @@ class WatcherConfig(BaseModel):
 
     debounce_seconds: float = Field(default=2.0, ge=0.5, le=30.0)
     check_interval_seconds: float = Field(default=0.5, ge=0.1, le=5.0)
+    file_ready_timeout_seconds: float = Field(
+        default=30.0,
+        ge=0.5,
+        le=600.0,
+        description="0-byte/growing/open-writer 파일의 최대 안정화 대기 시간",
+    )
     excluded_subdirs: list[str] = Field(
         default_factory=lambda: ["audio_quarantine"],
         description="watcher가 감시에서 제외할 서브디렉토리 이름 목록",
     )
+
+    @model_validator(mode="after")
+    def validate_file_ready_timeout(self) -> WatcherConfig:
+        """readiness timeout이 최소 한 번의 안정화 관찰을 포함하는지 검증한다."""
+        minimum = self.debounce_seconds + self.check_interval_seconds
+        if self.file_ready_timeout_seconds < minimum:
+            raise ValueError(
+                "file_ready_timeout_seconds must be >= debounce_seconds + check_interval_seconds"
+            )
+        return self
 
 
 class SecurityConfig(BaseModel):
@@ -677,7 +718,7 @@ class RecordingConfig(BaseModel):
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
     channels: int = Field(default=1, ge=1, le=2)
     max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간
-    min_duration_seconds: int = Field(default=5, ge=1)  # 최소 길이 미달 시 파기
+    min_duration_seconds: int = Field(default=30, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
     silence_threshold_rms: float = Field(default=0.001, ge=0.0, le=1.0)  # 무음 판정 RMS 임계값

@@ -31,6 +31,24 @@ from fastapi.testclient import TestClient
 from config import AppConfig, PathsConfig, ServerConfig
 
 
+def test_reindex_validator는_공백_한국어_single_segment를_허용() -> None:
+    """watcher 파일명에서 생성된 ID를 단일 재색인에서도 허용한다."""
+    from api.routers.reindex import _validate_meeting_id
+
+    _validate_meeting_id("회의 1")
+
+
+@pytest.mark.parametrize("meeting_id", ["", ".", "..", "a/b", r"a\b", "a\x00b"])
+def test_reindex_validator는_비정상_segment를_거부(meeting_id: str) -> None:
+    """path traversal에 쓰일 수 있는 ID는 재색인 전에 400으로 차단한다."""
+    from api.routers.reindex import _validate_meeting_id
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_meeting_id(meeting_id)
+
+    assert exc_info.value.status_code == 400
+
+
 def _make_test_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         paths=PathsConfig(base_dir=str(tmp_path)),

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -167,12 +166,8 @@ class MeetingsResponse(BaseModel):
 # === 헬퍼 함수 ===
 
 
-# meeting_id 유효성 검증 정규식 (path traversal 방지)
-_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
-
-
 def _validate_meeting_id(meeting_id: str) -> None:
-    """meeting_id 형식을 검증한다 (path traversal 방지).
+    """watcher와 동일한 안전한 단일 segment ID를 검증한다.
 
     Args:
         meeting_id: 검증할 회의 ID
@@ -180,7 +175,13 @@ def _validate_meeting_id(meeting_id: str) -> None:
     Raises:
         HTTPException: 유효하지 않은 형식일 때 (400)
     """
-    if not _MEETING_ID_PATTERN.match(meeting_id):
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or "\x00" in meeting_id
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",

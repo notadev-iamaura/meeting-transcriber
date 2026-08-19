@@ -13,15 +13,31 @@ SQLite 기반 작업 큐 모듈 (Job Queue Module)
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import sqlite3
+import stat
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
+from core.quarantine import (
+    QuarantineError,
+    _open_directory_tree_no_follow,
+    _same_inode,
+)
+
 logger = logging.getLogger(__name__)
+
+_RETRANSCRIBE_CLAIM_KIND = "retranscribe_pending"
+_RETRANSCRIBE_CLAIM_VERSION = 1
+_RETRANSCRIBE_PHASES = frozenset({"claimed", "staging", "purging", "committing"})
+_AUDIO_REJECTION_CLAIM_KIND = "audio_rejection_claim"
+_AUDIO_REJECTION_CLAIM_VERSION = 1
 
 
 # === 작업 상태 정의 ===
@@ -98,6 +114,829 @@ class Job:
     # 사용자 정의 제목 (빈 문자열이면 프론트엔드가 meeting_id 기반 타임스탬프 폴백 사용)
     title: str = ""
     requested_action: str = ""
+
+
+@dataclass(frozen=True)
+class RetranscribeClaim:
+    """중단 후에도 원상 복구할 수 있는 재전사 예약 payload."""
+
+    original_status: str
+    original_requested_action: str
+    token: str
+    phase: str
+
+    def to_requested_action(self) -> str:
+        """DB requested_action 컬럼에 저장할 versioned JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": _RETRANSCRIBE_CLAIM_VERSION,
+                "kind": _RETRANSCRIBE_CLAIM_KIND,
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "token": self.token,
+                "phase": self.phase,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+@dataclass(frozen=True)
+class AudioAdmissionHold:
+    """레거시 오디오 재감사를 위해 원래 큐 의도를 보존하는 payload."""
+
+    original_status: str
+    original_requested_action: str
+    token: str
+
+    def to_requested_action(self) -> str:
+        """DB requested_action 컬럼용 versioned JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": 1,
+                "kind": "audio_admission_hold",
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "token": self.token,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+@dataclass(frozen=True)
+class AudioRejectionClaim:
+    """격리와 DB 삭제 사이 crash를 복구하기 위한 미디어 거부 payload."""
+
+    original_status: str
+    original_requested_action: str
+    token: str
+    source_path: str
+    source_identity: tuple[int, int, int, int]
+    quarantine_path: str
+
+    def to_requested_action(self) -> str:
+        """DB requested_action 컬럼에 저장할 strict v1 JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": _AUDIO_REJECTION_CLAIM_VERSION,
+                "kind": _AUDIO_REJECTION_CLAIM_KIND,
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "token": self.token,
+                "source_path": self.source_path,
+                "source_dev": self.source_identity[0],
+                "source_ino": self.source_identity[1],
+                "source_size": self.source_identity[2],
+                "source_mtime_ns": self.source_identity[3],
+                "quarantine_path": self.quarantine_path,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def _valid_audio_rejection_absolute_path(value: object) -> bool:
+    """journal에 저장할 경로가 모호성 없는 lexical absolute path인지 반환한다."""
+    if not isinstance(value, str) or not value or "\x00" in value or value.startswith("~"):
+        return False
+    path = Path(value)
+    if not path.is_absolute():
+        return False
+    raw_components = value.split("/")
+    return all(component not in {"", ".", ".."} for component in raw_components[1:])
+
+
+def parse_audio_rejection_claim(requested_action: str) -> AudioRejectionClaim | None:
+    """requested_action의 미디어 거부 journal payload를 엄격히 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "token",
+        "source_path",
+        "source_dev",
+        "source_ino",
+        "source_size",
+        "source_mtime_ns",
+        "quarantine_path",
+    }
+    if set(payload) != expected_keys:
+        return None
+    if (
+        payload.get("v") != _AUDIO_REJECTION_CLAIM_VERSION
+        or payload.get("kind") != _AUDIO_REJECTION_CLAIM_KIND
+    ):
+        return None
+
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    token = payload.get("token")
+    source_path = payload.get("source_path")
+    quarantine_path = payload.get("quarantine_path")
+    source_dev = payload.get("source_dev")
+    source_ino = payload.get("source_ino")
+    source_size = payload.get("source_size")
+    source_mtime_ns = payload.get("source_mtime_ns")
+    if original_status not in {
+        JobStatus.RECORDED.value,
+        JobStatus.QUEUED.value,
+        JobStatus.FAILED.value,
+    }:
+        return None
+    if not isinstance(original_action, str):
+        return None
+    if not isinstance(token, str):
+        return None
+    try:
+        _validate_claim_token(token, "미디어 거부 claim token")
+    except JobQueueError:
+        return None
+    if not isinstance(source_path, str) or not _valid_audio_rejection_absolute_path(source_path):
+        return None
+    if not isinstance(quarantine_path, str) or not _valid_audio_rejection_absolute_path(
+        quarantine_path
+    ):
+        return None
+    if (
+        type(source_dev) is not int
+        or source_dev < 0
+        or type(source_ino) is not int
+        or source_ino < 0
+        or type(source_size) is not int
+        or source_size < 0
+        or type(source_mtime_ns) is not int
+        or source_mtime_ns < 0
+    ):
+        return None
+    return AudioRejectionClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        token=token,
+        source_path=source_path,
+        source_identity=(
+            source_dev,
+            source_ino,
+            source_size,
+            source_mtime_ns,
+        ),
+        quarantine_path=quarantine_path,
+    )
+
+
+def parse_audio_admission_hold(requested_action: str) -> AudioAdmissionHold | None:
+    """requested_action의 audio-admission hold payload를 엄격히 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "token",
+    }
+    if set(payload) != expected_keys:
+        return None
+    if payload.get("v") != 1 or payload.get("kind") != "audio_admission_hold":
+        return None
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    token = payload.get("token")
+    if original_status not in {JobStatus.QUEUED.value, JobStatus.FAILED.value}:
+        return None
+    if not isinstance(original_action, str):
+        return None
+    if not isinstance(token, str) or not token or len(token) > 128:
+        return None
+    if not all(character.isalnum() or character in {"-", "_"} for character in token):
+        return None
+    return AudioAdmissionHold(
+        original_status=original_status,
+        original_requested_action=original_action,
+        token=token,
+    )
+
+
+def parse_retranscribe_claim(requested_action: str) -> RetranscribeClaim | None:
+    """requested_action의 versioned 재전사 claim을 엄격하게 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "token",
+        "phase",
+    }
+    if set(payload) != expected_keys:
+        return None
+    if payload.get("v") != _RETRANSCRIBE_CLAIM_VERSION:
+        return None
+    if payload.get("kind") != _RETRANSCRIBE_CLAIM_KIND:
+        return None
+
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    token = payload.get("token")
+    phase = payload.get("phase")
+    if original_status not in {JobStatus.COMPLETED.value, JobStatus.FAILED.value}:
+        return None
+    if not isinstance(original_action, str):
+        return None
+    if not isinstance(token, str) or not token or len(token) > 128:
+        return None
+    if not all(character.isalnum() or character in {"-", "_"} for character in token):
+        return None
+    if phase not in _RETRANSCRIBE_PHASES:
+        return None
+    return RetranscribeClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        token=token,
+        phase=phase,
+    )
+
+
+RETRANSCRIBE_OUTPUT_FILES = (
+    "corrected.json",
+    "summary.md",
+    "meeting_minutes.md",
+    "summary.json",
+)
+
+
+def _validate_retranscribe_path_component(value: str, label: str) -> None:
+    """staging 경로에 사용할 단일 path component를 검증한다."""
+    if not value or "\x00" in value or value in {".", ".."} or Path(value).name != value:
+        raise JobQueueError(f"유효하지 않은 {label}: {value!r}")
+    if "/" in value or "\\" in value:
+        raise JobQueueError(f"유효하지 않은 {label}: {value!r}")
+
+
+def _validate_claim_token(token: str, label: str) -> None:
+    """DB payload와 staging 경로에 공통으로 사용할 opaque token을 검증한다."""
+    if (
+        not token
+        or len(token) > 128
+        or not all(character.isalnum() or character in {"-", "_"} for character in token)
+    ):
+        raise JobQueueError(f"유효하지 않은 {label}")
+
+
+def lexical_root_no_symlinks(root: Path) -> Path:
+    """root와 기존 intermediate를 resolve하지 않고 symlink 여부를 검사한다."""
+    lexical_root = root.expanduser().absolute()
+    if ".." in lexical_root.parts:
+        raise JobQueueError(f"staging root에 상위 경로 요소를 사용할 수 없습니다: {root}")
+    current = Path(lexical_root.anchor)
+    parts = lexical_root.parts[1:] if lexical_root.is_absolute() else lexical_root.parts
+    for index, component in enumerate(parts):
+        current /= component
+        try:
+            entry_stat = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise JobQueueError(f"staging root 상태 확인 실패: {current} ({exc})") from exc
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise JobQueueError(f"staging root에 심볼릭 링크를 사용할 수 없습니다: {current}")
+        if not stat.S_ISDIR(entry_stat.st_mode):
+            position = "root" if index == len(parts) - 1 else "root 상위 경로"
+            raise JobQueueError(f"staging {position}가 디렉터리가 아닙니다: {current}")
+    return lexical_root
+
+
+def retranscribe_staging_paths(
+    checkpoints_root: Path,
+    outputs_root: Path,
+    meeting_id: str,
+    token: str,
+) -> tuple[Path, Path]:
+    """token으로 결정되는 checkpoint/output staging 경로를 반환한다."""
+    _validate_retranscribe_path_component(meeting_id, "meeting_id")
+    _validate_claim_token(token, "재전사 claim token")
+    checkpoints_lexical = lexical_root_no_symlinks(checkpoints_root)
+    outputs_lexical = lexical_root_no_symlinks(outputs_root)
+    return (
+        checkpoints_lexical / f".retranscribe-{meeting_id}-{token}-checkpoints",
+        outputs_lexical / f".retranscribe-{meeting_id}-{token}-outputs",
+    )
+
+
+def _open_pinned_retranscribe_root(
+    root: Path, *, create: bool
+) -> tuple[Path, int, os.stat_result]:
+    """재전사 작업 동안 사용할 root descriptor와 최초 identity를 반환한다."""
+    lexical = lexical_root_no_symlinks(root)
+    try:
+        root_fd = _open_directory_tree_no_follow(lexical, create=create)
+    except (OSError, QuarantineError) as exc:
+        raise JobQueueError(f"재전사 root 열기 실패: {lexical} ({exc})") from exc
+    opened = os.fstat(root_fd)
+    if not stat.S_ISDIR(opened.st_mode):
+        os.close(root_fd)
+        raise JobQueueError(f"재전사 root가 디렉터리가 아닙니다: {lexical}")
+    return lexical, root_fd, opened
+
+
+def _verify_pinned_retranscribe_root(
+    root: Path,
+    root_fd: int,
+    expected: os.stat_result,
+) -> None:
+    """lexical root entry가 작업 시작 때 연 디렉터리와 같은지 재검증한다."""
+    current = os.fstat(root_fd)
+    if not stat.S_ISDIR(current.st_mode) or not _same_inode(current, expected):
+        raise JobQueueError(f"열어 둔 재전사 root identity가 변경되었습니다: {root}")
+    reopened_fd: int | None = None
+    try:
+        reopened_fd = _open_directory_tree_no_follow(root, create=False)
+        reopened = os.fstat(reopened_fd)
+    except (OSError, QuarantineError) as exc:
+        raise JobQueueError(f"재전사 root 재검증 실패: {root} ({exc})") from exc
+    finally:
+        if reopened_fd is not None:
+            os.close(reopened_fd)
+    if not _same_inode(reopened, expected):
+        raise JobQueueError(f"재전사 도중 root entry가 교체되었습니다: {root}")
+
+
+def _entry_stat(directory_fd: int, name: str) -> os.stat_result | None:
+    """directory descriptor 기준 entry의 no-follow stat을 반환한다."""
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_child_directory(directory_fd: int, name: str) -> tuple[int, os.stat_result]:
+    """부모 descriptor 아래 디렉터리를 no-follow로 열고 entry identity를 고정한다."""
+    before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise JobQueueError(f"재전사 경로가 안전한 디렉터리가 아닙니다: {name}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    child_fd = os.open(name, flags, dir_fd=directory_fd)
+    opened = os.fstat(child_fd)
+    if not stat.S_ISDIR(opened.st_mode) or not _same_inode(before, opened):
+        os.close(child_fd)
+        raise JobQueueError(f"재전사 디렉터리 entry가 여는 중 교체되었습니다: {name}")
+    return child_fd, opened
+
+
+def _require_open_entry_identity(
+    directory_fd: int,
+    name: str,
+    expected: os.stat_result,
+) -> None:
+    """열어 둔 entry가 여전히 부모 디렉터리의 같은 이름에 연결됐는지 확인한다."""
+    current = _entry_stat(directory_fd, name)
+    if current is None or not _same_inode(current, expected):
+        raise JobQueueError(f"재전사 도중 디렉터리 entry가 교체되었습니다: {name}")
+
+
+def _full_entry_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """rename 직전 교체까지 감지하는 entry의 전체 identity와 타입을 반환한다."""
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _same_published_entry(expected: os.stat_result, current: os.stat_result) -> bool:
+    """rename이 바꿀 수 있는 ctime을 제외하고 게시된 inode/타입/내용을 검증한다."""
+    return (
+        expected.st_dev == current.st_dev
+        and expected.st_ino == current.st_ino
+        and expected.st_mode == current.st_mode
+        and expected.st_size == current.st_size
+        and expected.st_mtime_ns == current.st_mtime_ns
+    )
+
+
+def _rollback_conflict_name(token: str, name: str) -> str:
+    """이름 충돌 시 foreign entry를 보존할 결정적 recovery 이름을 반환한다."""
+    digest = hashlib.sha256(name.encode()).hexdigest()[:16]
+    return f".rollback-conflict-{token[:64]}-{digest}"
+
+
+def _recover_mismatched_moved_entry(
+    source_fd: int,
+    destination_fd: int,
+    source_name: str,
+    destination_name: str,
+    token: str,
+    moved: os.stat_result,
+) -> None:
+    """검증과 rename 사이 바뀌어 잘못 게시된 entry를 source 쪽에 보존한다."""
+    destination_current = os.stat(
+        destination_name,
+        dir_fd=destination_fd,
+        follow_symlinks=False,
+    )
+    if not _same_published_entry(moved, destination_current):
+        raise JobQueueError(f"잘못 게시된 entry도 다시 교체되어 회수할 수 없습니다: {source_name}")
+    recovery_name = (
+        source_name
+        if _entry_stat(source_fd, source_name) is None
+        else _rollback_conflict_name(token, source_name)
+    )
+    if _entry_stat(source_fd, recovery_name) is not None:
+        raise JobQueueError(f"rollback conflict 보존 경로가 이미 존재합니다: {recovery_name}")
+    os.rename(
+        destination_name,
+        recovery_name,
+        src_dir_fd=destination_fd,
+        dst_dir_fd=source_fd,
+    )
+    recovered = os.stat(recovery_name, dir_fd=source_fd, follow_symlinks=False)
+    if not _same_published_entry(moved, recovered):
+        raise JobQueueError(f"잘못 게시된 entry 회수 identity 검증 실패: {source_name}")
+
+
+def _move_entry_checked(
+    source_fd: int,
+    destination_fd: int,
+    name: str,
+    expected: os.stat_result,
+    token: str,
+    *,
+    destination_name: str | None = None,
+) -> os.stat_result:
+    """entry를 descriptor-relative rename하고 pre/post identity를 검증한다."""
+    published_name = destination_name or name
+    current = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+    if _full_entry_identity(current) != _full_entry_identity(expected):
+        raise JobQueueError(f"재전사 entry가 rename 직전 교체되었습니다: {name}")
+    if _entry_stat(destination_fd, published_name) is not None:
+        raise JobQueueError(f"재전사 rename 목적지가 이미 존재합니다: {published_name}")
+    os.rename(
+        name,
+        published_name,
+        src_dir_fd=source_fd,
+        dst_dir_fd=destination_fd,
+    )
+    moved = os.stat(published_name, dir_fd=destination_fd, follow_symlinks=False)
+    if not _same_published_entry(expected, moved):
+        _recover_mismatched_moved_entry(
+            source_fd,
+            destination_fd,
+            name,
+            published_name,
+            token,
+            moved,
+        )
+        raise JobQueueError(f"재전사 rename 중 entry가 교체되었습니다: {name}")
+    return moved
+
+
+def _restore_checked_moves(
+    source_fd: int,
+    destination_fd: int,
+    moved_entries: dict[str, os.stat_result],
+    token: str,
+) -> None:
+    """부분 이동된 entry를 역순으로 원래 descriptor에 되돌린다."""
+    errors: list[str] = []
+    for name, moved in reversed(tuple(moved_entries.items())):
+        try:
+            _move_entry_checked(source_fd, destination_fd, name, moved, token)
+        except (OSError, JobQueueError) as exc:
+            errors.append(f"{name}: {exc}")
+    if errors:
+        raise JobQueueError("부분 rename 원복 실패: " + "; ".join(errors))
+
+
+def _remove_tree_contents(directory_fd: int) -> None:
+    """열린 디렉터리의 내용을 심볼릭 링크 없이 descriptor-relative 삭제한다."""
+    for name in os.listdir(directory_fd):
+        _validate_retranscribe_path_component(name, "staging entry")
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry.st_mode):
+            child_fd, opened = _open_child_directory(directory_fd, name)
+            try:
+                _remove_tree_contents(child_fd)
+                _require_open_entry_identity(directory_fd, name, opened)
+                os.rmdir(name, dir_fd=directory_fd)
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(entry.st_mode):
+            raise JobQueueError(f"재전사 staging에 안전하지 않은 entry가 있습니다: {name}")
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_inode(entry, current):
+            raise JobQueueError(f"재전사 staging entry가 삭제 전 교체되었습니다: {name}")
+        os.unlink(name, dir_fd=directory_fd)
+
+
+def _rollback_retranscribe_staging_fds(
+    checkpoints_fd: int,
+    outputs_fd: int,
+    meeting_id: str,
+    token: str,
+) -> None:
+    """이미 고정한 root descriptors 안에서 staging 산출물을 원복한다."""
+    checkpoint_stage = f".retranscribe-{meeting_id}-{token}-checkpoints"
+    output_stage = f".retranscribe-{meeting_id}-{token}-outputs"
+    errors: list[str] = []
+
+    try:
+        stage_stat = _entry_stat(checkpoints_fd, checkpoint_stage)
+        if stage_stat is not None:
+            if not stat.S_ISDIR(stage_stat.st_mode):
+                raise JobQueueError("checkpoint staging이 안전한 디렉터리가 아닙니다")
+            stage_fd, opened_stage = _open_child_directory(checkpoints_fd, checkpoint_stage)
+            try:
+                original_stat = _entry_stat(checkpoints_fd, meeting_id)
+                created_original = False
+                if original_stat is None:
+                    os.mkdir(meeting_id, mode=0o700, dir_fd=checkpoints_fd)
+                    created_original = True
+                    original_stat = os.stat(
+                        meeting_id,
+                        dir_fd=checkpoints_fd,
+                        follow_symlinks=False,
+                    )
+                if not stat.S_ISDIR(original_stat.st_mode):
+                    raise JobQueueError("checkpoint rollback 대상이 디렉터리가 아닙니다")
+                original_fd, opened_original = _open_child_directory(
+                    checkpoints_fd,
+                    meeting_id,
+                )
+                moved_entries: dict[str, os.stat_result] = {}
+                try:
+                    staged_entries = os.listdir(stage_fd)
+                    initial_entries: dict[str, os.stat_result] = {}
+                    discard_names: set[str] = set()
+                    for name in staged_entries:
+                        _validate_retranscribe_path_component(name, "checkpoint entry")
+                        source = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                        if stat.S_ISLNK(source.st_mode):
+                            raise JobQueueError("checkpoint staging에 심볼릭 링크가 있습니다")
+                        initial_entries[name] = source
+                        destination = _entry_stat(original_fd, name)
+                        if destination is None:
+                            continue
+                        if name != "reindex_required.json" or not stat.S_ISREG(source.st_mode):
+                            raise JobQueueError(
+                                f"checkpoint rollback 대상이 이미 존재합니다: {name}"
+                            )
+                        discard_names.add(name)
+
+                    for name, expected in initial_entries.items():
+                        if name in discard_names:
+                            continue
+                        moved_entries[name] = _move_entry_checked(
+                            stage_fd,
+                            original_fd,
+                            name,
+                            expected,
+                            token,
+                        )
+
+                    for name in discard_names:
+                        expected = initial_entries[name]
+                        current = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                        if _full_entry_identity(current) != _full_entry_identity(expected):
+                            raise JobQueueError(
+                                f"checkpoint staging entry가 삭제 전 교체되었습니다: {name}"
+                            )
+                        os.unlink(name, dir_fd=stage_fd)
+
+                    _require_open_entry_identity(
+                        checkpoints_fd,
+                        meeting_id,
+                        opened_original,
+                    )
+                    _require_open_entry_identity(
+                        checkpoints_fd,
+                        checkpoint_stage,
+                        opened_stage,
+                    )
+                    os.rmdir(checkpoint_stage, dir_fd=checkpoints_fd)
+                except BaseException as operation_error:
+                    try:
+                        _restore_checked_moves(
+                            original_fd,
+                            stage_fd,
+                            moved_entries,
+                            token,
+                        )
+                    except (OSError, JobQueueError) as restore_error:
+                        raise JobQueueError(
+                            f"checkpoint rollback entry 원복 실패: {restore_error}"
+                        ) from operation_error
+                    if created_original:
+                        try:
+                            os.rmdir(meeting_id, dir_fd=checkpoints_fd)
+                        except OSError as remove_error:
+                            raise JobQueueError(
+                                f"checkpoint rollback 임시 original 정리 실패: {remove_error}"
+                            ) from operation_error
+                    raise
+                finally:
+                    os.close(original_fd)
+            finally:
+                os.close(stage_fd)
+    except (OSError, JobQueueError) as exc:
+        errors.append(f"checkpoint rollback 실패: {exc}")
+
+    try:
+        stage_stat = _entry_stat(outputs_fd, output_stage)
+        if stage_stat is not None:
+            if not stat.S_ISDIR(stage_stat.st_mode):
+                raise JobQueueError("output staging이 안전한 디렉터리가 아닙니다")
+            stage_fd, opened_stage = _open_child_directory(outputs_fd, output_stage)
+            try:
+                staged_names = [
+                    name for name in RETRANSCRIBE_OUTPUT_FILES if _entry_stat(stage_fd, name)
+                ]
+                unexpected = set(os.listdir(stage_fd)) - set(staged_names)
+                if unexpected:
+                    raise JobQueueError(
+                        f"output staging에 예상하지 못한 entry가 있습니다: {sorted(unexpected)}"
+                    )
+                original_stat = _entry_stat(outputs_fd, meeting_id)
+                created_original = False
+                if staged_names and original_stat is None:
+                    os.mkdir(meeting_id, mode=0o700, dir_fd=outputs_fd)
+                    created_original = True
+                    original_stat = os.stat(
+                        meeting_id,
+                        dir_fd=outputs_fd,
+                        follow_symlinks=False,
+                    )
+                if original_stat is not None:
+                    if not stat.S_ISDIR(original_stat.st_mode):
+                        raise JobQueueError("output rollback 대상이 디렉터리가 아닙니다")
+                    original_fd, opened_original = _open_child_directory(outputs_fd, meeting_id)
+                    output_moved_entries: dict[str, os.stat_result] = {}
+                    try:
+                        output_initial_entries: dict[str, os.stat_result] = {}
+                        for name in staged_names:
+                            source = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                            if not stat.S_ISREG(source.st_mode):
+                                raise JobQueueError(
+                                    f"output rollback entry가 일반 파일이 아닙니다: {name}"
+                                )
+                            if _entry_stat(original_fd, name) is not None:
+                                raise JobQueueError(
+                                    f"output rollback 대상이 이미 존재합니다: {name}"
+                                )
+                            output_initial_entries[name] = source
+                        for name, expected in output_initial_entries.items():
+                            output_moved_entries[name] = _move_entry_checked(
+                                stage_fd,
+                                original_fd,
+                                name,
+                                expected,
+                                token,
+                            )
+                        _require_open_entry_identity(outputs_fd, meeting_id, opened_original)
+                    except BaseException as operation_error:
+                        try:
+                            _restore_checked_moves(
+                                original_fd,
+                                stage_fd,
+                                output_moved_entries,
+                                token,
+                            )
+                        except (OSError, JobQueueError) as restore_error:
+                            raise JobQueueError(
+                                f"output rollback entry 원복 실패: {restore_error}"
+                            ) from operation_error
+                        if created_original:
+                            try:
+                                os.rmdir(meeting_id, dir_fd=outputs_fd)
+                            except OSError as remove_error:
+                                raise JobQueueError(
+                                    f"output rollback 임시 original 정리 실패: {remove_error}"
+                                ) from operation_error
+                        raise
+                    finally:
+                        os.close(original_fd)
+                _require_open_entry_identity(outputs_fd, output_stage, opened_stage)
+                os.rmdir(output_stage, dir_fd=outputs_fd)
+            finally:
+                os.close(stage_fd)
+    except (OSError, JobQueueError) as exc:
+        errors.append(f"output rollback 실패: {exc}")
+
+    if errors:
+        raise JobQueueError("; ".join(errors))
+
+
+def rollback_retranscribe_staging(
+    checkpoints_root: Path,
+    outputs_root: Path,
+    meeting_id: str,
+    token: str,
+) -> None:
+    """결정적 staging 경로의 재전사 산출물을 pinned root 안에서 원복한다."""
+    retranscribe_staging_paths(checkpoints_root, outputs_root, meeting_id, token)
+    checkpoints_lexical, checkpoints_fd, checkpoints_identity = _open_pinned_retranscribe_root(
+        checkpoints_root, create=True
+    )
+    outputs_lexical: Path | None = None
+    outputs_fd: int | None = None
+    outputs_identity: os.stat_result | None = None
+    try:
+        outputs_lexical, outputs_fd, outputs_identity = _open_pinned_retranscribe_root(
+            outputs_root,
+            create=True,
+        )
+        _rollback_retranscribe_staging_fds(
+            checkpoints_fd,
+            outputs_fd,
+            meeting_id,
+            token,
+        )
+        _verify_pinned_retranscribe_root(
+            checkpoints_lexical,
+            checkpoints_fd,
+            checkpoints_identity,
+        )
+        _verify_pinned_retranscribe_root(outputs_lexical, outputs_fd, outputs_identity)
+    finally:
+        os.close(checkpoints_fd)
+        if outputs_fd is not None:
+            os.close(outputs_fd)
+
+
+def cleanup_retranscribe_staging(
+    checkpoints_root: Path,
+    outputs_root: Path,
+    meeting_id: str,
+    token: str,
+) -> None:
+    """commit 직전 재전사 staging을 no-follow 방식으로 엄격히 정리한다.
+
+    일부 디렉터리가 이미 정리된 경우에도 성공하므로 startup recovery에서
+    반복 실행할 수 있다. 예상치 못한 파일·심볼릭 링크·삭제 오류는 claim을
+    유지할 수 있도록 호출자에게 전파한다.
+    """
+    stage_paths = retranscribe_staging_paths(
+        checkpoints_root,
+        outputs_root,
+        meeting_id,
+        token,
+    )
+    for root, stage_path in zip((checkpoints_root, outputs_root), stage_paths, strict=True):
+        try:
+            lexical, root_fd, root_identity = _open_pinned_retranscribe_root(
+                root,
+                create=False,
+            )
+        except JobQueueError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                continue
+            raise
+        try:
+            stage_stat = _entry_stat(root_fd, stage_path.name)
+            if stage_stat is None:
+                _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+                continue
+            if not stat.S_ISDIR(stage_stat.st_mode):
+                raise JobQueueError(f"재전사 staging이 안전한 디렉터리가 아닙니다: {stage_path}")
+            stage_fd, opened_stage = _open_child_directory(root_fd, stage_path.name)
+            try:
+                _remove_tree_contents(stage_fd)
+                _require_open_entry_identity(root_fd, stage_path.name, opened_stage)
+                os.rmdir(stage_path.name, dir_fd=root_fd)
+            finally:
+                os.close(stage_fd)
+            _verify_pinned_retranscribe_root(lexical, root_fd, root_identity)
+        except OSError as exc:
+            raise JobQueueError(f"재전사 staging 정리 실패: {stage_path} ({exc})") from exc
+        finally:
+            os.close(root_fd)
 
 
 # === 에러 계층 ===
@@ -723,6 +1562,332 @@ class JobQueue:
         )
         return self.get_job(job_id)
 
+    def queue_failed_job(self, job_id: int) -> Job:
+        """실패 작업을 중간 상태 없이 원자적으로 queued 로 전환한다.
+
+        ``force=true`` 전사 요청용 전이다. retry_count 는 그대로 보존하고,
+        이전 실행의 오류와 requested_action 만 같은 UPDATE에서 초기화한다.
+        ``WHERE status = 'failed'`` 조건을 포함하므로 조회 이후 다른 워커가
+        상태를 바꾼 경우에도 새 상태를 덮어쓰지 않는다.
+
+        Args:
+            job_id: 큐에 다시 넣을 실패 작업 ID
+
+        Returns:
+            queued 로 전환된 Job 인스턴스
+
+        Raises:
+            JobNotFoundError: 작업이 없을 때
+            InvalidTransitionError: 현재 상태가 failed 가 아닐 때
+        """
+        conn = self._ensure_connection()
+        now = self._now_iso()
+
+        with self._write_lock:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    requested_action = '',
+                    error_message = '',
+                    updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    now,
+                    job_id,
+                    JobStatus.FAILED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = conn.execute(
+                    "SELECT status FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                conn.rollback()
+                if row is None:
+                    raise JobNotFoundError(job_id)
+                raise InvalidTransitionError(
+                    job_id,
+                    str(row["status"]),
+                    JobStatus.QUEUED.value,
+                )
+            conn.commit()
+
+        logger.info("실패 작업 원자적 큐잉: id=%s, failed → queued", job_id)
+        return self.get_job(job_id)
+
+    def queue_jobs_atomically(
+        self,
+        job_ids: list[int],
+        requested_action: str = "",
+    ) -> list[Job]:
+        """recorded 작업 묶음을 단일 SQL transaction으로 queued 전환한다.
+
+        하나라도 누락됐거나 더 이상 recorded가 아니면 전체 UPDATE를 rollback한다.
+        """
+        allowed_actions = {"", "transcribe", "full"}
+        if requested_action not in allowed_actions:
+            raise JobQueueError(f"유효하지 않은 requested_action: {requested_action}")
+        unique_ids = list(dict.fromkeys(job_ids))
+        if len(unique_ids) != len(job_ids):
+            raise JobQueueError("일괄 큐잉 job_id가 중복되었습니다")
+        if not unique_ids:
+            return []
+
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        placeholders = ", ".join("?" for _ in unique_ids)
+        with self._write_lock:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    f"""
+                    UPDATE jobs
+                    SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                    WHERE id IN ({placeholders}) AND status = ?
+                    """,
+                    (
+                        JobStatus.QUEUED.value,
+                        requested_action,
+                        now,
+                        *unique_ids,
+                        JobStatus.RECORDED.value,
+                    ),
+                )
+                if cursor.rowcount != len(unique_ids):
+                    conn.rollback()
+                    raise JobQueueError("일괄 큐잉 CAS 실패: 일부 작업이 recorded 상태가 아닙니다")
+                conn.commit()
+            except sqlite3.Error as exc:
+                conn.rollback()
+                raise JobQueueError(f"일괄 큐잉 SQLite transaction 실패: {exc}") from exc
+
+        logger.info(
+            "작업 일괄 원자 큐잉: ids=%s, requested_action=%r",
+            unique_ids,
+            requested_action,
+        )
+        return [self.get_job(job_id) for job_id in unique_ids]
+
+    def hold_job_for_audio_admission(self, job_id: int, token: str) -> Job:
+        """queued/failed 작업을 원래 실행 의도와 함께 recorded에 보류한다.
+
+        보류 정보는 versioned ``requested_action`` payload에 저장한다. 프로세스가
+        중단돼도 다음 시작 시 원래 상태와 실행 의도를 재감사할 수 있고, token
+        CAS가 늦게 끝난 validator의 복원을 차단한다.
+        """
+        _validate_claim_token(token, "audio admission hold token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            original_status = str(row["status"])
+            if original_status not in {JobStatus.QUEUED.value, JobStatus.FAILED.value}:
+                raise InvalidTransitionError(
+                    job_id,
+                    original_status,
+                    JobStatus.RECORDED.value,
+                )
+            original_action = str(row["requested_action"] or "")
+            payload = AudioAdmissionHold(
+                original_status=original_status,
+                original_requested_action=original_action,
+                token=token,
+            ).to_requested_action()
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDED.value,
+                    payload,
+                    now,
+                    job_id,
+                    original_status,
+                    original_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("audio admission hold CAS가 경합으로 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def finalize_audio_admission_hold(self, job_id: int, token: str) -> Job:
+        """ACCEPT된 hold를 token CAS로 원래 실행 계약에 맞게 finalize한다.
+
+        queued-origin은 원래 action으로 queued에 복귀한다. failed-origin은
+        recorded 대기 상태로 두고 이전 오류와 action을 지운다.
+        """
+        _validate_claim_token(token, "audio admission hold token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            hold = parse_audio_admission_hold(payload)
+            if row["status"] != JobStatus.RECORDED.value or hold is None:
+                raise InvalidTransitionError(
+                    job_id,
+                    str(row["status"]),
+                    "audio admission hold finalize",
+                )
+            if hold.token != token:
+                raise JobQueueError("audio admission hold token이 일치하지 않습니다")
+
+            queued_origin = hold.original_status == JobStatus.QUEUED.value
+            target_status = JobStatus.QUEUED.value if queued_origin else JobStatus.RECORDED.value
+            target_action = hold.original_requested_action if queued_origin else ""
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    target_status,
+                    target_action,
+                    now,
+                    job_id,
+                    JobStatus.RECORDED.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("audio admission hold finalize CAS가 경합으로 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def claim_for_audio_rejection(
+        self,
+        job_id: int,
+        token: str,
+        *,
+        source_path: str,
+        source_identity: tuple[int, int, int, int],
+        quarantine_path: str,
+    ) -> Job:
+        """확정된 미디어 거부를 격리 전에 durable token CAS로 예약한다."""
+        _validate_claim_token(token, "미디어 거부 claim token")
+        if not _valid_audio_rejection_absolute_path(source_path):
+            raise JobQueueError("유효하지 않은 미디어 거부 source_path")
+        if not _valid_audio_rejection_absolute_path(quarantine_path):
+            raise JobQueueError("유효하지 않은 미디어 거부 quarantine_path")
+        if len(source_identity) != 4 or any(
+            type(value) is not int or value < 0 for value in source_identity
+        ):
+            raise JobQueueError("유효하지 않은 미디어 거부 source identity")
+
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action, audio_path FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = str(row["status"])
+            current_action = str(row["requested_action"] or "")
+            if str(row["audio_path"]) != source_path:
+                raise JobQueueError("미디어 거부 source_path가 job audio_path와 일치하지 않습니다")
+            hold = parse_audio_admission_hold(current_action)
+            if current_status == JobStatus.RECORDED.value and hold is not None:
+                original_status = hold.original_status
+                original_action = hold.original_requested_action
+            elif current_status in {
+                JobStatus.RECORDED.value,
+                JobStatus.QUEUED.value,
+                JobStatus.FAILED.value,
+            }:
+                original_status = current_status
+                original_action = current_action
+            else:
+                raise InvalidTransitionError(
+                    job_id,
+                    current_status,
+                    JobStatus.RECORDING.value,
+                )
+
+            claim = AudioRejectionClaim(
+                original_status=original_status,
+                original_requested_action=original_action,
+                token=token,
+                source_path=source_path,
+                source_identity=source_identity,
+                quarantine_path=quarantine_path,
+            )
+            payload = claim.to_requested_action()
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDING.value,
+                    payload,
+                    now,
+                    job_id,
+                    current_status,
+                    current_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("미디어 거부 claim CAS가 경합으로 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def finalize_audio_rejection(self, job_id: int, token: str) -> None:
+        """정확한 미디어 거부 token+payload가 유지될 때만 job row를 삭제한다."""
+        _validate_claim_token(token, "미디어 거부 claim token")
+        conn = self._ensure_connection()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_audio_rejection_claim(payload)
+            if row["status"] != JobStatus.RECORDING.value or claim is None:
+                raise InvalidTransitionError(
+                    job_id,
+                    str(row["status"]),
+                    "audio rejection finalize",
+                )
+            if claim.token != token:
+                raise JobQueueError("미디어 거부 claim token이 일치하지 않습니다")
+            cursor = conn.execute(
+                """
+                DELETE FROM jobs
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (job_id, JobStatus.RECORDING.value, payload),
+            )
+            if cursor.rowcount != 1:
+                # CAS를 깨뜨린 동시 변경은 이 메서드가 되돌리면 안 된다.
+                conn.commit()
+                raise JobQueueError("미디어 거부 finalize CAS가 경합으로 실패했습니다")
+            conn.commit()
+
     def retry_job(self, job_id: int) -> Job:
         """실패한 작업을 재시도한다.
 
@@ -835,40 +2000,28 @@ class JobQueue:
         )
         return self.get_job(job_id)
 
-    def reset_for_retranscribe(self, job_id: int) -> Job:
-        """완료/실패한 작업을 재전사 대상으로 초기화한다.
+    def reset_for_retranscribe(self, job_id: int, token: str) -> Job:
+        """재전사 claim을 token CAS로 queued 상태에 commit한다.
 
-        표준 상태 전이 규칙(VALID_TRANSITIONS)을 우회하여
-        completed/failed 상태의 작업을 강제로 queued 로 되돌린다.
-        retry_count 와 error_message 도 리셋한다.
-
-        주의: 이 메서드는 체크포인트/출력 파일을 삭제하지 않는다.
-        호출자가 파일 정리 책임을 가진다 (api/routes.py::re_transcribe_meeting).
-
-        Args:
-            job_id: 재전사할 작업 ID
-
-        Returns:
-            업데이트된 Job 인스턴스
-
-        Raises:
-            JobNotFoundError: 작업이 없을 때
-            InvalidTransitionError: completed/failed 가 아닐 때
+        completed/failed에서 직접 queued로 우회할 수 없으며, 반드시
+        ``claim_for_retranscribe``가 만든 recording claim만 finalize한다.
         """
         conn = self._ensure_connection()
-        job = self.get_job(job_id)
-
-        allowed = {JobStatus.COMPLETED.value, JobStatus.FAILED.value}
-        if job.status not in allowed:
-            raise InvalidTransitionError(
-                job_id,
-                job.status,
-                JobStatus.QUEUED.value,
-            )
-
         now = self._now_iso()
         with self._write_lock:
-            conn.execute(
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            claim = parse_retranscribe_claim(str(row["requested_action"]))
+            if row["status"] != JobStatus.RECORDING.value or claim is None:
+                raise InvalidTransitionError(job_id, str(row["status"]), JobStatus.QUEUED.value)
+            if claim.token != token or claim.phase != "committing":
+                raise JobQueueError("재전사 claim token/phase가 일치하지 않습니다")
+
+            cursor = conn.execute(
                 """
                 UPDATE jobs
                 SET status = ?,
@@ -876,13 +2029,169 @@ class JobQueue:
                     requested_action = '',
                     error_message = '',
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
                 """,
-                (JobStatus.QUEUED.value, now, job_id),
+                (
+                    JobStatus.QUEUED.value,
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    str(row["requested_action"]),
+                ),
             )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("재전사 claim finalize CAS가 경합으로 실패했습니다")
             conn.commit()
 
-        logger.info(f"재전사 초기화: id={job_id} ({job.status} → queued)")
+        logger.info("재전사 claim commit: id=%s, token=%s → queued", job_id, token)
+        return self.get_job(job_id)
+
+    def claim_for_retranscribe(self, job_id: int, token: str) -> Job:
+        """completed/failed 작업을 원상태 보존 payload로 조건부 예약한다."""
+        _validate_claim_token(token, "재전사 claim token")
+
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            original_status = str(row["status"])
+            if original_status not in {JobStatus.COMPLETED.value, JobStatus.FAILED.value}:
+                raise InvalidTransitionError(
+                    job_id,
+                    original_status,
+                    JobStatus.RECORDING.value,
+                )
+            original_action = str(row["requested_action"] or "")
+            claim = RetranscribeClaim(
+                original_status=original_status,
+                original_requested_action=original_action,
+                token=token,
+                phase="claimed",
+            )
+            payload = claim.to_requested_action()
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDING.value,
+                    payload,
+                    now,
+                    job_id,
+                    original_status,
+                    original_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("재전사 claim CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.info("재전사 작업 예약: id=%s, token=%s", job_id, token)
+        return self.get_job(job_id)
+
+    def update_retranscribe_claim_phase(
+        self,
+        job_id: int,
+        token: str,
+        phase: str,
+    ) -> Job:
+        """재전사 claim phase를 token CAS로 갱신한다."""
+        if phase not in _RETRANSCRIBE_PHASES - {"claimed"}:
+            raise JobQueueError(f"유효하지 않은 재전사 claim phase: {phase}")
+
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            claim = parse_retranscribe_claim(str(row["requested_action"]))
+            if row["status"] != JobStatus.RECORDING.value or claim is None:
+                raise InvalidTransitionError(job_id, str(row["status"]), JobStatus.RECORDING.value)
+            if claim.token != token:
+                raise JobQueueError("재전사 claim token이 일치하지 않습니다")
+            expected_phase = {
+                "staging": "claimed",
+                "purging": "staging",
+                "committing": "purging",
+            }[phase]
+            if claim.phase != expected_phase:
+                raise JobQueueError(f"재전사 claim phase 전이 불가: {claim.phase} → {phase}")
+            next_claim = RetranscribeClaim(
+                original_status=claim.original_status,
+                original_requested_action=claim.original_requested_action,
+                token=claim.token,
+                phase=phase,
+            )
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET requested_action = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    next_claim.to_requested_action(),
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    str(row["requested_action"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("재전사 claim phase CAS가 경합으로 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def restore_retranscribe_claim(self, job_id: int, token: str) -> Job:
+        """재전사 claim payload의 원래 status/action을 token CAS로 복구한다."""
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            claim = parse_retranscribe_claim(str(row["requested_action"]))
+            if row["status"] != JobStatus.RECORDING.value or claim is None:
+                raise InvalidTransitionError(job_id, str(row["status"]), "claim restore")
+            if claim.token != token:
+                raise JobQueueError("재전사 claim token이 일치하지 않습니다")
+
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    claim.original_status,
+                    claim.original_requested_action,
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    str(row["requested_action"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("재전사 claim restore CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.warning("재전사 작업 예약 복구: id=%s → %s", job_id, claim.original_status)
         return self.get_job(job_id)
 
     def retry_all_failed(self) -> list[int]:
@@ -1128,6 +2437,12 @@ class AsyncJobQueue:
             job_id,
             requested_action,
         )
+
+    async def queue_failed_job(self, job_id: int) -> Job:
+        """실패 작업을 중간 상태 없이 비동기로 queued 로 전환한다."""
+        import asyncio
+
+        return await asyncio.to_thread(self._queue.queue_failed_job, job_id)
 
     async def retry_job(self, job_id: int) -> Job:
         """비동기로 실패 작업을 재시도한다.

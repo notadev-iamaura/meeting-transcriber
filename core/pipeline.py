@@ -15,11 +15,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
 import shutil
+import stat
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -30,9 +33,23 @@ from typing import Any
 import psutil
 
 from config import AppConfig, get_config
-from core.audio_quality import AudioMeasurementError, measure_audio_duration
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioMeasurementError,
+    AudioQualityStatus,
+    measure_audio_duration,
+    validate_audio_quality,
+)
+from core.io_utils import atomic_write_json, atomic_write_text
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.retry_policy import should_retry
+from steps.transcriber import (
+    AudioAdmissionError,
+    AudioFileIdentity,
+    EmptyAudioError,
+    inspect_audio_path_no_symlinks,
+    open_audio_path_no_symlinks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -416,19 +433,13 @@ class PipelineState:
         if indent is None:
             dump_kwargs["separators"] = (",", ":")
 
-        # 임시 파일에 먼저 쓴 후 원자적으로 교체 (크래시 시 데이터 손상 방지)
-        tmp_path = output_path.with_suffix(".tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, **dump_kwargs)
-                f.flush()
-                os.fsync(f.fileno())
-            # POSIX에서 os.replace()는 원자적 연산
-            os.replace(str(tmp_path), str(output_path))
-        except OSError:
-            # 실패 시 임시 파일 정리
-            tmp_path.unlink(missing_ok=True)
-            raise
+        # 같은 디렉터리의 예측 불가능한 exclusive temp를 사용하는 공용 helper로
+        # 원자 교체한다. 고정 `.tmp` symlink를 통한 외부 파일 overwrite를 막는다.
+        atomic_write_text(
+            output_path,
+            json.dumps(self.to_dict(), **dump_kwargs),
+            backup=False,
+        )
         logger.debug(f"파이프라인 상태 저장 (원자적 쓰기): {output_path}")
 
     @classmethod
@@ -471,6 +482,15 @@ class PipelineStepError(PipelineError):
 
 class InvalidInputError(PipelineError):
     """파이프라인 입력이 유효하지 않을 때 발생한다."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: AudioFailureKind | None = None,
+    ) -> None:
+        self.failure_kind = failure_kind
+        super().__init__(message)
 
 
 def _normalize_checkpoint_json_indent(value: object) -> int | None:
@@ -535,8 +555,14 @@ class PipelineManager:
         self._retry_max = self._config.pipeline.retry_max_count
 
         # 경로 설정
-        self._outputs_dir = self._config.paths.resolved_outputs_dir
-        self._checkpoints_dir = self._config.paths.resolved_checkpoints_dir
+        self._outputs_dir = self._configured_storage_root(
+            "outputs_dir",
+            self._config.paths.resolved_outputs_dir,
+        )
+        self._checkpoints_dir = self._configured_storage_root(
+            "checkpoints_dir",
+            self._config.paths.resolved_checkpoints_dir,
+        )
 
         # Graceful Degradation: 리소스 가드 초기화
         self._resource_guard = ResourceGuard(
@@ -577,6 +603,225 @@ class PipelineManager:
         stem = audio_path.stem
         return f"{timestamp}_{stem}"
 
+    def _configured_storage_root(self, field_name: str, resolved_fallback: Path) -> Path:
+        """resolve()가 숨길 수 있는 base symlink를 보존한 lexical root를 만든다."""
+        paths = self._config.paths
+        raw_base = getattr(paths, "base_dir", None)
+        raw_child = getattr(paths, field_name, None)
+        if isinstance(raw_base, (str, Path)) and isinstance(raw_child, (str, Path)):
+            lexical_base = Path(raw_base).expanduser().absolute()
+            child = Path(raw_child).expanduser()
+            if child == Path(".") or ".." in child.parts or "\x00" in str(child):
+                raise InvalidInputError(
+                    f"{field_name}은 base_dir 하위 상대경로여야 합니다: {raw_child!r}",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                )
+            candidate = (
+                child.absolute() if child.is_absolute() else (lexical_base / child).absolute()
+            )
+            try:
+                relative = candidate.relative_to(lexical_base)
+            except ValueError as exc:
+                raise InvalidInputError(
+                    f"{field_name}이 base_dir 밖을 가리킵니다: {candidate}",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                ) from exc
+            if not relative.parts:
+                raise InvalidInputError(
+                    f"{field_name}은 base_dir의 직접/하위 경로여야 합니다",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                )
+            return candidate
+        return Path(resolved_fallback).expanduser().absolute()
+
+    @staticmethod
+    def _validate_meeting_id(meeting_id: str) -> None:
+        """회의 ID가 경로 요소 하나로만 구성됐는지 검증한다."""
+        if (
+            not isinstance(meeting_id, str)
+            or not meeting_id
+            or meeting_id in {".", ".."}
+            or "\x00" in meeting_id
+            or "\\" in meeting_id
+            or Path(meeting_id).name != meeting_id
+        ):
+            raise InvalidInputError(f"유효하지 않은 회의 ID입니다: {meeting_id!r}")
+
+    @staticmethod
+    def _validate_storage_directory(path: Path, *, label: str) -> Path:
+        """openat dirfd chain으로 저장 디렉터리의 기존 요소를 검증한다."""
+        lexical_path = path.expanduser().absolute()
+        if ".." in lexical_path.parts:
+            raise InvalidInputError(
+                f"{label} 경로에 상위 디렉터리 요소가 포함되어 있습니다: {lexical_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+
+        parts = lexical_path.parts[1:] if lexical_path.is_absolute() else lexical_path.parts
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        current = Path(lexical_path.anchor)
+        current_fd: int | None = None
+        try:
+            try:
+                current_fd = os.open(lexical_path.anchor, flags)
+            except OSError as exc:
+                raise InvalidInputError(
+                    f"{label} root를 안전하게 열 수 없습니다: {lexical_path.anchor} ({exc})",
+                    failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+                ) from exc
+
+            for component in parts:
+                current /= component
+                try:
+                    next_fd = os.open(component, flags, dir_fd=current_fd)
+                except FileNotFoundError:
+                    # admission 뒤 생성할 경로는 missing을 허용한다.
+                    break
+                except OSError as exc:
+                    try:
+                        entry_stat = os.stat(
+                            component,
+                            dir_fd=current_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        break
+                    except OSError as stat_exc:
+                        raise InvalidInputError(
+                            f"{label} 경로 상태를 확인할 수 없습니다: {current} ({stat_exc})",
+                            failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+                        ) from stat_exc
+                    if stat.S_ISLNK(entry_stat.st_mode):
+                        raise InvalidInputError(
+                            f"{label} 경로에 심볼릭 링크가 포함되어 있습니다: {current}",
+                            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                        ) from exc
+                    if not stat.S_ISDIR(entry_stat.st_mode):
+                        raise InvalidInputError(
+                            f"{label} 경로 요소가 디렉터리가 아닙니다: {current}",
+                            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                        ) from exc
+                    kind = (
+                        AudioFailureKind.SECURITY_BLOCKED
+                        if exc.errno in {errno.ELOOP, errno.ENOTDIR}
+                        else AudioFailureKind.INFRA_UNAVAILABLE
+                    )
+                    raise InvalidInputError(
+                        f"{label} 경로를 안전하게 열 수 없습니다: {current} ({exc})",
+                        failure_kind=kind,
+                    ) from exc
+                os.close(current_fd)
+                current_fd = next_fd
+        finally:
+            if current_fd is not None:
+                os.close(current_fd)
+        return lexical_path
+
+    def _get_storage_child(self, root: Path, meeting_id: str, *, label: str) -> Path:
+        """설정 root와 회의별 direct child를 no-follow로 검증한다."""
+        self._validate_meeting_id(meeting_id)
+        lexical_root = self._validate_storage_directory(root, label=f"{label} root")
+        child = lexical_root / meeting_id
+        if child.parent != lexical_root:
+            raise InvalidInputError(
+                f"{label} 경로가 설정 root 밖을 가리킵니다: {child}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        self._validate_storage_directory(child, label=f"{label} meeting")
+        return child
+
+    @staticmethod
+    def _validate_storage_artifact(path: Path, *, label: str) -> Path:
+        """openat dirfd chain으로 기존 artifact를 no-follow 검사한다."""
+        lexical_path = path.expanduser().absolute()
+        parts = lexical_path.parts[1:] if lexical_path.is_absolute() else lexical_path.parts
+        if not lexical_path.is_absolute() or not parts or ".." in parts:
+            raise InvalidInputError(
+                f"유효하지 않은 {label} 경로입니다: {lexical_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            directory_flags |= os.O_CLOEXEC
+            file_flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            file_flags |= os.O_NONBLOCK
+
+        current_fd: int | None = None
+        artifact_fd: int | None = None
+        try:
+            current_fd = os.open(lexical_path.anchor, directory_flags)
+            for component in parts[:-1]:
+                try:
+                    next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+                except FileNotFoundError:
+                    return lexical_path
+                except OSError as exc:
+                    try:
+                        entry_stat = os.stat(
+                            component,
+                            dir_fd=current_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        return lexical_path
+                    if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISDIR(entry_stat.st_mode):
+                        raise InvalidInputError(
+                            f"{label} 상위 경로가 안전한 디렉터리가 아닙니다: {component}",
+                            failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                        ) from exc
+                    raise InvalidInputError(
+                        f"{label} 상위 경로를 열 수 없습니다: {component} ({exc})",
+                        failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+                    ) from exc
+                os.close(current_fd)
+                current_fd = next_fd
+            try:
+                artifact_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                return lexical_path
+            except OSError as exc:
+                try:
+                    entry_stat = os.stat(
+                        parts[-1],
+                        dir_fd=current_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    return lexical_path
+                if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
+                    raise InvalidInputError(
+                        f"{label} 파일에 심볼릭 링크/비정규 파일을 사용할 수 없습니다: "
+                        f"{lexical_path}",
+                        failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                    ) from exc
+                raise InvalidInputError(
+                    f"{label} 파일을 열 수 없습니다: {lexical_path} ({exc})",
+                    failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+                ) from exc
+            entry_stat = os.fstat(artifact_fd)
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise InvalidInputError(
+                    f"{label} 경로가 일반 파일이 아닙니다: {lexical_path}",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                )
+        except InvalidInputError:
+            raise
+        except OSError as exc:
+            raise InvalidInputError(
+                f"{label} 경로를 확인할 수 없습니다: {lexical_path} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+        finally:
+            if artifact_fd is not None:
+                os.close(artifact_fd)
+            if current_fd is not None:
+                os.close(current_fd)
+        return lexical_path
+
     def _get_checkpoint_path(
         self,
         meeting_id: str,
@@ -591,7 +836,15 @@ class PipelineManager:
         Returns:
             체크포인트 JSON 파일 경로
         """
-        return self._checkpoints_dir / meeting_id / f"{step.value}.json"
+        checkpoint_dir = self._get_storage_child(
+            self._checkpoints_dir,
+            meeting_id,
+            label="체크포인트",
+        )
+        return self._validate_storage_artifact(
+            checkpoint_dir / f"{step.value}.json",
+            label=f"{step.value} 체크포인트",
+        )
 
     def _get_state_path(self, meeting_id: str) -> Path:
         """파이프라인 상태 파일 경로를 반환한다.
@@ -602,14 +855,62 @@ class PipelineManager:
         Returns:
             상태 JSON 파일 경로
         """
-        return self._checkpoints_dir / meeting_id / "pipeline_state.json"
+        checkpoint_dir = self._get_storage_child(
+            self._checkpoints_dir,
+            meeting_id,
+            label="체크포인트",
+        )
+        return self._validate_storage_artifact(
+            checkpoint_dir / "pipeline_state.json",
+            label="파이프라인 상태",
+        )
 
     def _save_state(self, state: PipelineState, state_path: Path) -> None:
         """파이프라인 상태를 설정된 JSON 형식으로 저장한다."""
+        expected_path = self._get_state_path(state.meeting_id)
+        if state_path.expanduser().absolute() != expected_path:
+            raise InvalidInputError(
+                f"상태 파일이 설정된 체크포인트 경로 밖을 가리킵니다: {state_path}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        # mkdir 도중 경로가 바뀌거나 symlink를 따라간 경우 쓰기 전에 차단한다.
+        expected_path = self._get_state_path(state.meeting_id)
         if self._checkpoint_json_indent == 2:
-            state.save(state_path)
+            state.save(expected_path)
             return
-        state.save(state_path, indent=self._checkpoint_json_indent)
+        state.save(expected_path, indent=self._checkpoint_json_indent)
+
+    def _save_result_checkpoint(self, result: Any, checkpoint_path: Path) -> None:
+        """결과 checkpoint를 final symlink 검증 뒤 unique temp로 원자 저장한다."""
+        safe_path = self._validate_storage_artifact(
+            checkpoint_path,
+            label="저장 대상 체크포인트",
+        )
+        to_dict = getattr(result, "to_dict", None)
+        payload = to_dict() if callable(to_dict) else None
+        if isinstance(payload, dict):
+            if self._checkpoint_json_indent is None:
+                atomic_write_text(
+                    safe_path,
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    backup=False,
+                )
+                return
+            atomic_write_json(
+                safe_path,
+                payload,
+                backup=False,
+                indent=self._checkpoint_json_indent,
+            )
+            return
+
+        # 테스트 double/legacy 결과 타입 호환. production 결과는 모두 to_dict()를 제공한다.
+        result.save_checkpoint(safe_path)
 
     async def _acquire_llm_lock_with_timeout(self) -> None:
         """_llm_lock 을 타임아웃과 함께 획득한다.
@@ -727,7 +1028,7 @@ class PipelineManager:
         Returns:
             출력 디렉토리 경로
         """
-        return self._outputs_dir / meeting_id
+        return self._get_storage_child(self._outputs_dir, meeting_id, label="출력")
 
     def _apply_number_normalization(self, merged_result: Any) -> None:
         """병합 결과에 숫자 정규화를 적용한다 (in-place).
@@ -790,7 +1091,7 @@ class PipelineManager:
             total_failed=0,
         )
 
-    def _validate_input(self, audio_path: Path) -> None:
+    def _validate_input(self, audio_path: Path) -> AudioFileIdentity:
         """입력 오디오 파일의 유효성을 검증한다.
 
         Args:
@@ -799,14 +1100,92 @@ class PipelineManager:
         Raises:
             InvalidInputError: 파일이 없거나 유효하지 않을 때
         """
-        if not audio_path.exists():
-            raise InvalidInputError(f"오디오 파일을 찾을 수 없습니다: {audio_path}")
+        try:
+            return inspect_audio_path_no_symlinks(audio_path)
+        except EmptyAudioError as exc:
+            raise InvalidInputError(str(exc), failure_kind=AudioFailureKind.MEDIA_INVALID) from exc
+        except AudioAdmissionError as exc:
+            raise InvalidInputError(
+                str(exc),
+                failure_kind=exc.failure_kind,
+            ) from exc
+        except FileNotFoundError as exc:
+            raise InvalidInputError(str(exc)) from exc
 
-        if not audio_path.is_file():
-            raise InvalidInputError(f"오디오 경로가 파일이 아닙니다: {audio_path}")
+    def _assert_input_identity(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> None:
+        """입력 파일이 최초 no-follow 검사와 같은 inode/metadata인지 확인한다."""
+        try:
+            current_identity = inspect_audio_path_no_symlinks(audio_path)
+        except AudioAdmissionError as exc:
+            raise InvalidInputError(str(exc), failure_kind=exc.failure_kind) from exc
+        except (EmptyAudioError, FileNotFoundError) as exc:
+            raise InvalidInputError(
+                f"오디오 파일이 품질 검증 중 사라지거나 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            ) from exc
 
-        if audio_path.stat().st_size == 0:
-            raise InvalidInputError(f"오디오 파일이 비어있습니다: {audio_path}")
+        if current_identity != expected_identity:
+            raise InvalidInputError(
+                f"오디오 파일이 품질 검증 중 변경되었습니다: {audio_path}",
+                failure_kind=AudioFailureKind.SOURCE_BUSY,
+            )
+
+    async def _validate_audio_duration(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity,
+    ) -> None:
+        """공통 오디오 품질 gate에서 ACCEPT인 입력만 통과시킨다."""
+        self._assert_input_identity(audio_path, expected_identity)
+        enabled = getattr(self._config.audio_quality, "enabled", False)
+        if enabled is not True:
+            return
+
+        try:
+            result = await asyncio.to_thread(
+                validate_audio_quality,
+                audio_path,
+                min_mean_db=self._config.audio_quality.min_mean_volume_db,
+                min_duration_s=self._config.audio_quality.min_duration_seconds,
+                expected_identity=expected_identity,
+                decode_timeout_base_seconds=(
+                    self._config.audio_quality.decode_timeout_base_seconds
+                ),
+                decode_timeout_factor=self._config.audio_quality.decode_timeout_factor,
+                decode_timeout_cap_seconds=(self._config.audio_quality.decode_timeout_cap_seconds),
+            )
+        except Exception as exc:
+            try:
+                self._assert_input_identity(audio_path, expected_identity)
+            except InvalidInputError as identity_exc:
+                raise identity_exc from exc
+            raise InvalidInputError(
+                f"오디오 품질을 검증할 수 없어 전사를 시작하지 않습니다: {audio_path} ({exc})",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+
+        self._assert_input_identity(audio_path, expected_identity)
+
+        if result.status is AudioQualityStatus.ACCEPT:
+            return
+
+        reason = result.reason or "오디오 품질 검증 비수락"
+        failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+        duration_seconds = result.duration_seconds
+        min_duration = self._config.audio_quality.min_duration_seconds
+        if duration_seconds is not None and duration_seconds < min_duration:
+            raise InvalidInputError(
+                f"오디오가 너무 짧아 전사를 시작하지 않습니다: {reason}",
+                failure_kind=failure_kind,
+            )
+        raise InvalidInputError(
+            f"오디오 품질 검증을 통과하지 못해 전사를 시작하지 않습니다: {reason}",
+            failure_kind=failure_kind,
+        )
 
     def _find_resume_step(self, state: PipelineState) -> int | None:
         """재개할 단계의 인덱스를 찾는다.
@@ -897,8 +1276,126 @@ class PipelineManager:
 
         converter = AudioConverter(self._config)
         wav_path = await converter.convert_async(audio_path, output_dir)
+        wav_path = self._localize_converted_wav(audio_path, output_dir, wav_path)
         logger.info(f"변환 완료: {wav_path}")
         return wav_path
+
+    def _validate_pipeline_wav_path(
+        self,
+        output_dir: Path,
+        wav_path: Path,
+    ) -> Path:
+        """변환 WAV가 해당 회의 output의 안전한 direct regular child인지 검증한다."""
+        safe_output_dir = self._validate_storage_directory(
+            output_dir,
+            label="pipeline WAV output",
+        )
+        candidate = wav_path.expanduser().absolute()
+        if candidate.parent != safe_output_dir or candidate.suffix.lower() != ".wav":
+            raise InvalidInputError(
+                f"변환 WAV가 회의 output direct child가 아닙니다: {candidate}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        self._validate_storage_artifact(candidate, label="pipeline WAV")
+        self._validate_input(candidate)
+        return candidate
+
+    def _localize_converted_wav(
+        self,
+        audio_path: Path,
+        output_dir: Path,
+        converter_path: Path,
+    ) -> Path:
+        """converter의 WAV를 회의 output 아래로 고정하고 외부 반환값은 거부한다."""
+        safe_output_dir = self._validate_storage_directory(
+            output_dir,
+            label="pipeline WAV output",
+        )
+        source = converter_path.expanduser().absolute()
+        if source.parent == safe_output_dir:
+            return self._validate_pipeline_wav_path(safe_output_dir, source)
+
+        original = audio_path.expanduser().absolute()
+        if source != original or source.suffix.lower() != ".wav":
+            raise InvalidInputError(
+                f"converter가 회의 output 밖의 WAV를 반환했습니다: {source}",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+
+        # AudioConverter는 이미 16k mono PCM인 원본 WAV를 그대로 반환한다.
+        # 재개 상태가 외부 audio_input을 신뢰하지 않도록 안전한 fd에서 회의 output으로
+        # 복제하고, 이후 단계에는 이 로컬 snapshot만 전달한다.
+        destination = safe_output_dir / f"{source.stem}_16k.wav"
+        self._validate_storage_artifact(destination, label="pipeline localized WAV")
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            directory_flags |= os.O_CLOEXEC
+        output_fd: int | None = None
+        temporary_fd: int | None = None
+        temporary_name = f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            output_fd = os.open(safe_output_dir, directory_flags)
+            temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                temporary_flags |= os.O_CLOEXEC
+            temporary_fd = os.open(
+                temporary_name,
+                temporary_flags,
+                0o600,
+                dir_fd=output_fd,
+            )
+            with open_audio_path_no_symlinks(source) as (source_fd, source_identity):
+                with (
+                    os.fdopen(os.dup(source_fd), "rb") as source_file,
+                    os.fdopen(temporary_fd, "wb", closefd=False) as destination_file,
+                ):
+                    shutil.copyfileobj(source_file, destination_file)
+                    destination_file.flush()
+                    os.fsync(destination_file.fileno())
+                after_stat = os.fstat(source_fd)
+                after_identity: AudioFileIdentity = (
+                    after_stat.st_dev,
+                    after_stat.st_ino,
+                    after_stat.st_size,
+                    after_stat.st_mtime_ns,
+                    after_stat.st_ctime_ns,
+                )
+                if after_identity != source_identity:
+                    raise InvalidInputError(
+                        f"원본 WAV가 output snapshot 생성 중 변경되었습니다: {source}",
+                        failure_kind=AudioFailureKind.SOURCE_BUSY,
+                    )
+            os.close(temporary_fd)
+            temporary_fd = None
+            os.replace(
+                temporary_name,
+                destination.name,
+                src_dir_fd=output_fd,
+                dst_dir_fd=output_fd,
+            )
+            os.fsync(output_fd)
+        except InvalidInputError:
+            raise
+        except (AudioAdmissionError, EmptyAudioError, FileNotFoundError) as exc:
+            failure_kind = getattr(exc, "failure_kind", AudioFailureKind.SOURCE_BUSY)
+            raise InvalidInputError(str(exc), failure_kind=failure_kind) from exc
+        except OSError as exc:
+            raise InvalidInputError(
+                f"변환 WAV를 회의 output으로 고정하지 못했습니다: {exc}",
+                failure_kind=AudioFailureKind.INFRA_UNAVAILABLE,
+            ) from exc
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            if output_fd is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=output_fd)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    os.close(output_fd)
+
+        return self._validate_pipeline_wav_path(safe_output_dir, destination)
 
     async def _run_step_transcribe(
         self,
@@ -923,6 +1420,11 @@ class PipelineManager:
         if self._checkpoint_enabled and checkpoint_path.exists():
             logger.info(f"전사 체크포인트 복원: {checkpoint_path}")
             return TranscriptResult.from_checkpoint(checkpoint_path)
+
+        # 컨테이너 헤더 duration과 실제 디코딩 결과가 다른 손상 파일을 막기 위해
+        # 변환된 WAV를 STT 모델 로드 전에 한 번 더 검증한다.
+        wav_identity = self._validate_input(wav_path)
+        await self._validate_audio_duration(wav_path, wav_identity)
 
         # VAD 전처리: 음성 구간 감지 (enabled=false이면 None 반환)
         vad_clip_timestamps: list[float] | None = None
@@ -1007,7 +1509,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -1031,6 +1533,10 @@ class PipelineManager:
         if self._checkpoint_enabled and checkpoint_path.exists():
             logger.info(f"화자분리 체크포인트 복원: {checkpoint_path}")
             return DiarizationResult.from_checkpoint(checkpoint_path)
+
+        # 재개 경로에서도 pyannote 모델을 열기 전에 변환 WAV 전체를 검증한다.
+        wav_identity = self._validate_input(wav_path)
+        await self._validate_audio_duration(wav_path, wav_identity)
 
         diarization_audio_path = wav_path
         silence_plan: Any | None = None
@@ -1061,7 +1567,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -1093,7 +1599,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -1123,7 +1629,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -1155,7 +1661,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         # 마크다운 회의록 파일 저장
         markdown_path = output_dir / "meeting_minutes.md"
@@ -1189,8 +1695,9 @@ class PipelineManager:
 
         # 2) 오디오 파일 mtime
         try:
-            if audio_path.exists():
-                mtime = datetime.fromtimestamp(audio_path.stat().st_mtime)
+            entry_stat = audio_path.lstat()
+            if stat.S_ISREG(entry_stat.st_mode):
+                mtime = datetime.fromtimestamp(entry_stat.st_mtime)
                 return mtime.strftime("%Y-%m-%d")
         except OSError:
             pass
@@ -1231,7 +1738,7 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -1265,14 +1772,20 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            result.save_checkpoint(checkpoint_path)
+            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
     def _delete_checkpoint_if_exists(self, checkpoint_path: Path) -> None:
         """체크포인트가 있으면 삭제해 다음 단계가 실제 재실행되도록 한다."""
         try:
-            checkpoint_path.unlink(missing_ok=True)
+            safe_path = self._validate_storage_artifact(
+                checkpoint_path,
+                label="삭제 대상 체크포인트",
+            )
+            safe_path.unlink(missing_ok=True)
+        except InvalidInputError:
+            raise
         except OSError as e:
             raise PipelineError(f"체크포인트 삭제 실패: {checkpoint_path}: {e}") from e
 
@@ -1482,20 +1995,18 @@ class PipelineManager:
             PipelineStepError: 특정 단계 실행 실패 시 (재시도 모두 실패)
             PipelineError: 기타 파이프라인 오류 시
         """
-        audio_path = audio_path.resolve()
-        self._validate_input(audio_path)
+        # 최종 direntry의 symlink 여부를 보존하기 위해 resolve()하지 않는다.
+        audio_path = audio_path.expanduser().absolute()
 
-        # 회의 ID 결정
+        # 회의 ID를 먼저 확정·검증해 상태 경로가 base 밖으로 나가지 않게 한다.
         if meeting_id is None:
             meeting_id = self._generate_meeting_id(audio_path)
+        self._validate_meeting_id(meeting_id)
 
-        # 출력/체크포인트 디렉토리 생성
-        output_dir = self._get_output_dir(meeting_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
+        # 기존 상태를 입력 gate보다 먼저 읽는다. 전사·화자분리가 끝난 text-only
+        # 재개는 원본 오디오가 삭제됐더라도 체크포인트만으로 계속할 수 있다.
         state_path = self._get_state_path(meeting_id)
-
-        # 기존 상태 복원 또는 새로 생성
+        output_dir = self._get_output_dir(meeting_id)
         if state_path.exists():
             state = PipelineState.from_file(state_path)
             logger.info(
@@ -1507,6 +2018,35 @@ class PipelineManager:
                 audio_path=str(audio_path),
                 output_dir=str(output_dir),
             )
+
+        resume_idx = self._find_resume_step(state)
+        if resume_idx is None:
+            logger.info("모든 단계가 이미 완료되었습니다.")
+            if state.status != "completed" or state.current_step:
+                state.status = "completed"
+                state.current_step = ""
+                self._save_state(state, state_path)
+            return state
+
+        diarize_idx = PIPELINE_STEPS.index(PipelineStep.DIARIZE)
+        if resume_idx is not None and resume_idx <= diarize_idx:
+            admission_path = audio_path
+            if resume_idx > 0:
+                if not state.wav_path:
+                    raise InvalidInputError(
+                        "convert 완료 상태에 변환 WAV 경로가 없습니다.",
+                        failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                    )
+                admission_path = self._validate_pipeline_wav_path(
+                    output_dir,
+                    Path(state.wav_path),
+                )
+            admission_identity = self._validate_input(admission_path)
+            await self._validate_audio_duration(admission_path, admission_identity)
+
+        # admission 통과 후에만 새 출력 디렉터리를 만든다.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = self._get_output_dir(meeting_id)
 
         # === Graceful Degradation: 시작 전 리소스 점검 ===
         resource_status = self._resource_guard.check_all()
@@ -1559,14 +2099,6 @@ class PipelineManager:
             f"audio={audio_path.name}"
             f"{', degraded=True' if state.degraded else ''}"
         )
-
-        # 재개 시작 단계 결정
-        resume_idx = self._find_resume_step(state)
-        if resume_idx is None:
-            logger.info("모든 단계가 이미 완료되었습니다.")
-            state.status = "completed"
-            self._save_state(state, state_path)
-            return state
 
         if resume_idx > 0:
             logger.info(f"단계 {PIPELINE_STEPS[resume_idx].value}부터 재개")
@@ -1637,7 +2169,7 @@ class PipelineManager:
                     if step == PipelineStep.CORRECT:
                         assert merged_result is not None
                         corrected_result = self._build_passthrough_corrected_result(merged_result)
-                        corrected_result.save_checkpoint(checkpoint_path)
+                        self._save_result_checkpoint(corrected_result, checkpoint_path)
                         skipped_checkpoint_path = str(checkpoint_path)
                     elif step == PipelineStep.SUMMARIZE:
                         await self._unload_llm_model_if_current()
@@ -1781,6 +2313,26 @@ class PipelineManager:
                     success = True
                     last_error = None
                     break  # 성공 시 재시도 루프 탈출
+
+                except (AudioAdmissionError, InvalidInputError) as e:
+                    # 결정적 입력 차단은 retry/failed 카드로 바꾸지 않는다. 기존
+                    # 체크포인트는 유지하고 JobProcessor가 recorded로 돌릴 수 있게
+                    # typed InvalidInputError를 즉시 전파한다.
+                    state.status = "pending"
+                    state.current_step = ""
+                    state.error_message = ""
+                    self._save_state(state, state_path)
+                    failure_kind = getattr(e, "failure_kind", None)
+                    logger.info(
+                        f"오디오 admission 차단으로 파이프라인 보류: "
+                        f"step={step.value}, failure_kind={failure_kind}, reason={e}"
+                    )
+                    if isinstance(e, InvalidInputError):
+                        raise
+                    raise InvalidInputError(
+                        str(e),
+                        failure_kind=failure_kind,
+                    ) from e
 
                 except Exception as e:  # noqa: BLE001 — 재시도 루프 catch-all
                     last_error = e
@@ -1929,8 +2481,20 @@ class PipelineManager:
 
         # convert 완료 시 wav_path 복원
         if PipelineStep.CONVERT.value in state.completed_steps:
-            # wav_path가 저장되지 않았으면 원본 경로 사용
-            wav_path = Path(state.wav_path) if state.wav_path else audio_path
+            diarize_idx = PIPELINE_STEPS.index(PipelineStep.DIARIZE)
+            if resume_idx <= diarize_idx:
+                if not state.wav_path:
+                    raise InvalidInputError(
+                        "convert 완료 상태에 변환 WAV 경로가 없습니다.",
+                        failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                    )
+                wav_path = self._validate_pipeline_wav_path(
+                    self._get_output_dir(meeting_id),
+                    Path(state.wav_path),
+                )
+            else:
+                # text-only 재개는 WAV를 다시 열지 않으며 기존 상태 문자열만 보존한다.
+                wav_path = Path(state.wav_path) if state.wav_path else audio_path
 
         # transcribe 완료 시 복원
         if PipelineStep.TRANSCRIBE.value in state.completed_steps:
@@ -2017,6 +2581,7 @@ class PipelineManager:
         Raises:
             PipelineError: 상태 파일이 없거나 재개 불가 시
         """
+        self._validate_meeting_id(meeting_id)
         state_path = self._get_state_path(meeting_id)
 
         if not state_path.exists():
@@ -2024,9 +2589,6 @@ class PipelineManager:
 
         state = PipelineState.from_file(state_path)
         audio_path = Path(state.audio_path)
-
-        if not audio_path.exists():
-            raise InvalidInputError(f"원본 오디오 파일을 찾을 수 없습니다: {audio_path}")
 
         logger.info(
             f"파이프라인 재개: meeting_id={meeting_id}, 완료 단계: {state.completed_steps}"

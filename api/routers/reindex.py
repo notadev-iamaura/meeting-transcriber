@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,8 +16,6 @@ from api.dependencies import get_pipeline_manager as _get_pipeline_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
 
 
 def _log_task_exception(task: asyncio.Task[Any]) -> None:
@@ -52,8 +49,14 @@ def _track_background_task(app: Any, task: asyncio.Task[Any]) -> None:
 
 
 def _validate_meeting_id(meeting_id: str) -> None:
-    """meeting_id 형식을 검증한다 (path traversal 방지)."""
-    if not _MEETING_ID_PATTERN.match(meeting_id):
+    """watcher와 동일한 안전한 단일 segment ID를 검증한다."""
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or "\x00" in meeting_id
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",

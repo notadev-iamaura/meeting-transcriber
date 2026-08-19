@@ -24,7 +24,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config import AppConfig, reset_config
+from core.retry_policy import NonRetryableError
 from steps.transcriber import (
+    AudioAdmissionError,
     EmptyAudioError,
     ModelNotAvailableError,
     Transcriber,
@@ -48,7 +50,11 @@ def _reset_singletons() -> None:
 @pytest.fixture
 def config() -> AppConfig:
     """테스트용 AppConfig 인스턴스."""
-    return AppConfig()
+    cfg = AppConfig()
+    # 기존 단위 테스트는 실제 미디어가 아닌 더미 바이트를 사용한다. 공통 품질
+    # 게이트 자체를 검증하는 테스트만 명시적으로 다시 활성화한다.
+    cfg.audio_quality.enabled = False
+    return cfg
 
 
 @pytest.fixture
@@ -533,6 +539,250 @@ class TestTranscribe:
     """Transcriber.transcribe() 비동기 전사 테스트."""
 
     @pytest.mark.asyncio
+    async def test_입력_symlink는_모델_load전에_차단한다(
+        self,
+        transcriber: Transcriber,
+        mock_manager: MagicMock,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """직접 STT 호출도 symlink target을 따라가지 않고 입력 오류로 중단한다."""
+        symlink_path = tmp_path / "linked-audio.wav"
+        symlink_path.symlink_to(audio_file)
+
+        with pytest.raises(AudioAdmissionError, match="심볼릭 링크") as exc_info:
+            await transcriber.transcribe(symlink_path)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        mock_manager.acquire.assert_not_called()
+        assert audio_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_중간_symlink는_target을_열기전에_차단한다(
+        self,
+        transcriber: Transcriber,
+        mock_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """상위 경로 요소가 symlink여도 외부 오디오를 모델에 전달하지 않는다."""
+        safe_root = tmp_path.resolve()
+        external_dir = safe_root / "external"
+        external_dir.mkdir()
+        target = external_dir / "target.wav"
+        target.write_bytes(b"external audio")
+        jump = safe_root / "jump"
+        jump.symlink_to(external_dir, target_is_directory=True)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            await transcriber.transcribe(jump / target.name)
+
+        from core.audio_quality import AudioFailureKind
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        assert target.read_bytes() == b"external audio"
+        mock_manager.acquire.assert_not_called()
+
+    def test_openat_chain은_중간_dir_swap에도_외부target을_열지_않는다(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """component open 직후 symlink swap돼도 pinned dirfd의 원본만 검사한다."""
+        import os
+
+        from steps.transcriber import inspect_audio_path_no_symlinks
+
+        guarded_dir = tmp_path.resolve() / "guarded-openat"
+        guarded_dir.mkdir()
+        guarded_audio = guarded_dir / "audio.wav"
+        guarded_audio.write_bytes(b"ORIGINAL")
+        original_stat = guarded_audio.stat()
+        external_dir = tmp_path.resolve() / "external-openat"
+        external_dir.mkdir()
+        external_audio = external_dir / "audio.wav"
+        external_audio.write_bytes(b"EXTERNAL")
+        displaced_dir = tmp_path.resolve() / "guarded-openat-displaced"
+        real_open = os.open
+        swapped = False
+
+        def racing_open(
+            path: str | bytes,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal swapped
+            opened_fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if path == guarded_dir.name and dir_fd is not None and not swapped:
+                guarded_dir.rename(displaced_dir)
+                guarded_dir.symlink_to(external_dir, target_is_directory=True)
+                swapped = True
+            return opened_fd
+
+        monkeypatch.setattr("steps.transcriber.os.open", racing_open)
+
+        identity = inspect_audio_path_no_symlinks(guarded_audio)
+
+        assert swapped is True
+        assert identity[:2] == (original_stat.st_dev, original_stat.st_ino)
+        assert identity[1] != external_audio.stat().st_ino
+        assert external_audio.read_bytes() == b"EXTERNAL"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure_kind_name", "status_name", "quarantine_safe"),
+        [
+            ("MEDIA_INVALID", "REJECT", True),
+            ("SOURCE_BUSY", "ERROR", False),
+            ("INFRA_UNAVAILABLE", "ERROR", False),
+            ("SECURITY_BLOCKED", "ERROR", False),
+        ],
+    )
+    async def test_공통_품질게이트는_모델_acquire_전에_차단한다(
+        self,
+        config: AppConfig,
+        mock_manager: MagicMock,
+        audio_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_kind_name: str,
+        status_name: str,
+        quarantine_safe: bool,
+    ) -> None:
+        """모든 비수락 결과는 Whisper 모델을 적재하기 전에 입력 오류가 되어야 한다."""
+        import core.audio_quality as audio_quality
+        import steps.transcriber as transcriber_module
+
+        failure_kind = getattr(audio_quality.AudioFailureKind, failure_kind_name)
+        status = getattr(audio_quality.AudioQualityStatus, status_name)
+        admission = audio_quality.AudioQualityResult(
+            status=status,
+            mean_volume_db=None,
+            duration_seconds=None,
+            reason=f"blocked: {failure_kind_name}",
+            failure_kind=failure_kind,
+        )
+        assert admission.quarantine_safe is quarantine_safe
+        validate = MagicMock(return_value=admission)
+        monkeypatch.setattr(audio_quality, "validate_audio_quality", validate)
+        monkeypatch.setattr(
+            transcriber_module,
+            "validate_audio_quality",
+            validate,
+            raising=False,
+        )
+        config.audio_quality.enabled = True
+        transcriber = Transcriber(config=config, model_manager=mock_manager)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            await transcriber.transcribe(audio_file)
+
+        assert isinstance(exc_info.value, TranscriptionError)
+        assert isinstance(exc_info.value, NonRetryableError)
+        assert exc_info.value.failure_kind is failure_kind
+        validate.assert_called_once()
+        mock_manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_품질게이트_disabled면_기존_전사경로를_유지한다(
+        self,
+        transcriber: Transcriber,
+        mock_manager: MagicMock,
+        audio_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """audio_quality.enabled=false는 미디어 gate를 우회해야 한다."""
+        import core.audio_quality as audio_quality
+        import steps.transcriber as transcriber_module
+
+        validate = MagicMock(side_effect=AssertionError("disabled gate must not run"))
+        monkeypatch.setattr(audio_quality, "validate_audio_quality", validate)
+        monkeypatch.setattr(
+            transcriber_module,
+            "validate_audio_quality",
+            validate,
+            raising=False,
+        )
+
+        result = await transcriber.transcribe(audio_file)
+
+        assert isinstance(result, TranscriptResult)
+        validate.assert_not_called()
+        mock_manager.acquire.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_품질gate중_변경된_파일은_SOURCE_BUSY로_보존한다(
+        self,
+        config: AppConfig,
+        mock_manager: MagicMock,
+        audio_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """final backstop은 모델 acquire 전에 fingerprint 변경을 typed 오류로 보존한다."""
+        import steps.transcriber as transcriber_module
+        from core.audio_quality import (
+            AudioFailureKind,
+            AudioQualityResult,
+            AudioQualityStatus,
+        )
+
+        def mutate_during_gate(*args: Any, **kwargs: Any) -> AudioQualityResult:
+            audio_file.write_bytes(audio_file.read_bytes() + b"changed")
+            return AudioQualityResult(
+                status=AudioQualityStatus.ACCEPT,
+                mean_volume_db=-20.0,
+                duration_seconds=30.0,
+            )
+
+        monkeypatch.setattr(transcriber_module, "validate_audio_quality", mutate_during_gate)
+        config.audio_quality.enabled = True
+        transcriber = Transcriber(config=config, model_manager=mock_manager)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            await transcriber.transcribe(audio_file)
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SOURCE_BUSY
+        mock_manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_model_acquire중_symlink교체는_whisper호출전에_차단한다(
+        self,
+        config: AppConfig,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """모델 적재 중 source가 바뀌어도 mlx가 외부 target을 열지 않는다."""
+        from core.audio_quality import AudioFailureKind
+
+        target = tmp_path / "external.wav"
+        target.write_bytes(b"EXTERNAL")
+        whisper = MagicMock()
+        whisper.transcribe.return_value = _make_raw_result()
+
+        class _MutatingContext:
+            async def __aenter__(self) -> MagicMock:
+                audio_file.unlink()
+                audio_file.symlink_to(target)
+                return whisper
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+        manager = MagicMock()
+        manager.acquire.return_value = _MutatingContext()
+        config.audio_quality.enabled = False
+        transcriber = Transcriber(config=config, model_manager=manager)
+
+        with pytest.raises(AudioAdmissionError, match="심볼릭 링크") as exc_info:
+            await transcriber.transcribe(audio_file)
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+        whisper.transcribe.assert_not_called()
+        assert target.read_bytes() == b"EXTERNAL"
+
+    @pytest.mark.asyncio
     async def test_정상_전사(
         self,
         transcriber: Transcriber,
@@ -606,7 +856,10 @@ class TestTranscribe:
         audio_file: Path,
     ) -> None:
         """beam_size=10 설정 시 10이 transcribe()에 전달된다."""
-        custom_config = AppConfig(stt={"beam_size": 10})
+        custom_config = AppConfig(
+            stt={"beam_size": 10},
+            audio_quality={"enabled": False},
+        )
         t = Transcriber(config=custom_config, model_manager=mock_manager)
 
         ctx = mock_manager.acquire.return_value
@@ -624,7 +877,10 @@ class TestTranscribe:
         audio_file: Path,
     ) -> None:
         """word_timestamps=False 설정 시 mlx-whisper 호출에 그대로 전달된다."""
-        custom_config = AppConfig(stt={"word_timestamps": False})
+        custom_config = AppConfig(
+            stt={"word_timestamps": False},
+            audio_quality={"enabled": False},
+        )
         t = Transcriber(config=custom_config, model_manager=mock_manager)
         ctx = mock_manager.acquire.return_value
         mock_whisper = ctx.__aenter__.return_value
@@ -676,7 +932,10 @@ class TestTranscribe:
         audio_file: Path,
     ) -> None:
         """mlx-whisper가 batch_size를 명시 지원하면 설정값을 전달한다."""
-        custom_config = AppConfig(stt={"batch_size": 8})
+        custom_config = AppConfig(
+            stt={"batch_size": 8},
+            audio_quality={"enabled": False},
+        )
         t = Transcriber(config=custom_config, model_manager=mock_manager)
         ctx = mock_manager.acquire.return_value
         mock_whisper = ctx.__aenter__.return_value
@@ -834,6 +1093,7 @@ class TestInitialPromptAndVadClipTimestamps:
         """initial_prompt가 설정되면 폴백 경로에서 whisper.transcribe에 전달된다."""
         # initial_prompt가 설정된 config 생성
         config = AppConfig()
+        config.audio_quality.enabled = False
         # getattr 폴백을 위해 직접 속성 설정
         config.stt.initial_prompt = "회의 전사 테스트 프롬프트"  # type: ignore[attr-defined]
 

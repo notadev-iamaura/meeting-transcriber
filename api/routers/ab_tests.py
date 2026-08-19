@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,20 +13,33 @@ from pydantic import BaseModel, Field
 
 from api.dependencies import get_config as _get_config
 from core import ab_test_store
-from core.ab_test_runner import LlmScope, ModelSpec
+from core.ab_test_runner import (
+    LlmScope,
+    ModelSpec,
+    _assert_stt_audio_identity,
+    _inspect_stt_audio_source,
+    inspect_llm_ab_source,
+    is_ab_test_busy,
+)
 from core.ab_test_runner import cancel_test as _runner_cancel_test
 from core.ab_test_runner import delete_test as _runner_delete_test
 from core.ab_test_runner import get_test_result as _runner_get_test_result
 from core.ab_test_runner import list_tests as _runner_list_tests
 from core.ab_test_runner import new_test_id as _runner_new_test_id
+from core.ab_test_runner import reserve_llm_ab_test as _runner_reserve_llm_ab_test
+from core.ab_test_runner import reserve_stt_ab_test as _runner_reserve_stt_ab_test
 from core.ab_test_runner import run_llm_ab_test as _runner_run_llm_ab_test
 from core.ab_test_runner import run_stt_ab_test as _runner_run_stt_ab_test
+from core.audio_quality import (
+    AudioFailureKind,
+    AudioQualityStatus,
+    validate_audio_quality,
+)
+from steps.transcriber import AudioAdmissionError, AudioFileIdentity
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_MEETING_ID_PATTERN = re.compile(r"^[\w\-\.]+$")
 
 
 class ModelSpecPayload(BaseModel):
@@ -84,7 +96,14 @@ def _log_task_exception(task: asyncio.Task[Any]) -> None:
 
 def _validate_meeting_id(meeting_id: str) -> None:
     """meeting_id 형식을 검증한다."""
-    if not _MEETING_ID_PATTERN.match(meeting_id):
+    if (
+        not meeting_id
+        or meeting_id in {".", ".."}
+        or "\x00" in meeting_id
+        or "/" in meeting_id
+        or "\\" in meeting_id
+        or Path(meeting_id).name != meeting_id
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
@@ -114,6 +133,77 @@ def _get_ws_manager(request: Request) -> Any | None:
     return getattr(request.app.state, "ws_manager", None)
 
 
+_AUDIO_FAILURE_HTTP_STATUS = {
+    AudioFailureKind.MEDIA_INVALID: 422,
+    AudioFailureKind.SOURCE_BUSY: 409,
+    AudioFailureKind.INFRA_UNAVAILABLE: 503,
+    AudioFailureKind.SECURITY_BLOCKED: 400,
+}
+
+
+def _audio_admission_http_error(error: AudioAdmissionError) -> HTTPException:
+    """typed 오디오 admission 오류를 STT A/B HTTP 상태로 변환한다."""
+    return HTTPException(
+        status_code=_AUDIO_FAILURE_HTTP_STATUS[error.failure_kind],
+        detail=f"{error.failure_kind.name}: {error}",
+    )
+
+
+async def _require_audio_quality_accept(
+    config: Any,
+    audio_path: Path,
+    expected_identity: AudioFileIdentity,
+) -> None:
+    """STT A/B task 생성 전에 identity와 활성화된 공통 품질 gate를 적용한다."""
+    try:
+        _assert_stt_audio_identity(audio_path, expected_identity)
+    except AudioAdmissionError as exc:
+        raise _audio_admission_http_error(exc) from exc
+
+    quality_config = getattr(config, "audio_quality", None)
+    if quality_config is None or getattr(quality_config, "enabled", False) is not True:
+        try:
+            _assert_stt_audio_identity(audio_path, expected_identity)
+        except AudioAdmissionError as exc:
+            raise _audio_admission_http_error(exc) from exc
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            validate_audio_quality,
+            audio_path,
+            min_mean_db=quality_config.min_mean_volume_db,
+            min_duration_s=quality_config.min_duration_seconds,
+            expected_identity=expected_identity,
+            decode_timeout_base_seconds=quality_config.decode_timeout_base_seconds,
+            decode_timeout_factor=quality_config.decode_timeout_factor,
+            decode_timeout_cap_seconds=quality_config.decode_timeout_cap_seconds,
+        )
+    except Exception as exc:
+        try:
+            _assert_stt_audio_identity(audio_path, expected_identity)
+        except AudioAdmissionError as identity_exc:
+            raise _audio_admission_http_error(identity_exc) from identity_exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"INFRA_UNAVAILABLE: 오디오 품질 검증 실행 실패: {exc}",
+        ) from exc
+
+    try:
+        _assert_stt_audio_identity(audio_path, expected_identity)
+    except AudioAdmissionError as exc:
+        raise _audio_admission_http_error(exc) from exc
+
+    if result.status is AudioQualityStatus.ACCEPT:
+        return
+
+    failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
+    raise HTTPException(
+        status_code=_AUDIO_FAILURE_HTTP_STATUS[failure_kind],
+        detail=f"{failure_kind.name}: {result.reason or '오디오 품질 검증 비수락'}",
+    )
+
+
 async def _make_ab_broadcaster(request: Request) -> Any | None:
     """A/B 테스트 러너에 주입할 WebSocket broadcaster를 생성한다."""
     ws_manager = _get_ws_manager(request)
@@ -136,26 +226,39 @@ async def _make_ab_broadcaster(request: Request) -> Any | None:
     return _broadcast
 
 
-def _validate_meeting_exists(config: Any, meeting_id: str, test_type: str = "llm") -> None:
+def _validate_meeting_exists(
+    config: Any,
+    meeting_id: str,
+    test_type: str = "llm",
+) -> tuple[Path, AudioFileIdentity]:
     """원본 회의가 A/B 테스트 입력 조건을 만족하는지 검증한다."""
     _validate_meeting_id(meeting_id)
 
     if test_type == "stt":
-        wav = config.paths.resolved_audio_input_dir / f"{meeting_id}.wav"
-        if not wav.exists():
+        try:
+            return _inspect_stt_audio_source(config, meeting_id)
+        except FileNotFoundError as exc:
             raise HTTPException(
                 status_code=404,
                 detail=f"오디오 파일을 찾을 수 없습니다: {meeting_id}",
-            )
-        return
+            ) from exc
+        except AudioAdmissionError as exc:
+            raise _audio_admission_http_error(exc) from exc
 
-    ckpt_dir = config.paths.resolved_checkpoints_dir / meeting_id
-    out_dir = config.paths.resolved_outputs_dir / meeting_id
-    if not ckpt_dir.exists() and not out_dir.exists():
+    try:
+        return inspect_llm_ab_source(config, meeting_id)
+    except FileNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail=f"원본 회의를 찾을 수 없습니다: {meeting_id}",
-        )
+            detail=f"LLM A/B merge checkpoint를 찾을 수 없습니다: {meeting_id}",
+        ) from exc
+    except AudioAdmissionError as exc:
+        raise _audio_admission_http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"유효하지 않은 LLM A/B merge checkpoint입니다: {exc}",
+        ) from exc
 
 
 _LLM_PRESETS = [
@@ -224,33 +327,64 @@ async def start_llm_ab_test(
             detail="variant_a 와 variant_b 가 동일합니다.",
         )
 
-    _validate_meeting_exists(config, body.source_meeting_id)
+    if is_ab_test_busy():
+        raise HTTPException(
+            status_code=409,
+            detail="다른 A/B 테스트가 이미 진행 중입니다.",
+        )
+
+    merge_path, expected_merge_identity = _validate_meeting_exists(
+        config,
+        body.source_meeting_id,
+    )
 
     selected_id = _runner_new_test_id()
     broadcaster = await _make_ab_broadcaster(request)
     model_manager = getattr(request.app.state, "model_manager", None)
+    variant_a = ModelSpec(
+        label=body.variant_a.label,
+        model_id=body.variant_a.model_id,
+        backend=body.variant_a.backend,
+    )
+    variant_b = ModelSpec(
+        label=body.variant_b.label,
+        model_id=body.variant_b.model_id,
+        backend=body.variant_b.backend,
+    )
+    scope = LlmScope(
+        correct=body.scope.correct,
+        summarize=body.scope.summarize,
+    )
+    try:
+        _runner_reserve_llm_ab_test(
+            config,
+            test_id=selected_id,
+            source_meeting_id=body.source_meeting_id,
+            merge_path=merge_path,
+            variant_a=variant_a,
+            variant_b=variant_b,
+            scope=scope,
+        )
+    except AudioAdmissionError as exc:
+        raise _audio_admission_http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"유효하지 않은 LLM A/B source snapshot입니다: {exc}",
+        ) from exc
 
     task = asyncio.create_task(
         _runner_run_llm_ab_test(
             config=config,
             source_meeting_id=body.source_meeting_id,
-            variant_a=ModelSpec(
-                label=body.variant_a.label,
-                model_id=body.variant_a.model_id,
-                backend=body.variant_a.backend,
-            ),
-            variant_b=ModelSpec(
-                label=body.variant_b.label,
-                model_id=body.variant_b.model_id,
-                backend=body.variant_b.backend,
-            ),
-            scope=LlmScope(
-                correct=body.scope.correct,
-                summarize=body.scope.summarize,
-            ),
+            variant_a=variant_a,
+            variant_b=variant_b,
+            scope=scope,
             ws_broadcaster=broadcaster,
             model_manager=model_manager,
             test_id=selected_id,
+            expected_merge_identity=expected_merge_identity,
+            metadata_reserved=True,
         ),
         name=f"ab-test-llm-{selected_id}",
     )
@@ -279,30 +413,54 @@ async def start_stt_ab_test(
             detail="variant_a 와 variant_b 가 동일합니다.",
         )
 
-    _validate_meeting_exists(config, body.source_meeting_id, test_type="stt")
+    if is_ab_test_busy():
+        raise HTTPException(
+            status_code=409,
+            detail="다른 A/B 테스트가 이미 진행 중입니다.",
+        )
+
+    inspected_source = _validate_meeting_exists(
+        config,
+        body.source_meeting_id,
+        test_type="stt",
+    )
+    wav_path, expected_identity = inspected_source
+    await _require_audio_quality_accept(config, wav_path, expected_identity)
 
     selected_id = _runner_new_test_id()
     broadcaster = await _make_ab_broadcaster(request)
     model_manager = getattr(request.app.state, "model_manager", None)
+    variant_a = ModelSpec(
+        label=body.variant_a.label,
+        model_id=body.variant_a.model_id,
+        backend=body.variant_a.backend,
+    )
+    variant_b = ModelSpec(
+        label=body.variant_b.label,
+        model_id=body.variant_b.model_id,
+        backend=body.variant_b.backend,
+    )
+    _runner_reserve_stt_ab_test(
+        config,
+        test_id=selected_id,
+        source_meeting_id=body.source_meeting_id,
+        wav_path=wav_path,
+        variant_a=variant_a,
+        variant_b=variant_b,
+        allow_diarize_rerun=body.allow_diarize_rerun,
+    )
 
     task = asyncio.create_task(
         _runner_run_stt_ab_test(
             config=config,
             source_meeting_id=body.source_meeting_id,
-            variant_a=ModelSpec(
-                label=body.variant_a.label,
-                model_id=body.variant_a.model_id,
-                backend=body.variant_a.backend,
-            ),
-            variant_b=ModelSpec(
-                label=body.variant_b.label,
-                model_id=body.variant_b.model_id,
-                backend=body.variant_b.backend,
-            ),
+            variant_a=variant_a,
+            variant_b=variant_b,
             allow_diarize_rerun=body.allow_diarize_rerun,
             ws_broadcaster=broadcaster,
             model_manager=model_manager,
             test_id=selected_id,
+            metadata_reserved=True,
         ),
         name=f"ab-test-stt-{selected_id}",
     )
