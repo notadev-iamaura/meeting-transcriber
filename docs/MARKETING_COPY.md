@@ -12,17 +12,17 @@ Local Korean meeting recorder and cited Decision Wiki for Apple Silicon.
 
 ## 짧은 설명
 
-Recap은 Apple Silicon Mac에서 한국어 회의를 녹음하고, 전사·요약·검색·Decision Wiki 정리 흐름까지 로컬로 처리하는 오픈소스 프로젝트입니다. 회의가 끝난 뒤 사라지는 대화를 결정사항, 액션아이템, 원문 timestamp 근거와 함께 다시 찾을 수 있게 만드는 것이 목표입니다.
+Recap은 Apple Silicon Mac에서 한국어 회의를 녹음하고, 전사·요약·검색·Decision Wiki 정리 흐름을 로컬 우선으로 처리하는 오픈소스 프로젝트입니다. 기본 전사는 로컬이며, 설정에서 동의 후 OpenAI를 기본값으로 선택하거나 회의별 비교에 별도 동의한 경우에만 음성이 외부로 전송됩니다. 회의가 끝난 뒤 사라지는 대화를 결정사항, 액션아이템, 원문 timestamp 근거와 함께 다시 찾을 수 있게 만드는 것이 목표입니다.
 
 ## README용 소개문
 
-회의록은 남겨도 다시 찾기 어렵습니다. Recap은 회의 원문 전사와 RAG 검색을 유지하면서, 중요한 결정사항과 액션아이템을 별도의 Markdown Wiki 레이어로 정리합니다. 모든 처리는 Apple Silicon Mac에서 로컬로 실행되며, 데이터는 외부 서버로 전송되지 않습니다.
+회의록은 남겨도 다시 찾기 어렵습니다. Recap은 회의 원문 전사와 RAG 검색을 유지하면서, 중요한 결정사항과 액션아이템을 별도의 Markdown Wiki 레이어로 정리합니다. 기본 전사와 교정·요약·검색·Wiki 처리는 Apple Silicon Mac에서 로컬로 실행됩니다. 설정에서 동의 후 OpenAI를 기본값으로 유지하는 동안의 새 전사와 별도 동의한 회의별 비교만 외부로 전송됩니다.
 
 ## SNS 짧은 문구
 
 회의 전사문을 쌓아두는 것에서 한 걸음 더 나아가, 결정사항과 액션아이템을 위키로 정리하는 도구를 만들고 있습니다.
 
-Recap은 한국어 회의를 로컬에서 녹음하고, 전사·요약·검색·Decision Wiki 정리 흐름까지 Apple Silicon Mac에서 처리하는 오픈소스 프로젝트입니다.
+Recap은 한국어 회의를 로컬에서 녹음하고, 전사·요약·검색·Decision Wiki 정리 흐름을 Apple Silicon Mac에서 로컬 우선으로 처리하는 오픈소스 프로젝트입니다. 필요할 때만 동의 후 OpenAI 전사를 선택할 수 있습니다.
 
 ## SNS 긴 문구
 
@@ -34,7 +34,7 @@ Recap을 오픈소스로 준비하고 있습니다.
 - 화자 분리와 로컬 LLM 요약
 - ChromaDB + FTS5 기반 회의 검색
 - 원문 timestamp 근거가 있는 Decision Wiki
-- Apple Silicon Mac에서 로컬 실행
+- Apple Silicon Mac에서 로컬 우선 실행, 선택적 OpenAI 전사
 
 아직 다듬는 중이지만, 회의 데이터를 외부 API에 보내기 어려운 팀과 개인에게 유용한 방향으로 만들고 있습니다.
 
@@ -44,7 +44,7 @@ I am building Recap, an open-source local meeting transcriber for Korean meeting
 
 The part I care about most is not just transcription. After a meeting is processed, Recap can organize decisions and action items into a local Markdown-based Decision Wiki with timestamp citations back to the original transcript. The goal is to make meetings searchable as working memory, not just store long transcripts.
 
-It runs locally with MLX, mlx-whisper, pyannote, local LLMs, ChromaDB, and SQLite FTS5. The project is still early and Apple Silicon only, but I am trying to keep the positioning narrow: local Korean meeting memory with cited decisions.
+It is local-first with MLX, mlx-whisper, pyannote, local LLMs, ChromaDB, and SQLite FTS5. OpenAI transcription is optional: choosing it as the default requires one explicit consent and applies to subsequent new transcriptions until switched back, while per-meeting comparisons require separate consent. Correction, summarization, search, and the Decision Wiki remain local. The project is still early and Apple Silicon only, but I am trying to keep the positioning narrow: private Korean meeting memory with cited decisions.
 
 ## 게시 순서
 
@@ -66,7 +66,7 @@ It runs locally with MLX, mlx-whisper, pyannote, local LLMs, ChromaDB, and SQLit
 
 - "원문 근거가 있는 Decision Wiki"
 - "회의 전사와 위키 레이어를 분리"
-- "로컬에서 처리"
+- "로컬 우선으로 처리"
 - "한국어 회의에 초점"
 - "Apple Silicon 최적화"
 - "자동 생성 결과는 원문 timestamp로 확인"

@@ -762,13 +762,13 @@ async def _recheck_transcribe_items(
     queue: Any,
     config: Any,
     items: list[tuple[str, str, Path | None]],
-) -> list[tuple[str, int]]:
+) -> list[tuple[str, int, Any]]:
     """모든 전사 항목을 queue mutation 전에 한 번 더 검증한다.
 
     한 항목의 admission이 HTTP 오류를 내면 아직 어떤 job도 queued가 아니므로
     batch 전체가 무변경 상태로 종료된다.
     """
-    validated: list[tuple[str, int]] = []
+    validated: list[tuple[str, int, Any]] = []
     for meeting_id, classification, expected_audio_path in items:
         if classification != "transcribe" or expected_audio_path is None:
             continue
@@ -790,7 +790,7 @@ async def _recheck_transcribe_items(
             logger.warning("일괄 처리 큐잉 보류: audio_path 변경/소실 (%s)", meeting_id)
             continue
         await _require_audio_quality_accept(config, current_audio_path)
-        validated.append((meeting_id, int(job.id)))
+        validated.append((meeting_id, int(job.id), job))
     return validated
 
 
@@ -871,6 +871,33 @@ async def batch_action(
     background_items = [item for item in prepared.items if item[1] != "transcribe"]
     transcribe_items = [item for item in prepared.items if item[1] == "transcribe"]
 
+    # admission 전에 state → DB snapshot → config 순으로 각 회의의 실제
+    # 선택을 한 번만 캡는다. 하나라도 OpenAI면 파일을 읽기 전에
+    # Host/Origin 경계를 적용하고 같은 snapshot을 DB transaction에 저장한다.
+    from api.routers.meeting_detail import _read_pipeline_state_for_response
+    from api.routers.transcription_models import require_loopback_server
+    from core.transcription_models import selection_from_state_or_config
+
+    preflight_selections: dict[tuple[str, int], tuple[str, str]] = {}
+    for meeting_id, classification, _audio_path in transcribe_items:
+        if classification != "transcribe":
+            continue
+        candidate_job = await _get_job_for_batch(queue, meeting_id)
+        if not _is_job_status_safe_for_batch(candidate_job, "transcribe"):
+            continue
+        assert candidate_job is not None
+        try:
+            state = _read_pipeline_state_for_response(config, meeting_id)
+            selection = selection_from_state_or_config(config, state, job=candidate_job)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        preflight_selections[(meeting_id, int(candidate_job.id))] = (
+            selection.provider,
+            selection.model,
+        )
+        if selection.external_upload:
+            require_loopback_server(config, request)
+
     # 모든 2차 admission을 끝낸 뒤에만 단일 DB transaction으로 큐잉한다.
     # item N의 gate/CAS 실패가 item 1..N-1을 부분 queued로 남기지 않는다.
     validated_transcribe = await _recheck_transcribe_items(queue, config, transcribe_items)
@@ -884,13 +911,24 @@ async def batch_action(
             skipped += len(validated_transcribe)
         else:
             try:
+                stt_selections: dict[int, tuple[str, str]] = {}
+                for mid, job_id, job in validated_transcribe:
+                    captured = preflight_selections.get((mid, job_id))
+                    if captured is None:
+                        raise JobQueueError("일괄 전사 선택 snapshot을 찾을 수 없습니다")
+                    state = _read_pipeline_state_for_response(config, mid)
+                    current = selection_from_state_or_config(config, state, job=job)
+                    if captured != (current.provider, current.model):
+                        raise JobQueueError("일괄 전사 선택이 admission 중 변경되었습니다")
+                    stt_selections[job_id] = captured
                 await asyncio.to_thread(
                     sync_queue.queue_jobs_atomically,
-                    [job_id for _mid, job_id in validated_transcribe],
+                    [job_id for _mid, job_id, _job in validated_transcribe],
                     body.action,
+                    stt_selections=stt_selections,
                 )
-                queued_transcribe_ids = [mid for mid, _job_id in validated_transcribe]
-            except JobQueueError as exc:
+                queued_transcribe_ids = [mid for mid, _job_id, _job in validated_transcribe]
+            except (JobQueueError, ValueError) as exc:
                 logger.warning("일괄 처리 원자 큐잉 실패 — 전체 rollback: %s", exc)
                 skipped += len(validated_transcribe)
 

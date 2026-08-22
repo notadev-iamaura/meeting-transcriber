@@ -38,6 +38,7 @@ async def get_auto_processing_status(request: Request) -> dict[str, Any]:
 async def run_auto_processing_now(request: Request) -> dict[str, Any]:
     """자동 전사/요약을 즉시 1회 실행한다."""
     scheduler = getattr(request.app.state, "auto_processing_scheduler", None)
+    config = getattr(request.app.state, "config", None)
     if scheduler is None:
         raise HTTPException(
             status_code=503,
@@ -48,6 +49,15 @@ async def run_auto_processing_now(request: Request) -> dict[str, Any]:
             status_code=409,
             detail="자동 전사/요약이 이미 실행 중입니다.",
         )
+    if config is not None and getattr(config.auto_processing, "action", "full") in {
+        "transcribe",
+        "full",
+    }:
+        # recorded 작업은 취소 전 pipeline_state에 고정된 OpenAI provider를 재개할
+        # 수 있다. 현재 기본 provider만 검사하면 local 전환으로 guard가 우회된다.
+        from api.routers.transcription_models import require_loopback_server
+
+        require_loopback_server(config, request)
     result = await scheduler.run_once()
     return {
         "status": "ok",

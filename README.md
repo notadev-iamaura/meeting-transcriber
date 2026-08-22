@@ -7,10 +7,10 @@
 
 [![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11~3.12](https://img.shields.io/badge/python-3.11~3.12-blue.svg)](https://www.python.org/downloads/)
 
-Recap은 Apple Silicon Mac에서 회의 녹음 → 전사 → 화자 분리 → AI 교정·요약 → 검색·채팅 → Decision Wiki 정리 흐름까지 로컬로 처리하는 프로젝트입니다.
+Recap은 Apple Silicon Mac에서 회의 녹음 → 전사 → 화자 분리 → AI 교정·요약 → 검색·채팅 → Decision Wiki 정리 흐름을 기본적으로 로컬에서 처리하는 프로젝트입니다.
 회의가 끝난 뒤 사라지는 대화를 결정사항, 액션아이템, 원문 timestamp 근거와 함께 다시 찾을 수 있게 만드는 것이 목표입니다.
 
-모든 데이터는 로컬에서만 처리되며, 외부 서버로 전송되지 않습니다.
+기본 전사 모델은 로컬 `whisper-large-v3-turbo`이며 외부 전송은 없습니다. 설정에서 OpenAI를 기본값으로 선택하고 한 번 동의하면 로컬로 되돌리기 전까지 이후 새 전사 음성이 OpenAI로 전송됩니다. 회의별 비교는 실행할 때마다 별도 동의를 요구합니다. 교정·요약·검색·채팅은 계속 로컬에서 실행됩니다.
 
 > **⚠️ Apple Silicon Mac 전용** — 이 프로젝트는 MLX 프레임워크를 사용하며, Apple Silicon(M1/M2/M3/M4) Mac에서만 동작합니다.
 > Intel Mac, Linux, Windows에서는 MLX 기반 STT가 지원되지 않습니다.
@@ -36,8 +36,9 @@ Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반
 
 ## 주요 기능
 
-- **음성 → 텍스트 변환**: mlx-whisper 기반 한국어 STT (Apple Silicon MLX 가속)
-- **STT 모델 선택기**: 웹 UI에서 사용할 음성 인식 모델을 관리
+- **음성 → 텍스트 변환**: 기본은 mlx-whisper 기반 로컬 한국어 STT, 선택적으로 OpenAI `gpt-4o-transcribe-diarize`
+- **전사 모델 선택기**: 웹 UI에서 기본 처리 위치와 로컬 음성 인식 모델을 관리
+- **회의별 다른 모델 전사**: 기존 회의록을 보존한 채 로컬/OpenAI 결과를 비파괴 A/B 작업으로 생성
 - **화자 분리**: `pyannote/speaker-diarization-community-1`로 발화자별 자동 분리
 - **AI 교정**: Gemma 4 (기본) 또는 EXAONE 3.5 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
@@ -206,7 +207,8 @@ echo 'export HUGGINGFACE_TOKEN=hf_xxxxx' >> ~/.zshrc
 ```
 
 > **참고**: 토큰 설정 후 최초 실행 시 모델이 자동 다운로드되며 (`~/.cache/huggingface/`에 캐시),
-> 이후에는 인터넷 없이 오프라인으로 동작합니다.
+> 기본 로컬 전사 모드는 이후 인터넷 없이 동작합니다. 선택적 OpenAI 전사를 실행할 때는
+> 해당 음성 업로드를 위한 인터넷 연결이 필요합니다.
 
 ### 6. 실행
 
@@ -440,7 +442,7 @@ python main.py --no-menubar
 
 **준비 상태**: `/app/setup`에서 데이터 디렉토리, ffmpeg, HuggingFace 토큰, 오디오 장치, STT 모델 상태를 읽기 전용으로 확인. 설치나 권한 변경은 실행하지 않음.
 
-**설정**: STT 모델 선택, LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 즉시 적용.
+**설정**: 로컬/OpenAI 기본 전사 선택, OpenAI API 키 등록, 로컬 STT 모델 선택, LLM 모델 변경, Temperature 조절, LLM 스킵 토글, 전사 언어 변경 — 모두 웹에서 적용.
 
 **다크/라이트 모드**: 우측 상단 토글로 전환. 시스템 설정 자동 감지 + 수동 오버라이드 가능.
 
@@ -448,6 +450,11 @@ python main.py --no-menubar
 
 기본 STT 모델은 **`whisper-large-v3-turbo`** 입니다 (6 회의 벤치마크 1위, komixv2 대비 CER **−16%p**).
 설정 페이지의 "음성 인식 모델 (STT)" 섹션에서 한국어 fine-tune 모델 3종도 GUI로 다운로드/활성화할 수 있습니다.
+
+설정의 **기본 전사 모델**에서 `이 Mac에서 처리` 또는 `OpenAI 서버에서 처리`를 선택할 수 있습니다. OpenAI를 선택하려면 같은 화면에서 API 키를 macOS Keychain에 등록하고 외부 업로드에 한 번 명시적으로 동의해야 합니다. 이 선택을 유지하는 동안 이후 새 전사는 OpenAI로 처리됩니다. 새 설치의 초기값은 로컬이며 자동 cloud fallback은 없습니다.
+`gpt-4o-transcribe-diarize`는 API의 `language` 힌트를 지원하지 않아 언어를 자동 감지하며, 설정의 전사 언어 값은 로컬 STT 경로에 적용됩니다.
+
+전사가 완료된 회의의 **다른 모델로 텍스트 변환하기…** 버튼은 현재 회의록을 지우지 않습니다. 현재 로컬 모델과 OpenAI 모델의 결과를 별도 A/B 작업으로 저장해 비교하며, 실행할 때마다 해당 파일의 외부 전송 동의를 다시 받습니다. 변환 WAV가 아직 없는 녹음완료·변환 전 실패 파일은 먼저 로컬 전사를 완료해야 합니다.
 
 | 모델 | 베이스 | Zeroth CER | 회의 음성 | RAM | 디스크 | HuggingFace |
 |------|--------|-----------|----------|-----|--------|-------------|
@@ -478,7 +485,9 @@ python main.py --no-menubar
 ```yaml
 # 또는 config.yaml 에서 직접 변경 (HuggingFace repo ID 사용)
 stt:
+  provider: "local"                                  # 기본. "openai"는 명시적 외부 전송
   model_name: "mlx-community/whisper-large-v3-turbo"   # 기본값
+  openai_model: "gpt-4o-transcribe-diarize"          # 화자/시간 세그먼트 지원
   # model_name: "youngouk/seastar-medium-ko-4bit-mlx" # 다른 모델로 변경 시
 # 수동으로 가져온 경우에는 로컬 경로 사용 (예: ~/.meeting-transcriber/stt_models/seastar-medium-4bit-manual)
 ```
@@ -589,7 +598,12 @@ curl http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/download-status
 
 # 4. 활성 모델 변경 (config.yaml 자동 갱신)
 curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
+
+# 로컬/OpenAI 통합 전사 카탈로그와 API 키 등록 상태(키 값은 반환하지 않음)
+curl http://127.0.0.1:8765/api/transcription-models | python -m json.tool
 ```
+
+OpenAI API 키는 CLI 인자나 `config.yaml`에 넣지 말고 설정 화면에서 등록하는 것을 권장합니다. 앱은 키를 macOS Keychain에 저장하고 등록 여부만 API에 반환합니다.
 
 ### 검색 및 채팅
 
@@ -608,11 +622,13 @@ bash scripts/setup_launchagent.sh
 | 설정 | 설명 | 기본값 |
 |------|------|--------|
 | `paths.base_dir` | 데이터 디렉토리 | `~/.meeting-transcriber` |
-| `stt.model_name` | Whisper 모델 (HuggingFace ID 또는 로컬 경로) | `youngouk/whisper-medium-komixv2-mlx` |
+| `stt.provider` | 기본 전사 처리 위치 (`local` 또는 명시적 `openai`) | `local` |
+| `stt.model_name` | 로컬 Whisper 모델 (HuggingFace ID 또는 로컬 경로) | `mlx-community/whisper-large-v3-turbo` |
+| `stt.openai_model` | 외부 전사 선택 시 사용하는 화자분리 모델 | `gpt-4o-transcribe-diarize` |
 | `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
-| `llm.mlx_model_name` | MLX 모델명 | `mlx-community/EXAONE-3.5-7.8B-Instruct-4bit` |
+| `llm.mlx_model_name` | MLX 모델명 | `mlx-community/gemma-4-e4b-it-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
-| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `false` (기본: 전체 6단계 실행) |
+| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `false` (기본: 전체 8단계 실행) |
 | `server.port` | 웹 서버 포트 | `8765` |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |
@@ -655,6 +671,7 @@ sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니
 | `MT_LLM_MODEL` | MLX 모델명 오버라이드 |
 | `MT_LLM_HOST` | Ollama 호스트 (Ollama 사용 시) |
 | `HUGGINGFACE_TOKEN` | HuggingFace 토큰 |
+| `OPENAI_API_KEY` | 개발/CI용 OpenAI 키 폴백. 일반 사용은 macOS Keychain 권장 |
 
 ## 프로젝트 구조
 
@@ -670,6 +687,7 @@ meeting-transcriber/
 │   ├── thermal_manager.py   # 서멀 관리 (2-job + 쿨다운)
 │   ├── watcher.py           # 폴더 감시
 │   ├── orchestrator.py      # 파이프라인 오케스트레이터
+│   ├── transcription_models.py # 로컬/OpenAI 전사 선택 화이트리스트
 │   ├── llm_backend.py       # LLM 백엔드 프로토콜 (Ollama/MLX)
 │   ├── ollama_client.py     # Ollama API 클라이언트
 │   ├── mlx_client.py        # MLX in-process LLM 백엔드
@@ -677,13 +695,14 @@ meeting-transcriber/
 ├── steps/                   # 파이프라인 단계
 │   ├── audio_converter.py   # 오디오 → WAV 변환
 │   ├── transcriber.py       # STT (mlx-whisper)
+│   ├── openai_transcriber.py # 명시적 선택 시 OpenAI 화자분리 전사
 │   ├── vad_detector.py      # 음성 구간 감지 (Silero VAD v5)
 │   ├── hallucination_filter.py  # 환각 필터링 (4중 기준)
 │   ├── text_postprocessor.py    # 텍스트 정규화 (NFC, 공백)
 │   ├── number_normalizer.py     # 숫자 표현 정규화
 │   ├── diarizer.py          # 화자 분리 (pyannote)
 │   ├── merger.py            # 전사 + 화자 병합
-│   ├── corrector.py         # AI 교정 (EXAONE)
+│   ├── corrector.py         # 설정된 로컬 LLM 교정 (Gemma 4 기본 / EXAONE 선택)
 │   ├── chunker.py           # 텍스트 청크 분할
 │   ├── embedder.py          # 벡터 임베딩
 │   ├── summarizer.py        # AI 요약
@@ -712,6 +731,7 @@ meeting-transcriber/
 │   ├── secure_dir.py        # 디렉토리 보안 설정
 │   ├── lifecycle.py         # 데이터 수명주기 관리
 │   ├── health_check.py      # 시스템 상태 점검
+│   ├── openai_keychain.py   # OpenAI 키 Keychain 저장/조회
 │   └── setup_readiness.py   # 최초 설정 마법사용 read-only 준비 상태
 ├── scripts/                 # 스크립트
 │   ├── install.sh           # 설치 스크립트
@@ -723,14 +743,14 @@ meeting-transcriber/
 │   ├── setup_launchagent.sh # 자동 시작 설정
 │   ├── benchmark_ab_test.py # STT A/B 벤치마크
 │   └── convert_whisper_mlx.py # Whisper 모델 MLX 변환
-└── tests/                   # 테스트 (1,644개, 커버리지 87%)
+└── tests/                   # 단위·통합·UI·하네스 테스트
 ```
 
 ## 기술 스택
 
 | 영역 | 기술 |
 |------|------|
-| STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) (Apple MLX) — `whisper-large-v3-turbo` (기본) |
+| STT | [mlx-whisper](https://github.com/ml-explore/mlx-examples) `whisper-large-v3-turbo` (기본·로컬), 선택적 OpenAI `gpt-4o-transcribe-diarize` |
 | 화자 분리 | [pyannote-audio](https://github.com/pyannote/pyannote-audio) 3.1 (CPU) |
 | LLM | [Gemma 4](https://ai.google.dev/gemma) E4B (기본) 또는 [EXAONE 3.5](https://huggingface.co/LGAI-EXAONE) 7.8B / Gemma 4 E2B via [MLX](https://github.com/ml-explore/mlx-examples) |
 | 임베딩 | [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (MPS) |
@@ -741,9 +761,9 @@ meeting-transcriber/
 
 ## 아키텍처 특징
 
-- **100% 오프라인**: 모든 AI 모델이 로컬에서 실행, 외부 API 호출 없음
+- **로컬 우선**: 기본 동작은 오프라인. 기본 OpenAI 선택은 한 번 동의 후 이후 새 전사에 적용되고, 회의별 비교는 매번 별도 동의
 - **MLX 기본 백엔드**: Gemma 4 E4B (기본) / EXAONE 3.5 / Gemma 4 E2B 중 선택, Ollama도 지원
-- **웹 UI 설정 변경**: LLM 모델/Temperature/전사 언어를 브라우저에서 실시간 변경
+- **웹 UI 설정 변경**: 기본 전사 위치/API 키, LLM 모델/Temperature/전사 언어를 브라우저에서 변경
 - **Zoom 자동 녹음**: 회의 감지 → 녹음 → 전사까지 완전 자동화
 - **순차 모델 로드**: RAM 16GB 제한 내에서 피크 9.5GB 유지
 - **서멀 관리**: 팬리스 MacBook Air에서도 안정적 실행 (2-job 배치 + 3분 쿨다운)
@@ -756,47 +776,26 @@ meeting-transcriber/
 
 ## 프로젝트 현황
 
-### 코드 규모
+### 검증
 
-| 지표 | 수치 |
-|------|------|
-| 소스 코드 | 19,095줄 (43개 파일) |
-| 테스트 코드 | 32,603줄 (46개 파일) |
-| 테스트 케이스 | **1,644개** |
-| 코드-테스트 비율 | 1 : 1.71 |
-| 테스트 커버리지 | **87%** (5,933 statements) |
-| 테스트 실행 시간 | ~65초 |
-
-### 모듈별 테스트 커버리지
-
-| 모듈 | 커버리지 | 주요 파일 |
-|------|:--------:|----------|
-| core/ | 86% | pipeline(88%), job_queue(99%), orchestrator(98%) |
-| steps/ | 88% | transcriber(99%), hallucination_filter(100%), corrector(91%) |
-| search/ | 91% | hybrid_search(92%), chat(91%) |
-| api/ | 88% | websocket(94%), routes(86%), server(85%) |
-| security/ | 93% | secure_dir(96%), health_check(92%), lifecycle(91%) |
-| ui/ | 88% | native_window(100%), menubar(84%) |
-
-### 100% 커버리지 달성 모듈
-
-`hallucination_filter`, `text_postprocessor`, `llm_backend`, `chipset_detector`, `native_window`
+정확한 테스트 수와 커버리지는 코드 변경에 따라 달라지므로 고정 수치로 게시하지 않습니다.
+현재 소스의 회귀 검증은 `pytest tests/ -x -q`와 `docs/STATUS.md`의 릴리스 게이트를
+기준으로 합니다.
 
 ### 파이프라인 처리 흐름
 
 ```
 오디오 입력 (.wav/.m4a/.mp3)
   → [1] 오디오 변환 (ffmpeg → 16kHz mono WAV)
-  → [2] VAD 음성 구간 감지 (Silero VAD v5)
-  → [3] STT 전사 (mlx-whisper, 한국어 최적화)
-  → [4] 환각 필터링 (no_speech_prob + logprob + compression_ratio + 반복 패턴)
-  → [5] 텍스트 후처리 (NFC 정규화, 공백 정리)
-  → [6] 화자 분리 (pyannote community-1, CPU)
-  → [7] 세그먼트 병합 (STT + 화자 시간 매칭)
-  → [8] LLM 교정 (EXAONE 3.5, 배치 보정)
-  → [9] 스마트 청킹 (토픽/시간 기반, 300토큰)
-  → [10] 벡터 임베딩 (ChromaDB + SQLite FTS5 이중 저장)
-  → [11] AI 요약 생성
+  → [2] STT 전사
+        ├─ 로컬: 필요 시 VAD → mlx-whisper → 환각 필터/텍스트 후처리
+        └─ OpenAI: 명시적 동의 후 diarized transcription
+  → [3] 화자 분리 (OpenAI 단일 청크의 화자 구간 재사용 / 그 외 pyannote community-1, CPU)
+  → [4] 세그먼트 병합 (STT + 화자 시간 매칭)
+  → [5] LLM 교정 (Gemma 4 기본, EXAONE 선택 가능)
+  → [6] AI 요약 생성
+  → [7] 스마트 청킹 (토픽/시간 기반, 300토큰)
+  → [8] 벡터 임베딩 (ChromaDB + SQLite FTS5 이중 저장)
   → 검색 가능한 회의록 완성
 ```
 
@@ -830,7 +829,7 @@ meeting-transcriber/
 
 | 영역 | 기본값 | 관찰 |
 |------|--------|------|
-| STT 모델 | `whisper-medium-komixv2-mlx` (fp16) | 환각 필터 후 순도 100%, 커버리지 85.1% (단일 회의 425초) |
+| STT 모델 | `whisper-large-v3-turbo` | 6개 실제 회의 비교에서 komixv2보다 안정적 (§1.1) |
 | VAD | OFF | ON 시 실행 3.1배·커버리지 -13.2%p (이 환경) |
 | LLM 모델 | `gemma-4-e4b-it-4bit` | 정답지 44발화 대비 유사도 92.9% vs EXAONE 47.5% |
 | LLM temperature | 0.0 | MLX 4bit에서 0.0~0.5 결과 동일 관찰 |

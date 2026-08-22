@@ -14,7 +14,13 @@ paths:
 
 # === STT 모델 설정 ===
 stt:
+  provider: "local"                         # local(기본·Mac 내부) | openai(명시적 외부 전송)
   model_name: "mlx-community/whisper-large-v3-turbo"  # 6 회의 벤치마크 기반 (docs/BENCHMARK.md §1). komixv2 대비 CER -16%p
+  openai_model: "gpt-4o-transcribe-diarize" # 화자/시간 세그먼트를 제공하는 회의용 OpenAI 모델
+  openai_timeout_seconds: 600                # 외부 요청 1회 타임아웃 (초)
+  openai_chunk_seconds: 3600                 # 기본 60분. 바이트 상한에 맞춰 자동 축소
+  openai_audio_bitrate_kbps: 48              # 업로드용 mono MP3 비트레이트
+  openai_max_upload_bytes: 24000000           # API 25MB 제한보다 여유를 둔 상한
   language: "ko"  # 전사 언어
   beam_size: 5                               # 빔 서치 크기
   batch_size: 12                             # mlx-whisper가 명시 지원하는 버전에서만 전달 (0.4.3은 미지원)

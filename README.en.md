@@ -3,15 +3,15 @@
 English | [한국어](README.md)
 
 > **A local-first meeting memory tool that turns recordings into a cited Decision Wiki.**
-> _Built for Apple Silicon Macs, private meeting workflows, and teams that cannot send meeting data to external AI APIs._
+> _Built for Apple Silicon Macs and private, local-first meeting workflows._
 
 [![CI](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/notadev-iamaura/meeting-transcriber/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11~3.12](https://img.shields.io/badge/python-3.11~3.12-blue.svg)](https://www.python.org/downloads/)
 
-Recap runs a meeting workflow locally on Apple Silicon: recording, transcription, speaker diarization, correction, summarization, search, chat, and a Decision Wiki layer.
+Recap runs a meeting workflow locally by default on Apple Silicon: recording, transcription, speaker diarization, correction, summarization, search, chat, and a Decision Wiki layer.
 
 The core idea is simple: meetings should not end as long transcripts that nobody can find again. They should become searchable decisions, action items, and cited notes that link back to the original meeting timestamp.
 
-All processing is designed to happen locally. Meeting audio and transcripts are not sent to external AI APIs.
+The default transcription model is local and sends no meeting data to an external AI API. Selecting OpenAI as the default requires one explicit upload consent and applies to subsequent new transcriptions until the user switches back to local. Per-meeting comparisons require separate consent every time. Correction, summarization, search, chat, and the Decision Wiki remain local.
 
 > **Apple Silicon only** - Recap uses MLX and currently targets Apple Silicon Macs (M1/M2/M3/M4). Intel Mac, Linux, and Windows are not supported for the MLX-based STT path.
 
@@ -36,8 +36,9 @@ Recap started from a Korean-heavy meeting workflow, but the broader problem is l
 
 ## Features
 
-- **Recording and transcription**: local audio workflow with mlx-whisper on Apple Silicon.
-- **STT model management**: choose and manage speech recognition models from the web UI.
+- **Recording and transcription**: local mlx-whisper by default, with optional OpenAI `gpt-4o-transcribe-diarize`.
+- **Transcription model management**: choose the default processing location and manage local STT models from the web UI.
+- **Per-meeting alternate transcription**: for a completed meeting, create an isolated local-vs-OpenAI comparison without replacing the current transcript.
 - **Speaker diarization**: pyannote-audio based speaker separation.
 - **Local LLM correction and summarization**: MLX by default, Ollama optional.
 - **Decision Wiki**: turn decisions and action items into cited Markdown notes.

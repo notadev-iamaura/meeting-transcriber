@@ -56,7 +56,6 @@ from steps.transcriber import (
     AudioFileIdentity,
     EmptyAudioError,
     Transcriber,
-    TranscriptResult,
     inspect_audio_path_no_symlinks,
 )
 
@@ -75,7 +74,7 @@ class ModelSpec:
     Attributes:
         label: 사용자에게 보여지는 라벨 (예: "EXAONE 3.5 7.8B 4bit")
         model_id: 모델 식별자. LLM 은 HF repo id, STT 는 registry id 또는 HF repo id
-        backend: LLM 전용. "mlx" 또는 "ollama" (STT 에서는 관례상 "mlx")
+        backend: "mlx", "ollama" 또는 명시적 외부 STT인 "openai"
     """
 
     label: str
@@ -632,7 +631,7 @@ def _inspect_stt_audio_source(
     config: AppConfig,
     meeting_id: str,
 ) -> tuple[Path, AudioFileIdentity]:
-    """STT A/B 원본이 audio_input의 안전한 직접 자식인지 검사한다."""
+    """STT A/B용 변환 WAV가 허용된 저장소의 안전한 자식인지 검사한다."""
     _validate_source_meeting_id(meeting_id)
 
     audio_input_dir = _lexical_configured_path(
@@ -640,10 +639,42 @@ def _inspect_stt_audio_source(
         "audio_input_dir",
         config.paths.resolved_audio_input_dir,
     )
-    wav_path = _resolve_wav_path(config, meeting_id).expanduser().absolute()
-    if wav_path.parent != audio_input_dir:
+    outputs_root = _lexical_configured_path(
+        config,
+        "outputs_dir",
+        config.paths.resolved_outputs_dir,
+    )
+    expected_output_dir = outputs_root / meeting_id
+
+    # 처리된 업로드(M4A/MP3 포함)는 pipeline_state의 output-localized WAV를
+    # 우선 사용한다. 예전 녹음/A-B fixture는 audio_input/{id}.wav로 폴백한다.
+    wav_path: Path | None = None
+    state_path = _resolve_meeting_dir(config, meeting_id) / "pipeline_state.json"
+    try:
+        state, _state_identity = _read_json_artifact_no_symlinks(
+            state_path,
+            label="pipeline state",
+        )
+        raw_wav_path = state.get("wav_path")
+        if isinstance(raw_wav_path, str) and raw_wav_path:
+            candidate = Path(raw_wav_path).expanduser().absolute()
+            legacy_input_wav = _resolve_wav_path(config, meeting_id).expanduser().absolute()
+            if candidate.suffix.lower() != ".wav" or (
+                candidate.parent != expected_output_dir and candidate != legacy_input_wav
+            ):
+                raise AudioAdmissionError(
+                    f"pipeline WAV가 허용된 회의 저장소의 직접 자식이 아닙니다: {candidate}",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                )
+            wav_path = candidate
+    except FileNotFoundError:
+        pass
+
+    if wav_path is None:
+        wav_path = _resolve_wav_path(config, meeting_id).expanduser().absolute()
+    if wav_path.parent not in {audio_input_dir, expected_output_dir}:
         raise AudioAdmissionError(
-            f"STT A/B 오디오는 audio_input의 직접 자식이어야 합니다: {wav_path}",
+            f"STT A/B 오디오가 허용된 저장소의 직접 자식이 아닙니다: {wav_path}",
             failure_kind=AudioFailureKind.SECURITY_BLOCKED,
         )
 
@@ -723,16 +754,12 @@ async def _require_stt_audio_admission(
 
 def _write_metrics_file(dir_path: Path, metrics: dict[str, Any]) -> None:
     """metrics.json 을 기록한다."""
-    dir_path.mkdir(parents=True, exist_ok=True)
-    with open(dir_path / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    ab_test_store.write_variant_json(dir_path, "metrics.json", metrics)
 
 
 def _write_summary_markdown(dir_path: Path, markdown: str) -> None:
     """summary.md 를 기록한다."""
-    dir_path.mkdir(parents=True, exist_ok=True)
-    with open(dir_path / "summary.md", "w", encoding="utf-8") as f:
-        f.write(markdown)
+    ab_test_store.write_variant_text(dir_path, "summary.md", markdown)
 
 
 def _build_llm_temp_config(base_config: AppConfig, spec: ModelSpec) -> AppConfig:
@@ -763,6 +790,32 @@ def _build_stt_temp_config(base_config: AppConfig, spec: ModelSpec) -> AppConfig
     """
     from core.stt_model_registry import get_by_id as stt_get_by_id
     from core.stt_model_status import get_effective_model_path
+    from core.transcription_models import (
+        LOCAL_TRANSCRIPTION_ID,
+        OPENAI_TRANSCRIBE_DIARIZE_MODEL,
+        OPENAI_TRANSCRIPTION_ID,
+    )
+
+    if spec.backend == "openai":
+        if spec.model_id != OPENAI_TRANSCRIPTION_ID:
+            raise ValueError("지원하지 않는 OpenAI STT variant입니다.")
+        new_stt = base_config.stt.model_copy(
+            update={
+                "provider": "openai",
+                "openai_model": OPENAI_TRANSCRIBE_DIARIZE_MODEL,
+            }
+        )
+        return base_config.model_copy(update={"stt": new_stt})
+
+    if spec.model_id == LOCAL_TRANSCRIPTION_ID:
+        actual_model_name = base_config.stt.resolve_model_path(
+            base_dir=base_config.paths.resolved_base_dir
+        )
+        logger.info("STT 임시 config 생성: 현재 활성 로컬 모델")
+        new_stt = base_config.stt.model_copy(
+            update={"provider": "local", "model_name": actual_model_name}
+        )
+        return base_config.model_copy(update={"stt": new_stt})
 
     registry_spec = stt_get_by_id(spec.model_id)
     if registry_spec is not None:
@@ -772,7 +825,9 @@ def _build_stt_temp_config(base_config: AppConfig, spec: ModelSpec) -> AppConfig
         # 레지스트리에 없는 ID — 그대로 전달 (사용자가 HF repo ID 를 직접 입력한 경우)
         actual_model_name = spec.model_id
     logger.info(f"STT 임시 config 생성: {spec.model_id} → {actual_model_name}")
-    new_stt = base_config.stt.model_copy(update={"model_name": actual_model_name})
+    new_stt = base_config.stt.model_copy(
+        update={"provider": "local", "model_name": actual_model_name}
+    )
     return base_config.model_copy(update={"stt": new_stt})
 
 
@@ -928,7 +983,11 @@ async def _run_llm_variant(
         corrector = Corrector(temp_cfg, model_manager)
         corrected = await corrector.correct(merged)
         elapsed["correct"] = time.perf_counter() - t0
-        corrected.save_checkpoint(variant_dir / "correct.json")
+        ab_test_store.write_variant_json(
+            variant_dir,
+            "correct.json",
+            corrected.to_dict(),
+        )
 
     if scope.summarize:
         if corrected is None:
@@ -1069,7 +1128,6 @@ async def run_llm_ab_test(
         global _current_test_id
         _current_test_id = test_id
 
-        test_dir = ab_test_store.resolve_test_dir(config, test_id)
         # lock 획득 후 상태를 "running" 으로 갱신
         ab_test_store.update_metadata(config, test_id, status="running")
 
@@ -1109,7 +1167,11 @@ async def run_llm_ab_test(
                     },
                 )
 
-                variant_dir = test_dir / _variant_dir_name(variant)
+                variant_dir = ab_test_store.resolve_variant_dir(
+                    config,
+                    test_id,
+                    _variant_dir_name(variant),
+                )
                 try:
                     metrics = await _run_llm_variant(
                         config=config,
@@ -1137,13 +1199,26 @@ async def run_llm_ab_test(
                     variant_errors[variant] = str(exc)
                     # 에러 로그도 variant 디렉터리에 남긴다
                     try:
-                        variant_dir.mkdir(parents=True, exist_ok=True)
-                        (variant_dir / "stderr.log").write_text(
-                            f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+                        ab_test_store.write_variant_text(
+                            variant_dir,
+                            "stderr.log",
+                            f"{type(exc).__name__}: {exc}\n",
                         )
-                    except OSError:
+                    except (OSError, ValueError):
                         pass
                     await _force_unload_llm(mm)
+
+            if _is_cancelled(test_id):
+                ab_test_store.update_metadata(
+                    config,
+                    test_id,
+                    status="cancelled",
+                    current_variant=None,
+                    current_step=None,
+                    completed_at=_now_iso(),
+                    error="사용자가 A/B 테스트를 취소했습니다.",
+                )
+                return test_id
 
             # 최종 상태 결정
             if not variant_errors:
@@ -1207,8 +1282,11 @@ async def _ensure_diarize(
         return cached_result
     except FileNotFoundError:
         pass
-    # 체크포인트 없음 → 자동으로 1회 실행 (미전사 회의에서 필수)
-    logger.info("diarize 체크포인트 없음 → 화자분리 자동 실행")
+    if not allow_diarize_rerun:
+        raise RuntimeError(
+            "화자분리 체크포인트가 없습니다. 화자분리 재실행에 동의한 뒤 다시 시도해 주세요."
+        )
+    logger.info("diarize 체크포인트 없음 → 사용자 동의에 따라 화자분리 1회 실행")
     _assert_stt_audio_identity(wav_path, expected_identity)
     diarizer = Diarizer(config, model_manager)
     return await diarizer.diarize(wav_path)
@@ -1223,6 +1301,8 @@ async def _run_stt_variant(
     expected_identity: AudioFileIdentity,
     cached_diarize: DiarizationResult,
     variant_dir: Path,
+    openai_resume_dir: Path,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """단일 STT variant 를 실행한다.
 
@@ -1238,7 +1318,11 @@ async def _run_stt_variant(
     # VAD 전처리: 음성 구간만 추출하여 무음 환각 방지 (pipeline.py 와 동일)
     vad_clip_timestamps: list[float] | None = None
     vad_config = getattr(config, "vad", None)
-    if vad_config is not None and getattr(vad_config, "enabled", False):
+    if (
+        spec.backend != "openai"
+        and vad_config is not None
+        and getattr(vad_config, "enabled", False)
+    ):
         try:
             from steps.vad_detector import VoiceActivityDetector
 
@@ -1255,18 +1339,41 @@ async def _run_stt_variant(
 
     _assert_stt_audio_identity(wav_path, expected_identity)
     t0 = time.perf_counter()
-    transcriber = Transcriber(temp_cfg, model_manager)
-    transcript: TranscriptResult = await transcriber.transcribe(
-        wav_path, vad_clip_timestamps=vad_clip_timestamps
-    )
+    if spec.backend == "openai":
+        from steps.openai_transcriber import OpenAITranscriber
+
+        transcriber: Any = OpenAITranscriber(temp_cfg)
+    else:
+        transcriber = Transcriber(temp_cfg, model_manager)
+    if spec.backend == "openai":
+        transcript = await transcriber.transcribe(
+            wav_path,
+            vad_clip_timestamps=vad_clip_timestamps,
+            resume_dir=openai_resume_dir,
+            should_cancel=should_cancel,
+            expected_audio_identity=expected_identity,
+        )
+    else:
+        transcript = await transcriber.transcribe(
+            wav_path,
+            vad_clip_timestamps=vad_clip_timestamps,
+        )
     elapsed["transcribe"] = time.perf_counter() - t0
-    transcript.save_checkpoint(variant_dir / "transcribe.json")
+    ab_test_store.write_variant_json(
+        variant_dir,
+        "transcribe.json",
+        transcript.to_dict(),
+    )
 
     t1 = time.perf_counter()
     merger = Merger()
     merged = await merger.merge(transcript, cached_diarize)
     elapsed["merge"] = time.perf_counter() - t1
-    merged.save_checkpoint(variant_dir / "merge.json")
+    ab_test_store.write_variant_json(
+        variant_dir,
+        "merge.json",
+        merged.to_dict(),
+    )
 
     # STT 테스트에서는 LLM 교정/요약을 수행하지 않으므로 corrected=None
     metrics = compute_metrics(None, None, elapsed)
@@ -1282,6 +1389,12 @@ async def _run_stt_variant(
     metrics["forbidden_patterns"] = count_forbidden_patterns(body)
     _write_metrics_file(variant_dir, metrics)
 
+    if spec.backend == "openai":
+        try:
+            transcriber.cleanup_resume_cache(openai_resume_dir)
+        except Exception as exc:  # noqa: BLE001 - variant 산출물은 이미 안전하다.
+            logger.warning(f"OpenAI A/B 재개 캐시 정리 실패: {exc}")
+
     await _force_unload_llm(model_manager)
     return metrics
 
@@ -1296,6 +1409,7 @@ async def run_stt_ab_test(
     model_manager: ModelLoadManager | None = None,
     test_id: str | None = None,
     metadata_reserved: bool = False,
+    expected_source_identity: AudioFileIdentity | None = None,
 ) -> str:
     """STT 모델 2종을 순차 실행하고 결과를 격리 저장한다.
 
@@ -1308,6 +1422,8 @@ async def run_stt_ab_test(
         ws_broadcaster: (선택) 브로드캐스트 콜러블
         model_manager: (선택) 주입용
         test_id: (선택) 외부 주입 test_id. None 이면 내부 생성.
+        expected_source_identity: API admission에서 동의한 원본 파일 identity.
+            제공되면 runner가 새 파일을 기준으로 다시 채택하지 않는다.
 
     Returns:
         test_id
@@ -1329,7 +1445,10 @@ async def run_stt_ab_test(
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
 
     try:
-        wav_path, expected_identity = _inspect_stt_audio_source(config, source_meeting_id)
+        wav_path, inspected_identity = _inspect_stt_audio_source(config, source_meeting_id)
+        expected_identity = expected_source_identity or inspected_identity
+        if expected_source_identity is not None:
+            _assert_stt_audio_identity(wav_path, expected_source_identity)
         await _require_stt_audio_admission(config, wav_path, expected_identity)
         meeting_dir = _resolve_meeting_dir(config, source_meeting_id)
     except asyncio.CancelledError:
@@ -1403,8 +1522,6 @@ async def run_stt_ab_test(
         global _current_test_id
         _current_test_id = test_id
 
-        test_dir = ab_test_store.resolve_test_dir(config, test_id)
-
         try:
             # lock 대기 중 바뀐 원본을 모델/diarize가 열기 전에 다시 차단한다.
             _assert_stt_audio_identity(wav_path, expected_identity)
@@ -1471,7 +1588,11 @@ async def run_stt_ab_test(
                     },
                 )
 
-                variant_dir = test_dir / _variant_dir_name(variant)
+                variant_dir = ab_test_store.resolve_variant_dir(
+                    config,
+                    test_id,
+                    _variant_dir_name(variant),
+                )
                 try:
                     metrics = await _run_stt_variant(
                         config=config,
@@ -1481,7 +1602,15 @@ async def run_stt_ab_test(
                         expected_identity=expected_identity,
                         cached_diarize=cached_diarize,
                         variant_dir=variant_dir,
+                        # 테스트별 저장소에 격리해 다른 test의 DELETE/재시도와
+                        # raw provider 응답 캐시가 경합하지 않게 한다.
+                        openai_resume_dir=variant_dir.parent / ".openai-transcribe-parts",
+                        should_cancel=lambda: _is_cancelled(test_id),
                     )
+                    if _is_cancelled(test_id):
+                        raise asyncio.CancelledError(
+                            "사용자가 OpenAI STT A/B 테스트를 취소했습니다."
+                        )
                     variant_success[variant] = metrics
                     await _safe_broadcast(
                         ws_broadcaster,
@@ -1498,14 +1627,17 @@ async def run_stt_ab_test(
                     logger.error(f"STT A/B variant {variant} 실패: {exc}", exc_info=True)
                     variant_errors[variant] = str(exc)
                     try:
-                        variant_dir.mkdir(parents=True, exist_ok=True)
-                        (variant_dir / "stderr.log").write_text(
-                            f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+                        ab_test_store.write_variant_text(
+                            variant_dir,
+                            "stderr.log",
+                            f"{type(exc).__name__}: {exc}\n",
                         )
-                    except OSError:
+                    except (OSError, ValueError):
                         pass
                     await _force_unload_llm(mm)
 
+            if _is_cancelled(test_id):
+                raise asyncio.CancelledError("사용자가 OpenAI STT A/B 테스트를 취소했습니다.")
             if not variant_errors:
                 final_status = "completed"
             elif len(variant_errors) == 2:
@@ -1561,36 +1693,24 @@ async def run_stt_ab_test(
 def _read_variant_dir(variant_dir: Path) -> dict[str, Any]:
     """variant 디렉터리의 산출물을 딕셔너리로 읽어 반환한다 (없으면 빈값)."""
     out: dict[str, Any] = {"metrics": None, "correct": None, "summary": None}
-    metrics_path = variant_dir / "metrics.json"
-    if metrics_path.exists():
+    for filename, key in (
+        ("metrics.json", "metrics"),
+        ("correct.json", "correct"),
+        ("transcribe.json", "transcribe"),
+    ):
         try:
-            with open(metrics_path, encoding="utf-8") as f:
-                out["metrics"] = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"metrics.json 읽기 실패: {metrics_path} ({exc})")
+            out[key] = ab_test_store.read_variant_json(variant_dir, filename)
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning(f"{filename} 읽기 실패: {variant_dir} ({exc})")
 
-    correct_path = variant_dir / "correct.json"
-    if correct_path.exists():
-        try:
-            with open(correct_path, encoding="utf-8") as f:
-                out["correct"] = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"correct.json 읽기 실패: {correct_path} ({exc})")
-
-    summary_path = variant_dir / "summary.md"
-    if summary_path.exists():
-        try:
-            out["summary"] = summary_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(f"summary.md 읽기 실패: {summary_path} ({exc})")
-
-    transcribe_path = variant_dir / "transcribe.json"
-    if transcribe_path.exists():
-        try:
-            with open(transcribe_path, encoding="utf-8") as f:
-                out["transcribe"] = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"transcribe.json 읽기 실패: {transcribe_path} ({exc})")
+    try:
+        out["summary"] = ab_test_store.read_variant_text(variant_dir, "summary.md")
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        logger.warning(f"summary.md 읽기 실패: {variant_dir} ({exc})")
 
     return out
 
@@ -1619,11 +1739,14 @@ def get_test_status(config: AppConfig, test_id: str) -> dict[str, Any]:
 def get_test_result(config: AppConfig, test_id: str) -> dict[str, Any]:
     """metadata + variant_a + variant_b 산출물을 하나의 딕셔너리로 반환한다."""
     meta = ab_test_store.read_metadata(config, test_id)
-    test_dir = ab_test_store.resolve_test_dir(config, test_id)
     return {
         "metadata": meta,
-        "variant_a": _read_variant_dir(test_dir / "variant_a"),
-        "variant_b": _read_variant_dir(test_dir / "variant_b"),
+        "variant_a": _read_variant_dir(
+            ab_test_store.resolve_variant_dir(config, test_id, "variant_a")
+        ),
+        "variant_b": _read_variant_dir(
+            ab_test_store.resolve_variant_dir(config, test_id, "variant_b")
+        ),
     }
 
 
@@ -1650,6 +1773,39 @@ def list_tests(config: AppConfig, source_meeting_id: str | None = None) -> list[
     return result
 
 
+def recover_orphaned_tests(config: AppConfig) -> int:
+    """재시작 시 live task가 없는 active metadata를 terminal 상태로 복구한다."""
+    recovered = 0
+    for test_id in ab_test_store.list_test_ids(config):
+        try:
+            metadata = ab_test_store.read_metadata(config, test_id)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning("A/B orphan metadata 조회 실패: test_id=%s, error=%s", test_id, exc)
+            continue
+        status = metadata.get("status")
+        if status not in {"pending", "running", "cancelling"}:
+            continue
+        cancelled = status == "cancelling"
+        try:
+            ab_test_store.update_metadata(
+                config,
+                test_id,
+                status="cancelled" if cancelled else "failed",
+                current_variant=None,
+                current_step=None,
+                completed_at=_now_iso(),
+                error=(
+                    "앱 종료 중 취소된 A/B 테스트입니다."
+                    if cancelled
+                    else "앱 종료로 중단된 A/B 테스트입니다. 다시 시작해 주세요."
+                ),
+            )
+            recovered += 1
+        except (OSError, ValueError) as exc:
+            logger.error("A/B orphan metadata 복구 실패: test_id=%s, error=%s", test_id, exc)
+    return recovered
+
+
 def delete_test(config: AppConfig, test_id: str) -> None:
     """테스트 디렉터리를 삭제한다."""
     ab_test_store.delete_test_dir(config, test_id)
@@ -1663,5 +1819,16 @@ async def cancel_test(config: AppConfig, test_id: str) -> None:
     """
     if not ab_test_store.is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+    metadata = ab_test_store.read_metadata(config, test_id)
+    status = str(metadata.get("status", ""))
+    if status not in {"pending", "running", "cancelling"}:
+        raise ValueError(f"취소할 수 있는 A/B 테스트 상태가 아닙니다: {status or 'unknown'}")
+    if status != "cancelling":
+        ab_test_store.update_metadata(
+            config,
+            test_id,
+            status="cancelling",
+            error="사용자 취소 요청이 저장되었습니다.",
+        )
     _cancel_requests.add(test_id)
     logger.info(f"A/B 테스트 취소 요청 등록: {test_id}")

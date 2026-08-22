@@ -5,8 +5,10 @@
 
 ## 프로젝트 요약
 
-MacBook Air (Apple Silicon, 16GB)에서 100% 로컬로 동작하는 한국어 회의 전사 시스템.
-외부 API 호출 없이 음성→텍스트→화자분리→AI교정→벡터검색→AI채팅까지 처리한다.
+MacBook Air (Apple Silicon, 16GB)에서 로컬 우선으로 동작하는 한국어 회의 전사 시스템.
+기본은 음성→텍스트→화자분리→AI교정→벡터검색→AI채팅까지 로컬 처리한다.
+사용자가 OpenAI 전사와 외부 업로드에 명시적으로 동의한 경우에만 해당 음성을
+`api.openai.com`으로 전송하며, 교정·요약·검색·채팅은 계속 로컬에서 처리한다.
 
 ---
 
@@ -64,7 +66,7 @@ brew install ffmpeg
 
 # 3단계: LLM 모델 (MLX 기본, 추가 설치 불필요)
 # mlx-lm(EXAONE 등) 과 mlx-vlm(Gemma 4 등) 둘 다 pip install -e ".[dev]" 에 포함됨
-# 첫 실행 시 EXAONE 3.5 7.8B 4bit 모델이 자동 다운로드됨
+# 첫 실행 시 Gemma 4 E4B 4bit 모델이 자동 다운로드됨
 #
 # [선택] Gemma 4로 모델 변경 시:
 # config.yaml의 llm.mlx_model_name을 변경하면 자동 다운로드
@@ -153,7 +155,7 @@ bash scripts/setup_audio.sh
 ### 셋업 검증
 
 ```bash
-# 단위 테스트 (1700+개)
+# 단위/통합 테스트 (E2E 자동 제외)
 pytest tests/ -x -q
 
 # 실행 테스트
@@ -267,7 +269,7 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 
 | 영역 | 기술 | 디바이스 | 비고 |
 |------|------|---------|------|
-| STT | mlx-whisper — **`whisper-large-v3-turbo` 기본** (한국어 fine-tune 3종도 GUI 선택 가능) | MPS(GPU) | Apple MLX 가속. 6 회의 벤치마크 기준 komixv2 대비 CER −16%p |
+| STT | mlx-whisper — **`whisper-large-v3-turbo` 기본**; 선택적 OpenAI `gpt-4o-transcribe-diarize` | MPS(GPU) / OpenAI | 기본 로컬·자동 cloud fallback 없음. OpenAI는 명시적 동의 시만 음성 업로드 |
 | 화자분리 | pyannote-audio 3.1 | **CPU 강제** | MPS 버그 있음 |
 | LLM | **Gemma 4 E4B 기본** (EXAONE 3.5 / Gemma 4 E2B 선택 가능) — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
@@ -384,6 +386,13 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 > **웹 UI에서 다운로드/활성화 가능** (`/app/settings` → "음성 인식 모델 (STT)")
 > 또는 `config.yaml`의 `stt.model_name`을 직접 수정.
 
+**처리 위치 선택:** `stt.provider`의 기본값은 `local`이다. 설정 화면에서 OpenAI
+`gpt-4o-transcribe-diarize`를 기본값으로 선택할 수 있지만 macOS Keychain에 API 키를
+등록하고 외부 업로드에 한 번 동의해야 한다. 기본값을 OpenAI로 유지하는 동안 이후 새
+전사 작업의 음성도 OpenAI로 전송된다. 전사가 완료된 회의의 **다른 모델로 텍스트 변환하기…**는
+기존 산출물을 보존한 격리 A/B 작업이며 실행할 때마다 별도로 동의를 요구한다. diarize 모델에는
+지원되지 않는 `language`, `prompt`, `timestamp_granularities` 필드를 보내지 않는다.
+
 **지원 모델 (모두 사전 양자화 HF 배포):**
 
 | 모델 ID | 베이스 | CER | WER | RAM | 디스크 | HuggingFace | 추천 |
@@ -401,9 +410,9 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 > - **seastar (4bit)**: 세그먼트 세밀하지만 무음 구간 반복 환각 ("ohn ohn", "네 네 네") 빈번
 > - **ghost613 (4bit)**: 대량 환각 ("옷 옷 옷...", 뉴스 텍스트 삽입) → **실사용 부적합**
 >
-> 4bit 양자화 모델은 무음 구간에서 환각에 취약합니다. VAD(음성 구간 감지)가
-> 활성화되어 있으면 환각이 크게 줄어들므로 **`vad.enabled: true` (기본)** 을
-> 유지하세요. silero-vad 가 `pip install -e .` 에 포함되어 있습니다.
+> 4bit 양자화 모델은 무음 구간에서 환각에 취약합니다. VAD(음성 구간 감지)를
+> 활성화하면 환각이 줄 수 있지만 이 환경에서는 실행시간 증가와 커버리지 저하가
+> 관찰되어 **`vad.enabled: false`가 기본**입니다. 필요할 때만 샘플별로 비교하세요.
 
 **모델 변경 방법:**
 
@@ -421,10 +430,17 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 
 **구현 모듈:**
 
-- `core/stt_model_registry.py` — STTModelSpec + 3종 메타데이터 + 수동 다운로드 URL 헬퍼
+- `core/stt_model_registry.py` — 로컬 STT 모델 메타데이터 + 수동 다운로드 URL 헬퍼
 - `core/stt_model_status.py` — 상태 판정 (수동 임포트 > HF 캐시 > 로컬 경로)
 - `core/stt_model_downloader.py` — 백그라운드 HF 스냅샷 다운로드 + 검증
 - `api/routes.py` — `/api/stt-models/*` (list, download, download-status, activate, manual-download-info, import-manual)
+- `core/transcription_models.py` — 로컬/OpenAI 전사 선택 화이트리스트
+- `api/routers/transcription_models.py` — `/api/transcription-models`와
+  `/api/openai-credentials` 상태·등록·삭제 API. API 키 값은 쓰기 전용이며
+  `GET`은 등록 상태만 반환한다.
+- `steps/openai_transcriber.py` — 동의가 검증된 파일만 diarized transcription으로 전송
+- `PUT /api/settings`의 OpenAI 전환과 `POST /api/ab-tests/stt`는
+  `external_upload_confirmed`를 서버에서도 검증한다.
 
 **배포 전략:** 모든 모델은 저자가 사전 양자화·업로드한 결과물을 HuggingFace에서 직접 받습니다. 사용자 환경에 `mlx-examples` 같은 추가 의존성이 필요 없고, 다운로드 1회로 완료됩니다. 네트워크·방화벽 이슈가 있는 사용자는 GUI의 "브라우저로 직접 받기" 섹션에서 HF 직접 URL을 받아 수동 다운로드 후 "가져오기"로 설치할 수 있습니다.
 
@@ -435,7 +451,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 ### 핵심 규칙
 
 1. **한 번에 하나의 대형 모델만 메모리 적재** — `ModelLoadManager` 뮤텍스
-2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 회의록 → 청크 → 임베딩 (회의록 생성이 검색 인덱싱 실패에 의해 차단되지 않도록 순서 결정)
+2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 회의록 → 청크 → 임베딩 (회의록 생성이 검색 인덱싱 실패에 의해 차단되지 않도록 순서 결정). OpenAI 단일 업로드 응답에 화자/시간 세그먼트가 있으면 pyannote를 우회하고, 여러 client-side 청크는 기존 로컬 pyannote를 사용한다.
 3. **피크 RAM 9.5GB 이하** 유지 (16GB 중 나머지는 OS + 앱)
 4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
 5. **MLX는 in-process** (기본), Ollama 사용 시 localhost만 (`http://127.0.0.1:11434`)
@@ -455,19 +471,19 @@ PIPELINE_STEPS 순서:
 [1] AudioConverter  ──→  16kHz mono WAV
     │
     ▼
-[2] Transcriber     ──→  TranscriptResult (mlx-whisper, MPS)
-    │                     모델 로드 → 전사 → 모델 언로드
+[2] Transcriber     ──→  TranscriptResult
+    │                     기본: mlx-whisper(MPS), 명시 선택: OpenAI diarized transcription
     ▼
-[3] Diarizer        ──→  DiarizationResult (pyannote, CPU 강제)
-    │                     모델 로드 → 화자분리 → 모델 언로드
+[3] Diarizer        ──→  DiarizationResult
+    │                     OpenAI 단일 청크 화자 구간 재사용 또는 pyannote(CPU 강제)
     ▼
 [4] Merger          ──→  MergedResult (시간 겹침 기반 매칭)
     │
     ▼
-[5] Corrector       ──→  CorrectedResult (EXAONE via Ollama 또는 MLX)
+[5] Corrector       ──→  CorrectedResult (설정된 로컬 LLM: Gemma 4 기본 / EXAONE 선택)
     │                     백엔드 로드 → 배치 교정 → 백엔드 언로드
     ▼
-[6] Summarizer      ──→  요약 텍스트 (EXAONE via Ollama 또는 MLX)
+[6] Summarizer      ──→  요약 텍스트 (설정된 로컬 LLM)
     │                     회의록은 핵심 산출물 — 검색 인덱싱 실패에 차단 안 됨
     ▼
 [7] Chunker         ──→  ChunkedResult (화자+시간 기반 분할)
@@ -496,16 +512,18 @@ meeting-transcriber/
 │   ├── job_queue.py         # SQLite 기반 작업 큐
 │   ├── thermal_manager.py   # 서멀 관리 (2-job 배치 + 쿨다운)
 │   ├── watcher.py           # 폴더 감시 (watchdog)
-│   ├── stt_model_registry.py    # STT 모델 메타데이터 (komixv2/seastar/ghost613)
+│   ├── stt_model_registry.py    # 로컬 STT 모델 메타데이터
 │   ├── stt_model_status.py      # STT 모델 다운로드 상태 판정
-│   └── stt_model_downloader.py  # 백그라운드 HF snapshot_download + 검증 (사전 양자화 모델 대상)
+│   ├── stt_model_downloader.py  # 백그라운드 HF snapshot_download + 검증 (사전 양자화 모델 대상)
+│   └── transcription_models.py  # 로컬/OpenAI 전사 선택 화이트리스트
 │
 ├── steps/                   # 파이프라인 각 단계 (독립 모듈)
 │   ├── audio_converter.py   # ffmpeg 기반 WAV 변환
 │   ├── transcriber.py       # STT (mlx-whisper)
+│   ├── openai_transcriber.py # 명시적 외부 전사 + diarized_json 변환
 │   ├── diarizer.py          # 화자분리 (pyannote, CPU 강제)
 │   ├── merger.py            # 전사+화자 병합 (시간 겹침 매칭)
-│   ├── corrector.py         # LLM 교정 (EXAONE via Ollama)
+│   ├── corrector.py         # 설정된 로컬 LLM 교정 (Gemma 4 기본 / EXAONE 선택)
 │   ├── chunker.py           # 시맨틱 청크 분할
 │   ├── embedder.py          # 벡터 임베딩 + ChromaDB/FTS5 저장
 │   ├── summarizer.py        # AI 요약
@@ -513,7 +531,7 @@ meeting-transcriber/
 │
 ├── search/                  # 검색 엔진
 │   ├── hybrid_search.py     # 하이브리드 검색 (벡터 0.6 + FTS5 0.4, RRF k=60)
-│   └── chat.py              # RAG 채팅 (검색→컨텍스트→EXAONE 답변)
+│   └── chat.py              # RAG 채팅 (검색→컨텍스트→설정된 로컬 LLM 답변)
 │
 ├── api/                     # REST API + WebSocket
 │   ├── server.py            # FastAPI 앱 팩토리
@@ -536,6 +554,7 @@ meeting-transcriber/
 │   ├── secure_dir.py        # 디렉토리 권한 설정 (chmod 700)
 │   ├── lifecycle.py         # 데이터 수명주기 (hot→warm→cold)
 │   ├── health_check.py      # 시스템 상태 점검
+│   ├── openai_keychain.py   # OpenAI API 키 Keychain 저장/조회
 │   └── setup_readiness.py   # 최초 설정 마법사용 read-only 준비 상태
 │
 ├── scripts/                 # 설치/배포 스크립트
@@ -547,7 +566,7 @@ meeting-transcriber/
 │   ├── build_unsigned_release.py # unsigned local release 산출물 일괄 생성
 │   └── setup_launchagent.sh # macOS 로그인 시 자동 시작
 │
-├── tests/                   # 테스트 (1231개)
+├── tests/                   # 단위·통합·UI·하네스 테스트
 ├── pyproject.toml           # PEP 621 패키지 설정
 ├── config.yaml              # 애플리케이션 설정
 └── CLAUDE.md                # 이 파일 (AI 에이전트용 가이드)
@@ -656,7 +675,8 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 
 ### 금지 사항
 
-- 외부 API 호출 (인터넷 전송 절대 불가)
+- 사용자 동의·provider 화이트리스트·loopback gate를 거치지 않은 외부 API 호출
+- OpenAI API 키를 config/YAML/DB/로그/체크포인트/프론트 저장소에 기록하거나 응답에 반사
 - `pyannote`에서 `device="mps"` 사용
 - 모델 동시 로드 (반드시 이전 모델 언로드 후 다음 로드)
 - `print()` 사용 (logger 사용)
@@ -675,6 +695,7 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 | `MT_LLM_BACKEND` | LLM 백엔드 오버라이드 | `ollama` 또는 `mlx` |
 | `MT_LLM_MODEL` | MLX 모델명 오버라이드 | `mlx-community/gemma-4-e4b-it-4bit` |
 | `MT_LOG_LEVEL` | 로그 레벨 | `debug` |
+| `OPENAI_API_KEY` | 개발/CI용 OpenAI 키 읽기 전용 폴백 (일반 사용은 macOS Keychain) | `sk-...` |
 
 ---
 
@@ -690,7 +711,7 @@ python main.py
 # 헤드리스 모드 (서버만)
 python main.py --no-menubar
 
-# 단위/통합 테스트 (1800+개, E2E 자동 제외)
+# 단위/통합 테스트 (E2E 자동 제외)
 pytest tests/ -v
 
 # 빠른 테스트

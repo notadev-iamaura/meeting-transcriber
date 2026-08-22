@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_config as _get_config
+from api.dependencies import get_job_queue as _get_job_queue
 from core import ab_test_store
 from core.ab_test_runner import (
     LlmScope,
@@ -35,6 +36,7 @@ from core.audio_quality import (
     AudioQualityStatus,
     validate_audio_quality,
 )
+from core.job_queue import InvalidTransitionError, JobQueueError
 from steps.transcriber import AudioAdmissionError, AudioFileIdentity
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ class ModelSpecPayload(BaseModel):
 
     label: str
     model_id: str
-    backend: Literal["mlx", "ollama"] = "mlx"
+    backend: Literal["mlx", "ollama", "openai"] = "mlx"
 
 
 class LlmScopePayload(BaseModel):
@@ -73,6 +75,7 @@ class ABTestSTTRequest(BaseModel):
     variant_a: ModelSpecPayload
     variant_b: ModelSpecPayload
     allow_diarize_rerun: bool = False
+    external_upload_confirmed: bool = False
 
 
 class ABTestStartedResponse(BaseModel):
@@ -318,6 +321,9 @@ async def start_llm_ab_test(
     """LLM A/B 테스트를 백그라운드로 시작한다."""
     config = _get_config(request)
 
+    if any(variant.backend == "openai" for variant in (body.variant_a, body.variant_b)):
+        raise HTTPException(status_code=400, detail="OpenAI backend는 STT 비교에서만 지원합니다.")
+
     if (
         body.variant_a.model_id == body.variant_b.model_id
         and body.variant_a.backend == body.variant_b.backend
@@ -407,6 +413,38 @@ async def start_stt_ab_test(
     """STT A/B 테스트를 백그라운드로 시작한다."""
     config = _get_config(request)
 
+    openai_variants = [
+        variant for variant in (body.variant_a, body.variant_b) if variant.backend == "openai"
+    ]
+    if openai_variants:
+        # 동의 검증은 파일/Keychain 접근보다 먼저 수행한다.
+        if not body.external_upload_confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="이 음성 파일을 OpenAI로 전송하는 데 동의해야 합니다.",
+            )
+        from api.routers.transcription_models import require_loopback_server
+        from core.transcription_models import OPENAI_TRANSCRIPTION_ID
+        from security.openai_keychain import get_status
+
+        require_loopback_server(config, request)
+        if any(variant.model_id != OPENAI_TRANSCRIPTION_ID for variant in openai_variants):
+            raise HTTPException(status_code=400, detail="지원하지 않는 OpenAI 전사 모델입니다.")
+        if not get_status().configured:
+            raise HTTPException(status_code=400, detail="OpenAI API 키를 먼저 등록해 주세요.")
+
+    from core.transcription_models import OPENAI_TRANSCRIPTION_ID
+
+    for variant in (body.variant_a, body.variant_b):
+        if variant.backend not in {"mlx", "openai"}:
+            raise HTTPException(
+                status_code=400, detail="STT backend는 mlx 또는 openai만 허용됩니다."
+            )
+        if variant.backend != "openai" and variant.model_id == OPENAI_TRANSCRIPTION_ID:
+            raise HTTPException(
+                status_code=400, detail="OpenAI 모델과 backend 조합이 올바르지 않습니다."
+            )
+
     if body.variant_a.model_id == body.variant_b.model_id:
         raise HTTPException(
             status_code=400,
@@ -417,6 +455,22 @@ async def start_stt_ab_test(
         raise HTTPException(
             status_code=409,
             detail="다른 A/B 테스트가 이미 진행 중입니다.",
+        )
+
+    queue = _get_job_queue(request)
+    source_job = await asyncio.to_thread(
+        queue.queue.get_job_by_meeting_id,
+        body.source_meeting_id,
+    )
+    if source_job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"회의를 찾을 수 없습니다: {body.source_meeting_id}",
+        )
+    if str(getattr(source_job, "status", "") or "") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="완료된 회의만 다른 전사 모델로 비교할 수 있습니다.",
         )
 
     inspected_source = _validate_meeting_exists(
@@ -440,28 +494,64 @@ async def start_stt_ab_test(
         model_id=body.variant_b.model_id,
         backend=body.variant_b.backend,
     )
-    _runner_reserve_stt_ab_test(
-        config,
-        test_id=selected_id,
-        source_meeting_id=body.source_meeting_id,
-        wav_path=wav_path,
-        variant_a=variant_a,
-        variant_b=variant_b,
-        allow_diarize_rerun=body.allow_diarize_rerun,
-    )
-
-    task = asyncio.create_task(
-        _runner_run_stt_ab_test(
-            config=config,
+    source_claimed = False
+    try:
+        await asyncio.to_thread(
+            queue.queue.claim_for_stt_ab_test,
+            source_job.id,
+            selected_id,
+        )
+        source_claimed = True
+        _runner_reserve_stt_ab_test(
+            config,
+            test_id=selected_id,
             source_meeting_id=body.source_meeting_id,
+            wav_path=wav_path,
             variant_a=variant_a,
             variant_b=variant_b,
             allow_diarize_rerun=body.allow_diarize_rerun,
-            ws_broadcaster=broadcaster,
-            model_manager=model_manager,
-            test_id=selected_id,
-            metadata_reserved=True,
-        ),
+        )
+    except (InvalidTransitionError, JobQueueError) as exc:
+        if source_claimed:
+            await asyncio.to_thread(
+                queue.queue.restore_stt_ab_test_claim,
+                source_job.id,
+                selected_id,
+            )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        if source_claimed:
+            await asyncio.to_thread(
+                queue.queue.restore_stt_ab_test_claim,
+                source_job.id,
+                selected_id,
+            )
+        raise
+
+    async def _run_with_source_lease() -> str:
+        """A/B 종료 경로와 무관하게 완료 회의의 durable lease를 복원한다."""
+        try:
+            return await _runner_run_stt_ab_test(
+                config=config,
+                source_meeting_id=body.source_meeting_id,
+                variant_a=variant_a,
+                variant_b=variant_b,
+                allow_diarize_rerun=body.allow_diarize_rerun,
+                ws_broadcaster=broadcaster,
+                model_manager=model_manager,
+                test_id=selected_id,
+                metadata_reserved=True,
+                expected_source_identity=expected_identity,
+            )
+        finally:
+            await asyncio.to_thread(
+                queue.queue.restore_stt_ab_test_claim,
+                source_job.id,
+                selected_id,
+            )
+
+    task = asyncio.create_task(
+        _run_with_source_lease(),
         name=f"ab-test-stt-{selected_id}",
     )
     task.add_done_callback(_log_task_exception)
@@ -519,17 +609,18 @@ async def get_ab_test_summary(
     _validate_variant(variant)
     config = _get_config(request)
 
-    test_dir = ab_test_store.resolve_test_dir(config, test_id)
-    summary_path = test_dir / f"variant_{variant}" / "summary.md"
-
-    if not summary_path.exists():
+    variant_name = f"variant_{variant}"
+    try:
+        variant_dir = ab_test_store.resolve_variant_dir(config, test_id, variant_name)
+        content = ab_test_store.read_variant_text(variant_dir, "summary.md")
+    except FileNotFoundError:
         raise HTTPException(
             status_code=404,
-            detail=f"요약 파일이 없습니다: variant_{variant}/summary.md",
-        )
+            detail=f"요약 파일이 없습니다: {variant_name}/summary.md",
+        ) from None
 
     return Response(
-        content=summary_path.read_text(encoding="utf-8"),
+        content=content,
         media_type="text/markdown; charset=utf-8",
     )
 
@@ -547,6 +638,19 @@ async def delete_ab_test(
     """A/B 테스트를 삭제한다."""
     _validate_test_id(test_id)
     config = _get_config(request)
+    try:
+        metadata = ab_test_store.read_metadata(config, test_id)
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None and str(metadata.get("status", "")) in {
+        "pending",
+        "running",
+        "cancelling",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="진행 중인 A/B 테스트는 취소 완료 후 삭제할 수 있습니다.",
+        )
     try:
         _runner_delete_test(config, test_id)
     except FileNotFoundError:
@@ -572,6 +676,11 @@ async def cancel_ab_test(
     config = _get_config(request)
     try:
         await _runner_cancel_test(config, test_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"A/B 테스트를 찾을 수 없습니다: {test_id}",
+        ) from None
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ABTestStartedResponse(test_id=test_id, status="cancelling")

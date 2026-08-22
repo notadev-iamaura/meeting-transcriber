@@ -481,7 +481,6 @@ class TestApplyColdPolicy:
             has_flac=True,
             audio_files=[meeting_dir / "audio.flac"],
         )
-
         freed = manager.apply_cold_policy(info)
 
         assert freed == 500

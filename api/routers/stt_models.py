@@ -315,6 +315,9 @@ async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
 
     new_stt = config.stt.model_copy(update={"model_name": new_path})
     request.app.state.config = config.model_copy(update={"stt": new_stt})
+    pipeline_manager = getattr(request.app.state, "pipeline_manager", None)
+    if pipeline_manager is not None:
+        pipeline_manager.update_stt_config(new_stt)
 
     return {
         "model_id": model_id,

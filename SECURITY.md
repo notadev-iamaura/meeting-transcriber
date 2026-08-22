@@ -70,14 +70,16 @@
 
 ## 보안 설계 원칙
 
-### 로컬 전용 처리 (Local-Only Processing)
+### 로컬 우선 처리 (Local-First Processing)
 
 이 프로젝트의 가장 근본적인 보안 원칙입니다.
 
-- **외부 API 호출 금지**: 음성 데이터, 전사 텍스트, 회의 내용 등 모든 데이터는 사용자의 Mac에서만 처리됩니다. 외부 서버로 전송되는 데이터는 없습니다.
-- **LLM 로컬 실행**: EXAONE 3.5 모델은 Ollama(localhost) 또는 MLX(in-process) 백엔드를 통해 로컬에서 실행됩니다.
+- **기본값은 로컬**: 새 설치의 전사 provider는 `local`이며 자동 cloud fallback이 없습니다. OpenAI를 선택하지 않으면 음성 데이터, 전사 텍스트, 회의 내용은 외부 AI API로 전송되지 않습니다.
+- **명시적 OpenAI 예외**: 설정에서 OpenAI를 기본 전사로 선택하려면 한 번의 업로드 동의가 필요하며, 로컬로 되돌리기 전까지 이후 새 전사 음성이 `api.openai.com`으로 전송됩니다.
+- **파일별 동의와 비파괴 실행**: 회의별 **다른 모델로 텍스트 변환하기…**는 실행할 때마다 별도 동의를 요구하고 기존 전사·요약·검색 인덱스를 교체하지 않는 격리 A/B 작업으로 저장됩니다.
+- **LLM 로컬 실행**: Gemma 4(기본) 또는 EXAONE 3.5 모델은 MLX(in-process) 백엔드에서 실행되며, 선택적으로 Ollama(localhost)를 사용할 수 있습니다.
 - **임베딩 로컬 실행**: `multilingual-e5-small` 임베딩 모델은 로컬 Apple Silicon GPU(MPS)에서 실행됩니다.
-- **인터넷 연결 불필요**: 초기 모델 다운로드를 제외하면 애플리케이션 동작 시 인터넷 연결이 필요하지 않습니다.
+- **인터넷 연결 선택적**: 로컬 전사에는 초기 모델 다운로드 이후 인터넷 연결이 필요하지 않습니다. OpenAI 전사를 명시적으로 사용할 때만 연결이 필요합니다.
 - **웹 서버 localhost 전용**: FastAPI 서버는 `127.0.0.1`(loopback)에서만 실행됩니다. 외부 네트워크에 노출되지 않습니다.
 
 ### 최소 권한 원칙 (Principle of Least Privilege)
@@ -91,6 +93,8 @@
 - **암호화 정책**: 이 프로젝트는 파일 시스템 수준의 암호화를 별도로 구현하지 않습니다. macOS의 FileVault(전체 디스크 암호화)를 활성화하여 저장 데이터를 보호할 것을 권장합니다.
 - **데이터 수명주기**: `security/lifecycle.py`를 통해 회의 데이터의 보관 기간과 삭제 정책을 관리합니다. hot(활성) → warm(보관) → cold(아카이브) 단계별 정책을 `config.yaml`에서 설정할 수 있습니다.
 - **HuggingFace 토큰**: pyannote 화자분리 모델의 초기 다운로드에 필요한 HuggingFace 토큰은 환경변수(`HUGGINGFACE_TOKEN`)로만 관리합니다. 토큰을 코드나 설정 파일에 직접 기록하지 마십시오.
+- **OpenAI API 키**: 일반 사용에서는 별도 자격 증명 API를 통해 macOS Keychain에 저장합니다. 키 값은 설정 응답, DOM 재표시, YAML, SQLite, 체크포인트, 로그에 기록하지 않습니다. `OPENAI_API_KEY`는 개발/CI용 읽기 전용 폴백입니다.
+- **OpenAI 업로드 최소화**: 원본 파일명·회의 ID·제목·로컬 prompt를 보내지 않고 generic MP3 파일과 `model`, `response_format=diarized_json`, `chunking_strategy=auto` multipart 필드만 전송합니다. 지원되지 않는 `language`, `prompt`, `timestamp_granularities` 필드는 보내지 않으며, 25MB 제한보다 작은 로컬 청크를 고정 HTTPS endpoint로 순차 업로드합니다.
 
 ### 오디오 녹음 보안
 
@@ -135,6 +139,8 @@ chmod 600 ~/.zshrc
 | 파일 시스템 암호화 미구현 | macOS FileVault 사용 권장. 별도 구현 계획 없음 |
 | 네트워크 인증 없음 | localhost 전용 서버이므로 별도 인증 미구현. 다중 사용자 환경에서는 사용 주의 |
 | HuggingFace 초기 연결 | 최초 1회 모델 다운로드 시 HuggingFace 서버에 연결. 이후 오프라인 동작 |
+| 선택적 OpenAI 데이터 처리 | OpenAI 전사를 선택한 음성은 OpenAI의 데이터 처리 정책과 네트워크 가용성의 영향을 받음. 민감 회의는 로컬 기본값 유지 권장 |
+| OpenAI 키 유효성 | 앱은 저장 시 키 형식과 존재 여부만 확인하며 실제 API 유효성은 첫 전사 요청에서 확인됨 |
 
 ---
 

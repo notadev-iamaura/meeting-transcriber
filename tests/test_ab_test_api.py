@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -66,6 +67,12 @@ def _make_minimal_app(config: AppConfig) -> FastAPI:
     app.state.config = config
     app.state.ws_manager = None
     app.state.model_manager = None
+    raw_queue = MagicMock()
+    raw_queue.get_job_by_meeting_id.side_effect = lambda _meeting_id: SimpleNamespace(
+        id=1,
+        status="completed",
+    )
+    app.state.job_queue = SimpleNamespace(queue=raw_queue)
     return app
 
 
@@ -609,6 +616,40 @@ class TestPostSttAbTest:
         assert meta["status"] in ("completed", "partial_failed")
 
     @pytest.mark.asyncio
+    async def test_route가_admission_identity를_background_runner에_전달한다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+        meeting_id_with_merge: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """202 뒤 runner가 동의 대상과 다른 inode를 새 기준으로 채택하지 못한다."""
+        import api.routers.ab_tests as ab_routes
+
+        _path, approved_identity = ab_test_runner._inspect_stt_audio_source(
+            tmp_config,
+            meeting_id_with_merge,
+        )
+        captured: dict[str, Any] = {}
+        called = asyncio.Event()
+
+        async def runner(**kwargs: Any) -> str:
+            captured.update(kwargs)
+            called.set()
+            return str(kwargs["test_id"])
+
+        monkeypatch.setattr(ab_routes, "_runner_run_stt_ab_test", runner)
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+        await asyncio.wait_for(called.wait(), timeout=1.0)
+
+        assert response.status_code == 202
+        assert captured["expected_source_identity"] == approved_identity
+
+    @pytest.mark.asyncio
     async def test_동일_모델_쌍_거부(
         self,
         async_client: httpx.AsyncClient,
@@ -622,6 +663,27 @@ class TestPostSttAbTest:
         }
         resp = await async_client.post("/api/ab-tests/stt", json=body)
         assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_진행중인_회의는_STT_AB를_동시에_시작하지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        app: FastAPI,
+        meeting_id_with_merge: str,
+    ) -> None:
+        """main 전사와 A/B 외부 업로드가 같은 회의에서 중복 실행되지 않는다."""
+        app.state.job_queue.queue.get_job_by_meeting_id.return_value = SimpleNamespace(
+            status="transcribing"
+        )
+        app.state.job_queue.queue.get_job_by_meeting_id.side_effect = None
+
+        response = await async_client.post(
+            "/api/ab-tests/stt",
+            json=_stt_body(meeting_id_with_merge),
+        )
+
+        assert response.status_code == 409
+        assert "완료된 회의만" in response.json()["detail"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -939,12 +1001,17 @@ class TestDeleteAbTest:
         resp = await async_client.post("/api/ab-tests/llm", json=_llm_body(meeting_id_with_merge))
         tid = resp.json()["test_id"]
         await _wait_for_task_completion(tmp_config, tid)
+        cache_dir = ab_test_store.resolve_test_dir(tmp_config, tid) / ".openai-transcribe-parts"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached_response = cache_dir / "chunk.json"
+        cached_response.write_text('{"response":"sensitive transcript"}', encoding="utf-8")
 
         resp2 = await async_client.delete(f"/api/ab-tests/{tid}")
         assert resp2.status_code == 204
 
         test_dir = ab_test_store.resolve_test_dir(tmp_config, tid)
         assert not test_dir.exists()
+        assert not cached_response.exists()
 
     @pytest.mark.asyncio
     async def test_없는_테스트_삭제(self, async_client: httpx.AsyncClient) -> None:
@@ -952,6 +1019,27 @@ class TestDeleteAbTest:
         fake_id = new_test_id()
         resp = await async_client.delete(f"/api/ab-tests/{fake_id}")
         assert resp.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_진행중인_테스트는_삭제하지_않는다(
+        self,
+        async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
+    ) -> None:
+        """외부 청크 전송 중인 저장소를 지우지 않고 먼저 취소하도록 요구한다."""
+        test_id = new_test_id()
+        test_dir = ab_test_store.create_test_dir(tmp_config, test_id)
+        ab_test_store.write_metadata(
+            tmp_config,
+            test_id,
+            {"test_id": test_id, "status": "running"},
+        )
+
+        response = await async_client.delete(f"/api/ab-tests/{test_id}")
+
+        assert response.status_code == 409
+        assert "취소 완료 후" in response.json()["detail"]
+        assert test_dir.exists()
 
 
 # ============================================================
@@ -964,14 +1052,22 @@ class TestCancelAbTest:
     async def test_취소_요청(
         self,
         async_client: httpx.AsyncClient,
+        tmp_config: AppConfig,
     ) -> None:
         """유효한 test_id 에 대한 취소 요청 시 202."""
         tid = new_test_id()
+        ab_test_store.create_test_dir(tmp_config, tid)
+        ab_test_store.write_metadata(
+            tmp_config,
+            tid,
+            {"test_id": tid, "status": "running", "error": None},
+        )
         resp = await async_client.post(f"/api/ab-tests/{tid}/cancel")
         assert resp.status_code == 202
         data = resp.json()
         assert data["test_id"] == tid
         assert data["status"] == "cancelling"
+        assert ab_test_store.read_metadata(tmp_config, tid)["status"] == "cancelling"
 
         assert tid in ab_test_runner._cancel_requests
         ab_test_runner._cancel_requests.discard(tid)

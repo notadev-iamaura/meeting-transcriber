@@ -1970,6 +1970,8 @@ class TestIndividualSteps:
         mock_config.audio_quality.enabled = True
 
         mock_result = _make_mock_transcript()
+        mock_result.provider = "local"
+        mock_result.model = mock_config.stt.model_name
         validate = MagicMock(
             side_effect=AssertionError("checkpoint reuse must not re-run STT gate")
         )

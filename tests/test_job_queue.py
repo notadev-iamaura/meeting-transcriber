@@ -34,7 +34,10 @@ from core.job_queue import (
     MaxRetriesExceededError,
     cleanup_retranscribe_staging,
     parse_audio_admission_hold,
+    parse_cancellation_claim,
+    parse_delete_claim,
     parse_retranscribe_claim,
+    parse_stt_ab_source_claim,
     retranscribe_staging_paths,
     rollback_retranscribe_staging,
 )
@@ -326,6 +329,83 @@ class TestUpdateStatus:
         job_id = queue.add_job("m1", "/path/audio.m4a")
         job = queue.update_status(job_id, JobStatus.TRANSCRIBING)
         assert job.status == JobStatus.TRANSCRIBING.value
+
+    def test_queued_취소가_먼저_성공하면_worker_선점은_실패한다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """취소 CAS 뒤 stale worker snapshot은 transcribing으로 덮지 못한다."""
+        job_id = queue.add_job("cancel-wins", "/path/audio.m4a")
+
+        cancelled = queue.cancel_queued_job(job_id, "사용자가 취소함")
+
+        assert cancelled.status == JobStatus.RECORDED.value
+        with pytest.raises(InvalidTransitionError):
+            queue.claim_queued_job_for_processing(job_id)
+        assert queue.get_job(job_id).status == JobStatus.RECORDED.value
+
+    def test_worker_선점이_먼저_성공하면_queued_취소_CAS는_실패한다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """선점된 작업은 queued 취소 경로가 recorded로 강제 덮지 못한다."""
+        job_id = queue.add_job("worker-wins", "/path/audio.m4a")
+
+        claimed = queue.claim_queued_job_for_processing(job_id)
+
+        assert claimed.status == JobStatus.TRANSCRIBING.value
+        with pytest.raises(InvalidTransitionError):
+            queue.cancel_queued_job(job_id, "사용자가 취소함")
+        assert queue.get_job(job_id).status == JobStatus.TRANSCRIBING.value
+
+    def test_실행중_취소_claim은_재시작가능한_DB상태로_남는다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """실행 중 취소는 process-local flag가 아니라 DB claim으로 보존한다."""
+        job_id = queue.add_job(
+            "durable-cancel",
+            "/path/audio.m4a",
+            stt_provider="openai",
+            stt_model="gpt-4o-transcribe-diarize",
+        )
+        queue.claim_queued_job_for_processing(job_id)
+
+        claimed = queue.claim_active_job_for_cancellation(job_id, "cancel-token")
+
+        assert claimed.status == JobStatus.RECORDING.value
+        claim = parse_cancellation_claim(claimed.requested_action)
+        assert claim is not None
+        assert claim.original_status == JobStatus.TRANSCRIBING.value
+        assert claim.token == "cancel-token"
+        assert claimed.stt_provider == "openai"
+        assert claimed.stt_model == "gpt-4o-transcribe-diarize"
+
+        with pytest.raises(InvalidTransitionError):
+            queue.update_status(job_id, JobStatus.FAILED, "late failure")
+        with pytest.raises(InvalidTransitionError):
+            queue.force_set_status(job_id, JobStatus.COMPLETED)
+        still_claimed = queue.get_job(job_id)
+        assert still_claimed.status == JobStatus.RECORDING.value
+        assert parse_cancellation_claim(still_claimed.requested_action) is not None
+
+        finalized = queue.finalize_cancellation_claim(job_id)
+
+        assert finalized.status == JobStatus.RECORDED.value
+        assert finalized.requested_action == ""
+        assert finalized.error_message == "사용자가 취소함"
+        assert finalized.stt_provider == "openai"
+
+    def test_취소_claim은_terminal_job을_덮지_않는다(self, queue: JobQueue) -> None:
+        """늦게 도착한 취소 요청이 완료 상태를 recording으로 되돌리지 않는다."""
+        job_id = queue.add_job("late-cancel", "/path/audio.m4a")
+        queue.claim_queued_job_for_processing(job_id)
+        queue.force_set_status(job_id, JobStatus.COMPLETED)
+
+        with pytest.raises(InvalidTransitionError):
+            queue.claim_active_job_for_cancellation(job_id, "cancel-token")
+
+        assert queue.get_job(job_id).status == JobStatus.COMPLETED.value
 
     def test_full_pipeline_transition(self, queue: JobQueue) -> None:
         """전체 파이프라인 상태 전이가 성공하는지 확인한다."""
@@ -629,6 +709,114 @@ class TestQueueJob:
             queue.claim_for_retranscribe(job_id, "bad token\x00")
 
         assert queue.get_job(job_id).status == JobStatus.COMPLETED.value
+
+    @pytest.mark.parametrize(
+        "initial_status",
+        [
+            JobStatus.RECORDED.value,
+            JobStatus.COMPLETED.value,
+            JobStatus.FAILED.value,
+        ],
+    )
+    def test_delete_claim은_terminal_상태를_잠그고_원복한다(
+        self,
+        queue: JobQueue,
+        initial_status: str,
+    ) -> None:
+        """삭제 중은 일반 큐잉을 막고 실패 시 기존 metadata를 복구한다."""
+        job_id = queue.add_job(
+            f"m_delete_claim_{initial_status}",
+            "/path/audio.m4a",
+            initial_status=initial_status,
+        )
+        conn = queue._ensure_connection()
+        conn.execute(
+            "UPDATE jobs SET requested_action = 'full', error_message = 'old error' WHERE id = ?",
+            (job_id,),
+        )
+        conn.commit()
+
+        token = f"delete-{initial_status}"
+        claimed = queue.claim_for_deletion(job_id, token)
+
+        assert claimed.status == JobStatus.RECORDING.value
+        claim = parse_delete_claim(claimed.requested_action)
+        assert claim is not None
+        assert claim.original_status == initial_status
+        assert claim.original_requested_action == "full"
+        assert claim.original_error_message == "old error"
+        with pytest.raises(InvalidTransitionError):
+            queue.queue_job(job_id)
+
+        restored = queue.restore_delete_claim(job_id, token)
+        assert restored.status == initial_status
+        assert restored.requested_action == "full"
+        assert restored.error_message == "old error"
+
+    def test_delete_claim_commit은_일치하는_token으로만_행을_삭제한다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """잘못된 token은 행을 지우지 못하고 정확한 token만 commit한다."""
+        job_id = queue.add_job(
+            "m_delete_commit",
+            "/path/audio.m4a",
+            initial_status=JobStatus.COMPLETED.value,
+        )
+        queue.claim_for_deletion(job_id, "delete-owner")
+        queue.update_delete_claim_phase(job_id, "delete-owner", "quarantined")
+        queue.update_delete_claim_phase(job_id, "delete-owner", "purging")
+        queue.update_delete_claim_phase(job_id, "delete-owner", "committing")
+
+        with pytest.raises(InvalidTransitionError):
+            queue.delete_claimed_job(job_id, "delete-other")
+        assert queue.get_job(job_id).status == JobStatus.RECORDING.value
+
+        queue.delete_claimed_job(job_id, "delete-owner")
+        with pytest.raises(JobNotFoundError):
+            queue.get_job(job_id)
+
+    def test_stt_ab_source_lease는_완료_회의의_mutation을_차단한다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """A/B 실행 중 재전사를 막고 종료 후 completed로 복귀한다."""
+        job_id = queue.add_job(
+            "m_stt_ab_lease",
+            "/path/audio.m4a",
+            initial_status=JobStatus.COMPLETED.value,
+        )
+
+        claimed = queue.claim_for_stt_ab_test(job_id, "ab-test-1")
+
+        assert claimed.status == JobStatus.RECORDING.value
+        claim = parse_stt_ab_source_claim(claimed.requested_action)
+        assert claim is not None
+        assert claim.token == "ab-test-1"
+        with pytest.raises(InvalidTransitionError):
+            queue.queue_job(job_id, requested_action="transcribe")
+        with pytest.raises(InvalidTransitionError):
+            queue.claim_for_deletion(job_id, "delete-while-ab")
+
+        restored = queue.restore_stt_ab_test_claim(job_id, "ab-test-1")
+        assert restored.status == JobStatus.COMPLETED.value
+        assert restored.requested_action == ""
+
+    def test_failed_delete_claim은_retry에_덮어쓰여지지_않는다(
+        self,
+        queue: JobQueue,
+    ) -> None:
+        """삭제가 failed 행을 선점하면 stale retry가 queued로 덮지 못한다."""
+        job_id = queue.add_job("m_failed_delete_retry", "/path/audio.m4a")
+        queue.update_status(job_id, JobStatus.FAILED, error_message="old failure")
+        queue.claim_for_deletion(job_id, "delete-before-retry")
+
+        with pytest.raises(InvalidTransitionError):
+            queue.retry_job(job_id)
+
+        claimed = queue.get_job(job_id)
+        assert claimed.status == JobStatus.RECORDING.value
+        assert parse_delete_claim(claimed.requested_action) is not None
 
     def test_queue_jobs_atomically는_하나가_부적합하면_전체를_rollback한다(
         self,
@@ -1413,6 +1601,20 @@ class TestAsyncJobQueue:
 
         assert job.status == JobStatus.QUEUED.value
         assert job.requested_action == "transcribe"
+
+    async def test_async_queued_claim과_cancel_CAS_wrapper(
+        self,
+        async_queue: AsyncJobQueue,
+    ) -> None:
+        """비동기 wrapper도 동일한 원자적 선점/취소 계약을 보존한다."""
+        first = await async_queue.add_job("async-claim", "/path/a.m4a")
+        second = await async_queue.add_job("async-cancel", "/path/b.m4a")
+
+        claimed = await async_queue.claim_queued_job_for_processing(first)
+        cancelled = await async_queue.cancel_queued_job(second, "사용자가 취소함")
+
+        assert claimed.status == JobStatus.TRANSCRIBING.value
+        assert cancelled.status == JobStatus.RECORDED.value
 
     async def test_async_get_pending_jobs(
         self,

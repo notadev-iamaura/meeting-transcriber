@@ -95,6 +95,23 @@ class MockJob:
     updated_at: str = "2026-04-01T10:30:00"
     title: str = ""
     requested_action: str = ""
+    stt_provider: str = ""
+    stt_model: str = ""
+
+
+def _assert_local_stt_batch_snapshot(
+    queue_mock: MagicMock,
+    job_ids: list[int],
+    action: str,
+) -> None:
+    """일괄 큐잉이 클릭 시점의 로컬 모델을 job별로 고정했는지 확인한다."""
+    queue_mock.assert_called_once_with(
+        job_ids,
+        action,
+        stt_selections={
+            job_id: ("local", "mlx-community/whisper-large-v3-turbo") for job_id in job_ids
+        },
+    )
 
 
 def _make_meeting_dirs(
@@ -299,8 +316,95 @@ class TestBatchActionFilter:
         # merge 완료 회의는 skipped
         assert "meeting_with_merge" not in data["meeting_ids"]
         # transcribe 항목은 직접 실행하지 않고 JobProcessor 큐에 들어간다.
-        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+        _assert_local_stt_batch_snapshot(
+            app.state.job_queue._queue.queue_jobs_atomically,
+            [1],
+            "transcribe",
+        )
         mock_pipeline.run.assert_not_called()
+
+    def test_batch_transcribe는_pinned_OpenAI_state를_local_기본값으로_우회하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """취소된 OpenAI 작업의 일괄 재개도 악성 Host에서 큐 mutation 전에 거부한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_cancelled_openai"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+        (checkpoint_dir / "pipeline_state.json").write_text(
+            json.dumps(
+                {
+                    "status": "pending",
+                    "stt_provider": "openai",
+                    "stt_model": "gpt-4o-transcribe-diarize",
+                }
+            ),
+            encoding="utf-8",
+        )
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, meeting_id, str(audio_path), status="recorded")
+            )
+            queue.queue_jobs_atomically = MagicMock()
+            response = client.post(
+                "/api/meetings/batch",
+                json={
+                    "action": "transcribe",
+                    "scope": "selected",
+                    "meeting_ids": [meeting_id],
+                },
+                headers={"host": "attacker.example:8765"},
+            )
+
+        assert app.state.config.stt.provider == "local"
+        assert response.status_code == 403
+        queue.queue_jobs_atomically.assert_not_called()
+
+    def test_batch_transcribe는_state없는_OpenAI_queue_snapshot도_외부경계를_적용한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """queued 취소 뒤 남은 DB snapshot도 현재 local 설정보다 우선한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_cancelled_before_state"
+        _make_meeting_dirs(tmp_path, meeting_id, has_merge=False)
+        audio_path = tmp_path / "audio_input" / f"{meeting_id}.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(b"audio")
+        job = MockJob(
+            1,
+            meeting_id,
+            str(audio_path),
+            status="recorded",
+            stt_provider="openai",
+            stt_model="gpt-4o-transcribe-diarize",
+        )
+
+        with TestClient(app) as client:
+            _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=job)
+            queue.queue_jobs_atomically = MagicMock()
+            response = client.post(
+                "/api/meetings/batch",
+                json={
+                    "action": "transcribe",
+                    "scope": "selected",
+                    "meeting_ids": [meeting_id],
+                },
+                headers={"host": "attacker.example:8765"},
+            )
+
+        assert app.state.config.stt.provider == "local"
+        assert response.status_code == 403
+        queue.queue_jobs_atomically.assert_not_called()
 
     def test_batch_summarize_all_filters_summary_done(self, tmp_path: Path) -> None:
         """action=summarize + scope=all: summary.md 있는 회의는 제외된다."""
@@ -383,7 +487,11 @@ class TestBatchActionFilter:
         assert set(data["meeting_ids"]) == {"m_no_merge", "m_no_summary"}
         assert data["matched"] == 3
         assert data["skipped"] == 1
-        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "full")
+        _assert_local_stt_batch_snapshot(
+            app.state.job_queue._queue.queue_jobs_atomically,
+            [1],
+            "full",
+        )
 
     def test_batch_full_skips_already_summarized(self, tmp_path: Path) -> None:
         """action=full: merge + summary 둘 다 있는 회의는 skip."""
@@ -581,7 +689,11 @@ class TestBatchScope:
         assert data["queued"] == 1
         assert data["skipped"] == 3
         assert data["meeting_ids"] == ["m_recorded"]
-        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+        _assert_local_stt_batch_snapshot(
+            app.state.job_queue._queue.queue_jobs_atomically,
+            [1],
+            "transcribe",
+        )
         mock_pipeline.run.assert_not_called()
 
     def test_batch_scope_selected_uses_provided_ids(self, tmp_path: Path) -> None:
@@ -775,7 +887,11 @@ class TestBatchBackgroundExecution:
         assert response.status_code == 200
 
         # m_no_merge → JobProcessor 큐에 full 의도로 등록
-        app.state.job_queue._queue.queue_jobs_atomically.assert_called_once_with([1], "full")
+        _assert_local_stt_batch_snapshot(
+            app.state.job_queue._queue.queue_jobs_atomically,
+            [1],
+            "full",
+        )
         mock_pipeline.run.assert_not_called()
 
         # m_no_summary → run_llm_steps 호출
@@ -1078,7 +1194,7 @@ class TestBatchIntegration:
         assert response.status_code == 200
         assert response.json()["meeting_ids"] == [meeting_id]
         assert admission.call_count == 2
-        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+        _assert_local_stt_batch_snapshot(queue.queue_jobs_atomically, [1], "transcribe")
 
     def test_batch_gate예외중_source가_바뀌면_503대신_409이고_DB무변경(
         self,
@@ -1301,7 +1417,7 @@ class TestBatchIntegration:
 
         assert response.status_code == 200
         admission.assert_not_called()
-        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+        _assert_local_stt_batch_snapshot(queue.queue_jobs_atomically, [1], "transcribe")
 
     @pytest.mark.parametrize(
         ("path_kind", "expected_status", "failure_name"),
@@ -1483,7 +1599,7 @@ class TestBatchIntegration:
 
         assert response.status_code == 200
         assert response.json()["meeting_ids"] == [meeting_id]
-        queue.queue_jobs_atomically.assert_called_once_with([1], "transcribe")
+        _assert_local_stt_batch_snapshot(queue.queue_jobs_atomically, [1], "transcribe")
 
     def test_batch_recent의_dot_segment_job은_분류전에_skip한다(
         self,

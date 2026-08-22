@@ -153,9 +153,17 @@ def _install_retranscribe_claim_mocks(queue: Any, original_job: MockJob) -> Magi
             phase=phase,
         ).to_requested_action()
 
-    def _claim(_job_id: int, token: str) -> MockJob:
+    def _claim(
+        _job_id: int,
+        token: str,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> MockJob:
         token_box["token"] = token
         _set_payload(token, "claimed")
+        durable_job.stt_provider = stt_provider  # type: ignore[attr-defined]
+        durable_job.stt_model = stt_model  # type: ignore[attr-defined]
         return durable_job
 
     def _phase(_job_id: int, token: str, phase: str) -> MockJob:
@@ -168,6 +176,84 @@ def _install_retranscribe_claim_mocks(queue: Any, original_job: MockJob) -> Magi
     queue.get_job = MagicMock(return_value=durable_job)
     queue.restore_retranscribe_claim = MagicMock(return_value=original_job)
     return queue.restore_retranscribe_claim
+
+
+def _install_delete_claim_mocks(
+    queue: Any,
+    job: MockJob,
+    *,
+    delete_side_effect: Any | None = None,
+) -> MagicMock:
+    """DELETE route의 durable claim/commit/rollback을 테스트용으로 모사한다."""
+    from core.job_queue import DeleteClaim
+
+    original_status = job.status
+    original_action = str(getattr(job, "requested_action", "") or "")
+    original_error = str(getattr(job, "error_message", "") or "")
+    claim_box: dict[str, DeleteClaim] = {}
+
+    def _publish(claim: DeleteClaim) -> MockJob:
+        claim_box["claim"] = claim
+        job.status = "recording"
+        job.requested_action = claim.to_requested_action()  # type: ignore[attr-defined]
+        return job
+
+    def _claim(_job_id: int, token: str) -> MockJob:
+        return _publish(
+            DeleteClaim(
+                original_status=original_status,
+                original_requested_action=original_action,
+                original_error_message=original_error,
+                token=token,
+            )
+        )
+
+    def _prepare(
+        _job_id: int,
+        token: str,
+        *,
+        source_path: str,
+        quarantine_path: str,
+        source_identity: tuple[int, int, int, int],
+    ) -> MockJob:
+        current = claim_box["claim"]
+        assert current.token == token
+        return _publish(
+            DeleteClaim(
+                original_status=current.original_status,
+                original_requested_action=current.original_requested_action,
+                original_error_message=current.original_error_message,
+                token=current.token,
+                phase="quarantining",
+                source_path=source_path,
+                quarantine_path=quarantine_path,
+                source_identity=source_identity,
+            )
+        )
+
+    def _phase(_job_id: int, token: str, phase: str) -> MockJob:
+        current = claim_box["claim"]
+        assert current.token == token
+        return _publish(
+            DeleteClaim(
+                original_status=current.original_status,
+                original_requested_action=current.original_requested_action,
+                original_error_message=current.original_error_message,
+                token=current.token,
+                phase=phase,
+                source_path=current.source_path,
+                quarantine_path=current.quarantine_path,
+                source_identity=current.source_identity,
+            )
+        )
+
+    queue.claim_for_deletion = MagicMock(side_effect=_claim)
+    queue.prepare_delete_quarantine = MagicMock(side_effect=_prepare)
+    queue.update_delete_claim_phase = MagicMock(side_effect=_phase)
+    queue.get_job = MagicMock(return_value=job)
+    queue.delete_claimed_job = MagicMock(side_effect=delete_side_effect)
+    queue.restore_delete_claim = MagicMock(return_value=job)
+    return queue.delete_claimed_job
 
 
 def _install_search_engine_mock(
@@ -1780,10 +1866,11 @@ def test_meeting_detail_single_segment_contract는_한글과_공백을_허용한
     with TestClient(app) as client:
         queue = app.state.job_queue._queue
         queue.get_job_by_meeting_id = MagicMock(return_value=recorded)
-        queue.update_status = MagicMock(return_value=queued)
+        queue.queue_job = MagicMock(return_value=queued)
         response = client.post(f"/api/meetings/{meeting_id}/transcribe")
 
     assert response.status_code == 200
+    queue.queue_job.assert_called_once()
     assert response.json()["meeting_id"] == meeting_id
 
 
@@ -1834,6 +1921,30 @@ class TestRetryMeetingEndpoint:
             response = client.post("/api/meetings/nonexistent/retry")
 
         assert response.status_code == 404
+
+    def test_재시도는_DB의_OpenAI_snapshot을_local설정으로_우회하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """state 생성 전 실패한 OpenAI job도 악성 Host에서 재개할 수 없다."""
+        app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, "retry-openai-snapshot.m4a")
+        failed_job = MockJob(1, "retry_openai_snapshot", str(audio_path), "failed")
+        failed_job.stt_provider = "openai"  # type: ignore[attr-defined]
+        failed_job.stt_model = "gpt-4o-transcribe-diarize"  # type: ignore[attr-defined]
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=failed_job)
+            queue.retry_job = MagicMock()
+            response = client.post(
+                "/api/meetings/retry_openai_snapshot/retry",
+                headers={"host": "attacker.example:8765"},
+            )
+
+        assert app.state.config.stt.provider == "local"
+        assert response.status_code == 403
+        queue.retry_job.assert_not_called()
 
     def test_재시도_상태_전이_불가_409(self, tmp_path: Path) -> None:
         """failed가 아닌 상태에서 재시도 시 409를 반환한다."""
@@ -2243,19 +2354,31 @@ class TestDeleteMeetingEndpoint:
         """회의 삭제 성공 시 200과 확인 메시지를 반환한다."""
         app = _make_test_app(tmp_path)
         audio_path = _make_audio_file(tmp_path, "delete-failed.m4a")
+        cache_dir = (
+            app.state.config.paths.resolved_checkpoints_dir
+            / "meeting_001"
+            / ".openai-transcribe-parts"
+        )
+        cache_dir.mkdir(parents=True)
+        cached_response = cache_dir / "chunk.json"
+        cached_response.write_text('{"response":"sensitive transcript"}', encoding="utf-8")
 
         mock_job = MockJob(1, "meeting_001", str(audio_path), "failed")
 
         with TestClient(app) as client:
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_001")
 
         assert response.status_code == 200
         assert "삭제" in response.json()["message"]
+        delete_commit.assert_called_once()
+        assert delete_commit.call_args.args[0] == mock_job.id
+        assert not cached_response.exists()
 
     def test_삭제_미존재_404(self, tmp_path: Path) -> None:
         """존재하지 않는 meeting_id 삭제 시 404를 반환한다."""
@@ -2270,6 +2393,38 @@ class TestDeleteMeetingEndpoint:
 
         assert response.status_code == 404
 
+    @pytest.mark.parametrize(
+        "status",
+        ["queued", "recording", "transcribing", "diarizing", "merging", "embedding"],
+    )
+    def test_처리중인_회의는_취소완료전_삭제하지_않는다(
+        self,
+        tmp_path: Path,
+        status: str,
+    ) -> None:
+        """진행 중 외부 업로드와 저장소 삭제가 경합하지 않게 409로 차단한다."""
+        app = _make_test_app(tmp_path)
+        audio_path = _make_audio_file(tmp_path, f"active-{status}.m4a")
+        purge = MagicMock(return_value=IndexPurgeResult(meeting_id="meeting_active"))
+
+        with (
+            TestClient(app) as client,
+            patch("api.routers.meeting_detail.purge_meeting_index", purge),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
+                return_value=MockJob(1, "meeting_active", str(audio_path), status)
+            )
+            queue.claim_for_deletion = MagicMock()
+
+            response = client.delete("/api/meetings/meeting_active")
+
+        assert response.status_code == 409
+        assert "취소 완료 후" in response.json()["detail"]
+        purge.assert_not_called()
+        queue.claim_for_deletion.assert_not_called()
+        assert audio_path.exists()
+
     def test_완료된_회의_삭제_성공(self, tmp_path: Path) -> None:
         """완료된 회의도 삭제할 수 있다."""
         app = _make_test_app(tmp_path)
@@ -2278,14 +2433,16 @@ class TestDeleteMeetingEndpoint:
         mock_job = MockJob(1, "meeting_001", str(audio_path), "completed")
 
         with TestClient(app) as client:
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_001")
 
         assert response.status_code == 200
+        delete_commit.assert_called_once()
 
     def test_삭제는_audio_identity를_검증해_quarantine에_전달한다(
         self,
@@ -2311,22 +2468,25 @@ class TestDeleteMeetingEndpoint:
                 "api.routers.meeting_detail.purge_meeting_index",
                 return_value=IndexPurgeResult(meeting_id=meeting_id),
             ),
-            patch("core.quarantine.move_to_quarantine", move),
+            patch("core.quarantine.move_to_quarantine_exact", move),
         ):
             queue = app.state.job_queue._queue
-            queue.get_job_by_meeting_id = MagicMock(
-                return_value=MockJob(1, meeting_id, str(audio_path), "completed")
-            )
-            queue.delete_job = MagicMock()
+            mock_job = MockJob(1, meeting_id, str(audio_path), "completed")
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_delete_claim_mocks(queue, mock_job)
             response = client.delete(f"/api/meetings/{meeting_id}")
 
         assert response.status_code == 200
-        move.assert_called_once_with(
-            audio_path,
-            tmp_path / "audio_quarantine",
-            reason=f"사용자 삭제: meeting_id={meeting_id}",
-            expected_identity=expected_identity,
-        )
+        move.assert_called_once()
+        move_args = move.call_args
+        assert move_args.args[0] == audio_path
+        assert move_args.args[1].parent == tmp_path / "audio_quarantine"
+        assert move_args.args[1].name.startswith("deleted-")
+        assert move_args.args[1].suffix == ".audio"
+        assert move_args.kwargs == {
+            "reason": f"사용자 삭제 준비: meeting_id={meeting_id}",
+            "expected_identity": expected_identity,
+        }
 
     def test_삭제_audio_symlink는_target과_DB를_보존한다(
         self,
@@ -2348,16 +2508,16 @@ class TestDeleteMeetingEndpoint:
                 patch("api.routers.meeting_detail.purge_meeting_index", purge),
             ):
                 queue = app.state.job_queue._queue
-                queue.get_job_by_meeting_id = MagicMock(
-                    return_value=MockJob(1, meeting_id, str(audio_path), "completed")
-                )
-                queue.delete_job = MagicMock()
+                mock_job = MockJob(1, meeting_id, str(audio_path), "completed")
+                queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+                delete_commit = _install_delete_claim_mocks(queue, mock_job)
                 response = client.delete(f"/api/meetings/{meeting_id}")
 
             assert response.status_code == 400
             assert "SECURITY_BLOCKED" in response.json()["detail"]
             purge.assert_not_called()
-            queue.delete_job.assert_not_called()
+            delete_commit.assert_not_called()
+            queue.restore_delete_claim.assert_called_once()
             assert target.read_bytes() == b"external-sentinel"
         finally:
             target.unlink(missing_ok=True)
@@ -2384,15 +2544,15 @@ class TestDeleteMeetingEndpoint:
                 patch("api.routers.meeting_detail.purge_meeting_index", purge),
             ):
                 queue = app.state.job_queue._queue
-                queue.get_job_by_meeting_id = MagicMock(
-                    return_value=MockJob(1, meeting_id, str(audio_path), "completed")
-                )
-                queue.delete_job = MagicMock()
+                mock_job = MockJob(1, meeting_id, str(audio_path), "completed")
+                queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+                delete_commit = _install_delete_claim_mocks(queue, mock_job)
                 response = client.delete(f"/api/meetings/{meeting_id}")
 
             assert response.status_code == 400
             purge.assert_not_called()
-            queue.delete_job.assert_not_called()
+            delete_commit.assert_not_called()
+            queue.restore_delete_claim.assert_called_once()
             assert audio_path.read_bytes() == b"audio-sentinel"
             assert list(external_sink.iterdir()) == []
         finally:
@@ -2431,16 +2591,16 @@ class TestDeleteMeetingEndpoint:
             patch("api.routers.meeting_detail.inspect_audio_path_no_symlinks", inspect),
         ):
             queue = app.state.job_queue._queue
-            queue.get_job_by_meeting_id = MagicMock(
-                return_value=MockJob(1, meeting_id, str(audio_path), "completed")
-            )
-            queue.delete_job = MagicMock()
+            mock_job = MockJob(1, meeting_id, str(audio_path), "completed")
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
             response = client.delete(f"/api/meetings/{meeting_id}")
 
         assert response.status_code == 400
         inspect.assert_not_called()
         purge.assert_not_called()
-        queue.delete_job.assert_not_called()
+        delete_commit.assert_not_called()
+        queue.restore_delete_claim.assert_called_once()
         assert audio_path.read_bytes() == b"external-audio"
 
     def test_삭제는_검색인덱스_정리_후_DB삭제(self, tmp_path: Path) -> None:
@@ -2453,7 +2613,7 @@ class TestDeleteMeetingEndpoint:
             calls.append("purge")
             return IndexPurgeResult(meeting_id="meeting_order")
 
-        def _fake_delete(_job_id: int) -> None:
+        def _fake_delete(_job_id: int, _token: str) -> None:
             calls.append("delete")
 
         with (
@@ -2463,10 +2623,15 @@ class TestDeleteMeetingEndpoint:
                 side_effect=_fake_purge,
             ),
         ):
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock(side_effect=_fake_delete)
+            _install_delete_claim_mocks(
+                queue,
+                mock_job,
+                delete_side_effect=_fake_delete,
+            )
 
             response = client.delete("/api/meetings/meeting_order")
 
@@ -2477,7 +2642,7 @@ class TestDeleteMeetingEndpoint:
         self,
         tmp_path: Path,
     ) -> None:
-        """검색 인덱스 정리 실패 시 DB 레코드를 보존하고 500을 반환한다."""
+        """재색인까지 못 하면 DB 행은 durable claim 상태로 보존한다."""
         app = _make_test_app(tmp_path)
         mock_job = MockJob(1, "meeting_purge_fail", "", "completed")
 
@@ -2488,16 +2653,106 @@ class TestDeleteMeetingEndpoint:
                 side_effect=IndexPurgeError("index locked"),
             ),
         ):
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_purge_fail")
 
         assert response.status_code == 500
         assert "검색 인덱스" in response.json()["detail"]
-        app.state.job_queue._queue.delete_job.assert_not_called()
+        delete_commit.assert_not_called()
+        queue.restore_delete_claim.assert_not_called()
+        assert mock_job.status == "recording"
+
+    def test_삭제_purge실패는_OpenAI_성공청크_cache를_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """삭제 rollback 뒤 retry가 이미 과금된 청크를 다시 보내지 않게 한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_delete_cache_rollback"
+        cache_dir = (
+            app.state.config.paths.resolved_checkpoints_dir
+            / meeting_id
+            / ".openai-transcribe-parts"
+        )
+        cache_dir.mkdir(parents=True)
+        cached = cache_dir / "chunk_0000.json"
+        cached.write_text('{"response":"paid"}', encoding="utf-8")
+        mock_job = MockJob(1, meeting_id, "", "completed")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("index locked"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_delete_claim_mocks(queue, mock_job)
+            response = client.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 500
+        assert cached.read_text(encoding="utf-8") == '{"response":"paid"}'
+        queue.restore_delete_claim.assert_not_called()
+
+    def test_삭제_cache정리실패는_committing_claim을_남겨_startup이_완료한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """부분 cache 삭제 뒤 회의를 복원하거나 tombstone을 먼저 없애지 않는다."""
+        from core.job_queue import parse_delete_claim
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_delete_cache_commit"
+        mock_job = MockJob(1, meeting_id, "", "completed")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "steps.openai_transcriber.cleanup_meeting_openai_resume_caches",
+                side_effect=OSError("disk busy"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
+            response = client.delete(f"/api/meetings/{meeting_id}")
+
+        assert response.status_code == 500
+        delete_commit.assert_not_called()
+        queue.restore_delete_claim.assert_not_called()
+        claim = parse_delete_claim(mock_job.requested_action)  # type: ignore[attr-defined]
+        assert claim is not None
+        assert claim.phase == "committing"
+
+    def test_recorded_삭제_purge실패는_검색산출물없이_원상복구한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """미전사 회의 rollback은 없는 correct/merge 체크포인트를 요구하지 않는다."""
+        app = _make_test_app(tmp_path)
+        mock_job = MockJob(2, "recorded_purge_fail", "", "recorded")
+
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                side_effect=IndexPurgeError("index locked"),
+            ),
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=mock_job)
+            _install_delete_claim_mocks(queue, mock_job)
+
+            response = client.delete("/api/meetings/recorded_purge_fail")
+
+        assert response.status_code == 500
+        queue.restore_delete_claim.assert_called_once()
 
     # === Phase 1-7: 오디오 파일 quarantine 이동 테스트 ===
 
@@ -2523,10 +2778,11 @@ class TestDeleteMeetingEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_phase1")
 
@@ -2535,7 +2791,8 @@ class TestDeleteMeetingEndpoint:
         assert "삭제" in response.json()["message"]
 
         # 3) DB 삭제 호출 확인
-        app.state.job_queue._queue.delete_job.assert_called_once_with(1)
+        delete_commit.assert_called_once()
+        assert delete_commit.call_args.args[0] == 1
 
         # 4) 원본 파일 사라졌는지
         assert not audio_file.exists(), "원본 오디오 파일이 quarantine으로 이동되었어야 한다"
@@ -2543,8 +2800,9 @@ class TestDeleteMeetingEndpoint:
         # 5) quarantine 디렉토리에 이동되었는지
         quarantine_dir = tmp_path / "audio_quarantine"
         assert quarantine_dir.exists()
-        moved = quarantine_dir / "meeting_phase1.wav"
-        assert moved.exists(), f"{quarantine_dir} 아래에 meeting_phase1.wav 가 있어야 한다"
+        moved_files = list(quarantine_dir.glob("deleted-*.audio"))
+        assert len(moved_files) == 1
+        moved = moved_files[0]
         assert moved.read_bytes() == b"fake audio data"
 
     def test_삭제시_오디오_파일_누락이어도_DB_삭제는_성공(self, tmp_path: Path) -> None:
@@ -2562,17 +2820,19 @@ class TestDeleteMeetingEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_missing")
 
         # 파일 부재에도 DELETE 성공
         assert response.status_code == 200
         # DB 삭제는 여전히 호출
-        app.state.job_queue._queue.delete_job.assert_called_once_with(2)
+        delete_commit.assert_called_once()
+        assert delete_commit.call_args.args[0] == 2
 
     def test_삭제시_audio_path_비어있어도_정상_처리(self, tmp_path: Path) -> None:
         """Job 의 audio_path 가 비어 있어도 DB 삭제는 성공한다."""
@@ -2586,15 +2846,17 @@ class TestDeleteMeetingEndpoint:
         )
 
         with TestClient(app) as client:
-            app.state.job_queue._queue.get_job_by_meeting_id = MagicMock(
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(
                 return_value=mock_job,
             )
-            app.state.job_queue._queue.delete_job = MagicMock()
+            delete_commit = _install_delete_claim_mocks(queue, mock_job)
 
             response = client.delete("/api/meetings/meeting_noaudio")
 
         assert response.status_code == 200
-        app.state.job_queue._queue.delete_job.assert_called_once_with(3)
+        delete_commit.assert_called_once()
+        assert delete_commit.call_args.args[0] == 3
 
 
 # === TestSystemResourcesEndpoint ===
@@ -2852,7 +3114,11 @@ class TestTranscribeMeetingEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "queued"
-        queue.queue_failed_job.assert_called_once_with(1)
+        queue.queue_failed_job.assert_called_once_with(
+            1,
+            stt_provider="local",
+            stt_model="mlx-community/whisper-large-v3-turbo",
+        )
         queue.force_set_status.assert_not_called()
         queue.update_status.assert_not_called()
 
@@ -2868,13 +3134,48 @@ class TestTranscribeMeetingEndpoint:
             queue = app.state.job_queue._queue
             queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
             queue.force_set_status = MagicMock()
-            queue.update_status = MagicMock(return_value=queued_job)
+            queue.queue_job = MagicMock(return_value=queued_job)
 
             response = client.post("/api/meetings/meeting_ok/transcribe")
 
         assert response.status_code == 200
         # recorded 상태에서는 force_set_status 를 호출하지 않아야 한다
         queue.force_set_status.assert_not_called()
+
+    def test_transcribe는_취소된_OpenAI_state를_local_기본값으로_우회하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """pinned OpenAI 재개는 현재 기본값이 local이어도 악성 Host에서 거부한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_cancelled_openai"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        checkpoint_dir = app.state.config.paths.resolved_checkpoints_dir / meeting_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "pipeline_state.json").write_text(
+            json.dumps(
+                {
+                    "status": "pending",
+                    "stt_provider": "openai",
+                    "stt_model": "gpt-4o-transcribe-diarize",
+                }
+            ),
+            encoding="utf-8",
+        )
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock()
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                headers={"host": "attacker.example:8765"},
+            )
+
+        assert app.state.config.stt.provider == "local"
+        assert response.status_code == 403
+        queue.queue_job.assert_not_called()
 
     def test_transcribe_completed_상태_force_true_여도_409(self, tmp_path: Path) -> None:
         """completed 등 다른 상태에서는 force=true 여도 force_set_status 를 타지 않아 409."""
@@ -2954,6 +3255,58 @@ class TestTranscribeMeetingEndpoint:
         assert failed_job.retry_count == 2
         assert failed_job.error_message == "old failure"
         assert output_path.read_text(encoding="utf-8") == "output-sentinel"
+
+
+class TestCancelMeetingEndpoint:
+    """POST /api/meetings/{meeting_id}/cancel의 durable 취소 계약."""
+
+    def test_실행중_OpenAI_취소는_DB_claim후_flag를_등록한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """200 응답 직후 종료돼도 startup이 외부 업로드를 재개하지 않게 한다."""
+        from core.job_queue import CancellationClaim
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "cancel-active-openai"
+        active_job = MockJob(
+            91,
+            meeting_id,
+            str(_make_audio_file(tmp_path, f"{meeting_id}.m4a")),
+            "transcribing",
+        )
+        active_job.stt_provider = "openai"  # type: ignore[attr-defined]
+        active_job.stt_model = "gpt-4o-transcribe-diarize"  # type: ignore[attr-defined]
+        durable_job = MockJob(
+            91,
+            meeting_id,
+            active_job.audio_path,
+            "recording",
+            error_message="사용자가 취소 요청함",
+        )
+        durable_job.stt_provider = "openai"  # type: ignore[attr-defined]
+        durable_job.stt_model = "gpt-4o-transcribe-diarize"  # type: ignore[attr-defined]
+        durable_job.requested_action = CancellationClaim(  # type: ignore[attr-defined]
+            original_status="transcribing",
+            original_requested_action="",
+            token="durable-token",
+        ).to_requested_action()
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=active_job)
+            queue.claim_active_job_for_cancellation = MagicMock(return_value=durable_job)
+            processor = MagicMock()
+            processor.stop = AsyncMock()
+            app.state.job_processor = processor
+
+            response = client.post(f"/api/meetings/{meeting_id}/cancel")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "recording"
+        assert "저장" in response.json()["status_detail"]
+        queue.claim_active_job_for_cancellation.assert_called_once()
+        processor.request_cancellation.assert_called_once_with(meeting_id)
 
 
 class TestReTranscribeMeetingEndpoint:

@@ -22,7 +22,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.job_queue import JobStatus, RetranscribeClaim
+from core.job_queue import (
+    CancellationClaim,
+    DeleteClaim,
+    InvalidTransitionError,
+    JobStatus,
+    RetranscribeClaim,
+)
 from core.orchestrator import JobProcessor
 
 pytestmark = pytest.mark.asyncio
@@ -305,6 +311,173 @@ class TestRecoverRetranscribeClaim:
             )
             mock_job_queue.queue.reset_for_retranscribe.assert_not_called()
         mock_job_queue.queue.force_set_status.assert_not_called()
+
+
+class TestRecoverDeleteClaim:
+    """검색 purge에 진입한 삭제 claim의 startup roll-back 계약."""
+
+    async def test_startup은_durable_취소_claim을_queued로_재개하지_않는다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """취소 응답 직후 종료돼도 startup은 외부 업로드를 재개하지 않는다."""
+        job = _make_job(status=JobStatus.RECORDING.value)
+        job.requested_action = CancellationClaim(
+            original_status=JobStatus.TRANSCRIBING.value,
+            original_requested_action="transcribe",
+            token="cancel-token",
+        ).to_requested_action()
+        mock_job_queue.get_all_jobs.return_value = [job]
+
+        await processor._recover_orphaned_jobs()
+
+        mock_job_queue.queue.finalize_cancellation_claim.assert_called_once_with(job.id)
+        mock_job_queue.queue.force_set_status.assert_not_called()
+
+    async def test_committing_delete_claim은_cache정리후_DB삭제로_rollforward한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """cache cleanup 중 종료된 삭제는 회의를 되살리지 않고 끝까지 완료한다."""
+        from config import AppConfig, PathsConfig
+
+        config = AppConfig(paths=PathsConfig(base_dir=str(tmp_path)))
+        mock_pipeline._config = config
+        job = _make_job(status=JobStatus.RECORDING.value)
+        job.requested_action = DeleteClaim(
+            original_status=JobStatus.COMPLETED.value,
+            original_requested_action="",
+            original_error_message="",
+            token="delete-token",
+            phase="committing",
+        ).to_requested_action()
+        mock_job_queue.get_all_jobs.return_value = [job]
+        order: list[str] = []
+        mock_job_queue.queue.delete_claimed_job.side_effect = lambda *_args: order.append("delete")
+
+        with patch(
+            "steps.openai_transcriber.cleanup_meeting_openai_resume_caches",
+            side_effect=lambda *_args: order.append("cleanup"),
+        ):
+            await processor._recover_orphaned_jobs()
+
+        assert order == ["cleanup", "delete"]
+        mock_job_queue.queue.restore_delete_claim.assert_not_called()
+
+    async def test_purging_claim은_재색인과_marker소비후에만_DB를_복구한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        from config import AppConfig, PathsConfig
+
+        config = AppConfig().model_copy(update={"paths": PathsConfig(base_dir=str(tmp_path))})
+        mock_pipeline._config = config
+        mock_pipeline._model_manager = object()
+        job = _make_job(status="recording")
+        claim = DeleteClaim(
+            original_status="completed",
+            original_requested_action="full",
+            original_error_message="",
+            token="delete-token",
+            phase="purging",
+        )
+        job.requested_action = claim.to_requested_action()
+        mock_job_queue.get_all_jobs.return_value = [job]
+        order: list[str] = []
+        mock_job_queue.queue.restore_delete_claim.side_effect = lambda *_args: order.append(
+            "restore"
+        )
+
+        with (
+            patch.object(
+                processor,
+                "_write_retranscribe_recovery_marker",
+                side_effect=lambda *_args, **_kwargs: order.append("marker"),
+            ),
+            patch(
+                "core.reindex_recovery.reindex_meeting_artifacts",
+                new=AsyncMock(side_effect=lambda *_args: order.append("reindex")),
+            ),
+            patch(
+                "core.reindex_recovery.consume_reindex_required_marker",
+                side_effect=lambda *_args: order.append("consume"),
+            ),
+        ):
+            await processor._recover_orphaned_jobs()
+
+        assert order == ["marker", "reindex", "consume", "restore"]
+        mock_job_queue.queue.restore_delete_claim.assert_called_once_with(
+            job.id,
+            "delete-token",
+        )
+
+    async def test_purging_claim_재색인실패는_completed로_숨기지_않는다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+        mock_pipeline: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        from config import AppConfig, PathsConfig
+
+        config = AppConfig().model_copy(update={"paths": PathsConfig(base_dir=str(tmp_path))})
+        mock_pipeline._config = config
+        mock_pipeline._model_manager = object()
+        job = _make_job(status="recording")
+        job.requested_action = DeleteClaim(
+            original_status="completed",
+            original_requested_action="",
+            original_error_message="",
+            token="delete-token",
+            phase="purging",
+        ).to_requested_action()
+        mock_job_queue.get_all_jobs.return_value = [job]
+
+        with (
+            patch.object(processor, "_write_retranscribe_recovery_marker"),
+            patch(
+                "core.reindex_recovery.reindex_meeting_artifacts",
+                new=AsyncMock(side_effect=RuntimeError("embed unavailable")),
+            ),
+        ):
+            await processor._recover_orphaned_jobs()
+
+        mock_job_queue.queue.restore_delete_claim.assert_not_called()
+
+    async def test_recorded_purging_claim은_산출물없이_원상복구한다(
+        self,
+        processor: JobProcessor,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """아직 전사되지 않은 회의는 존재하지 않는 검색 산출물을 요구하지 않는다."""
+        job = _make_job(status="recording")
+        job.requested_action = DeleteClaim(
+            original_status="recorded",
+            original_requested_action="",
+            original_error_message="",
+            token="delete-token",
+            phase="purging",
+        ).to_requested_action()
+        mock_job_queue.get_all_jobs.return_value = [job]
+
+        with patch(
+            "core.reindex_recovery.reindex_meeting_artifacts",
+            new=AsyncMock(),
+        ) as reindex:
+            await processor._recover_orphaned_jobs()
+
+        reindex.assert_not_awaited()
+        mock_job_queue.queue.restore_delete_claim.assert_called_once_with(
+            job.id,
+            "delete-token",
+        )
 
     @pytest.mark.parametrize("configured_child", ["../outside", "/tmp/outside"])
     async def test_recovery_storage_root는_base_dir_밖을_거부한다(
@@ -662,6 +835,162 @@ class TestProcessJobSuccess:
         # 최소한 completed 상태가 포함되어야 함
         status_values = [c[0][1] for c in calls]
         assert "completed" in status_values
+
+    async def test_thermal_wait중_취소된_stale_job은_pipeline을_시작하지_않는다(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_thermal: AsyncMock,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """queued snapshot 뒤 CAS가 실패하면 외부 전사를 포함한 실행을 생략한다."""
+        job = _make_job(job_id=41, meeting_id="cancelled-during-thermal")
+        mock_job_queue.claim_queued_job_for_processing.side_effect = InvalidTransitionError(
+            41,
+            JobStatus.RECORDED.value,
+            JobStatus.TRANSCRIBING.value,
+        )
+
+        await processor._process_job(job)
+
+        mock_thermal.wait_if_needed.assert_awaited_once()
+        mock_thermal.notify_job_started.assert_not_awaited()
+        mock_pipeline.run.assert_not_awaited()
+
+    async def test_pipeline에_청크_취소_callback을_전달한다(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+    ) -> None:
+        """OpenAI 어댑터가 청크 사이 취소 상태를 직접 확인할 수 있다."""
+        job = _make_job(job_id=42, meeting_id="chunk-cancel")
+
+        await processor._process_job(job)
+
+        callback = mock_pipeline.run.await_args.kwargs["should_cancel"]
+        assert callback() is False
+        processor.request_cancellation("chunk-cancel")
+        assert callback() is True
+
+    async def test_pipeline_취소_callback은_DB_claim도_확인한다(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """API task가 중단돼 메모리 flag가 없어도 durable claim이 업로드를 막는다."""
+        job = _make_job(job_id=43, meeting_id="durable-chunk-cancel")
+        durable_job = _make_job(
+            job_id=43,
+            meeting_id="durable-chunk-cancel",
+            status=JobStatus.RECORDING.value,
+        )
+        durable_job.requested_action = CancellationClaim(
+            original_status=JobStatus.TRANSCRIBING.value,
+            original_requested_action="",
+            token="cancel-token",
+        ).to_requested_action()
+        mock_job_queue.queue.get_job.return_value = durable_job
+
+        async def _run_with_callback(*_args: object, **kwargs: object) -> object:
+            callback = kwargs["should_cancel"]
+            assert callable(callback)
+            assert callback() is True
+            raise asyncio.CancelledError
+
+        mock_pipeline.run.side_effect = _run_with_callback
+
+        await processor._process_job(job)
+
+        mock_job_queue.queue.finalize_cancellation_claim.assert_called_once_with(job.id)
+
+    async def test_최종취소검사후_claim도_completed로_덮지_않는다(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """pipeline 반환과 completed CAS 사이 취소가 이기면 recorded로 확정한다."""
+        job = _make_job(job_id=44, meeting_id="cancel-at-complete")
+        claimed_job = _make_job(job_id=44, meeting_id="cancel-at-complete")
+        claimed_job.stt_provider = "local"
+        claimed_job.stt_model = "mlx-community/whisper-large-v3-turbo"
+        mock_job_queue.claim_queued_job_for_processing.return_value = claimed_job
+        normal = _make_job(
+            job_id=44,
+            meeting_id="cancel-at-complete",
+            status=JobStatus.TRANSCRIBING.value,
+        )
+        durable = _make_job(
+            job_id=44,
+            meeting_id="cancel-at-complete",
+            status=JobStatus.RECORDING.value,
+        )
+        durable.requested_action = CancellationClaim(
+            original_status=JobStatus.TRANSCRIBING.value,
+            original_requested_action="",
+            token="cancel-token",
+        ).to_requested_action()
+        mock_job_queue.queue.get_job.return_value = normal
+
+        async def _mark_then_claim(*_args: object) -> bool:
+            mock_job_queue.queue.get_job.return_value = durable
+            return False
+
+        with patch.object(
+            processor,
+            "_mark_job_completed_after_pipeline",
+            side_effect=_mark_then_claim,
+        ) as mark_completed:
+            await processor._process_job(job)
+
+        mark_completed.assert_awaited_once()
+        mock_job_queue.queue.finalize_cancellation_claim.assert_called_once_with(job.id)
+        events = [
+            call.args[0].event_type
+            for call in processor._ws_manager.broadcast_event.call_args_list
+        ]
+        assert "job_cancelled" in events
+        assert "job_completed" not in events
+
+    async def test_오류와_취소claim이_경합하면_failed가_아닌_cancelled다(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_job_queue: AsyncMock,
+    ) -> None:
+        """외부 요청 오류 직전 durable 취소가 생기면 실패 상태로 덮지 않는다."""
+        job = _make_job(job_id=45, meeting_id="cancel-at-error")
+        claimed_job = _make_job(job_id=45, meeting_id="cancel-at-error")
+        claimed_job.stt_provider = "local"
+        claimed_job.stt_model = "mlx-community/whisper-large-v3-turbo"
+        mock_job_queue.claim_queued_job_for_processing.return_value = claimed_job
+        durable = _make_job(
+            job_id=45,
+            meeting_id="cancel-at-error",
+            status=JobStatus.RECORDING.value,
+        )
+        durable.requested_action = CancellationClaim(
+            original_status=JobStatus.TRANSCRIBING.value,
+            original_requested_action="",
+            token="cancel-token",
+        ).to_requested_action()
+
+        async def _fail_after_claim(*_args: object, **_kwargs: object) -> None:
+            mock_job_queue.queue.get_job.return_value = durable
+            raise RuntimeError("upstream failed")
+
+        mock_pipeline.run.side_effect = _fail_after_claim
+
+        await processor._process_job(job)
+
+        mock_job_queue.queue.finalize_cancellation_claim.assert_called_once_with(job.id)
+        failed_updates = [
+            call
+            for call in mock_job_queue.update_status.call_args_list
+            if len(call.args) > 1 and call.args[1] == JobStatus.FAILED
+        ]
+        assert failed_updates == []
 
     async def test_파이프라인_실행시_on_step_start_콜백_전달(
         self,

@@ -59,6 +59,7 @@ class TranscriptSegment:
     end: float
     avg_logprob: float = 0.0
     no_speech_prob: float = 0.0
+    speaker: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -72,6 +73,7 @@ class TranscriptSegment:
             "end": self.end,
             "avg_logprob": self.avg_logprob,
             "no_speech_prob": self.no_speech_prob,
+            "speaker": self.speaker,
         }
 
 
@@ -90,6 +92,8 @@ class TranscriptResult:
     full_text: str
     language: str
     audio_path: str
+    provider: str = "local"
+    model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화/체크포인트 저장용).
@@ -102,6 +106,8 @@ class TranscriptResult:
             "full_text": self.full_text,
             "language": self.language,
             "audio_path": self.audio_path,
+            "provider": self.provider,
+            "model": self.model,
         }
 
     def save_checkpoint(self, output_path: Path) -> None:
@@ -140,6 +146,8 @@ class TranscriptResult:
             full_text=data.get("full_text", ""),
             language=data.get("language", "ko"),
             audio_path=data.get("audio_path", ""),
+            provider=data.get("provider", "local"),
+            model=data.get("model", ""),
         )
 
 
@@ -750,6 +758,10 @@ class Transcriber:
             full_text=full_text,
             language=raw_result.get("language", self._language),
             audio_path=str(audio_path),
+            provider="local",
+            # 체크포인트 provenance에는 시점에 따라 달라질 수 있는 HF cache
+            # 절대경로 대신 사용자가 선택한 canonical model ID를 기록한다.
+            model=self._config.stt.model_name,
         )
 
         logger.info(

@@ -2855,6 +2855,320 @@ button {
 .viewer-action-btn.copy { color: var(--text-secondary); }
 .viewer-action-btn.copy.copied { color: var(--success, #34C759); border-color: var(--success, #34C759); }
 .viewer-action-btn.download-txt { color: var(--text-secondary); }
+.viewer-action-btn.alternate-transcription { color: var(--accent); }
+
+/* --- 모델별 비파괴 비교 전사 대화상자 --- */
+dialog.transcription-model-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 48px));
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+dialog.transcription-model-dialog:not([open]) {
+  display: none;
+}
+
+dialog.transcription-model-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.transcription-model-dialog-content {
+  padding: 22px;
+}
+
+.transcription-model-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.transcription-model-dialog-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.transcription-model-dialog-header p {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.transcription-dialog-close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              color var(--duration-fast) var(--ease-macos);
+}
+
+.transcription-dialog-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.transcription-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.transcription-model-option {
+  min-width: 0;
+  padding: 14px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+}
+
+.transcription-model-option.external {
+  border-color: var(--warning);
+  background: rgba(255, 149, 0, 0.05);
+}
+
+.processing-location-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.processing-location-badge.local {
+  background: rgba(52, 199, 89, 0.12);
+  color: var(--success);
+}
+
+.processing-location-badge.external {
+  background: rgba(255, 149, 0, 0.12);
+  color: var(--warning);
+}
+
+.transcription-model-option h3,
+.transcription-model-option label {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.transcription-model-name {
+  min-height: 32px;
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.transcription-model-select {
+  width: 100%;
+  min-height: 32px;
+  margin-bottom: 8px;
+  padding: 6px 28px 6px 9px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.transcription-model-select:disabled {
+  opacity: 0.6;
+}
+
+.transcription-model-detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.external-upload-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 0.5px solid var(--warning);
+  border-radius: var(--radius);
+  background: rgba(255, 149, 0, 0.08);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.external-upload-warning strong {
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.external-upload-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.external-upload-consent input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.transcription-missing-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.transcription-missing-key[hidden] {
+  display: none;
+}
+
+.transcription-settings-link {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.transcription-model-status {
+  min-height: 18px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.transcription-model-status.success { color: var(--success); }
+.transcription-model-status.warning { color: var(--warning); }
+.transcription-model-status.error { color: var(--error); }
+
+.transcription-model-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 0.5px solid var(--border);
+}
+
+.transcription-dialog-cancel,
+.transcription-dialog-submit {
+  min-height: 32px;
+  padding: 7px 14px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-macos),
+              opacity var(--duration-fast) var(--ease-macos);
+}
+
+.transcription-dialog-cancel {
+  border: 0.5px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.transcription-dialog-submit {
+  border: 0.5px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.transcription-dialog-submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.transcription-dialog-close:focus-visible,
+.transcription-model-select:focus-visible,
+.external-upload-consent input:focus-visible,
+.transcription-settings-link:focus-visible,
+.transcription-dialog-cancel:focus-visible,
+.transcription-dialog-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+  dialog.transcription-model-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .transcription-model-dialog-content {
+    padding: 18px 14px;
+  }
+
+  .transcription-comparison-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .transcription-missing-key,
+  .transcription-model-dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .transcription-dialog-cancel,
+  .transcription-dialog-submit {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcription-dialog-close,
+  .transcription-dialog-cancel,
+  .transcription-dialog-submit {
+    transition: none;
+  }
+}
 
 
 /* --- 12-1. 회의 정보 헤더 --- */

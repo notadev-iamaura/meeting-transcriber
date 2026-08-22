@@ -406,3 +406,114 @@ def move_to_quarantine_exact(
         expected_identity=expected_identity,
         exact_destination=destination,
     )
+
+
+def restore_from_quarantine(
+    source_path: Path,
+    quarantine_path: Path,
+    *,
+    expected_identity: tuple[int, int, int, int],
+    reason: str,
+) -> Path:
+    """durable delete journal의 exact quarantine 파일을 원래 경로로 멱등 복구한다.
+
+    hardlink 생성 후 source unlink 전에 프로세스가 종료된 경우에는 두 경로가
+    같은 inode를 가리킨다. 이때는 source를 보존하고 quarantine 링크만
+    제거한다. source가 없고 quarantine만 있으면 기존 exact move 계약으로
+    역방향 이동한다.
+    """
+    source = _lexical_absolute(source_path)
+    quarantined = _lexical_absolute(quarantine_path)
+    if len(expected_identity) != 4:
+        raise QuarantineError("복구 identity는 dev/ino/size/mtime 4-tuple이어야 합니다")
+
+    source_dir_fd: int | None = None
+    quarantine_dir_fd: int | None = None
+    restore_by_move = False
+    try:
+        source_dir_fd = _open_directory_tree_no_follow(source.parent, create=False)
+        source_dir_stat = os.fstat(source_dir_fd)
+        try:
+            source_stat = os.stat(source.name, dir_fd=source_dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            source_stat = None
+
+        # prepare journal 직후, quarantine 디렉터리를 만들기 전에 종료될 수 있다.
+        # 원본이 예약 identity 그대로라면 없는 quarantine parent는 "이동 전"으로
+        # 간주해 멱등 성공시킨다. source가 없을 때만 quarantine 존재가 필수다.
+        try:
+            quarantine_dir_fd = _open_directory_tree_no_follow(
+                quarantined.parent,
+                create=False,
+            )
+        except FileNotFoundError:
+            if source_stat is None:
+                raise QuarantineError(
+                    "복구할 source와 quarantine 디렉터리가 모두 없습니다"
+                ) from None
+            if not stat.S_ISREG(source_stat.st_mode) or not _matches_expected_identity(
+                source_stat,
+                expected_identity,
+            ):
+                raise QuarantineError("복구 source가 예약된 파일과 다릅니다") from None
+            _verify_lexical_directory_identity(source.parent, source_dir_stat)
+            logger.info("삭제 quarantine 이동 전 rollback 완료: %s (%s)", source, reason)
+            return source
+
+        quarantine_dir_stat = os.fstat(quarantine_dir_fd)
+        try:
+            quarantine_stat = os.stat(
+                quarantined.name,
+                dir_fd=quarantine_dir_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            quarantine_stat = None
+
+        if source_stat is not None:
+            if not stat.S_ISREG(source_stat.st_mode) or not _matches_expected_identity(
+                source_stat,
+                expected_identity,
+            ):
+                raise QuarantineError("복구 source가 예약된 파일과 다릅니다")
+            if quarantine_stat is not None:
+                if not stat.S_ISREG(quarantine_stat.st_mode) or not _same_inode(
+                    source_stat,
+                    quarantine_stat,
+                ):
+                    raise QuarantineError("복구 quarantine 경로가 다른 파일로 교체되었습니다")
+                os.unlink(quarantined.name, dir_fd=quarantine_dir_fd)
+                os.fsync(quarantine_dir_fd)
+            _verify_lexical_directory_identity(source.parent, source_dir_stat)
+            _verify_lexical_directory_identity(quarantined.parent, quarantine_dir_stat)
+            logger.info("삭제 quarantine rollback 완료: %s (%s)", source, reason)
+            return source
+
+        if quarantine_stat is None:
+            raise QuarantineError("복구할 source와 quarantine 파일이 모두 없습니다")
+        if not stat.S_ISREG(quarantine_stat.st_mode) or not _matches_expected_identity(
+            quarantine_stat,
+            expected_identity,
+        ):
+            raise QuarantineError("복구 quarantine 파일 identity가 다릅니다")
+        _verify_lexical_directory_identity(source.parent, source_dir_stat)
+        _verify_lexical_directory_identity(quarantined.parent, quarantine_dir_stat)
+        restore_by_move = True
+    except QuarantineError:
+        raise
+    except OSError as exc:
+        raise QuarantineError(f"삭제 quarantine rollback 상태 확인 실패: {exc}") from exc
+    finally:
+        if source_dir_fd is not None:
+            os.close(source_dir_fd)
+        if quarantine_dir_fd is not None:
+            os.close(quarantine_dir_fd)
+
+    if not restore_by_move:
+        raise QuarantineError("삭제 quarantine rollback 상태를 확정하지 못했습니다")
+    return move_to_quarantine_exact(
+        quarantined,
+        source,
+        reason=reason,
+        expected_identity=expected_identity,
+    )

@@ -222,90 +222,10 @@ async def _reindex_meeting(
     model_manager: Any,
     meeting_id: str,
 ) -> dict[str, Any]:
-    """단일 회의의 chunk + embed 를 실행한다.
+    """core의 재색인 구현을 API 호환 이름으로 호출한다."""
+    from core.reindex_recovery import reindex_meeting_artifacts
 
-    correct.json 우선 → merge.json 폴백 (구버전 호환).
-    파이프라인 chunk/embed 단계와 동일한 로직을 호출한다.
-
-    Args:
-        config: AppConfig
-        model_manager: ModelLoadManager (e5 임베딩 모델 라이프사이클 관리)
-        meeting_id: 회의 식별자
-
-    Returns:
-        {"chunks": N, "chroma_stored": bool, "fts_stored": bool}
-
-    Raises:
-        FileNotFoundError: correct.json / merge.json 둘 다 없을 때
-    """
-    from steps.chunker import Chunker
-    from steps.corrector import CorrectedResult
-    from steps.embedder import Embedder
-    from steps.merger import MergedResult
-
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
-    correct_cp = checkpoints_dir / meeting_id / "correct.json"
-    merge_cp = checkpoints_dir / meeting_id / "merge.json"
-
-    # 입력: correct.json 우선, 없으면 merge.json (LLM 보정 없는 raw 발화)
-    if correct_cp.exists():
-        corrected = CorrectedResult.from_checkpoint(correct_cp)
-    elif merge_cp.exists():
-        merged = MergedResult.from_checkpoint(merge_cp)
-        # MergedResult → CorrectedResult 변환 (was_corrected=False 로 패스스루)
-        from steps.corrector import CorrectedUtterance
-
-        utterances = [
-            CorrectedUtterance(
-                text=u.text,
-                original_text=u.text,
-                speaker=u.speaker,
-                start=u.start,
-                end=u.end,
-                was_corrected=False,
-            )
-            for u in merged.utterances
-        ]
-        corrected = CorrectedResult(
-            utterances=utterances,
-            audio_path=getattr(merged, "audio_path", ""),
-            num_speakers=getattr(merged, "num_speakers", 0),
-            total_corrected=0,
-        )
-    else:
-        raise FileNotFoundError(f"correct.json / merge.json 체크포인트가 없습니다: {meeting_id}")
-
-    # 회의 날짜 도출 (meeting_id 패턴 → mtime → 오늘)
-    import re
-    from datetime import datetime
-
-    match = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", meeting_id)
-    if match:
-        date_str = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-    else:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-
-    # 1) Chunker
-    chunker = Chunker(config)
-    chunked = await chunker.chunk(corrected, meeting_id, date_str)
-
-    # 청크 체크포인트 저장 (재개 가능성)
-    chunk_cp = checkpoints_dir / meeting_id / "chunk.json"
-    chunk_cp.parent.mkdir(parents=True, exist_ok=True)
-    chunked.save_checkpoint(chunk_cp)
-
-    # 2) Embedder (fail-loud — ChromaDB / FTS5 둘 다 성공해야 함)
-    embedder = Embedder(config, model_manager)
-    embedded = await embedder.embed(chunked)
-
-    embed_cp = checkpoints_dir / meeting_id / "embed.json"
-    embedded.save_checkpoint(embed_cp)
-
-    return {
-        "chunks": embedded.total_chunks,
-        "chroma_stored": embedded.chroma_stored,
-        "fts_stored": embedded.fts_stored,
-    }
+    return await reindex_meeting_artifacts(config, model_manager, meeting_id)
 
 
 @router.post("/meetings/{meeting_id}/reindex", response_model=ReindexResponse)

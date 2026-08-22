@@ -288,6 +288,120 @@
   text-align: right;
 }
 
+/* 기본 전사 모델 + 외부 처리 고지 */
+.transcription-default-select {
+  max-width: 360px;
+}
+
+.processing-location-note {
+  margin: 0;
+  padding: 10px 0 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.processing-location-note.local {
+  color: var(--success);
+}
+
+.processing-location-note.external {
+  color: var(--warning);
+}
+
+.processing-location-note.error {
+  color: var(--error);
+}
+
+.external-upload-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--warning);
+  border-radius: var(--radius);
+  background: rgba(255, 149, 0, 0.08);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.external-upload-confirmation[hidden] {
+  display: none;
+}
+
+.external-upload-confirmation input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.external-upload-confirmation input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* OpenAI 자격 증명 — 키 원문은 입력 순간 외에는 화면에 표시하지 않는다. */
+.openai-credential-control {
+  padding: 12px 0;
+}
+
+.credential-status {
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.credential-status.configured {
+  color: var(--success);
+}
+
+.credential-status.unconfigured {
+  color: var(--warning);
+}
+
+.credential-status.error {
+  color: var(--error);
+}
+
+.secret-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secret-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.credential-help,
+.credential-operation-status {
+  margin-top: 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.credential-operation-status {
+  min-height: 17px;
+}
+
+.credential-operation-status.success {
+  color: var(--success);
+}
+
+.credential-operation-status.error {
+  color: var(--error);
+}
+
+.credential-actions {
+  margin-top: 4px;
+}
+
 .setting-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -409,6 +523,23 @@
   .setting-select {
     width: 100%;
     min-width: unset;
+  }
+
+  .transcription-default-select {
+    max-width: none;
+  }
+
+  .credential-status {
+    text-align: left;
+  }
+
+  .secret-input-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .secret-input-row .btn-secondary {
+    width: 100%;
   }
 
   .setting-slider-group {

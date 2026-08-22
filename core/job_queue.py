@@ -34,10 +34,19 @@ from core.quarantine import (
 logger = logging.getLogger(__name__)
 
 _RETRANSCRIBE_CLAIM_KIND = "retranscribe_pending"
-_RETRANSCRIBE_CLAIM_VERSION = 1
+_RETRANSCRIBE_CLAIM_VERSION = 2
 _RETRANSCRIBE_PHASES = frozenset({"claimed", "staging", "purging", "committing"})
 _AUDIO_REJECTION_CLAIM_KIND = "audio_rejection_claim"
 _AUDIO_REJECTION_CLAIM_VERSION = 1
+_DELETE_CLAIM_KIND = "delete_pending"
+_DELETE_CLAIM_VERSION = 2
+_DELETE_CLAIM_PHASES = frozenset(
+    {"claimed", "quarantining", "quarantined", "purging", "committing"}
+)
+_STT_AB_CLAIM_KIND = "stt_ab_source_lease"
+_STT_AB_CLAIM_VERSION = 1
+_CANCEL_CLAIM_KIND = "pipeline_cancel_pending"
+_CANCEL_CLAIM_VERSION = 1
 
 
 # === 작업 상태 정의 ===
@@ -114,6 +123,79 @@ class Job:
     # 사용자 정의 제목 (빈 문자열이면 프론트엔드가 meeting_id 기반 타임스탬프 폴백 사용)
     title: str = ""
     requested_action: str = ""
+    # queued 시점에 고정한 전사 선택. 두 필드가 모두 빈 문자열이면
+    # 마이그레이션 전 legacy job으로 간주해 실행 시 설정을 1회 snapshot한다.
+    stt_provider: str = ""
+    stt_model: str = ""
+
+
+@dataclass(frozen=True)
+class CancellationClaim:
+    """실행 중 사용자 취소를 재시작 뒤에도 보존하는 durable payload."""
+
+    original_status: str
+    original_requested_action: str
+    token: str
+
+    def to_requested_action(self) -> str:
+        """DB requested_action에 저장할 strict JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": _CANCEL_CLAIM_VERSION,
+                "kind": _CANCEL_CLAIM_KIND,
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "token": self.token,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def parse_cancellation_claim(requested_action: str) -> CancellationClaim | None:
+    """실행 중 취소 claim payload를 엄격히 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    expected_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "token",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload.get("v") != _CANCEL_CLAIM_VERSION
+        or payload.get("kind") != _CANCEL_CLAIM_KIND
+    ):
+        return None
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    token = payload.get("token")
+    if original_status not in {
+        JobStatus.TRANSCRIBING.value,
+        JobStatus.DIARIZING.value,
+        JobStatus.MERGING.value,
+        JobStatus.EMBEDDING.value,
+    }:
+        return None
+    if not isinstance(original_action, str) or original_action not in {"", "transcribe", "full"}:
+        return None
+    if not isinstance(token, str):
+        return None
+    try:
+        _validate_claim_token(token, "취소 claim token")
+    except JobQueueError:
+        return None
+    return CancellationClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        token=token,
+    )
 
 
 @dataclass(frozen=True)
@@ -124,6 +206,10 @@ class RetranscribeClaim:
     original_requested_action: str
     token: str
     phase: str
+    original_stt_provider: str = ""
+    original_stt_model: str = ""
+    requested_stt_provider: str = ""
+    requested_stt_model: str = ""
 
     def to_requested_action(self) -> str:
         """DB requested_action 컬럼에 저장할 versioned JSON을 반환한다."""
@@ -135,6 +221,10 @@ class RetranscribeClaim:
                 "original_requested_action": self.original_requested_action,
                 "token": self.token,
                 "phase": self.phase,
+                "original_stt_provider": self.original_stt_provider,
+                "original_stt_model": self.original_stt_model,
+                "requested_stt_provider": self.requested_stt_provider,
+                "requested_stt_model": self.requested_stt_model,
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -197,6 +287,188 @@ class AudioRejectionClaim:
             separators=(",", ":"),
             sort_keys=True,
         )
+
+
+@dataclass(frozen=True)
+class DeleteClaim:
+    """회의 삭제 중 동시 큐잉과 crash 복구를 막는 durable payload."""
+
+    original_status: str
+    original_requested_action: str
+    original_error_message: str
+    token: str
+    phase: str = "claimed"
+    source_path: str = ""
+    quarantine_path: str = ""
+    source_identity: tuple[int, int, int, int] | None = None
+
+    def to_requested_action(self) -> str:
+        """DB requested_action 컬럼에 저장할 strict v1 JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": _DELETE_CLAIM_VERSION,
+                "kind": _DELETE_CLAIM_KIND,
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "original_error_message": self.original_error_message,
+                "token": self.token,
+                "phase": self.phase,
+                "source_path": self.source_path,
+                "quarantine_path": self.quarantine_path,
+                "source_identity": list(self.source_identity or ()),
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def parse_delete_claim(requested_action: str) -> DeleteClaim | None:
+    """requested_action의 회의 삭제 claim을 엄격히 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    legacy_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "original_error_message",
+        "token",
+    }
+    current_keys = legacy_keys | {
+        "phase",
+        "source_path",
+        "quarantine_path",
+        "source_identity",
+    }
+    version = payload.get("v")
+    if (version == 1 and set(payload) != legacy_keys) or (
+        version == _DELETE_CLAIM_VERSION and set(payload) != current_keys
+    ):
+        return None
+    if version not in {1, _DELETE_CLAIM_VERSION} or payload.get("kind") != _DELETE_CLAIM_KIND:
+        return None
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    original_error = payload.get("original_error_message")
+    token = payload.get("token")
+    if original_status not in {
+        JobStatus.RECORDED.value,
+        JobStatus.COMPLETED.value,
+        JobStatus.FAILED.value,
+    }:
+        return None
+    if not isinstance(original_action, str) or not isinstance(original_error, str):
+        return None
+    if not isinstance(token, str) or not token or len(token) > 128:
+        return None
+    if not all(character.isalnum() or character in {"-", "_"} for character in token):
+        return None
+    phase = payload.get("phase", "claimed")
+    source_path = payload.get("source_path", "")
+    quarantine_path = payload.get("quarantine_path", "")
+    raw_identity = payload.get("source_identity", [])
+    if phase not in _DELETE_CLAIM_PHASES:
+        return None
+    if not isinstance(source_path, str) or not isinstance(quarantine_path, str):
+        return None
+    if not isinstance(raw_identity, list) or any(
+        type(value) is not int or value < 0 for value in raw_identity
+    ):
+        return None
+    source_identity: tuple[int, int, int, int] | None
+    if raw_identity:
+        if len(raw_identity) != 4:
+            return None
+        source_identity = tuple(raw_identity)  # type: ignore[assignment]
+        if not _valid_audio_rejection_absolute_path(source_path):
+            return None
+        if not _valid_audio_rejection_absolute_path(quarantine_path):
+            return None
+    else:
+        if source_path or quarantine_path or phase == "quarantining":
+            return None
+        source_identity = None
+    return DeleteClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        original_error_message=original_error,
+        token=token,
+        phase=phase,
+        source_path=source_path,
+        quarantine_path=quarantine_path,
+        source_identity=source_identity,
+    )
+
+
+@dataclass(frozen=True)
+class STTABSourceClaim:
+    """STT A/B 실행 동안 완료 회의를 다른 mutation에서 잠그는 payload."""
+
+    original_status: str
+    original_requested_action: str
+    original_error_message: str
+    token: str
+
+    def to_requested_action(self) -> str:
+        """DB requested_action 컬럼에 저장할 strict v1 JSON을 반환한다."""
+        return json.dumps(
+            {
+                "v": _STT_AB_CLAIM_VERSION,
+                "kind": _STT_AB_CLAIM_KIND,
+                "original_status": self.original_status,
+                "original_requested_action": self.original_requested_action,
+                "original_error_message": self.original_error_message,
+                "token": self.token,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def parse_stt_ab_source_claim(requested_action: str) -> STTABSourceClaim | None:
+    """requested_action의 STT A/B source lease를 엄격히 파싱한다."""
+    try:
+        payload = json.loads(requested_action)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expected_keys = {
+        "v",
+        "kind",
+        "original_status",
+        "original_requested_action",
+        "original_error_message",
+        "token",
+    }
+    if set(payload) != expected_keys:
+        return None
+    if payload.get("v") != _STT_AB_CLAIM_VERSION or payload.get("kind") != _STT_AB_CLAIM_KIND:
+        return None
+    original_status = payload.get("original_status")
+    original_action = payload.get("original_requested_action")
+    original_error = payload.get("original_error_message")
+    token = payload.get("token")
+    if original_status != JobStatus.COMPLETED.value:
+        return None
+    if not isinstance(original_action, str) or not isinstance(original_error, str):
+        return None
+    if not isinstance(token, str) or not token or len(token) > 128:
+        return None
+    if not all(character.isalnum() or character in {"-", "_"} for character in token):
+        return None
+    return STTABSourceClaim(
+        original_status=original_status,
+        original_requested_action=original_action,
+        original_error_message=original_error,
+        token=token,
+    )
 
 
 def _valid_audio_rejection_absolute_path(value: object) -> bool:
@@ -339,7 +611,7 @@ def parse_retranscribe_claim(requested_action: str) -> RetranscribeClaim | None:
         return None
     if not isinstance(payload, dict):
         return None
-    expected_keys = {
+    legacy_keys = {
         "v",
         "kind",
         "original_status",
@@ -347,9 +619,18 @@ def parse_retranscribe_claim(requested_action: str) -> RetranscribeClaim | None:
         "token",
         "phase",
     }
-    if set(payload) != expected_keys:
+    current_keys = legacy_keys | {
+        "original_stt_provider",
+        "original_stt_model",
+        "requested_stt_provider",
+        "requested_stt_model",
+    }
+    version = payload.get("v")
+    if (version == 1 and set(payload) != legacy_keys) or (
+        version == _RETRANSCRIBE_CLAIM_VERSION and set(payload) != current_keys
+    ):
         return None
-    if payload.get("v") != _RETRANSCRIBE_CLAIM_VERSION:
+    if version not in {1, _RETRANSCRIBE_CLAIM_VERSION}:
         return None
     if payload.get("kind") != _RETRANSCRIBE_CLAIM_KIND:
         return None
@@ -368,11 +649,39 @@ def parse_retranscribe_claim(requested_action: str) -> RetranscribeClaim | None:
         return None
     if phase not in _RETRANSCRIBE_PHASES:
         return None
+    original_provider = payload.get("original_stt_provider", "")
+    original_model = payload.get("original_stt_model", "")
+    requested_provider = payload.get("requested_stt_provider", "")
+    requested_model = payload.get("requested_stt_model", "")
+    try:
+        _validate_stt_snapshot(str(original_provider), str(original_model))
+        _validate_stt_snapshot(str(requested_provider), str(requested_model))
+    except JobQueueError:
+        return None
     return RetranscribeClaim(
         original_status=original_status,
         original_requested_action=original_action,
         token=token,
         phase=phase,
+        original_stt_provider=str(original_provider),
+        original_stt_model=str(original_model),
+        requested_stt_provider=str(requested_provider),
+        requested_stt_model=str(requested_model),
+    )
+
+
+def _has_durable_requested_action(requested_action: str) -> bool:
+    """일반 상태 전이가 덮어쓰면 안 되는 transaction payload인지 반환한다."""
+    return any(
+        parser(requested_action) is not None
+        for parser in (
+            parse_cancellation_claim,
+            parse_delete_claim,
+            parse_stt_ab_source_claim,
+            parse_audio_rejection_claim,
+            parse_audio_admission_hold,
+            parse_retranscribe_claim,
+        )
     )
 
 
@@ -400,6 +709,21 @@ def _validate_claim_token(token: str, label: str) -> None:
         or not all(character.isalnum() or character in {"-", "_"} for character in token)
     ):
         raise JobQueueError(f"유효하지 않은 {label}")
+
+
+def _validate_stt_snapshot(provider: str, model: str) -> None:
+    """queue-time STT snapshot 두 필드의 조합과 문자열을 검증한다."""
+    if provider == "" and model == "":
+        return
+    if provider not in {"local", "openai"}:
+        raise JobQueueError("전사 provider snapshot이 유효하지 않습니다")
+    if (
+        not isinstance(model, str)
+        or not model
+        or len(model) > 512
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in model)
+    ):
+        raise JobQueueError("전사 model snapshot이 유효하지 않습니다")
 
 
 def lexical_root_no_symlinks(root: Path) -> Path:
@@ -1036,7 +1360,9 @@ class JobQueue:
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         title TEXT NOT NULL DEFAULT '',
-        requested_action TEXT NOT NULL DEFAULT ''
+        requested_action TEXT NOT NULL DEFAULT '',
+        stt_provider TEXT NOT NULL DEFAULT '',
+        stt_model TEXT NOT NULL DEFAULT ''
     )
     """
 
@@ -1191,6 +1517,7 @@ class JobQueue:
         마이그레이션 목록:
             - v1: title TEXT NOT NULL DEFAULT '' (사용자 정의 회의 제목)
             - v2: requested_action TEXT NOT NULL DEFAULT '' (전사만/full 큐 실행 의도)
+            - v3: stt_provider/stt_model (queue-time 전사 선택 snapshot)
         """
         if conn is None:
             conn = self._ensure_connection()
@@ -1203,6 +1530,12 @@ class JobQueue:
         if "requested_action" not in existing_columns:
             logger.info("JobQueue 마이그레이션: jobs.requested_action 컬럼 추가")
             conn.execute("ALTER TABLE jobs ADD COLUMN requested_action TEXT NOT NULL DEFAULT ''")
+        if "stt_provider" not in existing_columns:
+            logger.info("JobQueue 마이그레이션: jobs.stt_provider 컬럼 추가")
+            conn.execute("ALTER TABLE jobs ADD COLUMN stt_provider TEXT NOT NULL DEFAULT ''")
+        if "stt_model" not in existing_columns:
+            logger.info("JobQueue 마이그레이션: jobs.stt_model 컬럼 추가")
+            conn.execute("ALTER TABLE jobs ADD COLUMN stt_model TEXT NOT NULL DEFAULT ''")
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
@@ -1222,6 +1555,14 @@ class JobQueue:
             requested_action = row["requested_action"]
         except (KeyError, IndexError):
             requested_action = ""
+        try:
+            stt_provider = row["stt_provider"]
+        except (KeyError, IndexError):
+            stt_provider = ""
+        try:
+            stt_model = row["stt_model"]
+        except (KeyError, IndexError):
+            stt_model = ""
 
         return Job(
             id=row["id"],
@@ -1235,6 +1576,8 @@ class JobQueue:
             updated_at=row["updated_at"],
             title=title or "",
             requested_action=requested_action or "",
+            stt_provider=stt_provider or "",
+            stt_model=stt_model or "",
         )
 
     def add_job(
@@ -1242,6 +1585,9 @@ class JobQueue:
         meeting_id: str,
         audio_path: str,
         initial_status: str = JobStatus.QUEUED.value,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
     ) -> int:
         """새 작업을 큐에 등록한다.
 
@@ -1256,6 +1602,7 @@ class JobQueue:
         Raises:
             JobQueueError: 중복 meeting_id 또는 DB 오류 시
         """
+        _validate_stt_snapshot(stt_provider, stt_model)
         conn = self._ensure_connection()
         now = self._now_iso()
 
@@ -1266,8 +1613,9 @@ class JobQueue:
                     """
                     INSERT INTO jobs
                         (meeting_id, audio_path, status, retry_count,
-                         max_retries, error_message, created_at, updated_at)
-                    VALUES (?, ?, ?, 0, ?, '', ?, ?)
+                         max_retries, error_message, created_at, updated_at,
+                         stt_provider, stt_model)
+                    VALUES (?, ?, ?, 0, ?, '', ?, ?, ?, ?)
                     """,
                     (
                         meeting_id,
@@ -1276,6 +1624,8 @@ class JobQueue:
                         self._max_retries,
                         now,
                         now,
+                        stt_provider,
+                        stt_model,
                     ),
                 )
                 conn.commit()
@@ -1450,66 +1800,269 @@ class JobQueue:
         """
         conn = self._ensure_connection()
 
-        # 현재 작업 조회
-        job = self.get_job(job_id)
-        current_status = JobStatus(job.status)
-
-        # 상태 전이 검증
-        valid_targets = VALID_TRANSITIONS.get(current_status, set())
-        if new_status not in valid_targets:
-            raise InvalidTransitionError(
-                job_id,
-                current_status.value,
-                new_status.value,
-            )
-
         now = self._now_iso()
-
-        # 쓰기 직렬화 (STAB-017)
         with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = JobStatus(str(row["status"]))
+            current_action = str(row["requested_action"] or "")
+            if _has_durable_requested_action(current_action):
+                raise InvalidTransitionError(
+                    job_id,
+                    current_status.value,
+                    new_status.value,
+                )
+            valid_targets = VALID_TRANSITIONS.get(current_status, set())
+            if new_status not in valid_targets:
+                raise InvalidTransitionError(
+                    job_id,
+                    current_status.value,
+                    new_status.value,
+                )
+
             # failed 전이 시 에러 메시지 기록
             if new_status == JobStatus.FAILED:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE jobs
                     SET status = ?, error_message = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = ? AND requested_action = ?
                     """,
-                    (new_status.value, error_message, now, job_id),
+                    (
+                        new_status.value,
+                        error_message,
+                        now,
+                        job_id,
+                        current_status.value,
+                        current_action,
+                    ),
                 )
             else:
                 if new_status == JobStatus.QUEUED:
-                    conn.execute(
+                    cursor = conn.execute(
                         """
                         UPDATE jobs
                         SET status = ?,
                             requested_action = '',
                             error_message = '',
                             updated_at = ?
-                        WHERE id = ?
+                        WHERE id = ? AND status = ? AND requested_action = ?
                         """,
-                        (new_status.value, now, job_id),
+                        (
+                            new_status.value,
+                            now,
+                            job_id,
+                            current_status.value,
+                            current_action,
+                        ),
                     )
                 else:
-                    conn.execute(
+                    cursor = conn.execute(
                         """
                         UPDATE jobs
                         SET status = ?, error_message = '', updated_at = ?
-                        WHERE id = ?
+                        WHERE id = ? AND status = ? AND requested_action = ?
                         """,
-                        (new_status.value, now, job_id),
+                        (
+                            new_status.value,
+                            now,
+                            job_id,
+                            current_status.value,
+                            current_action,
+                        ),
                     )
-
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("작업 상태 전이 CAS가 경합으로 실패했습니다")
             conn.commit()
 
         logger.info(f"작업 상태 변경: id={job_id}, {current_status.value} → {new_status.value}")
 
         return self.get_job(job_id)
 
+    def claim_queued_job_for_processing(self, job_id: int) -> Job:
+        """queued 작업을 단일 SQL CAS로 transcribing 상태에 선점한다.
+
+        폴링 시점과 실제 파이프라인 시작 사이에 사용자가 취소한 작업을
+        stale snapshot으로 실행하지 않도록 ``WHERE status = 'queued'``를
+        포함한 원자적 전이만 허용한다.
+        """
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    JobStatus.TRANSCRIBING.value,
+                    now,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                row = conn.execute(
+                    "SELECT status FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    raise JobNotFoundError(job_id)
+                raise InvalidTransitionError(
+                    job_id,
+                    str(row["status"]),
+                    JobStatus.TRANSCRIBING.value,
+                )
+            conn.commit()
+
+        logger.info("작업 처리 선점: id=%s, queued → transcribing", job_id)
+        return self.get_job(job_id)
+
+    def cancel_queued_job(self, job_id: int, error_message: str) -> Job:
+        """아직 선점되지 않은 queued 작업만 recorded로 원자적으로 취소한다."""
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    requested_action = '',
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    JobStatus.RECORDED.value,
+                    error_message,
+                    now,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                row = conn.execute(
+                    "SELECT status FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    raise JobNotFoundError(job_id)
+                raise InvalidTransitionError(
+                    job_id,
+                    str(row["status"]),
+                    JobStatus.RECORDED.value,
+                )
+            conn.commit()
+
+        logger.info("대기 작업 취소: id=%s, queued → recorded", job_id)
+        return self.get_job(job_id)
+
+    def claim_active_job_for_cancellation(self, job_id: int, token: str) -> Job:
+        """실행 중 작업을 durable cancellation claim으로 원자 예약한다."""
+        _validate_claim_token(token, "취소 claim token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        allowed_statuses = {
+            JobStatus.TRANSCRIBING.value,
+            JobStatus.DIARIZING.value,
+            JobStatus.MERGING.value,
+            JobStatus.EMBEDDING.value,
+        }
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = str(row["status"])
+            current_action = str(row["requested_action"] or "")
+            if current_status not in allowed_statuses or current_action not in {
+                "",
+                "transcribe",
+                "full",
+            }:
+                raise InvalidTransitionError(job_id, current_status, "cancel")
+            claim = CancellationClaim(
+                original_status=current_status,
+                original_requested_action=current_action,
+                token=token,
+            )
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDING.value,
+                    claim.to_requested_action(),
+                    "사용자가 취소 요청함",
+                    now,
+                    job_id,
+                    current_status,
+                    current_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("취소 claim CAS가 경합으로 실패했습니다")
+            conn.commit()
+        logger.info("실행 작업 취소 claim 예약: id=%s", job_id)
+        return self.get_job(job_id)
+
+    def finalize_cancellation_claim(self, job_id: int) -> Job:
+        """durable cancellation claim을 recorded 상태로 원자 확정한다."""
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_cancellation_claim(payload)
+            if str(row["status"]) != JobStatus.RECORDING.value or claim is None:
+                raise InvalidTransitionError(job_id, str(row["status"]), "cancel finalize")
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = '', error_message = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDED.value,
+                    "사용자가 취소함",
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("취소 claim finalize CAS가 경합으로 실패했습니다")
+            conn.commit()
+        logger.info("실행 작업 취소 claim 확정: id=%s", job_id)
+        return self.get_job(job_id)
+
     def queue_job(
         self,
         job_id: int,
         requested_action: str = "",
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
     ) -> Job:
         """작업을 queued 상태로 전환하면서 실행 의도를 저장한다.
 
@@ -1528,30 +2081,48 @@ class JobQueue:
         allowed_actions = {"", "transcribe", "full"}
         if requested_action not in allowed_actions:
             raise JobQueueError(f"유효하지 않은 requested_action: {requested_action}")
+        _validate_stt_snapshot(stt_provider, stt_model)
 
         conn = self._ensure_connection()
-        job = self.get_job(job_id)
-        current_status = JobStatus(job.status)
-        if JobStatus.QUEUED not in VALID_TRANSITIONS.get(current_status, set()):
-            raise InvalidTransitionError(
-                job_id,
-                current_status.value,
-                JobStatus.QUEUED.value,
-            )
-
         now = self._now_iso()
         with self._write_lock:
-            conn.execute(
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = JobStatus(str(row["status"]))
+            if JobStatus.QUEUED not in VALID_TRANSITIONS.get(current_status, set()):
+                raise InvalidTransitionError(
+                    job_id,
+                    current_status.value,
+                    JobStatus.QUEUED.value,
+                )
+            cursor = conn.execute(
                 """
                 UPDATE jobs
                 SET status = ?,
                     requested_action = ?,
+                    stt_provider = ?,
+                    stt_model = ?,
                     error_message = '',
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = ?
                 """,
-                (JobStatus.QUEUED.value, requested_action, now, job_id),
+                (
+                    JobStatus.QUEUED.value,
+                    requested_action,
+                    stt_provider,
+                    stt_model,
+                    now,
+                    job_id,
+                    current_status.value,
+                ),
             )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("작업 큐잉 CAS가 경합으로 실패했습니다")
             conn.commit()
 
         logger.info(
@@ -1562,7 +2133,13 @@ class JobQueue:
         )
         return self.get_job(job_id)
 
-    def queue_failed_job(self, job_id: int) -> Job:
+    def queue_failed_job(
+        self,
+        job_id: int,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> Job:
         """실패 작업을 중간 상태 없이 원자적으로 queued 로 전환한다.
 
         ``force=true`` 전사 요청용 전이다. retry_count 는 그대로 보존하고,
@@ -1580,6 +2157,7 @@ class JobQueue:
             JobNotFoundError: 작업이 없을 때
             InvalidTransitionError: 현재 상태가 failed 가 아닐 때
         """
+        _validate_stt_snapshot(stt_provider, stt_model)
         conn = self._ensure_connection()
         now = self._now_iso()
 
@@ -1589,12 +2167,16 @@ class JobQueue:
                 UPDATE jobs
                 SET status = ?,
                     requested_action = '',
+                    stt_provider = ?,
+                    stt_model = ?,
                     error_message = '',
                     updated_at = ?
                 WHERE id = ? AND status = ?
                 """,
                 (
                     JobStatus.QUEUED.value,
+                    stt_provider,
+                    stt_model,
                     now,
                     job_id,
                     JobStatus.FAILED.value,
@@ -1622,6 +2204,10 @@ class JobQueue:
         self,
         job_ids: list[int],
         requested_action: str = "",
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+        stt_selections: dict[int, tuple[str, str]] | None = None,
     ) -> list[Job]:
         """recorded 작업 묶음을 단일 SQL transaction으로 queued 전환한다.
 
@@ -1635,6 +2221,17 @@ class JobQueue:
             raise JobQueueError("일괄 큐잉 job_id가 중복되었습니다")
         if not unique_ids:
             return []
+        if stt_selections is None:
+            _validate_stt_snapshot(stt_provider, stt_model)
+            selection_by_id = {job_id: (stt_provider, stt_model) for job_id in unique_ids}
+        else:
+            if stt_provider or stt_model:
+                raise JobQueueError("일괄 STT snapshot 지정 방식을 중복할 수 없습니다")
+            if set(stt_selections) != set(unique_ids):
+                raise JobQueueError("일괄 STT snapshot의 job_id 목록이 다릅니다")
+            selection_by_id = dict(stt_selections)
+            for provider, model in selection_by_id.values():
+                _validate_stt_snapshot(provider, model)
 
         conn = self._ensure_connection()
         now = self._now_iso()
@@ -1642,23 +2239,38 @@ class JobQueue:
         with self._write_lock:
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                cursor = conn.execute(
-                    f"""
-                    UPDATE jobs
-                    SET status = ?, requested_action = ?, error_message = '', updated_at = ?
-                    WHERE id IN ({placeholders}) AND status = ?
-                    """,
-                    (
-                        JobStatus.QUEUED.value,
-                        requested_action,
-                        now,
-                        *unique_ids,
-                        JobStatus.RECORDED.value,
-                    ),
-                )
-                if cursor.rowcount != len(unique_ids):
+                rows = conn.execute(
+                    f"SELECT id, status FROM jobs WHERE id IN ({placeholders})",
+                    tuple(unique_ids),
+                ).fetchall()
+                if len(rows) != len(unique_ids) or any(
+                    str(row["status"]) != JobStatus.RECORDED.value for row in rows
+                ):
                     conn.rollback()
                     raise JobQueueError("일괄 큐잉 CAS 실패: 일부 작업이 recorded 상태가 아닙니다")
+                for job_id in unique_ids:
+                    provider, model = selection_by_id[job_id]
+                    cursor = conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = ?, requested_action = ?,
+                            stt_provider = ?, stt_model = ?,
+                            error_message = '', updated_at = ?
+                        WHERE id = ? AND status = ?
+                        """,
+                        (
+                            JobStatus.QUEUED.value,
+                            requested_action,
+                            provider,
+                            model,
+                            now,
+                            job_id,
+                            JobStatus.RECORDED.value,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        conn.rollback()
+                        raise JobQueueError("일괄 큐잉 CAS가 경합으로 실패했습니다")
                 conn.commit()
             except sqlite3.Error as exc:
                 conn.rollback()
@@ -1888,7 +2500,13 @@ class JobQueue:
                 raise JobQueueError("미디어 거부 finalize CAS가 경합으로 실패했습니다")
             conn.commit()
 
-    def retry_job(self, job_id: int) -> Job:
+    def retry_job(
+        self,
+        job_id: int,
+        *,
+        stt_provider: str | None = None,
+        stt_model: str | None = None,
+    ) -> Job:
         """실패한 작업을 재시도한다.
 
         retry_count를 증가시키고 상태를 queued로 되돌린다.
@@ -1905,42 +2523,68 @@ class JobQueue:
             InvalidTransitionError: failed 상태가 아닐 때
             MaxRetriesExceededError: 최대 재시도 초과 시
         """
+        if (stt_provider is None) != (stt_model is None):
+            raise JobQueueError("재시도 STT snapshot은 provider/model을 함께 지정해야 합니다")
         conn = self._ensure_connection()
 
-        job = self.get_job(job_id)
-
-        # failed 상태만 재시도 가능
-        if job.status != JobStatus.FAILED.value:
-            raise InvalidTransitionError(
-                job_id,
-                job.status,
-                JobStatus.QUEUED.value,
-            )
-
-        # 최대 재시도 초과 확인
-        if job.retry_count >= job.max_retries:
-            raise MaxRetriesExceededError(
-                job_id,
-                job.retry_count,
-                job.max_retries,
-            )
-
         now = self._now_iso()
-        new_retry_count = job.retry_count + 1
-
-        # 쓰기 직렬화 (STAB-017)
         with self._write_lock:
-            conn.execute(
+            row = conn.execute(
+                """
+                SELECT status, retry_count, max_retries, stt_provider, stt_model
+                FROM jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = str(row["status"])
+            retry_count = int(row["retry_count"])
+            max_retries = int(row["max_retries"])
+            if current_status != JobStatus.FAILED.value:
+                raise InvalidTransitionError(
+                    job_id,
+                    current_status,
+                    JobStatus.QUEUED.value,
+                )
+            if retry_count >= max_retries:
+                raise MaxRetriesExceededError(
+                    job_id,
+                    retry_count,
+                    max_retries,
+                )
+
+            target_provider = (
+                str(row["stt_provider"] or "") if stt_provider is None else stt_provider
+            )
+            target_model = str(row["stt_model"] or "") if stt_model is None else stt_model
+            _validate_stt_snapshot(target_provider, target_model)
+            new_retry_count = retry_count + 1
+            cursor = conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, retry_count = ?, error_message = '', updated_at = ?
-                WHERE id = ?
+                SET status = ?, retry_count = ?,
+                    stt_provider = ?, stt_model = ?,
+                    error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND retry_count = ?
                 """,
-                (JobStatus.QUEUED.value, new_retry_count, now, job_id),
+                (
+                    JobStatus.QUEUED.value,
+                    new_retry_count,
+                    target_provider,
+                    target_model,
+                    now,
+                    job_id,
+                    JobStatus.FAILED.value,
+                    retry_count,
+                ),
             )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("작업 재시도 CAS가 경합으로 실패했습니다")
             conn.commit()
 
-        logger.info(f"작업 재시도: id={job_id}, retry_count={new_retry_count}/{job.max_retries}")
+        logger.info(f"작업 재시도: id={job_id}, retry_count={new_retry_count}/{max_retries}")
 
         return self.get_job(job_id)
 
@@ -1967,37 +2611,401 @@ class JobQueue:
             JobNotFoundError: 작업이 없을 때
         """
         conn = self._ensure_connection()
-        # 존재 확인 (없으면 JobNotFoundError)
-        self.get_job(job_id)
-
         now = self._now_iso()
         with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            current_status = str(row["status"])
+            current_action = str(row["requested_action"] or "")
+            if _has_durable_requested_action(current_action):
+                raise InvalidTransitionError(job_id, current_status, new_status.value)
             if new_status == JobStatus.RECORDED:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE jobs
                     SET status = ?,
                         requested_action = '',
                         error_message = ?,
                         updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = ? AND requested_action = ?
                     """,
-                    (new_status.value, error_message, now, job_id),
+                    (
+                        new_status.value,
+                        error_message,
+                        now,
+                        job_id,
+                        current_status,
+                        current_action,
+                    ),
                 )
             else:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE jobs
                     SET status = ?, error_message = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = ? AND requested_action = ?
                     """,
-                    (new_status.value, error_message, now, job_id),
+                    (
+                        new_status.value,
+                        error_message,
+                        now,
+                        job_id,
+                        current_status,
+                        current_action,
+                    ),
                 )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("작업 강제 상태 전이 CAS가 경합으로 실패했습니다")
             conn.commit()
 
         logger.info(
             f"작업 상태 강제 변경: id={job_id} → {new_status.value} ({error_message or '사유 없음'})"
         )
+        return self.get_job(job_id)
+
+    def claim_for_deletion(self, job_id: int, token: str) -> Job:
+        """terminal 작업을 recording delete claim으로 원자적으로 예약한다."""
+        _validate_claim_token(token, "회의 삭제 claim token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action, error_message FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            original_status = str(row["status"])
+            if original_status not in {
+                JobStatus.RECORDED.value,
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+            }:
+                raise InvalidTransitionError(job_id, original_status, "delete")
+            original_action = str(row["requested_action"] or "")
+            claim = DeleteClaim(
+                original_status=original_status,
+                original_requested_action=original_action,
+                original_error_message=str(row["error_message"] or ""),
+                token=token,
+            )
+            payload = claim.to_requested_action()
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDING.value,
+                    payload,
+                    now,
+                    job_id,
+                    original_status,
+                    original_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("회의 삭제 claim CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.info("회의 삭제 claim 예약: id=%s, token=%s", job_id, token)
+        return self.get_job(job_id)
+
+    def restore_delete_claim(self, job_id: int, token: str) -> Job:
+        """실패·재기동 시 delete claim의 원래 상태와 메시지를 복원한다."""
+        _validate_claim_token(token, "회의 삭제 claim token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_delete_claim(payload)
+            if (
+                str(row["status"]) != JobStatus.RECORDING.value
+                or claim is None
+                or claim.token != token
+            ):
+                raise InvalidTransitionError(job_id, str(row["status"]), "delete restore")
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    claim.original_status,
+                    claim.original_requested_action,
+                    claim.original_error_message,
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("회의 삭제 claim 복구 CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.warning("회의 삭제 claim 복구: id=%s → %s", job_id, claim.original_status)
+        return self.get_job(job_id)
+
+    def prepare_delete_quarantine(
+        self,
+        job_id: int,
+        token: str,
+        *,
+        source_path: str,
+        quarantine_path: str,
+        source_identity: tuple[int, int, int, int],
+    ) -> Job:
+        """삭제 source/quarantine identity를 이동 전 durable claim에 고정한다."""
+        _validate_claim_token(token, "회의 삭제 claim token")
+        if not _valid_audio_rejection_absolute_path(source_path):
+            raise JobQueueError("회의 삭제 source_path가 유효하지 않습니다")
+        if not _valid_audio_rejection_absolute_path(quarantine_path):
+            raise JobQueueError("회의 삭제 quarantine_path가 유효하지 않습니다")
+        if len(source_identity) != 4 or any(
+            type(value) is not int or value < 0 for value in source_identity
+        ):
+            raise JobQueueError("회의 삭제 source identity가 유효하지 않습니다")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_delete_claim(payload)
+            if (
+                str(row["status"]) != JobStatus.RECORDING.value
+                or claim is None
+                or claim.token != token
+                or claim.phase != "claimed"
+            ):
+                raise InvalidTransitionError(job_id, str(row["status"]), "delete quarantine")
+            next_claim = DeleteClaim(
+                original_status=claim.original_status,
+                original_requested_action=claim.original_requested_action,
+                original_error_message=claim.original_error_message,
+                token=claim.token,
+                phase="quarantining",
+                source_path=source_path,
+                quarantine_path=quarantine_path,
+                source_identity=source_identity,
+            )
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET requested_action = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    next_claim.to_requested_action(),
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("회의 삭제 quarantine prepare CAS가 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def update_delete_claim_phase(self, job_id: int, token: str, phase: str) -> Job:
+        """삭제 claim을 quarantined/purging/committing 순서로 token CAS 갱신한다."""
+        if phase not in {"quarantined", "purging", "committing"}:
+            raise JobQueueError("유효하지 않은 회의 삭제 claim phase")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_delete_claim(payload)
+            expected = {
+                "quarantined": {"claimed", "quarantining"},
+                "purging": {"quarantined"},
+                "committing": {"purging"},
+            }[phase]
+            if (
+                str(row["status"]) != JobStatus.RECORDING.value
+                or claim is None
+                or claim.token != token
+                or claim.phase not in expected
+            ):
+                raise InvalidTransitionError(job_id, str(row["status"]), f"delete {phase}")
+            if claim.phase == "claimed" and claim.source_identity is not None:
+                raise JobQueueError(
+                    "오디오 source가 있는 삭제 claim은 quarantine 준비가 필요합니다"
+                )
+            next_claim = DeleteClaim(
+                original_status=claim.original_status,
+                original_requested_action=claim.original_requested_action,
+                original_error_message=claim.original_error_message,
+                token=claim.token,
+                phase=phase,
+                source_path=claim.source_path,
+                quarantine_path=claim.quarantine_path,
+                source_identity=claim.source_identity,
+            )
+            cursor = conn.execute(
+                """
+                UPDATE jobs SET requested_action = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    next_claim.to_requested_action(),
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("회의 삭제 claim phase CAS가 실패했습니다")
+            conn.commit()
+        return self.get_job(job_id)
+
+    def delete_claimed_job(self, job_id: int, token: str) -> None:
+        """token이 일치하는 delete claim 작업만 DB에서 삭제한다."""
+        _validate_claim_token(token, "회의 삭제 claim token")
+        conn = self._ensure_connection()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_delete_claim(payload)
+            if (
+                str(row["status"]) != JobStatus.RECORDING.value
+                or claim is None
+                or claim.token != token
+                or claim.phase != "committing"
+            ):
+                raise InvalidTransitionError(job_id, str(row["status"]), "delete commit")
+            cursor = conn.execute(
+                "DELETE FROM jobs WHERE id = ? AND status = ? AND requested_action = ?",
+                (job_id, JobStatus.RECORDING.value, payload),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("회의 삭제 claim commit CAS가 경합으로 실패했습니다")
+            conn.commit()
+        logger.info("회의 삭제 claim commit: id=%s, token=%s", job_id, token)
+
+    def claim_for_stt_ab_test(self, job_id: int, token: str) -> Job:
+        """completed 회의를 STT A/B 실행 동안 recording lease로 선점한다."""
+        _validate_claim_token(token, "STT A/B source lease token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action, error_message FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            status = str(row["status"])
+            if status != JobStatus.COMPLETED.value:
+                raise InvalidTransitionError(job_id, status, "stt ab source lease")
+            original_action = str(row["requested_action"] or "")
+            claim = STTABSourceClaim(
+                original_status=status,
+                original_requested_action=original_action,
+                original_error_message=str(row["error_message"] or ""),
+                token=token,
+            )
+            payload = claim.to_requested_action()
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = '', updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    JobStatus.RECORDING.value,
+                    payload,
+                    now,
+                    job_id,
+                    JobStatus.COMPLETED.value,
+                    original_action,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("STT A/B source lease CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.info("STT A/B source lease 예약: id=%s, token=%s", job_id, token)
+        return self.get_job(job_id)
+
+    def restore_stt_ab_test_claim(self, job_id: int, token: str) -> Job:
+        """STT A/B 종료 또는 재기동 시 source lease를 원래 상태로 복원한다."""
+        _validate_claim_token(token, "STT A/B source lease token")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            payload = str(row["requested_action"] or "")
+            claim = parse_stt_ab_source_claim(payload)
+            if (
+                str(row["status"]) != JobStatus.RECORDING.value
+                or claim is None
+                or claim.token != token
+            ):
+                raise InvalidTransitionError(job_id, str(row["status"]), "stt ab lease restore")
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, requested_action = ?, error_message = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND requested_action = ?
+                """,
+                (
+                    claim.original_status,
+                    claim.original_requested_action,
+                    claim.original_error_message,
+                    now,
+                    job_id,
+                    JobStatus.RECORDING.value,
+                    payload,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("STT A/B source lease 복구 CAS가 경합으로 실패했습니다")
+            conn.commit()
+
+        logger.info("STT A/B source lease 복구: id=%s", job_id)
         return self.get_job(job_id)
 
     def reset_for_retranscribe(self, job_id: int, token: str) -> Job:
@@ -2027,12 +3035,16 @@ class JobQueue:
                 SET status = ?,
                     retry_count = 0,
                     requested_action = '',
+                    stt_provider = ?,
+                    stt_model = ?,
                     error_message = '',
                     updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ?
                 """,
                 (
                     JobStatus.QUEUED.value,
+                    claim.requested_stt_provider,
+                    claim.requested_stt_model,
                     now,
                     job_id,
                     JobStatus.RECORDING.value,
@@ -2047,15 +3059,26 @@ class JobQueue:
         logger.info("재전사 claim commit: id=%s, token=%s → queued", job_id, token)
         return self.get_job(job_id)
 
-    def claim_for_retranscribe(self, job_id: int, token: str) -> Job:
+    def claim_for_retranscribe(
+        self,
+        job_id: int,
+        token: str,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> Job:
         """completed/failed 작업을 원상태 보존 payload로 조건부 예약한다."""
         _validate_claim_token(token, "재전사 claim token")
+        _validate_stt_snapshot(stt_provider, stt_model)
 
         conn = self._ensure_connection()
         now = self._now_iso()
         with self._write_lock:
             row = conn.execute(
-                "SELECT status, requested_action FROM jobs WHERE id = ?",
+                """
+                SELECT status, requested_action, stt_provider, stt_model
+                FROM jobs WHERE id = ?
+                """,
                 (job_id,),
             ).fetchone()
             if row is None:
@@ -2073,6 +3096,10 @@ class JobQueue:
                 original_requested_action=original_action,
                 token=token,
                 phase="claimed",
+                original_stt_provider=str(row["stt_provider"] or ""),
+                original_stt_model=str(row["stt_model"] or ""),
+                requested_stt_provider=stt_provider,
+                requested_stt_model=stt_model,
             )
             payload = claim.to_requested_action()
             cursor = conn.execute(
@@ -2134,6 +3161,10 @@ class JobQueue:
                 original_requested_action=claim.original_requested_action,
                 token=claim.token,
                 phase=phase,
+                original_stt_provider=claim.original_stt_provider,
+                original_stt_model=claim.original_stt_model,
+                requested_stt_provider=claim.requested_stt_provider,
+                requested_stt_model=claim.requested_stt_model,
             )
             cursor = conn.execute(
                 """
@@ -2174,12 +3205,15 @@ class JobQueue:
             cursor = conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, requested_action = ?, updated_at = ?
+                SET status = ?, requested_action = ?,
+                    stt_provider = ?, stt_model = ?, updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ?
                 """,
                 (
                     claim.original_status,
                     claim.original_requested_action,
+                    claim.original_stt_provider,
+                    claim.original_stt_model,
                     now,
                     job_id,
                     JobStatus.RECORDING.value,
@@ -2356,6 +3390,9 @@ class AsyncJobQueue:
         meeting_id: str,
         audio_path: str,
         initial_status: str = JobStatus.QUEUED.value,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
     ) -> int:
         """비동기로 새 작업을 등록한다.
 
@@ -2374,6 +3411,8 @@ class AsyncJobQueue:
             meeting_id,
             audio_path,
             initial_status,
+            stt_provider=stt_provider,
+            stt_model=stt_model,
         )
 
     async def get_job(self, job_id: int) -> Job:
@@ -2424,10 +3463,32 @@ class AsyncJobQueue:
             error_message,
         )
 
+    async def claim_queued_job_for_processing(self, job_id: int) -> Job:
+        """queued 작업을 비동기 CAS로 transcribing 상태에 선점한다."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._queue.claim_queued_job_for_processing,
+            job_id,
+        )
+
+    async def cancel_queued_job(self, job_id: int, error_message: str) -> Job:
+        """선점 전 queued 작업만 비동기 CAS로 취소한다."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._queue.cancel_queued_job,
+            job_id,
+            error_message,
+        )
+
     async def queue_job(
         self,
         job_id: int,
         requested_action: str = "",
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
     ) -> Job:
         """비동기로 작업을 queued 상태로 전환하면서 실행 의도를 저장한다."""
         import asyncio
@@ -2436,15 +3497,34 @@ class AsyncJobQueue:
             self._queue.queue_job,
             job_id,
             requested_action,
+            stt_provider=stt_provider,
+            stt_model=stt_model,
         )
 
-    async def queue_failed_job(self, job_id: int) -> Job:
+    async def queue_failed_job(
+        self,
+        job_id: int,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> Job:
         """실패 작업을 중간 상태 없이 비동기로 queued 로 전환한다."""
         import asyncio
 
-        return await asyncio.to_thread(self._queue.queue_failed_job, job_id)
+        return await asyncio.to_thread(
+            self._queue.queue_failed_job,
+            job_id,
+            stt_provider=stt_provider,
+            stt_model=stt_model,
+        )
 
-    async def retry_job(self, job_id: int) -> Job:
+    async def retry_job(
+        self,
+        job_id: int,
+        *,
+        stt_provider: str | None = None,
+        stt_model: str | None = None,
+    ) -> Job:
         """비동기로 실패 작업을 재시도한다.
 
         Args:
@@ -2455,7 +3535,12 @@ class AsyncJobQueue:
         """
         import asyncio
 
-        return await asyncio.to_thread(self._queue.retry_job, job_id)
+        return await asyncio.to_thread(
+            self._queue.retry_job,
+            job_id,
+            stt_provider=stt_provider,
+            stt_model=stt_model,
+        )
 
     async def retry_all_failed(self) -> list[int]:
         """비동기로 모든 실패 작업을 재시도한다.

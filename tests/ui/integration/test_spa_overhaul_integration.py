@@ -2543,6 +2543,8 @@ def test_settings_auto_processing_gui_save_and_run_now(
                         "llm_mlx_max_tokens": 2000,
                         "llm_skip_steps": False,
                         "stt_language": "ko",
+                        "stt_provider": "local",
+                        "stt_openai_model": "gpt-4o-transcribe-diarize",
                         "hf_enabled": True,
                         "hf_no_speech_threshold": 0.9,
                         "hf_compression_ratio_threshold": 2.4,
@@ -2581,6 +2583,42 @@ def test_settings_auto_processing_gui_save_and_run_now(
                         "settings": payload,
                         "message": "설정이 저장되었습니다.",
                         "changed_fields": list(payload.keys()),
+                    }
+                ),
+            )
+            return
+        if "/api/transcription-models" in url:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "default_model_id": "local",
+                        "openai_key": {"configured": False, "source": None},
+                        "models": [
+                            {
+                                "id": "local",
+                                "label": "이 Mac에서 처리 · Whisper Large-v3 Turbo",
+                                "provider": "local",
+                                "model": "mlx-community/whisper-large-v3-turbo",
+                                "external_upload": False,
+                                "available": True,
+                                "unavailable_reason": None,
+                                "is_default": True,
+                            },
+                            {
+                                "id": "openai:gpt-4o-transcribe-diarize",
+                                "label": (
+                                    "OpenAI 서버에서 처리 · GPT-4o Transcribe Diarize · 외부 전송"
+                                ),
+                                "provider": "openai",
+                                "model": "gpt-4o-transcribe-diarize",
+                                "external_upload": True,
+                                "available": False,
+                                "unavailable_reason": "설정에서 OpenAI API 키를 등록하세요.",
+                                "is_default": False,
+                            },
+                        ],
                     }
                 ),
             )
@@ -2684,6 +2722,9 @@ def test_settings_auto_processing_gui_save_and_run_now(
         assert payload["auto_processing_recent_hours"] == 72
         assert payload["auto_processing_action"] == "summarize"
         assert payload["auto_processing_run_on_startup_if_missed"] is True
+        assert payload["stt_provider"] == "local"
+        assert payload["stt_openai_model"] == "gpt-4o-transcribe-diarize"
+        assert payload["external_upload_confirmed"] is False
 
         page.locator("#settingsAutoProcessingRunNow").click()
         page.wait_for_function(

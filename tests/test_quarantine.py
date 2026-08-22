@@ -13,6 +13,7 @@ from core.quarantine import (
     QuarantineError,
     move_to_quarantine,
     move_to_quarantine_exact,
+    restore_from_quarantine,
 )
 
 
@@ -319,3 +320,65 @@ def test_exact_quarantine은_기존목적지를_덮어쓰거나_이름변경하�
     assert source.read_bytes() == b"new-source"
     assert destination.read_bytes() == b"existing-quarantine"
     assert list(destination.parent.iterdir()) == [destination]
+
+
+def test_delete_rollback은_quarantine_parent_생성전_crash를_멱등복구(
+    tmp_path: Path,
+) -> None:
+    """durable prepare 뒤 mover 진입 전 종료되어도 원본이 있으면 성공한다."""
+    source_dir = tmp_path / "audio_input"
+    source_dir.mkdir()
+    source = source_dir / "meeting.wav"
+    source.write_bytes(b"still-source")
+    source_stat = source.stat()
+    expected = (
+        source_stat.st_dev,
+        source_stat.st_ino,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+    )
+    quarantine = tmp_path / "never-created" / "deleted-token.audio"
+
+    restored = restore_from_quarantine(
+        source,
+        quarantine,
+        expected_identity=expected,
+        reason="startup rollback before move",
+    )
+
+    assert restored == source
+    assert source.read_bytes() == b"still-source"
+    assert not quarantine.parent.exists()
+
+
+def test_delete_rollback은_이동된_exact_quarantine을_원위치로_복구(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "audio_input"
+    source_dir.mkdir()
+    source = source_dir / "meeting.wav"
+    source.write_bytes(b"moved-source")
+    source_stat = source.stat()
+    expected = (
+        source_stat.st_dev,
+        source_stat.st_ino,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+    )
+    quarantine = tmp_path / "audio_quarantine" / "deleted-token.audio"
+    move_to_quarantine_exact(
+        source,
+        quarantine,
+        reason="delete prepare",
+        expected_identity=expected,
+    )
+
+    restore_from_quarantine(
+        source,
+        quarantine,
+        expected_identity=expected,
+        reason="startup rollback after move",
+    )
+
+    assert source.read_bytes() == b"moved-source"
+    assert not quarantine.exists()

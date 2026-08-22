@@ -453,6 +453,83 @@ def test_viewer_recovery_actions_distinguish_retry_from_restart() -> None:
     assert ".viewer-action-btn.retranscribe" in style_css
 
 
+def test_openai_transcription_settings_keep_credentials_separate_from_general_settings() -> None:
+    settings_view = Path("ui/web/settings-view.js").read_text(encoding="utf-8")
+    settings_css = Path("ui/web/settings.css").read_text(encoding="utf-8")
+
+    general_panel = settings_view[
+        settings_view.index("function GeneralSettingsPanel") : settings_view.index(
+            "// === PromptsSettingsPanel"
+        )
+    ]
+    save_settings = general_panel[
+        general_panel.index("GeneralSettingsPanel.prototype._saveSettings") : general_panel.index(
+            "GeneralSettingsPanel.prototype._loadAutoProcessingStatus"
+        )
+    ]
+
+    assert 'App.apiRequest("/transcription-models")' in general_panel
+    assert 'App.apiRequest("/openai-credentials", {' in general_panel
+    assert 'method: "PUT"' in general_panel
+    assert 'method: "DELETE"' in general_panel
+    assert "body: JSON.stringify({ api_key: apiKey })" in general_panel
+    assert 'type="password"' in general_panel
+    assert 'autocomplete="new-password"' in general_panel
+    assert 'els.openAIKeyInput.value = ""' in general_panel
+    assert "localStorage" not in general_panel
+
+    assert "stt_provider:" in save_settings
+    assert "stt_openai_model:" in save_settings
+    assert "external_upload_confirmed:" in save_settings
+    assert "selectedTranscriptionModel.model || selectedTranscriptionModel.id" in save_settings
+    assert "api_key" not in save_settings
+    assert ".external-upload-confirmation" in settings_css
+    assert ".credential-status.configured" in settings_css
+
+
+def test_viewer_alternate_transcription_is_confirmed_non_destructive_ab_test() -> None:
+    viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
+    style_css = Path("ui/web/style.css").read_text(encoding="utf-8")
+
+    alternate_flow = viewer_view[
+        viewer_view.index(
+            "ViewerView.prototype._openAlternateTranscriptionDialog"
+        ) : viewer_view.index("ViewerView.prototype._handleStepProgress")
+    ]
+
+    assert "다른 모델로 텍스트 변환하기…" in viewer_view
+    assert "기존 회의록은 유지" in viewer_view
+    assert 'if (data.status === "completed") {' in viewer_view
+    assert 'App.apiRequest("/transcription-models"' in alternate_flow
+    assert 'App.apiRequest("/ab-tests/stt"' in alternate_flow
+    assert 'backend: "mlx"' in alternate_flow
+    assert 'backend: "openai"' in alternate_flow
+    assert "allow_diarize_rerun: false" in alternate_flow
+    assert "external_upload_confirmed: true" in alternate_flow
+    assert 'Router.navigate("/app/settings?focus=openai")' in alternate_flow
+    assert 'Router.navigate("/app/ab-test/"' in alternate_flow
+    assert "consentInput.checked" in alternate_flow
+    assert "abortController.abort()" in alternate_flow
+    assert 'dialog.addEventListener("cancel", onDialogCancel)' in alternate_flow
+    assert 'dialog.removeEventListener("cancel", onDialogCancel)' in alternate_flow
+    assert "if (requestInFlight) event.preventDefault()" in alternate_flow
+    assert "setDialogDismissalBlocked(true)" in alternate_flow
+    assert "setDialogDismissalBlocked(false)" in alternate_flow
+    assert "closeBtn.disabled = blocked" in alternate_flow
+    assert "cancelBtn.disabled = blocked" in alternate_flow
+    assert "settingsBtn.disabled = blocked" in alternate_flow
+    assert 'dialog.setAttribute("aria-busy", "true")' in alternate_flow
+    assert "self._els.viewerActions.querySelector(" in alternate_flow
+    assert '".alternate-transcription"' in alternate_flow
+    assert "this._alternateTranscriptionCleanup(false)" in viewer_view
+    assert 'id="viewerMetaTranscription"' in viewer_view
+    assert 'data.stt_provider === "openai"' in viewer_view
+
+    assert "dialog.transcription-model-dialog" in style_css
+    assert ".external-upload-warning" in style_css
+    assert ".external-upload-consent" in style_css
+
+
 def test_viewer_missing_transcript_uses_meeting_status_not_unconditional_polling() -> None:
     viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
 

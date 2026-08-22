@@ -605,9 +605,14 @@
             self._els = {};
             self._listeners = [];
             self._dirty = false;
+            self._settingsData = null;
+            self._transcriptionCatalog = null;
+            self._openAIKeyStatus = { configured: false, source: "none" };
+            self._focusTimer = null;
             self._render();
             self._bind();
             self._loadSettings();
+            self._loadTranscriptionModels();
         }
 
         GeneralSettingsPanel.prototype._render = function () {
@@ -711,6 +716,43 @@
                 '          <option value="zh">中文</option>',
                 '        </select>',
                 '      </div>',
+                '      <div class="setting-row transcription-default-row">',
+                '        <label class="setting-label" for="settingsDefaultTranscriptionModel">기본 전사 모델</label>',
+                '        <select class="setting-select transcription-default-select" id="settingsDefaultTranscriptionModel" aria-describedby="settingsTranscriptionLocation" disabled>',
+                '          <option value="">불러오는 중…</option>',
+                '        </select>',
+                '      </div>',
+                '      <div class="processing-location-note" id="settingsTranscriptionLocation" role="status" aria-live="polite">',
+                '        기본값은 이 Mac에서 처리되며 음성 파일이 외부로 전송되지 않습니다.',
+                '      </div>',
+                '      <label class="external-upload-confirmation" id="settingsDefaultExternalConsentRow" hidden>',
+                '        <input type="checkbox" id="settingsDefaultExternalConsent">',
+                '        <span>기본 전사 시 음성 파일이 OpenAI 서버로 업로드되는 것에 동의합니다.</span>',
+                '      </label>',
+                '    </div>',
+                '  </section>',
+                '  <section class="settings-section openai-credential-section" id="settingsOpenAICredentialSection">',
+                '    <h3 class="settings-section-title">OpenAI 전사</h3>',
+                '    <p class="settings-section-desc">필요할 때만 OpenAI 전사 모델을 사용할 수 있습니다. 키는 응답이나 입력창에 다시 표시하지 않습니다.</p>',
+                '    <div class="settings-group">',
+                '      <div class="setting-row credential-status-row">',
+                '        <span class="setting-label">API 키</span>',
+                '        <span class="credential-status" id="settingsOpenAIKeyState" role="status" aria-live="polite">확인 중…</span>',
+                '      </div>',
+                '      <div class="openai-credential-control">',
+                '        <label class="sr-only" for="settingsOpenAIApiKey">OpenAI API 키</label>',
+                '        <div class="secret-input-row">',
+                '          <input class="setting-input secret-input" id="settingsOpenAIApiKey" type="password"',
+                '                 autocomplete="new-password" autocapitalize="none" spellcheck="false"',
+                '                 placeholder="새 API 키 입력" aria-describedby="settingsOpenAIKeyHelp">',
+                '          <button type="button" class="btn-secondary" id="settingsOpenAIKeySave">키 저장</button>',
+                '        </div>',
+                '        <div class="credential-help" id="settingsOpenAIKeyHelp">입력한 키는 저장 요청 직후 이 화면에서 지워집니다.</div>',
+                '        <div class="credential-actions">',
+                '          <button type="button" class="btn-text-destructive" id="settingsOpenAIKeyDelete" hidden>저장된 키 삭제</button>',
+                '        </div>',
+                '        <div class="credential-operation-status" id="settingsOpenAIKeyOperationStatus" role="status" aria-live="polite"></div>',
+                '      </div>',
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
@@ -789,8 +831,8 @@
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
-                '    <h3 class="settings-section-title">음성 인식 모델 (STT)</h3>',
-                '    <p class="settings-section-desc">한국어 회의 전사에 사용할 모델을 선택하세요. 다운로드 완료 후 활성화하면 다음 전사부터 적용돼요.</p>',
+                '    <h3 class="settings-section-title">로컬 음성 인식 모델 (STT)</h3>',
+                '    <p class="settings-section-desc">이 Mac에서 처리할 로컬 모델을 관리합니다. 다운로드 완료 후 활성화하면 로컬 전사에 적용돼요.</p>',
                 '    <div class="stt-models" id="settingsSttModels" aria-live="polite">',
                 '      <div class="stt-models-loading">불러오는 중…</div>',
                 '    </div>',
@@ -821,6 +863,16 @@
                 tempValue: document.getElementById("settingsTempValue"),
                 skipLlm: document.getElementById("settingsSkipLlm"),
                 lang: document.getElementById("settingsLang"),
+                defaultTranscriptionModel: document.getElementById("settingsDefaultTranscriptionModel"),
+                transcriptionLocation: document.getElementById("settingsTranscriptionLocation"),
+                defaultExternalConsentRow: document.getElementById("settingsDefaultExternalConsentRow"),
+                defaultExternalConsent: document.getElementById("settingsDefaultExternalConsent"),
+                openAICredentialSection: document.getElementById("settingsOpenAICredentialSection"),
+                openAIKeyState: document.getElementById("settingsOpenAIKeyState"),
+                openAIKeyInput: document.getElementById("settingsOpenAIApiKey"),
+                openAIKeySave: document.getElementById("settingsOpenAIKeySave"),
+                openAIKeyDelete: document.getElementById("settingsOpenAIKeyDelete"),
+                openAIKeyOperationStatus: document.getElementById("settingsOpenAIKeyOperationStatus"),
                 saveBtn: document.getElementById("settingsSaveBtn"),
                 saveStatus: document.getElementById("settingsSaveStatus"),
                 sttModels: document.getElementById("settingsSttModels"),
@@ -880,6 +932,66 @@
             els.model.addEventListener("change", onModelChange);
             self._listeners.push({ el: els.model, type: "change", fn: onModelChange });
 
+            var onDefaultTranscriptionChange = function () {
+                // 외부 모델을 새로 선택할 때마다 전송 동의를 다시 확인한다.
+                els.defaultExternalConsent.checked = false;
+                self._updateDefaultTranscriptionUi();
+                self._setDirty(true);
+            };
+            els.defaultTranscriptionModel.addEventListener(
+                "change",
+                onDefaultTranscriptionChange
+            );
+            self._listeners.push({
+                el: els.defaultTranscriptionModel,
+                type: "change",
+                fn: onDefaultTranscriptionChange,
+            });
+
+            var onExternalConsentChange = function () {
+                self._setDirty(true);
+                self._updateDefaultTranscriptionUi();
+            };
+            els.defaultExternalConsent.addEventListener("change", onExternalConsentChange);
+            self._listeners.push({
+                el: els.defaultExternalConsent,
+                type: "change",
+                fn: onExternalConsentChange,
+            });
+
+            var onOpenAIKeySave = function () {
+                self._saveOpenAIKey();
+            };
+            els.openAIKeySave.addEventListener("click", onOpenAIKeySave);
+            self._listeners.push({
+                el: els.openAIKeySave,
+                type: "click",
+                fn: onOpenAIKeySave,
+            });
+
+            var onOpenAIKeyInput = function (event) {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    self._saveOpenAIKey();
+                }
+            };
+            els.openAIKeyInput.addEventListener("keydown", onOpenAIKeyInput);
+            self._listeners.push({
+                el: els.openAIKeyInput,
+                type: "keydown",
+                fn: onOpenAIKeyInput,
+            });
+
+            var onOpenAIKeyDelete = function () {
+                self._deleteOpenAIKey();
+            };
+            els.openAIKeyDelete.addEventListener("click", onOpenAIKeyDelete);
+            self._listeners.push({
+                el: els.openAIKeyDelete,
+                type: "click",
+                fn: onOpenAIKeyDelete,
+            });
+
             var markDirty = function () {
                 self._setDirty(true);
             };
@@ -915,6 +1027,17 @@
             self._loadSttModels();
             self._loadAutoProcessingStatus();
 
+            if (new URLSearchParams(window.location.search).get("focus") === "openai") {
+                self._focusTimer = setTimeout(function () {
+                    if (!self._els.openAICredentialSection) return;
+                    self._els.openAICredentialSection.scrollIntoView({
+                        behavior: "smooth",
+                        block: "center",
+                    });
+                    self._els.openAIKeyInput.focus();
+                }, 0);
+            }
+
             // 고급 기능 — A/B 테스트 링크
             var abTestLink = document.getElementById("settingsAbTestLink");
             if (abTestLink) {
@@ -933,6 +1056,7 @@
             var els = this._els;
             try {
                 var data = await App.apiRequest("/settings");
+                self._settingsData = data;
                 if (data.available_models && data.available_models.length > 0) {
                     // 모델 description 캐시 (툴팁 갱신용)
                     self._modelDescriptions = {};
@@ -957,6 +1081,9 @@
                 }
                 els.skipLlm.checked = !!data.llm_skip_steps;
                 if (data.stt_language) els.lang.value = data.stt_language;
+                self._syncDefaultTranscriptionSelection(
+                    self._dirty ? els.defaultTranscriptionModel.value : ""
+                );
                 // 환각 필터
                 els.hfEnabled.checked = !!data.hf_enabled;
                 if (data.hf_no_speech_threshold !== undefined && data.hf_no_speech_threshold !== null) {
@@ -1000,6 +1127,269 @@
             }
         };
 
+        /**
+         * 로컬/OpenAI 전사 모델 카탈로그와 비밀키 등록 상태를 불러온다.
+         * API는 키 원문을 반환하지 않으며, 이 메서드도 상태값만 보관한다.
+         * @param {boolean} [preserveSelection=false] 사용자가 선택한 모델 유지 여부
+         */
+        GeneralSettingsPanel.prototype._loadTranscriptionModels = async function (preserveSelection) {
+            var self = this;
+            var els = self._els;
+            var preferredId = preserveSelection ? els.defaultTranscriptionModel.value : "";
+            try {
+                var data = await App.apiRequest("/transcription-models");
+                self._transcriptionCatalog = data || {};
+                self._transcriptionCatalog.models = Array.isArray(data && data.models)
+                    ? data.models
+                    : [];
+                self._openAIKeyStatus = (data && data.openai_key) || {
+                    configured: false,
+                    source: "none",
+                };
+                self._renderTranscriptionModelOptions(preferredId);
+                self._renderOpenAIKeyStatus();
+            } catch (err) {
+                els.defaultTranscriptionModel.innerHTML = "";
+                var option = document.createElement("option");
+                option.value = "";
+                option.textContent = "모델 목록을 불러올 수 없음";
+                els.defaultTranscriptionModel.appendChild(option);
+                els.defaultTranscriptionModel.disabled = true;
+                els.transcriptionLocation.textContent =
+                    "전사 모델 상태 조회 실패: " + (err.message || String(err));
+                els.transcriptionLocation.className = "processing-location-note error";
+                els.openAIKeyState.textContent = "상태 확인 실패";
+                els.openAIKeyState.className = "credential-status error";
+            }
+        };
+
+        /**
+         * 전사 모델 선택지를 안전한 DOM API로 구성한다.
+         * @param {string} preferredId 유지할 모델 ID
+         */
+        GeneralSettingsPanel.prototype._renderTranscriptionModelOptions = function (preferredId) {
+            var self = this;
+            var els = self._els;
+            var models = self._transcriptionCatalog.models || [];
+            els.defaultTranscriptionModel.innerHTML = "";
+
+            models.forEach(function (model) {
+                var option = document.createElement("option");
+                option.value = model.id;
+                var location = model.external_upload ? "OpenAI 서버" : "이 Mac에서 처리";
+                var label = String(model.label || model.id);
+                option.textContent = label.indexOf(location) >= 0
+                    ? label
+                    : location + " · " + label;
+                if (!model.available) {
+                    option.textContent += " · 사용 불가";
+                    option.disabled = true;
+                }
+                els.defaultTranscriptionModel.appendChild(option);
+            });
+
+            if (models.length === 0) {
+                var emptyOption = document.createElement("option");
+                emptyOption.value = "";
+                emptyOption.textContent = "사용 가능한 모델 없음";
+                els.defaultTranscriptionModel.appendChild(emptyOption);
+                els.defaultTranscriptionModel.disabled = true;
+                self._updateDefaultTranscriptionUi();
+                return;
+            }
+
+            els.defaultTranscriptionModel.disabled = false;
+            self._syncDefaultTranscriptionSelection(preferredId);
+        };
+
+        /**
+         * /api/settings와 카탈로그의 기본값을 모델 선택 UI에 동기화한다.
+         * @param {string} preferredId 사용자 선택을 우선 유지할 모델 ID
+         */
+        GeneralSettingsPanel.prototype._syncDefaultTranscriptionSelection = function (preferredId) {
+            var self = this;
+            var els = self._els;
+            if (!self._transcriptionCatalog) return;
+            var models = self._transcriptionCatalog.models || [];
+            if (models.length === 0) return;
+
+            var desiredId = preferredId || "";
+            var settings = self._settingsData || {};
+            if (!desiredId && settings.stt_provider === "openai" && settings.stt_openai_model) {
+                var configuredOpenAI = models.find(function (model) {
+                    return model.provider === "openai" && (
+                        model.id === settings.stt_openai_model ||
+                        model.model === settings.stt_openai_model
+                    );
+                });
+                desiredId = configuredOpenAI ? configuredOpenAI.id : "";
+            }
+            if (!desiredId && settings.stt_provider === "local") {
+                var configuredLocal = models.find(function (model) {
+                    return model.provider === "local" && model.is_default;
+                });
+                if (configuredLocal) desiredId = configuredLocal.id;
+            }
+            if (!desiredId) {
+                desiredId = self._transcriptionCatalog.default_model_id || "";
+            }
+            if (!models.some(function (model) { return model.id === desiredId; })) {
+                var localFallback = models.find(function (model) {
+                    return model.provider === "local" && model.available;
+                });
+                var anyFallback = models.find(function (model) { return model.available; });
+                desiredId = (localFallback || anyFallback || models[0]).id;
+            }
+
+            els.defaultTranscriptionModel.value = desiredId;
+            if (!self._dirty) {
+                var selected = self._getSelectedTranscriptionModel();
+                var alreadyConfiguredAsOpenAI = !!(
+                    selected &&
+                    selected.provider === "openai" &&
+                    settings.stt_provider === "openai" &&
+                    (
+                        !settings.stt_openai_model ||
+                        selected.id === settings.stt_openai_model ||
+                        selected.model === settings.stt_openai_model
+                    )
+                );
+                els.defaultExternalConsent.checked = !!(
+                    selected &&
+                    selected.external_upload &&
+                    (settings.external_upload_confirmed || alreadyConfiguredAsOpenAI)
+                );
+            }
+            self._updateDefaultTranscriptionUi();
+        };
+
+        /**
+         * 현재 기본 전사 모델 선택을 반환한다.
+         * @returns {Object|null}
+         */
+        GeneralSettingsPanel.prototype._getSelectedTranscriptionModel = function () {
+            var catalog = this._transcriptionCatalog;
+            if (!catalog || !Array.isArray(catalog.models)) return null;
+            var selectedId = this._els.defaultTranscriptionModel.value;
+            return catalog.models.find(function (model) {
+                return model.id === selectedId;
+            }) || null;
+        };
+
+        /**
+         * 선택 모델의 처리 위치와 외부 업로드 동의 게이트를 갱신한다.
+         */
+        GeneralSettingsPanel.prototype._updateDefaultTranscriptionUi = function () {
+            var els = this._els;
+            var model = this._getSelectedTranscriptionModel();
+            if (!model) {
+                els.defaultExternalConsentRow.hidden = true;
+                return;
+            }
+
+            if (!model.external_upload) {
+                els.defaultExternalConsentRow.hidden = true;
+                els.transcriptionLocation.textContent =
+                    "이 Mac에서 처리 · 음성 파일이 외부로 전송되지 않습니다.";
+                els.transcriptionLocation.className = "processing-location-note local";
+                return;
+            }
+
+            els.defaultExternalConsentRow.hidden = false;
+            els.transcriptionLocation.className = "processing-location-note external";
+            if (!this._openAIKeyStatus.configured) {
+                els.transcriptionLocation.textContent =
+                    "OpenAI API 키가 필요합니다. 아래 OpenAI 전사 섹션에서 키를 등록해 주세요.";
+            } else if (!model.available) {
+                els.transcriptionLocation.textContent =
+                    model.unavailable_reason || "현재 이 OpenAI 모델을 사용할 수 없습니다.";
+            } else {
+                els.transcriptionLocation.textContent =
+                    "OpenAI 서버에서 처리 · 전사할 때마다 음성 파일이 외부로 업로드됩니다.";
+            }
+        };
+
+        /** OpenAI 비밀키 상태를 원문 없이 표시한다. */
+        GeneralSettingsPanel.prototype._renderOpenAIKeyStatus = function () {
+            var els = this._els;
+            var status = this._openAIKeyStatus || {};
+            var source = String(status.source || "").toLowerCase();
+            var fromEnvironment = source.indexOf("env") >= 0 || source.indexOf("environment") >= 0;
+
+            if (!status.configured) {
+                els.openAIKeyState.textContent = "등록되지 않음";
+                els.openAIKeyState.className = "credential-status unconfigured";
+                els.openAIKeyDelete.hidden = true;
+                return;
+            }
+
+            els.openAIKeyState.textContent = fromEnvironment
+                ? "등록됨 · 환경 변수"
+                : "등록됨 · macOS 키체인";
+            els.openAIKeyState.className = "credential-status configured";
+            // 환경 변수는 앱이 소유한 값이 아니므로 UI에서 삭제하지 않는다.
+            els.openAIKeyDelete.hidden = fromEnvironment;
+        };
+
+        /** 사용자가 입력한 OpenAI 키를 전용 자격 증명 API로 저장한다. */
+        GeneralSettingsPanel.prototype._saveOpenAIKey = async function () {
+            var self = this;
+            var els = self._els;
+            var apiKey = els.openAIKeyInput.value.trim();
+            if (!apiKey) {
+                els.openAIKeyOperationStatus.textContent = "새 API 키를 입력해 주세요.";
+                els.openAIKeyOperationStatus.className = "credential-operation-status error";
+                els.openAIKeyInput.focus();
+                return;
+            }
+
+            // 비밀값은 요청 데이터로 옮긴 즉시 DOM에서 제거한다.
+            els.openAIKeyInput.value = "";
+            els.openAIKeySave.disabled = true;
+            els.openAIKeyOperationStatus.textContent = "키 저장 중…";
+            els.openAIKeyOperationStatus.className = "credential-operation-status";
+            try {
+                await App.apiRequest("/openai-credentials", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ api_key: apiKey }),
+                });
+                els.openAIKeyOperationStatus.textContent = "키를 저장했습니다.";
+                els.openAIKeyOperationStatus.className = "credential-operation-status success";
+                await self._loadTranscriptionModels(true);
+            } catch (err) {
+                els.openAIKeyOperationStatus.textContent =
+                    "키 저장 실패: " + (err.message || String(err));
+                els.openAIKeyOperationStatus.className = "credential-operation-status error";
+            } finally {
+                apiKey = "";
+                els.openAIKeySave.disabled = false;
+            }
+        };
+
+        /** 앱이 저장한 OpenAI 키를 삭제한다. */
+        GeneralSettingsPanel.prototype._deleteOpenAIKey = async function () {
+            var self = this;
+            var els = self._els;
+            if (!window.confirm("이 Mac에 저장된 OpenAI API 키를 삭제하시겠습니까?")) return;
+
+            els.openAIKeyDelete.disabled = true;
+            els.openAIKeyOperationStatus.textContent = "저장된 키 삭제 중…";
+            els.openAIKeyOperationStatus.className = "credential-operation-status";
+            try {
+                await App.apiRequest("/openai-credentials", { method: "DELETE" });
+                els.openAIKeyOperationStatus.textContent = "저장된 키를 삭제했습니다.";
+                els.openAIKeyOperationStatus.className = "credential-operation-status success";
+                await self._loadTranscriptionModels(true);
+            } catch (err) {
+                els.openAIKeyOperationStatus.textContent =
+                    "키 삭제 실패: " + (err.message || String(err));
+                els.openAIKeyOperationStatus.className = "credential-operation-status error";
+            } finally {
+                els.openAIKeyDelete.disabled = false;
+            }
+        };
+
         GeneralSettingsPanel.prototype._setDirty = function (dirty) {
             this._dirty = !!dirty;
             var els = this._els;
@@ -1031,9 +1421,51 @@
 
         GeneralSettingsPanel.prototype._saveSettings = async function () {
             var els = this._els;
+            var selectedTranscriptionModel = this._getSelectedTranscriptionModel();
+            if (!selectedTranscriptionModel) {
+                els.saveStatus.textContent = "저장 실패: 기본 전사 모델을 선택해 주세요.";
+                els.saveStatus.className = "settings-save-status error";
+                els.defaultTranscriptionModel.focus();
+                return;
+            }
+            if (!selectedTranscriptionModel.available) {
+                els.saveStatus.textContent =
+                    "저장 실패: " +
+                    (selectedTranscriptionModel.unavailable_reason || "선택한 모델을 사용할 수 없습니다.");
+                els.saveStatus.className = "settings-save-status error";
+                if (selectedTranscriptionModel.provider === "openai" && !this._openAIKeyStatus.configured) {
+                    els.openAIKeyInput.focus();
+                } else {
+                    els.defaultTranscriptionModel.focus();
+                }
+                return;
+            }
+            if (
+                selectedTranscriptionModel.external_upload &&
+                !els.defaultExternalConsent.checked
+            ) {
+                els.saveStatus.textContent = "저장 실패: 외부 업로드 동의를 확인해 주세요.";
+                els.saveStatus.className = "settings-save-status error";
+                els.defaultExternalConsent.focus();
+                return;
+            }
+
             els.saveBtn.disabled = true;
             els.saveBtn.textContent = "저장 중…";
             els.saveStatus.textContent = "";
+
+            var configuredOpenAIModel = (this._settingsData && this._settingsData.stt_openai_model) || "";
+            if (selectedTranscriptionModel.provider === "openai") {
+                configuredOpenAIModel =
+                    selectedTranscriptionModel.model || selectedTranscriptionModel.id;
+            } else if (!configuredOpenAIModel && this._transcriptionCatalog) {
+                var firstOpenAIModel = (this._transcriptionCatalog.models || []).find(function (model) {
+                    return model.provider === "openai";
+                });
+                configuredOpenAIModel = firstOpenAIModel
+                    ? (firstOpenAIModel.model || firstOpenAIModel.id)
+                    : "";
+            }
 
             var payload = {
                 llm_mlx_model_name: els.model.value,
@@ -1041,6 +1473,12 @@
                 llm_temperature: parseFloat(els.temp.value),
                 llm_skip_steps: els.skipLlm.checked,
                 stt_language: els.lang.value,
+                stt_provider: selectedTranscriptionModel.provider === "openai" ? "openai" : "local",
+                stt_openai_model: configuredOpenAIModel,
+                external_upload_confirmed: !!(
+                    selectedTranscriptionModel.external_upload &&
+                    els.defaultExternalConsent.checked
+                ),
                 hf_enabled: els.hfEnabled.checked,
                 hf_no_speech_threshold: parseFloat(els.hfNoSpeech.value),
                 hf_compression_ratio_threshold: parseFloat(els.hfCompRatio.value),
@@ -1058,25 +1496,22 @@
             };
 
             try {
-                var resp = await fetch("/api/settings", {
+                await App.apiRequest("/settings", {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
                 });
-                if (!resp.ok) {
-                    var errData = await resp.json().catch(function () { return {}; });
-                    throw new Error(errData.detail || "HTTP " + resp.status);
-                }
                 els.saveStatus.textContent = "저장 완료";
                 els.saveStatus.className = "settings-save-status success";
                 this._dirty = false;
+                this._settingsData = Object.assign({}, this._settingsData || {}, payload);
                 await this._loadAutoProcessingStatus();
                 setTimeout(function () {
                     els.saveStatus.textContent = "변경 전";
                     els.saveStatus.className = "settings-save-status";
                 }, 3000);
             } catch (err) {
-                els.saveStatus.textContent = "저장 실패: " + App.escapeHtml(err.message || String(err));
+                els.saveStatus.textContent = "저장 실패: " + (err.message || String(err));
                 els.saveStatus.className = "settings-save-status error";
             } finally {
                 els.saveBtn.disabled = false;
@@ -1180,6 +1615,11 @@
                 e.el.removeEventListener(e.type, e.fn);
             });
             this._listeners = [];
+            clearTimeout(this._focusTimer);
+            this._focusTimer = null;
+            if (this._els.openAIKeyInput) {
+                this._els.openAIKeyInput.value = "";
+            }
             // STT 폴링 타이머 정리 (메모리 누수 방지)
             if (this._sttPollTimers) {
                 this._sttPollTimers.forEach(function (t) { clearInterval(t); });
@@ -1736,6 +2176,7 @@
             try {
                 var resp = await App.apiPost("/stt-models/" + modelId + "/activate", {});
                 await self._loadSttModels();
+                await self._loadTranscriptionModels(true);
                 var msg = (resp && resp.message)
                     ? resp.message
                     : "활성 모델이 변경되었어요. 다음 전사부터 적용돼요.";

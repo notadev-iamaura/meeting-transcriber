@@ -46,6 +46,8 @@ ui/web-dist/
 .idea/
 
 # 벤치마크/임시 (개발용)
+benchmark_runs/
+output/
 short_clip_comparison.json
 test_short_clip_comparison.py
 benchmark_*_results.json

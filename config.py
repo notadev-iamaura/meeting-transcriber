@@ -258,7 +258,39 @@ class NumberNormalizationConfig(BaseModel):
 class STTConfig(BaseModel):
     """STT (Speech-to-Text) 모델 설정"""
 
+    provider: Literal["local", "openai"] = Field(
+        default="local",
+        description="전사 처리 위치. local은 Mac 내부, openai는 명시적 외부 전송.",
+    )
     model_name: str = "mlx-community/whisper-large-v3-turbo"
+    openai_model: Literal["gpt-4o-transcribe-diarize"] = Field(
+        default="gpt-4o-transcribe-diarize",
+        description="회의 타임스탬프를 보존하는 OpenAI 전사 모델.",
+    )
+    openai_timeout_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=3600,
+        description="OpenAI 전사 요청 1회 타임아웃 (초)",
+    )
+    openai_chunk_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=3600,
+        description="외부 업로드 전 로컬에서 나누는 오디오 청크 길이 (초)",
+    )
+    openai_audio_bitrate_kbps: int = Field(
+        default=48,
+        ge=24,
+        le=128,
+        description="OpenAI 업로드용 mono MP3 비트레이트 (kbps)",
+    )
+    openai_max_upload_bytes: int = Field(
+        default=24_000_000,
+        ge=1_000_000,
+        le=25_000_000,
+        description="OpenAI 25MB 제한보다 여유를 둔 청크별 최대 바이트 수",
+    )
     language: str = "ko"
     beam_size: int = Field(default=5, ge=1, le=20)
     batch_size: int = Field(

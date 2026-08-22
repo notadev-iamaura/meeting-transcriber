@@ -21,11 +21,13 @@ import json
 import logging
 import os
 import re
-import shutil
+import stat
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
 from config import AppConfig
+from core.quarantine import QuarantineError, _open_directory_tree_no_follow
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,119 @@ _AB_TESTS_DIRNAME = "ab_tests"
 # metadata 파일명
 METADATA_FILENAME = "metadata.json"
 VARIANT_DIRS: tuple[str, str] = ("variant_a", "variant_b")
+_VARIANT_FILES = frozenset(
+    {
+        "metrics.json",
+        "correct.json",
+        "summary.md",
+        "transcribe.json",
+        "merge.json",
+        "stderr.log",
+    }
+)
+
+
+def _root_path(config: AppConfig) -> Path:
+    """resolve()로 symlink를 숨기지 않은 A/B 저장소 lexical 경로를 반환한다."""
+    base = Path(config.paths.base_dir).expanduser()
+    if not base.is_absolute():
+        base = Path.cwd() / base
+    return Path(os.path.abspath(os.fspath(base))) / _AB_TESTS_DIRNAME
+
+
+def _open_root(config: AppConfig, *, create: bool) -> int:
+    """A/B root를 모든 component no-follow 조건으로 열어 fd를 반환한다."""
+    try:
+        return _open_directory_tree_no_follow(_root_path(config), create=create)
+    except (OSError, QuarantineError) as exc:
+        raise ValueError("A/B 테스트 저장소 경로가 안전하지 않습니다.") from exc
+
+
+def _directory_flags() -> int:
+    """하위 디렉터리 openat에 사용할 no-follow 플래그를 반환한다."""
+    return int(os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+
+
+def _open_test_dir(config: AppConfig, test_id: str, *, create: bool) -> int:
+    """검증된 test_id 디렉터리를 root fd 기준으로 열어 반환한다."""
+    if not is_valid_test_id(test_id):
+        raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+    root_fd = _open_root(config, create=True)
+    try:
+        if create:
+            try:
+                os.mkdir(test_id, mode=0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        try:
+            test_fd = os.open(test_id, _directory_flags(), dir_fd=root_fd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise ValueError("A/B 테스트 디렉터리가 안전하지 않습니다.") from exc
+        if not stat.S_ISDIR(os.fstat(test_fd).st_mode):
+            os.close(test_fd)
+            raise ValueError("A/B 테스트 경로가 디렉터리가 아닙니다.")
+        return test_fd
+    finally:
+        os.close(root_fd)
+
+
+def _open_variant_dir_path(variant_dir: Path) -> int:
+    """variant lexical 경로를 symlink 없이 열어 fd를 반환한다."""
+    try:
+        return _open_directory_tree_no_follow(variant_dir, create=False)
+    except (OSError, QuarantineError) as exc:
+        raise ValueError("A/B variant 저장 경로가 안전하지 않습니다.") from exc
+
+
+def _atomic_write_text_at(directory_fd: int, filename: str, content: str) -> None:
+    """고정 디렉터리 fd 안에서 unique temp를 만들고 원자 교체한다."""
+    temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    temporary_fd: int | None = None
+    try:
+        temporary_fd = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+            temporary_fd = None
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temporary_name,
+            filename,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _read_text_at(directory_fd: int, filename: str) -> str:
+    """고정 디렉터리 fd의 일반 파일을 no-follow로 읽는다."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        file_fd = os.open(filename, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError("A/B 산출물 파일이 안전하지 않습니다.") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise ValueError("A/B 산출물 경로가 일반 파일이 아닙니다.")
+        with os.fdopen(file_fd, encoding="utf-8") as stream:
+            file_fd = -1
+            return stream.read()
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
 
 
 def is_valid_test_id(test_id: str) -> bool:
@@ -64,12 +179,9 @@ def get_ab_test_root(config: AppConfig) -> Path:
     Returns:
         절대 경로 (Path)
     """
-    root = config.paths.resolved_base_dir / _AB_TESTS_DIRNAME
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.error(f"ab_tests 루트 생성 실패: {root} ({exc})")
-        raise
+    root = _root_path(config)
+    root_fd = _open_root(config, create=True)
+    os.close(root_fd)
     return root
 
 
@@ -92,14 +204,22 @@ def resolve_test_dir(config: AppConfig, test_id: str) -> Path:
     if not is_valid_test_id(test_id):
         raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
 
-    root = get_ab_test_root(config).resolve()
-    candidate = (root / test_id).resolve()
-
-    # 루트 하위 여부 재확인
+    root = get_ab_test_root(config)
+    candidate = root / test_id
+    root_fd = _open_root(config, create=False)
     try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"test_id 가 ab_tests 루트를 벗어났습니다: {test_id!r}") from exc
+        try:
+            entry = os.stat(test_id, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return candidate
+        if not stat.S_ISDIR(entry.st_mode):
+            raise ValueError("A/B 테스트 경로가 안전한 디렉터리가 아닙니다.")
+        test_fd = os.open(test_id, _directory_flags(), dir_fd=root_fd)
+        os.close(test_fd)
+    except OSError as exc:
+        raise ValueError("A/B 테스트 경로가 안전하지 않습니다.") from exc
+    finally:
+        os.close(root_fd)
 
     return candidate
 
@@ -118,17 +238,73 @@ def create_test_dir(config: AppConfig, test_id: str) -> Path:
         ValueError: test_id 부적합
         OSError: 디렉터리 생성 실패
     """
-    test_dir = resolve_test_dir(config, test_id)
-    test_dir.mkdir(parents=True, exist_ok=True)
-    for variant in VARIANT_DIRS:
-        (test_dir / variant).mkdir(parents=True, exist_ok=True)
+    test_dir = get_ab_test_root(config) / test_id
+    test_fd = _open_test_dir(config, test_id, create=True)
+    try:
+        for variant in VARIANT_DIRS:
+            try:
+                os.mkdir(variant, mode=0o700, dir_fd=test_fd)
+            except FileExistsError:
+                pass
+            variant_fd = os.open(variant, _directory_flags(), dir_fd=test_fd)
+            os.close(variant_fd)
+    except OSError as exc:
+        raise ValueError("A/B variant 디렉터리가 안전하지 않습니다.") from exc
+    finally:
+        os.close(test_fd)
     logger.debug(f"A/B 테스트 디렉터리 생성: {test_dir}")
     return test_dir
 
 
-def _metadata_path(config: AppConfig, test_id: str) -> Path:
-    """테스트 metadata.json 절대 경로를 반환한다."""
-    return resolve_test_dir(config, test_id) / METADATA_FILENAME
+def resolve_variant_dir(config: AppConfig, test_id: str, variant: str) -> Path:
+    """고정 variant 디렉터리를 no-follow로 검증하고 lexical 경로를 반환한다."""
+    if variant not in VARIANT_DIRS:
+        raise ValueError(f"유효하지 않은 variant 디렉터리: {variant!r}")
+    test_fd = _open_test_dir(config, test_id, create=False)
+    try:
+        variant_fd = os.open(variant, _directory_flags(), dir_fd=test_fd)
+        os.close(variant_fd)
+    except OSError as exc:
+        raise ValueError("A/B variant 디렉터리가 안전하지 않습니다.") from exc
+    finally:
+        os.close(test_fd)
+    return _root_path(config) / test_id / variant
+
+
+def write_variant_text(variant_dir: Path, filename: str, content: str) -> None:
+    """검증된 variant 파일을 no-follow + atomic replace로 기록한다."""
+    if filename not in _VARIANT_FILES:
+        raise ValueError(f"허용되지 않은 A/B 산출물 파일명: {filename!r}")
+    variant_fd = _open_variant_dir_path(variant_dir)
+    try:
+        _atomic_write_text_at(variant_fd, filename, content)
+    finally:
+        os.close(variant_fd)
+
+
+def write_variant_json(variant_dir: Path, filename: str, data: Any) -> None:
+    """variant JSON을 안전하게 직렬화해 기록한다."""
+    write_variant_text(
+        variant_dir,
+        filename,
+        json.dumps(data, ensure_ascii=False, indent=2),
+    )
+
+
+def read_variant_text(variant_dir: Path, filename: str) -> str:
+    """검증된 variant 일반 파일을 no-follow로 읽는다."""
+    if filename not in _VARIANT_FILES:
+        raise ValueError(f"허용되지 않은 A/B 산출물 파일명: {filename!r}")
+    variant_fd = _open_variant_dir_path(variant_dir)
+    try:
+        return _read_text_at(variant_fd, filename)
+    finally:
+        os.close(variant_fd)
+
+
+def read_variant_json(variant_dir: Path, filename: str) -> Any:
+    """variant JSON을 no-follow로 읽어 파싱한다."""
+    return json.loads(read_variant_text(variant_dir, filename))
 
 
 def read_metadata(config: AppConfig, test_id: str) -> dict[str, Any]:
@@ -145,14 +321,17 @@ def read_metadata(config: AppConfig, test_id: str) -> dict[str, Any]:
         FileNotFoundError: 파일이 없을 때
         ValueError: JSON 파싱 실패 또는 test_id 부적합
     """
-    path = _metadata_path(config, test_id)
-    if not path.exists():
-        raise FileNotFoundError(f"metadata.json 이 없습니다: {path}")
+    test_fd = _open_test_dir(config, test_id, create=False)
     try:
-        with open(path, encoding="utf-8") as f:
-            return cast(dict[str, Any], json.load(f))
+        raw = _read_text_at(test_fd, METADATA_FILENAME)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"metadata.json 이 없습니다: {test_id}") from None
+    finally:
+        os.close(test_fd)
+    try:
+        return cast(dict[str, Any], json.loads(raw))
     except json.JSONDecodeError as exc:
-        logger.error(f"metadata.json 파싱 실패: {path} ({exc})")
+        logger.error(f"metadata.json 파싱 실패: {test_id} ({exc})")
         raise ValueError(f"metadata.json 파싱 실패: {exc}") from exc
 
 
@@ -164,29 +343,18 @@ def write_metadata(config: AppConfig, test_id: str, data: dict[str, Any]) -> Non
         test_id: 테스트 식별자
         data: 저장할 딕셔너리
     """
-    test_dir = resolve_test_dir(config, test_id)
-    test_dir.mkdir(parents=True, exist_ok=True)
-    path = test_dir / METADATA_FILENAME
-    tmp = path.with_suffix(".json.tmp")
+    test_fd = _open_test_dir(config, test_id, create=True)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                # 일부 환경(tmpfs)에서는 fsync 실패 — 치명적이지 않음
-                pass
-        os.replace(tmp, path)
+        _atomic_write_text_at(
+            test_fd,
+            METADATA_FILENAME,
+            json.dumps(data, ensure_ascii=False, indent=2),
+        )
     except OSError as exc:
-        logger.error(f"metadata.json 저장 실패: {path} ({exc})")
-        # 임시 파일 정리
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except OSError:
-            pass
+        logger.error(f"metadata.json 저장 실패: {test_id} ({exc})")
         raise
+    finally:
+        os.close(test_fd)
 
 
 def update_metadata(config: AppConfig, test_id: str, **patch: Any) -> dict[str, Any]:
@@ -222,28 +390,56 @@ def list_test_ids(config: AppConfig, source_meeting_id: str | None = None) -> li
     Returns:
         test_id 리스트 (최신순)
     """
-    root = get_ab_test_root(config)
-    if not root.exists():
-        return []
-
+    root_fd = _open_root(config, create=True)
     ids: list[str] = []
-    for entry in root.iterdir():
-        if not entry.is_dir():
-            continue
-        if not is_valid_test_id(entry.name):
-            continue
-        if source_meeting_id is not None:
+    try:
+        for name in os.listdir(root_fd):
+            if not is_valid_test_id(name):
+                continue
             try:
-                meta = read_metadata(config, entry.name)
-            except (FileNotFoundError, ValueError):
+                entry = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode):
+                    continue
+                test_fd = os.open(name, _directory_flags(), dir_fd=root_fd)
+                os.close(test_fd)
+            except OSError:
                 continue
-            if meta.get("source_meeting_id") != source_meeting_id:
-                continue
-        ids.append(entry.name)
+            if source_meeting_id is not None:
+                try:
+                    meta = read_metadata(config, name)
+                except (FileNotFoundError, ValueError):
+                    continue
+                if meta.get("source_meeting_id") != source_meeting_id:
+                    continue
+            ids.append(name)
+    finally:
+        os.close(root_fd)
 
     # test_id 에 타임스탬프가 내장되어 있으므로 문자열 역순이 곧 최신순
     ids.sort(reverse=True)
     return ids
+
+
+def _remove_directory_contents(directory_fd: int) -> None:
+    """열어 둔 디렉터리 안의 entry를 symlink 추적 없이 재귀 삭제한다."""
+    for name in os.listdir(directory_fd):
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(entry.st_mode):
+            os.unlink(name, dir_fd=directory_fd)
+            continue
+
+        child_fd = os.open(name, _directory_flags(), dir_fd=directory_fd)
+        try:
+            opened = os.fstat(child_fd)
+            if opened.st_dev != entry.st_dev or opened.st_ino != entry.st_ino:
+                raise ValueError("A/B 삭제 대상 디렉터리가 처리 중 교체되었습니다.")
+            _remove_directory_contents(child_fd)
+        finally:
+            os.close(child_fd)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if current.st_dev != entry.st_dev or current.st_ino != entry.st_ino:
+            raise ValueError("A/B 삭제 대상 디렉터리가 처리 중 교체되었습니다.")
+        os.rmdir(name, dir_fd=directory_fd)
 
 
 def delete_test_dir(config: AppConfig, test_id: str) -> None:
@@ -256,13 +452,32 @@ def delete_test_dir(config: AppConfig, test_id: str) -> None:
     Raises:
         ValueError: test_id 부적합
     """
-    test_dir = resolve_test_dir(config, test_id)
-    if not test_dir.exists():
-        logger.warning(f"삭제 대상 디렉터리가 없음: {test_dir}")
-        return
+    if not is_valid_test_id(test_id):
+        raise ValueError(f"유효하지 않은 test_id: {test_id!r}")
+    root_fd = _open_root(config, create=True)
     try:
-        shutil.rmtree(test_dir)
-        logger.info(f"A/B 테스트 디렉터리 삭제: {test_dir}")
+        try:
+            entry = os.stat(test_id, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            logger.warning(f"삭제 대상 디렉터리가 없음: {test_id}")
+            return
+        if not stat.S_ISDIR(entry.st_mode):
+            raise ValueError("A/B 삭제 대상이 안전한 디렉터리가 아닙니다.")
+        test_fd = os.open(test_id, _directory_flags(), dir_fd=root_fd)
+        try:
+            opened = os.fstat(test_fd)
+            if opened.st_dev != entry.st_dev or opened.st_ino != entry.st_ino:
+                raise ValueError("A/B 삭제 대상이 처리 중 교체되었습니다.")
+            _remove_directory_contents(test_fd)
+        finally:
+            os.close(test_fd)
+        current = os.stat(test_id, dir_fd=root_fd, follow_symlinks=False)
+        if current.st_dev != entry.st_dev or current.st_ino != entry.st_ino:
+            raise ValueError("A/B 삭제 대상이 처리 중 교체되었습니다.")
+        os.rmdir(test_id, dir_fd=root_fd)
+        logger.info(f"A/B 테스트 디렉터리 삭제: {test_id}")
     except OSError as exc:
-        logger.error(f"A/B 테스트 디렉터리 삭제 실패: {test_dir} ({exc})")
+        logger.error(f"A/B 테스트 디렉터리 삭제 실패: {test_id} ({exc})")
         raise
+    finally:
+        os.close(root_fd)

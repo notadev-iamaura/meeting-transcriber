@@ -499,6 +499,12 @@ list_stt_models = _stt_models.list_stt_models
 router.include_router(_stt_models.router)
 
 
+# 로컬/외부 통합 전사 모델 카탈로그와 write-only 자격 증명 API.
+from api.routers import transcription_models as _transcription_models_router  # noqa: E402
+
+router.include_router(_transcription_models_router.router)
+
+
 # A/B 테스트 API 는 api.routers.ab_tests 로 분리한다.
 # 아래 re-export 는 기존 `api.routes.ABTestLLMRequest` 같은 접근을 보존한다.
 from api.routers import ab_tests as _ab_tests_router  # noqa: E402

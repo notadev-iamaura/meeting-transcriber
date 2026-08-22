@@ -8,6 +8,7 @@ variant 부분 실패, 취소, diarize 체크포인트 분기를 monkeypatch 기
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -193,6 +194,74 @@ class TestStore:
         result = ab_test_store.list_test_ids(tmp_config)
         assert result == sorted(ids, reverse=True)
 
+    @pytest.mark.parametrize(
+        ("active_status", "terminal_status"),
+        [("pending", "failed"), ("running", "failed"), ("cancelling", "cancelled")],
+    )
+    def test_startup은_ghost_A_B_metadata를_terminal로_복구한다(
+        self,
+        tmp_config: AppConfig,
+        active_status: str,
+        terminal_status: str,
+    ) -> None:
+        """프로세스 재시작 뒤 소비할 task가 없는 active 상태를 남기지 않는다."""
+        tid = new_test_id()
+        ab_test_store.create_test_dir(tmp_config, tid)
+        ab_test_store.write_metadata(
+            tmp_config,
+            tid,
+            {
+                "test_id": tid,
+                "status": active_status,
+                "current_variant": "variant_a",
+                "current_step": "transcribe",
+                "completed_at": None,
+                "error": None,
+            },
+        )
+
+        assert ab_test_runner.recover_orphaned_tests(tmp_config) == 1
+
+        recovered = ab_test_store.read_metadata(tmp_config, tid)
+        assert recovered["status"] == terminal_status
+        assert recovered["current_variant"] is None
+        assert recovered["current_step"] is None
+        assert recovered["completed_at"]
+        assert "종료" in recovered["error"]
+
+    def test_startup_A_B_recovery는_terminal_metadata를_변경하지_않는다(
+        self,
+        tmp_config: AppConfig,
+    ) -> None:
+        tid = new_test_id()
+        ab_test_store.create_test_dir(tmp_config, tid)
+        original = {"test_id": tid, "status": "completed", "completed_at": "done"}
+        ab_test_store.write_metadata(tmp_config, tid, original)
+
+        assert ab_test_runner.recover_orphaned_tests(tmp_config) == 0
+        assert ab_test_store.read_metadata(tmp_config, tid) == original
+
+    @pytest.mark.asyncio
+    async def test_취소요청은_crash전에_cancelling으로_durable하게_기록한다(
+        self,
+        tmp_config: AppConfig,
+    ) -> None:
+        """202 직후 종료돼도 startup은 failed가 아니라 cancelled로 복구한다."""
+        tid = new_test_id()
+        ab_test_store.create_test_dir(tmp_config, tid)
+        ab_test_store.write_metadata(
+            tmp_config,
+            tid,
+            {"test_id": tid, "status": "running", "error": None},
+        )
+
+        await ab_test_runner.cancel_test(tmp_config, tid)
+        assert ab_test_store.read_metadata(tmp_config, tid)["status"] == "cancelling"
+
+        ab_test_runner._cancel_requests.discard(tid)
+        assert ab_test_runner.recover_orphaned_tests(tmp_config) == 1
+        assert ab_test_store.read_metadata(tmp_config, tid)["status"] == "cancelled"
+
     def test_delete_test_디렉터리_제거(self, tmp_config: AppConfig) -> None:
         tid = new_test_id()
         ab_test_store.create_test_dir(tmp_config, tid)
@@ -205,6 +274,61 @@ class TestStore:
     def test_resolve_test_dir_부적합_id_거부(self, tmp_config: AppConfig) -> None:
         with pytest.raises(ValueError):
             ab_test_store.resolve_test_dir(tmp_config, "../evil")
+
+    def test_ab_tests_root_symlink를_따라_외부에_쓰지_않는다(
+        self,
+        tmp_config: AppConfig,
+        tmp_path: Path,
+    ) -> None:
+        """저장소 root가 symlink면 외부 대상에 variant를 만들지 않고 거부한다."""
+        external = tmp_path / "external-root"
+        external.mkdir()
+        (tmp_path / "ab_tests").symlink_to(external, target_is_directory=True)
+        tid = "ab_20260822-120000_a1b2c3d4"
+
+        with pytest.raises(ValueError, match="안전하지"):
+            ab_test_store.create_test_dir(tmp_config, tid)
+
+        assert list(external.iterdir()) == []
+
+    def test_test와_variant_symlink를_저장_경계에서_거부한다(
+        self,
+        tmp_config: AppConfig,
+        tmp_path: Path,
+    ) -> None:
+        """유효한 이름이어도 test/variant symlink는 no-follow 검증을 통과하지 못한다."""
+        root = ab_test_store.get_ab_test_root(tmp_config)
+        external = tmp_path / "external-test"
+        external.mkdir()
+        linked_tid = "ab_20260822-120001_a1b2c3d4"
+        (root / linked_tid).symlink_to(external, target_is_directory=True)
+        with pytest.raises(ValueError, match="안전"):
+            ab_test_store.create_test_dir(tmp_config, linked_tid)
+
+        safe_tid = "ab_20260822-120002_a1b2c3d4"
+        safe_dir = ab_test_store.create_test_dir(tmp_config, safe_tid)
+        (safe_dir / "variant_a").rmdir()
+        (safe_dir / "variant_a").symlink_to(external, target_is_directory=True)
+        with pytest.raises(ValueError, match="안전"):
+            ab_test_store.resolve_variant_dir(tmp_config, safe_tid, "variant_a")
+        assert list(external.iterdir()) == []
+
+    def test_metadata_고정_tmp_symlink를_덮어쓰지_않는다(
+        self,
+        tmp_config: AppConfig,
+        tmp_path: Path,
+    ) -> None:
+        """예측 가능한 legacy temp symlink가 있어도 원자 쓰기는 unique temp를 쓴다."""
+        tid = "ab_20260822-120003_a1b2c3d4"
+        test_dir = ab_test_store.create_test_dir(tmp_config, tid)
+        marker = tmp_path / "external-marker.txt"
+        marker.write_text("keep", encoding="utf-8")
+        (test_dir / "metadata.json.tmp").symlink_to(marker)
+
+        ab_test_store.write_metadata(tmp_config, tid, {"test_id": tid})
+
+        assert marker.read_text(encoding="utf-8") == "keep"
+        assert ab_test_store.read_metadata(tmp_config, tid) == {"test_id": tid}
 
 
 # ============================================================
@@ -573,6 +697,46 @@ class TestLlmRunner:
 
 
 class TestSttRunner:
+    def test_legacy_pipeline_state의_audio_input_wav도_허용한다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+    ) -> None:
+        """구버전 state의 안전한 audio_input/{id}.wav 경로를 조기 차단하지 않는다."""
+        wav_path = tmp_config.paths.resolved_audio_input_dir / f"{meeting_with_merge}.wav"
+        state_path = (
+            tmp_config.paths.resolved_checkpoints_dir / meeting_with_merge / "pipeline_state.json"
+        )
+        state_path.write_text(json.dumps({"wav_path": str(wav_path)}), encoding="utf-8")
+
+        inspected, _identity = ab_test_runner._inspect_stt_audio_source(
+            tmp_config,
+            meeting_with_merge,
+        )
+
+        assert inspected == wav_path
+
+    def test_pipeline_state는_다른_회의의_audio_input_wav를_가리킬_수_없다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+    ) -> None:
+        """변조된 state로 같은 input 디렉터리의 다른 회의 음성을 읽지 않는다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        other = tmp_config.paths.resolved_audio_input_dir / "other-meeting.wav"
+        other.write_bytes(b"RIFF....WAVEfmt ")
+        state_path = (
+            tmp_config.paths.resolved_checkpoints_dir / meeting_with_merge / "pipeline_state.json"
+        )
+        state_path.write_text(json.dumps({"wav_path": str(other)}), encoding="utf-8")
+
+        with pytest.raises(AudioAdmissionError) as captured:
+            ab_test_runner._inspect_stt_audio_source(tmp_config, meeting_with_merge)
+
+        assert captured.value.failure_kind is AudioFailureKind.SECURITY_BLOCKED
+
     def test_metadata_reserved_STT_admission취소는_cancelled로_종결한다(
         self,
         tmp_config: AppConfig,
@@ -714,6 +878,87 @@ class TestSttRunner:
         run_variant.assert_not_called()
         assert not (tmp_config.paths.resolved_base_dir / "ab_tests" / planned_id).exists()
 
+    def test_API_admission뒤_교체된_파일을_runner가_새_identity로_채택하지_않는다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """외부전송 동의가 route에서 검사한 동일 inode/content에만 결합된다."""
+        from core.audio_quality import AudioFailureKind
+        from steps.transcriber import AudioAdmissionError
+
+        wav_path, approved_identity = ab_test_runner._inspect_stt_audio_source(
+            tmp_config,
+            meeting_with_merge,
+        )
+        wav_path.unlink()
+        wav_path.write_bytes(b"replacement audio")
+        ensure_diarize = AsyncMock(side_effect=AssertionError("교체 파일 diarize 금지"))
+        run_variant = AsyncMock(side_effect=AssertionError("교체 파일 외부전송 금지"))
+        monkeypatch.setattr(ab_test_runner, "_ensure_diarize", ensure_diarize)
+        monkeypatch.setattr(ab_test_runner, "_run_stt_variant", run_variant)
+
+        with pytest.raises(AudioAdmissionError) as exc_info:
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    expected_source_identity=approved_identity,
+                )
+            )
+
+        assert exc_info.value.failure_kind is AudioFailureKind.SOURCE_BUSY
+        ensure_diarize.assert_not_called()
+        run_variant.assert_not_called()
+        assert not (tmp_config.paths.resolved_base_dir / "ab_tests").exists()
+
+    def test_variant_완료직후_취소를_completed로_덮지_않는다(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """마지막 외부 요청 중 취소된 테스트의 최종 상태는 cancelled다."""
+        planned_id = "ab_20260822-143000_deadbeef"
+        cached_diarize = DiarizationResult(
+            segments=[],
+            num_speakers=0,
+            audio_path="/mock/audio.wav",
+        )
+
+        async def finish_after_cancel(**_kwargs: Any) -> dict[str, Any]:
+            ab_test_runner._cancel_requests.add(planned_id)
+            return {"char_count": {"correct": 1}}
+
+        monkeypatch.setattr(
+            ab_test_runner,
+            "_ensure_diarize",
+            AsyncMock(return_value=cached_diarize),
+        )
+        monkeypatch.setattr(ab_test_runner, "_run_stt_variant", finish_after_cancel)
+
+        with pytest.raises(asyncio.CancelledError):
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    test_id=planned_id,
+                )
+            )
+
+        metadata = ab_test_store.read_metadata(tmp_config, planned_id)
+        assert metadata["status"] == "cancelled"
+        assert planned_id not in ab_test_runner._cancel_requests
+
     def test_run_stt_ab_test는_중간_symlink_target을_열지_않는다(
         self,
         tmp_config: AppConfig,
@@ -821,7 +1066,7 @@ class TestSttRunner:
         dummy_manager: _DummyManager,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """diarize 체크포인트가 없으면 자동으로 화자분리를 실행한다."""
+        """명시적으로 허용하면 diarize 체크포인트를 다시 생성한다."""
         # Diarizer/Transcriber/Merger stub
         stub_diarize = DiarizationResult(segments=[], num_speakers=1, audio_path="/fake")
 
@@ -855,9 +1100,35 @@ class TestSttRunner:
                 variant_a=ModelSpec(label="A", model_id="stt-a"),
                 variant_b=ModelSpec(label="B", model_id="stt-b"),
                 model_manager=dummy_manager,
+                allow_diarize_rerun=True,
             )
         )
         assert test_id is not None
+
+    def test_run_stt_ab_test_diarize_재실행_미동의면_모델로드전에_거부(
+        self,
+        tmp_config: AppConfig,
+        meeting_with_merge: str,
+        dummy_manager: _DummyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """기본 OFF 계약에서는 pyannote를 암묵적으로 실행하지 않는다."""
+        diarizer = MagicMock()
+        monkeypatch.setattr(ab_test_runner, "Diarizer", diarizer)
+
+        with pytest.raises(RuntimeError, match="화자분리 재실행에 동의"):
+            _run(
+                run_stt_ab_test(
+                    config=tmp_config,
+                    source_meeting_id=meeting_with_merge,
+                    variant_a=ModelSpec(label="A", model_id="stt-a"),
+                    variant_b=ModelSpec(label="B", model_id="stt-b"),
+                    model_manager=dummy_manager,
+                    allow_diarize_rerun=False,
+                )
+            )
+
+        diarizer.assert_not_called()
 
     def test_run_stt_ab_test_diarize_재실행_허용(
         self,

@@ -19,17 +19,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from config import AppConfig
 from core.io_utils import atomic_write_json
 from core.job_queue import (
+    InvalidTransitionError,
+    JobNotFoundError,
     JobStatus,
     RetranscribeClaim,
     cleanup_retranscribe_staging,
     parse_audio_rejection_claim,
+    parse_cancellation_claim,
+    parse_delete_claim,
     parse_retranscribe_claim,
+    parse_stt_ab_source_claim,
     rollback_retranscribe_staging,
 )
 from core.perf_stats import PerfStats
 from core.pipeline import InvalidInputError, PipelineManager
+from core.quarantine import restore_from_quarantine
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +116,20 @@ class JobProcessor:
         """해당 회의에 대해 취소 요청이 있는지 확인한다."""
         return meeting_id in self._cancellation_requests
 
+    def _is_job_cancellation_requested(self, meeting_id: str, job_id: int) -> bool:
+        """메모리 flag 또는 durable DB claim에 남은 취소 요청을 확인한다."""
+        if meeting_id in self._cancellation_requests:
+            return True
+        try:
+            job = self._job_queue.queue.get_job(job_id)
+        except Exception as exc:
+            logger.debug("durable 취소 claim 조회 실패: job_id=%s, error=%s", job_id, exc)
+            return False
+        return (
+            job.status == JobStatus.RECORDING.value
+            and parse_cancellation_claim(str(job.requested_action or "")) is not None
+        )
+
     @property
     def is_running(self) -> bool:
         """프로세서 실행 중 여부를 반환한다."""
@@ -145,11 +166,178 @@ class JobProcessor:
             JobStatus.MERGING.value,
             JobStatus.EMBEDDING.value,
         }
+        config = getattr(self._pipeline, "_config", None)
+        if isinstance(config, AppConfig):
+            try:
+                from steps.openai_transcriber import cleanup_stale_openai_temp_dirs
+
+                removed_temp_dirs = await asyncio.to_thread(
+                    cleanup_stale_openai_temp_dirs,
+                    config,
+                )
+                if removed_temp_dirs:
+                    logger.warning(
+                        "중단된 OpenAI 임시 오디오 정리: %s건",
+                        removed_temp_dirs,
+                    )
+            except Exception as exc:
+                logger.error("중단된 OpenAI 임시 오디오 정리 실패: %s", exc)
+            try:
+                from core.ab_test_runner import recover_orphaned_tests
+
+                recovered_tests = await asyncio.to_thread(recover_orphaned_tests, config)
+                if recovered_tests:
+                    logger.warning("중단된 A/B 테스트 metadata 복구: %s건", recovered_tests)
+            except Exception as exc:
+                logger.error("중단된 A/B 테스트 metadata 복구 실패: %s", exc)
         try:
             all_jobs = await self._job_queue.get_all_jobs()
         except Exception as e:
             logger.error(f"orphaned 작업 조회 실패: {e}")
             return
+
+        # 사용자 취소 요청은 process-local flag보다 먼저 DB claim으로 남는다.
+        # 응답 직후 SIGKILL되어도 외부 업로드를 queued로 재개하지 않고 recorded로
+        # 확정한 뒤 일반 orphan 복구를 진행한다.
+        for job in all_jobs:
+            if job.status != JobStatus.RECORDING.value:
+                continue
+            cancellation_claim = parse_cancellation_claim(
+                str(getattr(job, "requested_action", ""))
+            )
+            if cancellation_claim is None:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self._job_queue.queue.finalize_cancellation_claim,
+                    job.id,
+                )
+                logger.warning("중단된 사용자 취소 claim 확정: meeting_id=%s", job.meeting_id)
+            except Exception as exc:
+                logger.error(
+                    "중단된 사용자 취소 claim 확정 실패: job_id=%s, error=%s",
+                    job.id,
+                    exc,
+                )
+
+        # 삭제 claim은 quarantine/index purge/DB commit을 묶는 durable journal이다.
+        # 중단된 source를 먼저 입력 폴더로 복구하고, purge 진입 후라면
+        # reindex marker를 남긴 뒤에만 원래 terminal 상태로 되돌린다.
+        for job in all_jobs:
+            if job.status != JobStatus.RECORDING.value:
+                continue
+            delete_claim = parse_delete_claim(str(getattr(job, "requested_action", "")))
+            if delete_claim is None:
+                continue
+            try:
+                if delete_claim.phase == "committing":
+                    from steps.openai_transcriber import (
+                        cleanup_meeting_openai_resume_caches,
+                    )
+
+                    config = getattr(self._pipeline, "_config", None)
+                    if not isinstance(config, AppConfig):
+                        raise RuntimeError("파이프라인 설정을 찾을 수 없습니다")
+                    await asyncio.to_thread(
+                        cleanup_meeting_openai_resume_caches,
+                        config,
+                        job.meeting_id,
+                    )
+                    await asyncio.to_thread(
+                        self._job_queue.queue.delete_claimed_job,
+                        job.id,
+                        delete_claim.token,
+                    )
+                    logger.warning(
+                        "중단된 회의 삭제 roll-forward 완료: meeting_id=%s",
+                        job.meeting_id,
+                    )
+                    continue
+                if delete_claim.source_identity is not None:
+                    await asyncio.to_thread(
+                        restore_from_quarantine,
+                        Path(delete_claim.source_path),
+                        Path(delete_claim.quarantine_path),
+                        expected_identity=delete_claim.source_identity,
+                        reason=f"중단된 회의 삭제 rollback: {job.meeting_id}",
+                    )
+                if (
+                    delete_claim.phase == "purging"
+                    and delete_claim.original_status == JobStatus.COMPLETED.value
+                ):
+                    config = getattr(self._pipeline, "_config", None)
+                    if config is None:
+                        raise RuntimeError("파이프라인 설정을 찾을 수 없습니다")
+                    checkpoints_root = self._configured_storage_root(
+                        config,
+                        "checkpoints_dir",
+                        config.paths.resolved_checkpoints_dir,
+                    )
+                    await asyncio.to_thread(
+                        self._write_retranscribe_recovery_marker,
+                        checkpoints_root,
+                        job.meeting_id,
+                        delete_claim,
+                        reason="회의 삭제 index purge 중 종료되어 재색인이 필요합니다.",
+                    )
+                    if isinstance(config, AppConfig):
+                        from core.reindex_recovery import (
+                            consume_reindex_required_marker,
+                            reindex_meeting_artifacts,
+                        )
+
+                        model_manager = getattr(self._pipeline, "_model_manager", None)
+                        if model_manager is None:
+                            raise RuntimeError("재색인용 모델 관리자를 찾을 수 없습니다")
+                        await reindex_meeting_artifacts(
+                            config,
+                            model_manager,
+                            job.meeting_id,
+                        )
+                        await asyncio.to_thread(
+                            consume_reindex_required_marker,
+                            config,
+                            job.meeting_id,
+                        )
+                await asyncio.to_thread(
+                    self._job_queue.queue.restore_delete_claim,
+                    job.id,
+                    delete_claim.token,
+                )
+                logger.warning(
+                    "중단된 회의 삭제 claim 복구: meeting_id=%s, status=%s",
+                    job.meeting_id,
+                    delete_claim.original_status,
+                )
+            except Exception as exc:
+                logger.error(
+                    "중단된 회의 삭제 claim 복구 실패: job_id=%s, error=%s",
+                    job.id,
+                    exc,
+                )
+
+        for job in all_jobs:
+            if job.status != JobStatus.RECORDING.value:
+                continue
+            stt_ab_claim = parse_stt_ab_source_claim(str(getattr(job, "requested_action", "")))
+            if stt_ab_claim is None:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self._job_queue.queue.restore_stt_ab_test_claim,
+                    job.id,
+                    stt_ab_claim.token,
+                )
+                logger.warning(
+                    "중단된 STT A/B source lease 복구: meeting_id=%s",
+                    job.meeting_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "중단된 STT A/B source lease 복구 실패: job_id=%s, error=%s",
+                    job.id,
+                    exc,
+                )
 
         # watcher가 복구할 audio-rejection claim은 recording 상태를 durable
         # transaction lock으로 사용한다. watcher가 비활성/실패한 startup에서도
@@ -178,11 +366,13 @@ class JobProcessor:
         for job in all_jobs:
             if job.status != JobStatus.RECORDING.value:
                 continue
-            claim = parse_retranscribe_claim(str(getattr(job, "requested_action", "")))
-            if claim is not None:
-                retranscribe_claims.append((job, claim))
+            retranscribe_claim = parse_retranscribe_claim(
+                str(getattr(job, "requested_action", ""))
+            )
+            if retranscribe_claim is not None:
+                retranscribe_claims.append((job, retranscribe_claim))
 
-        for job, claim in retranscribe_claims:
+        for job, retranscribe_claim in retranscribe_claims:
             try:
                 config = getattr(self._pipeline, "_config", None)
                 if config is None:
@@ -197,23 +387,23 @@ class JobProcessor:
                     "outputs_dir",
                     config.paths.resolved_outputs_dir,
                 )
-                if claim.phase == "committing":
+                if retranscribe_claim.phase == "committing":
                     await asyncio.to_thread(
                         cleanup_retranscribe_staging,
                         checkpoints_root,
                         outputs_root,
                         job.meeting_id,
-                        claim.token,
+                        retranscribe_claim.token,
                     )
                     await asyncio.to_thread(
                         self._job_queue.queue.reset_for_retranscribe,
                         job.id,
-                        claim.token,
+                        retranscribe_claim.token,
                     )
                     logger.warning(
                         "중단된 재전사 commit 완료: meeting_id=%s, token=%s",
                         job.meeting_id,
-                        claim.token,
+                        retranscribe_claim.token,
                     )
                     continue
                 await asyncio.to_thread(
@@ -221,25 +411,25 @@ class JobProcessor:
                     checkpoints_root,
                     outputs_root,
                     job.meeting_id,
-                    claim.token,
+                    retranscribe_claim.token,
                 )
-                if claim.phase == "purging":
+                if retranscribe_claim.phase == "purging":
                     await asyncio.to_thread(
                         self._write_retranscribe_recovery_marker,
                         checkpoints_root,
                         job.meeting_id,
-                        claim,
+                        retranscribe_claim,
                     )
                 await asyncio.to_thread(
                     self._job_queue.queue.restore_retranscribe_claim,
                     job.id,
-                    claim.token,
+                    retranscribe_claim.token,
                 )
                 logger.warning(
                     "중단된 재전사 claim 복구: meeting_id=%s, phase=%s, status=%s",
                     job.meeting_id,
-                    claim.phase,
-                    claim.original_status,
+                    retranscribe_claim.phase,
+                    retranscribe_claim.original_status,
                 )
             except Exception as e:
                 # 파일 원복/marker가 완결되지 않았다면 recording claim을 그대로
@@ -248,7 +438,7 @@ class JobProcessor:
                     "중단된 재전사 claim 복구 실패: job_id=%s, meeting_id=%s, phase=%s, error=%s",
                     job.id,
                     job.meeting_id,
-                    claim.phase,
+                    retranscribe_claim.phase,
                     e,
                 )
 
@@ -307,7 +497,9 @@ class JobProcessor:
         self,
         checkpoints_root: Path,
         meeting_id: str,
-        claim: RetranscribeClaim,
+        claim: Any,
+        *,
+        reason: str = "재전사 index purge 도중 앱이 종료되어 재색인이 필요합니다.",
     ) -> None:
         """purge 진입 후 crash한 회의에 재색인 필요 marker를 원자 기록한다."""
         PipelineManager._validate_meeting_id(meeting_id)
@@ -330,7 +522,7 @@ class JobProcessor:
             marker_path,
             {
                 "meeting_id": meeting_id,
-                "reason": "재전사 index purge 도중 앱이 종료되어 재색인이 필요합니다.",
+                "reason": reason,
                 "claim_token": claim.token,
                 "claim_phase": claim.phase,
                 "created_at": datetime.now().isoformat(),
@@ -472,7 +664,42 @@ class JobProcessor:
             )
             return False
 
-    def _resolve_step_model_id(self, step: str) -> str:
+    async def _finalize_user_cancellation(self, job_id: int, meeting_id: str) -> None:
+        """durable claim 또는 legacy flag를 recorded 취소 상태로 확정한다."""
+        self._cancellation_requests.discard(meeting_id)
+        try:
+            await asyncio.to_thread(
+                self._job_queue.queue.finalize_cancellation_claim,
+                job_id,
+            )
+        except (InvalidTransitionError, JobNotFoundError):
+            # 레거시/직접 테스트처럼 durable claim 없이 process-local
+            # cancellation만 등록된 경로를 하위 호환한다.
+            try:
+                await asyncio.to_thread(
+                    self._job_queue.queue.force_set_status,
+                    job_id,
+                    JobStatus.RECORDED,
+                    "사용자가 취소함",
+                )
+            except Exception as exc:
+                logger.error("취소 후 상태 복귀 실패: job_id=%s, error=%s", job_id, exc)
+        except Exception as exc:
+            logger.error("취소 claim 확정 실패: job_id=%s, error=%s", job_id, exc)
+        await self._thermal_manager.notify_job_completed()
+        await self._broadcast_event(
+            "job_cancelled",
+            {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
+        )
+        logger.info("작업 취소 완료: job_id=%s, meeting_id=%s", job_id, meeting_id)
+
+    def _resolve_step_model_id(
+        self,
+        step: str,
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> str:
         """단계에 해당하는 활성 모델 ID를 반환한다.
 
         - transcribe: STT 모델명 (HF repo ID 의 마지막 segment 또는 원본)
@@ -487,7 +714,12 @@ class JobProcessor:
                 return "default"
 
             if step == "transcribe":
-                stt_name = getattr(getattr(config, "stt", None), "model_name", "") or ""
+                if stt_provider in {"local", "openai"} and stt_model:
+                    return stt_model.split("/")[-1]
+                stt_cfg = getattr(config, "stt", None)
+                if getattr(stt_cfg, "provider", "local") == "openai":
+                    return getattr(stt_cfg, "openai_model", "default") or "default"
+                stt_name = getattr(stt_cfg, "model_name", "") or ""
                 # HF repo ID 에서 슬러그 추출: "youngouk/seastar-medium-ko-4bit-mlx" → 마지막 segment
                 # 단, perf_baseline.json 의 by_model 키와 매칭되도록 간단한 변환 사용
                 if "seastar" in stt_name:
@@ -555,12 +787,42 @@ class JobProcessor:
 
         logger.info(f"작업 처리 시작: job_id={job_id}, meeting_id={meeting_id}")
 
-        # 서멀 대기
+        # 서멀 대기 뒤 queued 상태를 원자적으로 선점한다. 폴링 snapshot을 얻은
+        # 동안 사용자가 취소해 recorded가 된 작업은 여기서 반드시 중단한다.
         await self._thermal_manager.wait_if_needed()
-        await self._thermal_manager.notify_job_started()
+        try:
+            claimed_job = await self._job_queue.claim_queued_job_for_processing(job_id)
+        except (InvalidTransitionError, JobNotFoundError) as exc:
+            logger.info(
+                "작업 처리 선점 실패로 파이프라인 생략: job_id=%s, meeting_id=%s, error=%s",
+                job_id,
+                meeting_id,
+                exc,
+            )
+            return
 
-        # 초기 상태 업데이트 (transcribing)
-        await self._update_job_status_safe(job_id, "transcribing")
+        queued_stt_provider = str(getattr(claimed_job, "stt_provider", "") or "")
+        queued_stt_model = str(getattr(claimed_job, "stt_model", "") or "")
+        if not queued_stt_provider and not queued_stt_model:
+            # v3 마이그레이션 전 legacy queued job만 실행 직전 설정을
+            # 1회 snapshot한다. 신규 큐는 모두 등록 시점에 저장된다.
+            from core.transcription_models import selection_from_config
+
+            legacy_selection = selection_from_config(getattr(self._pipeline, "_config", None))
+            queued_stt_provider = legacy_selection.provider
+            queued_stt_model = legacy_selection.model
+        elif not queued_stt_provider or not queued_stt_model:
+            logger.error(
+                "불완전한 STT queue snapshot으로 파이프라인 중단: job_id=%s",
+                job_id,
+            )
+            await self._update_job_status_safe(
+                job_id,
+                "failed",
+                error_message="전사 모델 선택 snapshot이 손상되었습니다.",
+            )
+            return
+        await self._thermal_manager.notify_job_started()
 
         # 파이프라인 단계별 상태 업데이트 콜백
         async def on_step_start(step_name: str) -> None:
@@ -575,7 +837,7 @@ class JobProcessor:
             Raises:
                 asyncio.CancelledError: 사용자가 이 회의에 대해 취소를 요청한 경우
             """
-            if meeting_id in self._cancellation_requests:
+            if self._is_job_cancellation_requested(meeting_id, job_id):
                 logger.info(
                     f"취소 감지: meeting_id={meeting_id}, step={step_name} → CancelledError 발생"
                 )
@@ -584,6 +846,10 @@ class JobProcessor:
             mapped_status = STEP_TO_STATUS.get(step_name)
             if mapped_status:
                 await self._update_job_status_safe(job_id, mapped_status)
+                # 첫 검사와 상태 CAS 사이에 등록된 durable claim도 실제 단계가
+                # 시작되기 전에 다시 확인한다.
+                if self._is_job_cancellation_requested(meeting_id, job_id):
+                    raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
                 await self._broadcast_event(
                     "pipeline_status",
                     {"job_id": job_id, "step": step_name, "status": mapped_status},
@@ -604,7 +870,11 @@ class JobProcessor:
                 phase = evt.get("phase", "")
                 step = evt.get("step", "")
                 input_size = float(evt.get("input_size") or 0.0)
-                model_id = self._resolve_step_model_id(step)
+                model_id = self._resolve_step_model_id(
+                    step,
+                    stt_provider=queued_stt_provider,
+                    stt_model=queued_stt_model,
+                )
 
                 payload: dict[str, Any] = {
                     "job_id": job_id,
@@ -650,10 +920,21 @@ class JobProcessor:
                 on_step_start=on_step_start,
                 on_step_progress=on_step_progress,
                 skip_llm_steps=skip_llm_steps_override,
+                should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
+                stt_provider=queued_stt_provider,
+                stt_model=queued_stt_model,
             )
+
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
 
             # 완료 상태 업데이트. 실패 시 복구 경로를 통해 pipeline_state 와 DB 상태를 맞춘다.
             status_recovered = await self._mark_job_completed_after_pipeline(job_id, meeting_id)
+            if not status_recovered and self._is_job_cancellation_requested(
+                meeting_id,
+                job_id,
+            ):
+                raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
             await self._thermal_manager.notify_job_completed()
             if not status_recovered:
                 await self._broadcast_event(
@@ -673,29 +954,14 @@ class JobProcessor:
             logger.info(f"작업 처리 완료: job_id={job_id}")
 
         except asyncio.CancelledError:
-            is_user_cancel = meeting_id in self._cancellation_requests
-            self._cancellation_requests.discard(meeting_id)
+            is_user_cancel = self._is_job_cancellation_requested(meeting_id, job_id)
 
             if is_user_cancel:
-                try:
-                    # JobStatus 전이 규칙 우회: 직접 강제 업데이트
-                    await asyncio.to_thread(
-                        self._job_queue.queue.force_set_status,
-                        job_id,
-                        JobStatus.RECORDED,
-                        "사용자가 취소함",
-                    )
-                except Exception as exc:
-                    logger.error(f"취소 후 상태 복귀 실패: job_id={job_id}, error={exc}")
-                await self._thermal_manager.notify_job_completed()
-                await self._broadcast_event(
-                    "job_cancelled",
-                    {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
-                )
-                logger.info(f"작업 취소 완료: job_id={job_id}, meeting_id={meeting_id}")
+                await self._finalize_user_cancellation(job_id, meeting_id)
                 # 사용자 취소는 작업 루프를 계속 동작시켜야 하므로 재전파하지 않는다.
                 return
 
+            self._cancellation_requests.discard(meeting_id)
             try:
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
@@ -714,6 +980,9 @@ class JobProcessor:
             raise
 
         except InvalidInputError as e:
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                await self._finalize_user_cancellation(job_id, meeting_id)
+                return
             try:
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
@@ -725,6 +994,9 @@ class JobProcessor:
                 logger.error(
                     f"입력 품질 보류 후 상태 복귀 실패: job_id={job_id}, error={status_exc}"
                 )
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                await self._finalize_user_cancellation(job_id, meeting_id)
+                return
             await self._thermal_manager.notify_job_completed()
             logger.info(
                 f"입력 품질 검증 비수락으로 작업 보류: "
@@ -732,6 +1004,9 @@ class JobProcessor:
             )
 
         except Exception as e:
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                await self._finalize_user_cancellation(job_id, meeting_id)
+                return
             # 실패 상태 업데이트
             error_msg = str(e)
             await self._update_job_status_safe(
@@ -739,6 +1014,9 @@ class JobProcessor:
                 "failed",
                 error_message=error_msg,
             )
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                await self._finalize_user_cancellation(job_id, meeting_id)
+                return
             await self._thermal_manager.notify_job_completed()
             await self._broadcast_event(
                 "job_failed",

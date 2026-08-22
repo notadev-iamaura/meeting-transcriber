@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from api.config_yaml import get_config_path as _get_config_path
 from api.config_yaml import replace_yaml_value as _replace_yaml_value
+from api.openai_settings_guard import get_openai_settings_mutation_lock
 from core.io_utils import atomic_write_text as _atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ class SettingsResponse(BaseModel):
     llm_mlx_max_tokens: int = 2000
     llm_skip_steps: bool = False
     stt_language: str = "ko"
+    stt_provider: str = "local"
+    stt_openai_model: str = "gpt-4o-transcribe-diarize"
     # 환각 필터 (hallucination_filter)
     hf_enabled: bool = True
     hf_no_speech_threshold: float = 0.9
@@ -113,6 +116,9 @@ class SettingsUpdateRequest(BaseModel):
     llm_mlx_max_tokens: int | None = None
     llm_skip_steps: bool | None = None
     stt_language: str | None = None
+    stt_provider: str | None = None
+    stt_openai_model: str | None = None
+    external_upload_confirmed: bool | None = None
     # 환각 필터
     hf_enabled: bool | None = None
     hf_no_speech_threshold: float | None = None
@@ -156,6 +162,12 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         llm_mlx_max_tokens=config.llm.mlx_max_tokens,
         llm_skip_steps=config.pipeline.skip_llm_steps,
         stt_language=config.stt.language,
+        stt_provider=getattr(config.stt, "provider", "local"),
+        stt_openai_model=getattr(
+            config.stt,
+            "openai_model",
+            "gpt-4o-transcribe-diarize",
+        ),
         hf_enabled=config.hallucination_filter.enabled,
         hf_no_speech_threshold=config.hallucination_filter.no_speech_threshold,
         hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
@@ -205,6 +217,15 @@ async def update_settings(
     request: Request,
     body: SettingsUpdateRequest,
 ) -> SettingsUpdateResponse:
+    """설정과 OpenAI 키의 불변식을 유지하며 설정을 갱신한다."""
+    async with get_openai_settings_mutation_lock(request):
+        return await _update_settings_locked(request, body)
+
+
+async def _update_settings_locked(
+    request: Request,
+    body: SettingsUpdateRequest,
+) -> SettingsUpdateResponse:
     """시스템 설정을 업데이트한다.
 
     전달된 필드만 config.yaml에 반영하고 런타임 config도 갱신한다.
@@ -229,6 +250,7 @@ async def update_settings(
 
     # 변경할 필드만 추출 (None이 아닌 값)
     updates = body.model_dump(exclude_none=True)
+    external_upload_confirmed = bool(updates.pop("external_upload_confirmed", False))
     if not updates:
         return SettingsUpdateResponse(
             settings=_build_settings_response(config),
@@ -277,6 +299,35 @@ async def update_settings(
                     "stt_language 는 BCP-47 언어 코드 형식만 허용됩니다 "
                     "(예: ko, en, en-US, zh-Hant)."
                 ),
+            )
+
+    if "stt_provider" in updates and updates["stt_provider"] not in {"local", "openai"}:
+        raise HTTPException(
+            status_code=400,
+            detail="stt_provider는 'local' 또는 'openai'만 허용됩니다.",
+        )
+
+    if "stt_openai_model" in updates and updates["stt_openai_model"] != (
+        "gpt-4o-transcribe-diarize"
+    ):
+        raise HTTPException(status_code=400, detail="지원하지 않는 OpenAI 전사 모델입니다.")
+
+    current_stt_provider = getattr(config.stt, "provider", "local")
+    effective_stt_provider = updates.get("stt_provider", current_stt_provider)
+    if effective_stt_provider == "openai":
+        from api.routers.transcription_models import require_loopback_server
+        from security.openai_keychain import get_status
+
+        require_loopback_server(config, request)
+        if current_stt_provider != "openai" and not external_upload_confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="OpenAI를 기본 전사로 사용하려면 외부 오디오 전송에 동의해야 합니다.",
+            )
+        if not get_status().configured:
+            raise HTTPException(
+                status_code=400,
+                detail="OpenAI API 키를 먼저 등록해 주세요.",
             )
 
     # 환각 필터 파라미터 검증 (Pydantic Field 의 ge/le 와 동일 범위)
@@ -386,6 +437,10 @@ async def update_settings(
 
     if "stt_language" in updates:
         changed_fields.append("stt_language")
+    if "stt_provider" in updates:
+        changed_fields.append("stt_provider")
+    if "stt_openai_model" in updates:
+        changed_fields.append("stt_openai_model")
 
     if "hf_enabled" in updates:
         changed_fields.append("hf_enabled")
@@ -448,6 +503,17 @@ async def update_settings(
         if "stt_language" in updates:
             content = _replace_yaml_value(
                 content, "stt", "language", f'"{updates["stt_language"]}"'
+            )
+        if "stt_provider" in updates:
+            content = _replace_yaml_value(
+                content, "stt", "provider", f'"{updates["stt_provider"]}"'
+            )
+        if "stt_openai_model" in updates:
+            content = _replace_yaml_value(
+                content,
+                "stt",
+                "openai_model",
+                f'"{updates["stt_openai_model"]}"',
             )
         if "hf_enabled" in updates:
             val = "true" if updates["hf_enabled"] else "false"
@@ -564,8 +630,15 @@ async def update_settings(
         )
         config = config.model_copy(update={"pipeline": new_pipeline})
 
+    stt_updates: dict[str, Any] = {}
     if "stt_language" in updates:
-        new_stt = config.stt.model_copy(update={"language": updates["stt_language"]})
+        stt_updates["language"] = updates["stt_language"]
+    if "stt_provider" in updates:
+        stt_updates["provider"] = updates["stt_provider"]
+    if "stt_openai_model" in updates:
+        stt_updates["openai_model"] = updates["stt_openai_model"]
+    if stt_updates:
+        new_stt = config.stt.model_copy(update=stt_updates)
         config = config.model_copy(update={"stt": new_stt})
 
     # 환각 필터 런타임 갱신
@@ -618,6 +691,10 @@ async def update_settings(
 
     # app.state.config 갱신
     request.app.state.config = config
+
+    pipeline_manager = getattr(request.app.state, "pipeline_manager", None)
+    if stt_updates and pipeline_manager is not None:
+        pipeline_manager.update_stt_config(config.stt)
 
     lifecycle_scheduler = getattr(request.app.state, "lifecycle_scheduler", None)
     if lifecycle_updates and lifecycle_scheduler is not None:

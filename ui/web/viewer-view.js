@@ -66,6 +66,8 @@
             self._transcriptSourceStage = "corrected";
             self._transcriptReadonly = false;
             self._transcriptSignature = "";
+            self._alternateTranscriptionDialog = null;
+            self._alternateTranscriptionCleanup = null;
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
             var urlParams = new URLSearchParams(window.location.search);
@@ -105,6 +107,7 @@
                 '    <span class="viewer-meta-item" id="viewerMetaDate"></span>',
                 '    <span class="viewer-meta-item" id="viewerMetaSpeakers"></span>',
                 '    <span class="viewer-meta-item" id="viewerMetaUtterances"></span>',
+                '    <span class="viewer-meta-item transcription-provider-meta" id="viewerMetaTranscription" hidden></span>',
                 '  </div>',
                 '  <div class="transcript-source-status" id="viewerTranscriptSourceStatus"',
                 '       role="status" aria-live="polite" style="display:none;"></div>',
@@ -213,6 +216,7 @@
                 metaDate: document.getElementById("viewerMetaDate"),
                 metaSpeakers: document.getElementById("viewerMetaSpeakers"),
                 metaUtterances: document.getElementById("viewerMetaUtterances"),
+                metaTranscription: document.getElementById("viewerMetaTranscription"),
                 transcriptSourceStatus: document.getElementById("viewerTranscriptSourceStatus"),
                 speakerLegend: document.getElementById("viewerSpeakerLegend"),
                 viewerActions: document.getElementById("viewerActions"),
@@ -1191,6 +1195,19 @@
 
                 els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(App.getFileName(data.audio_path)) + '</span>';
                 els.metaDate.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(App.formatDate(data.created_at)) + '</span>';
+                if (data.stt_provider) {
+                    var processingLocation = data.stt_provider === "openai"
+                        ? "OpenAI 서버"
+                        : "이 Mac";
+                    var modelName = String(data.stt_model || "").split("/").pop();
+                    els.metaTranscription.textContent = modelName
+                        ? processingLocation + " · " + modelName
+                        : processingLocation + "에서 전사";
+                    els.metaTranscription.hidden = false;
+                } else {
+                    els.metaTranscription.hidden = true;
+                    els.metaTranscription.textContent = "";
+                }
 
                 // 액션 버튼 렌더링 (전사 시작, 재시도, 요약 생성, 삭제)
                 // _loadTranscript 완료 후 다시 호출되어 복사/다운로드 버튼이 갱신됨
@@ -1464,6 +1481,20 @@
                     self._reTranscribeMeeting(data.meeting_id, reBtn);
                 });
                 dangerGroup.appendChild(reBtn);
+            }
+
+            // 기존 결과를 보존하고 로컬/OpenAI 전사 결과를 별도 A/B 작업으로 비교한다.
+            if (data.status === "completed") {
+                var alternateModelBtn = document.createElement("button");
+                alternateModelBtn.className = "viewer-action-btn alternate-transcription";
+                alternateModelBtn.textContent = "다른 모델로 텍스트 변환하기…";
+                alternateModelBtn.title =
+                    "기존 회의록은 유지하고 로컬 모델과 OpenAI 모델의 전사 결과를 비교합니다.";
+                alternateModelBtn.setAttribute("aria-haspopup", "dialog");
+                alternateModelBtn.addEventListener("click", function () {
+                    self._openAlternateTranscriptionDialog(alternateModelBtn);
+                });
+                secondaryGroup.appendChild(alternateModelBtn);
             }
 
             // 요약 생성 버튼 (completed + skipped_steps에 summarize 포함 시)
@@ -1770,6 +1801,339 @@
                 btn.disabled = false;
                 btn.innerHTML = originalText;
             }
+        };
+
+        /**
+         * 현재 회의의 로컬 전사와 OpenAI 전사를 비교하는 비파괴 A/B 대화상자를 연다.
+         * @param {HTMLElement} trigger 닫힌 뒤 포커스를 되돌릴 버튼
+         */
+        ViewerView.prototype._openAlternateTranscriptionDialog = function (trigger) {
+            var self = this;
+            if (self._alternateTranscriptionCleanup) {
+                self._alternateTranscriptionCleanup(false);
+            }
+
+            var abortController = new AbortController();
+            var dialog = document.createElement("dialog");
+            dialog.className = "transcription-model-dialog";
+            dialog.setAttribute("role", "dialog");
+            dialog.setAttribute("aria-modal", "true");
+            dialog.setAttribute("aria-labelledby", "alternateTranscriptionTitle");
+            dialog.setAttribute("aria-describedby", "alternateTranscriptionDescription");
+            dialog.innerHTML = [
+                '<div class="transcription-model-dialog-content">',
+                '  <header class="transcription-model-dialog-header">',
+                '    <div>',
+                '      <h2 id="alternateTranscriptionTitle">다른 모델로 텍스트 변환하기</h2>',
+                '      <p id="alternateTranscriptionDescription">기존 회의록을 바꾸지 않고 두 전사 결과를 별도 A/B 테스트로 만듭니다.</p>',
+                '    </div>',
+                '    <button type="button" class="transcription-dialog-close" aria-label="닫기">&#x2715;</button>',
+                '  </header>',
+                '  <div class="transcription-comparison-grid">',
+                '    <section class="transcription-model-option local" aria-labelledby="alternateLocalTitle">',
+                '      <div class="processing-location-badge local">A · 이 Mac에서 처리</div>',
+                '      <h3 id="alternateLocalTitle">로컬 기준 모델</h3>',
+                '      <p class="transcription-model-name" id="alternateLocalModel">불러오는 중…</p>',
+                '      <p class="transcription-model-detail">음성 파일이 외부로 전송되지 않습니다.</p>',
+                '    </section>',
+                '    <section class="transcription-model-option external" aria-labelledby="alternateOpenAITitle">',
+                '      <div class="processing-location-badge external">B · OpenAI 서버</div>',
+                '      <label id="alternateOpenAITitle" for="alternateOpenAIModel">OpenAI 전사 모델</label>',
+                '      <select id="alternateOpenAIModel" class="transcription-model-select" aria-describedby="alternateTranscriptionStatus" disabled>',
+                '        <option value="">불러오는 중…</option>',
+                '      </select>',
+                '      <p class="transcription-model-detail">선택한 모델로 처리하기 위해 음성 파일을 외부로 전송합니다.</p>',
+                '    </section>',
+                '  </div>',
+                '  <div class="external-upload-warning" role="note">',
+                '    <strong>외부 전송 안내</strong>',
+                '    <span>OpenAI 모델을 실행하면 이 회의의 음성 파일이 OpenAI 서버로 업로드됩니다. 기존 로컬 전사문과 회의록은 그대로 유지됩니다.</span>',
+                '  </div>',
+                '  <label class="external-upload-consent">',
+                '    <input type="checkbox" id="alternateExternalUploadConsent">',
+                '    <span>이 음성 파일을 OpenAI 서버로 전송하는 데 동의합니다.</span>',
+                '  </label>',
+                '  <div class="transcription-missing-key" id="alternateMissingKey" hidden>',
+                '    <span>OpenAI API 키를 먼저 등록해야 합니다.</span>',
+                '    <button type="button" class="transcription-settings-link">설정에서 키 등록</button>',
+                '  </div>',
+                '  <div class="transcription-model-status" id="alternateTranscriptionStatus" role="status" aria-live="polite">모델 목록을 불러오는 중…</div>',
+                '  <footer class="transcription-model-dialog-actions">',
+                '    <button type="button" class="transcription-dialog-cancel">취소</button>',
+                '    <button type="button" class="transcription-dialog-submit" disabled>비교 전사 시작</button>',
+                '  </footer>',
+                '</div>',
+            ].join("\n");
+
+            document.body.appendChild(dialog);
+            self._alternateTranscriptionDialog = dialog;
+
+            var closeBtn = dialog.querySelector(".transcription-dialog-close");
+            var cancelBtn = dialog.querySelector(".transcription-dialog-cancel");
+            var submitBtn = dialog.querySelector(".transcription-dialog-submit");
+            var settingsBtn = dialog.querySelector(".transcription-settings-link");
+            var localModelEl = dialog.querySelector("#alternateLocalModel");
+            var openAISelect = dialog.querySelector("#alternateOpenAIModel");
+            var consentInput = dialog.querySelector("#alternateExternalUploadConsent");
+            var missingKeyEl = dialog.querySelector("#alternateMissingKey");
+            var statusEl = dialog.querySelector("#alternateTranscriptionStatus");
+            var catalog = null;
+            var localModel = null;
+            var requestInFlight = false;
+
+            var cleanup = function (restoreFocus) {
+                if (self._alternateTranscriptionDialog !== dialog) return;
+                abortController.abort();
+                dialog.removeEventListener("close", onClose);
+                dialog.removeEventListener("cancel", onDialogCancel);
+                dialog.removeEventListener("click", onBackdropClick);
+                closeBtn.removeEventListener("click", onDismiss);
+                cancelBtn.removeEventListener("click", onDismiss);
+                settingsBtn.removeEventListener("click", onOpenSettings);
+                openAISelect.removeEventListener("change", updateGate);
+                consentInput.removeEventListener("change", updateGate);
+                submitBtn.removeEventListener("click", onSubmit);
+                if (dialog.parentNode) dialog.parentNode.removeChild(dialog);
+                self._alternateTranscriptionDialog = null;
+                self._alternateTranscriptionCleanup = null;
+                if (restoreFocus) {
+                    var focusTarget = trigger && trigger.isConnected ? trigger : null;
+                    if (!focusTarget && self._els && self._els.viewerActions) {
+                        focusTarget = self._els.viewerActions.querySelector(
+                            ".alternate-transcription"
+                        );
+                    }
+                    if (focusTarget) focusTarget.focus();
+                }
+            };
+
+            function setDialogDismissalBlocked(blocked) {
+                closeBtn.disabled = blocked;
+                cancelBtn.disabled = blocked;
+                settingsBtn.disabled = blocked;
+                if (blocked) {
+                    dialog.setAttribute("aria-busy", "true");
+                } else {
+                    dialog.removeAttribute("aria-busy");
+                }
+            }
+
+            var onClose = function () { cleanup(true); };
+            var onDialogCancel = function (event) {
+                if (requestInFlight) event.preventDefault();
+            };
+            var onDismiss = function () {
+                if (requestInFlight) return;
+                dialog.close();
+            };
+            var onBackdropClick = function (event) {
+                if (!requestInFlight && event.target === dialog) dialog.close();
+            };
+            var onOpenSettings = function () {
+                if (requestInFlight) return;
+                cleanup(false);
+                Router.navigate("/app/settings?focus=openai");
+            };
+
+            function getSelectedOpenAIModel() {
+                if (!catalog) return null;
+                return (catalog.models || []).find(function (model) {
+                    return model.provider === "openai" && model.id === openAISelect.value;
+                }) || null;
+            }
+
+            function getDisplayModelLabel(model) {
+                var label = String((model && (model.label || model.id)) || "");
+                return label
+                    .replace(/^이 Mac에서 처리\s*·\s*/, "")
+                    .replace(/^OpenAI 서버에서 처리\s*·\s*/, "")
+                    .replace(/\s*·\s*외부 전송$/, "");
+            }
+
+            function updateGate() {
+                var openAIKey = catalog && catalog.openai_key;
+                var selectedOpenAIModel = getSelectedOpenAIModel();
+                var keyConfigured = !!(openAIKey && openAIKey.configured);
+                var ready = !!(
+                    !requestInFlight &&
+                    localModel &&
+                    localModel.available &&
+                    selectedOpenAIModel &&
+                    selectedOpenAIModel.available &&
+                    keyConfigured &&
+                    consentInput.checked
+                );
+                submitBtn.disabled = !ready;
+                missingKeyEl.hidden = keyConfigured;
+
+                if (!localModel) {
+                    statusEl.textContent = "비교할 로컬 모델을 찾을 수 없습니다.";
+                    statusEl.className = "transcription-model-status error";
+                } else if (!localModel.available) {
+                    statusEl.textContent =
+                        localModel.unavailable_reason || "로컬 기준 모델을 사용할 수 없습니다.";
+                    statusEl.className = "transcription-model-status error";
+                } else if (!keyConfigured) {
+                    statusEl.textContent = "OpenAI API 키를 등록하면 비교 전사를 시작할 수 있습니다.";
+                    statusEl.className = "transcription-model-status warning";
+                } else if (!selectedOpenAIModel) {
+                    statusEl.textContent = "사용할 수 있는 OpenAI 전사 모델을 선택해 주세요.";
+                    statusEl.className = "transcription-model-status warning";
+                } else if (!selectedOpenAIModel.available) {
+                    statusEl.textContent =
+                        selectedOpenAIModel.unavailable_reason || "선택한 OpenAI 모델을 사용할 수 없습니다.";
+                    statusEl.className = "transcription-model-status error";
+                } else if (!consentInput.checked) {
+                    statusEl.textContent = "외부 전송 안내를 확인하고 동의해 주세요.";
+                    statusEl.className = "transcription-model-status warning";
+                } else {
+                    statusEl.textContent = "원본은 유지되며 비교 결과는 별도 A/B 테스트에 저장됩니다.";
+                    statusEl.className = "transcription-model-status success";
+                }
+            }
+
+            var onSubmit = async function () {
+                var selectedOpenAIModel = getSelectedOpenAIModel();
+                if (
+                    requestInFlight ||
+                    !localModel ||
+                    !selectedOpenAIModel ||
+                    !consentInput.checked ||
+                    !(catalog.openai_key && catalog.openai_key.configured)
+                ) {
+                    updateGate();
+                    return;
+                }
+
+                requestInFlight = true;
+                setDialogDismissalBlocked(true);
+                openAISelect.disabled = true;
+                consentInput.disabled = true;
+                submitBtn.disabled = true;
+                submitBtn.textContent = "비교 작업 생성 중…";
+                statusEl.textContent = "두 전사 모델의 비교 작업을 만들고 있습니다…";
+                statusEl.className = "transcription-model-status";
+
+                var payload = {
+                    source_meeting_id: self._meetingId,
+                    variant_a: {
+                        label: getDisplayModelLabel(localModel),
+                        model_id: localModel.id,
+                        backend: "mlx",
+                    },
+                    variant_b: {
+                        label: getDisplayModelLabel(selectedOpenAIModel),
+                        model_id: selectedOpenAIModel.id,
+                        backend: "openai",
+                    },
+                    allow_diarize_rerun: false,
+                    external_upload_confirmed: true,
+                };
+
+                try {
+                    var result = await App.apiRequest("/ab-tests/stt", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                        signal: abortController.signal,
+                    });
+                    if (self._alternateTranscriptionDialog !== dialog) return;
+                    if (!result || !result.test_id) {
+                        throw new Error("A/B 테스트 ID를 받지 못했습니다.");
+                    }
+                    var testId = result.test_id;
+                    requestInFlight = false;
+                    setDialogDismissalBlocked(false);
+                    cleanup(false);
+                    Router.navigate("/app/ab-test/" + encodeURIComponent(testId));
+                } catch (err) {
+                    if (err && err.name === "AbortError") return;
+                    if (self._alternateTranscriptionDialog !== dialog) return;
+                    requestInFlight = false;
+                    setDialogDismissalBlocked(false);
+                    openAISelect.disabled = false;
+                    consentInput.disabled = false;
+                    submitBtn.textContent = "비교 전사 시작";
+                    updateGate();
+                    statusEl.textContent = "비교 전사 시작 실패: " + (err.message || String(err));
+                    statusEl.className = "transcription-model-status error";
+                }
+            };
+
+            dialog.addEventListener("close", onClose);
+            dialog.addEventListener("cancel", onDialogCancel);
+            dialog.addEventListener("click", onBackdropClick);
+            closeBtn.addEventListener("click", onDismiss);
+            cancelBtn.addEventListener("click", onDismiss);
+            settingsBtn.addEventListener("click", onOpenSettings);
+            openAISelect.addEventListener("change", updateGate);
+            consentInput.addEventListener("change", updateGate);
+            submitBtn.addEventListener("click", onSubmit);
+            self._alternateTranscriptionCleanup = cleanup;
+
+            if (typeof dialog.showModal === "function") {
+                dialog.showModal();
+            } else {
+                dialog.setAttribute("open", "");
+            }
+            closeBtn.focus();
+
+            App.apiRequest("/transcription-models", { signal: abortController.signal })
+                .then(function (data) {
+                    if (self._alternateTranscriptionDialog !== dialog) return;
+                    catalog = data || { models: [], openai_key: { configured: false } };
+                    var models = Array.isArray(catalog.models) ? catalog.models : [];
+                    localModel = models.find(function (model) {
+                        return model.provider === "local" && model.is_default;
+                    }) || models.find(function (model) {
+                        return model.provider === "local" && model.available;
+                    }) || models.find(function (model) {
+                        return model.provider === "local";
+                    }) || null;
+                    localModelEl.textContent = localModel
+                        ? getDisplayModelLabel(localModel)
+                        : "사용 가능한 로컬 모델 없음";
+
+                    openAISelect.innerHTML = "";
+                    var placeholder = document.createElement("option");
+                    placeholder.value = "";
+                    placeholder.textContent = "OpenAI 모델 선택";
+                    placeholder.disabled = true;
+                    placeholder.selected = true;
+                    openAISelect.appendChild(placeholder);
+
+                    var firstAvailableId = "";
+                    var firstOpenAIId = "";
+                    models.filter(function (model) {
+                        return model.provider === "openai";
+                    }).forEach(function (model) {
+                        var option = document.createElement("option");
+                        option.value = model.id;
+                        option.textContent = getDisplayModelLabel(model);
+                        if (!firstOpenAIId) firstOpenAIId = model.id;
+                        if (!model.available) {
+                            option.textContent += " · 사용 불가";
+                            option.disabled = true;
+                        } else if (!firstAvailableId) {
+                            firstAvailableId = model.id;
+                        }
+                        openAISelect.appendChild(option);
+                    });
+                    if (firstAvailableId || firstOpenAIId) {
+                        openAISelect.value = firstAvailableId || firstOpenAIId;
+                    }
+                    openAISelect.disabled = !firstAvailableId;
+                    updateGate();
+                    if (firstAvailableId) openAISelect.focus();
+                })
+                .catch(function (err) {
+                    if (err && err.name === "AbortError") return;
+                    if (self._alternateTranscriptionDialog !== dialog) return;
+                    localModelEl.textContent = "모델 목록 조회 실패";
+                    openAISelect.disabled = true;
+                    statusEl.textContent = "모델 목록 조회 실패: " + (err.message || String(err));
+                    statusEl.className = "transcription-model-status error";
+                });
         };
 
         /**
@@ -2639,6 +3003,11 @@
          * 뷰를 정리한다.
          */
         ViewerView.prototype.destroy = function () {
+            // 외부 전사 대화상자의 네트워크 요청·리스너·DOM을 함께 정리한다.
+            if (this._alternateTranscriptionCleanup) {
+                this._alternateTranscriptionCleanup(false);
+            }
+
             // 이벤트 리스너 해제
             this._listeners.forEach(function (entry) {
                 entry.el.removeEventListener(entry.type, entry.fn);

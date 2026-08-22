@@ -44,6 +44,7 @@ from core.job_queue import (
     _verify_pinned_retranscribe_root,
     cleanup_retranscribe_staging,
     lexical_root_no_symlinks,
+    parse_delete_claim,
     parse_retranscribe_claim,
     retranscribe_staging_paths,
     rollback_retranscribe_staging,
@@ -1072,13 +1073,42 @@ def _build_meeting_item(
     status_detail: str = "",
 ) -> MeetingItem:
     """Job 과 pipeline_state 를 API 응답 스키마로 변환한다."""
+    from core.transcription_models import (
+        OPENAI_PROVIDER,
+        OPENAI_TRANSCRIBE_DIARIZE_MODEL,
+    )
+
+    def _valid_stt_snapshot(provider: Any, model: Any) -> tuple[str, str] | None:
+        """응답에 노출해도 되는 provider/model 쌍만 반환한다."""
+        if provider not in {"local", OPENAI_PROVIDER} or not isinstance(model, str) or not model:
+            return None
+        if provider == OPENAI_PROVIDER and model != OPENAI_TRANSCRIBE_DIARIZE_MODEL:
+            return None
+        return str(provider), model
+
     skipped_steps = []
     degraded = False
+    stt_provider = ""
+    stt_model = ""
     if pipeline_state is not None:
         raw_skipped = pipeline_state.get("skipped_steps", [])
         if isinstance(raw_skipped, list):
             skipped_steps = [str(step) for step in raw_skipped]
         degraded = bool(pipeline_state.get("degraded", False))
+        state_snapshot = _valid_stt_snapshot(
+            pipeline_state.get("stt_provider", ""),
+            pipeline_state.get("stt_model", ""),
+        )
+        if state_snapshot is not None:
+            stt_provider, stt_model = state_snapshot
+
+    if not stt_provider:
+        job_snapshot = _valid_stt_snapshot(
+            getattr(job, "stt_provider", ""),
+            getattr(job, "stt_model", ""),
+        )
+        if job_snapshot is not None:
+            stt_provider, stt_model = job_snapshot
 
     return MeetingItem(
         id=job.id,
@@ -1093,6 +1123,8 @@ def _build_meeting_item(
         degraded=degraded,
         skipped_steps=skipped_steps,
         status_detail=status_detail,
+        stt_provider=stt_provider,
+        stt_model=stt_model,
     )
 
 
@@ -1187,6 +1219,8 @@ class MeetingItem(BaseModel):
     degraded: bool = False
     skipped_steps: list[str] = Field(default_factory=list)
     status_detail: str = ""
+    stt_provider: str = ""
+    stt_model: str = ""
 
 
 class TranscriptUtteranceItem(BaseModel):
@@ -1352,17 +1386,11 @@ async def patch_meeting(
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
                 raise
 
-        return MeetingItem(
-            id=job.id,
-            meeting_id=job.meeting_id,
-            audio_path=job.audio_path,
-            status=job.status,
-            retry_count=job.retry_count,
-            error_message=job.error_message,
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            title=getattr(job, "title", "") or "",
+        pipeline_state = _read_pipeline_state_for_response(
+            _get_config(request),
+            meeting_id,
         )
+        return _build_meeting_item(job, pipeline_state=pipeline_state)
     except HTTPException:
         raise
     except Exception as e:
@@ -1430,11 +1458,31 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
                 ),
             )
 
+        from core.transcription_models import selection_from_state_or_config
+
+        try:
+            stt_selection = selection_from_state_or_config(
+                config,
+                pipeline_state,
+                job=job,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if stt_selection.external_upload:
+            from api.routers.transcription_models import require_loopback_server
+
+            require_loopback_server(config, request)
+
         # 완료 산출물 복구가 아니라 실제 파이프라인 재실행일 때만 admission을 요구한다.
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # 재시도 실행 (job_id 기반)
-        updated_job = await asyncio.to_thread(queue.queue.retry_job, job.id)
+        updated_job = await asyncio.to_thread(
+            queue.queue.retry_job,
+            job.id,
+            stt_provider=stt_selection.provider,
+            stt_model=stt_selection.model,
+        )
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
         job_processor = getattr(request.app.state, "job_processor", None)
@@ -1508,6 +1556,21 @@ async def transcribe_meeting(
             raise HTTPException(status_code=409, detail=detail)
 
         config = _get_config(request)
+        pipeline_state = _read_pipeline_state_for_response(config, meeting_id)
+        from core.transcription_models import selection_from_state_or_config
+
+        try:
+            stt_selection = selection_from_state_or_config(
+                config,
+                pipeline_state,
+                job=job,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if stt_selection.external_upload:
+            from api.routers.transcription_models import require_loopback_server
+
+            require_loopback_server(config, request)
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # failed → queued 를 한 번의 조건부 UPDATE로 수행해 recorded 중간 상태를
@@ -1520,12 +1583,16 @@ async def transcribe_meeting(
             updated_job = await asyncio.to_thread(
                 queue.queue.queue_failed_job,
                 job.id,
+                stt_provider=stt_selection.provider,
+                stt_model=stt_selection.model,
             )
         else:
             updated_job = await asyncio.to_thread(
-                queue.queue.update_status,
+                queue.queue.queue_job,
                 job.id,
-                JobStatus.QUEUED,
+                "",
+                stt_provider=stt_selection.provider,
+                stt_model=stt_selection.model,
             )
 
         # 이전 취소 요청이 set 에 남아있을 수 있으니 정리 (stale 방어)
@@ -1535,17 +1602,7 @@ async def transcribe_meeting(
 
         logger.info(f"전사 시작 요청: {meeting_id} (job_id={job.id})")
 
-        return MeetingItem(
-            id=updated_job.id,
-            meeting_id=updated_job.meeting_id,
-            audio_path=updated_job.audio_path,
-            status=updated_job.status,
-            retry_count=updated_job.retry_count,
-            error_message=updated_job.error_message,
-            created_at=updated_job.created_at,
-            updated_at=updated_job.updated_at,
-            title=getattr(updated_job, "title", "") or "",
-        )
+        return _build_meeting_item(updated_job, pipeline_state=pipeline_state)
     except HTTPException:
         raise
     except InvalidTransitionError as e:
@@ -1565,9 +1622,9 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
     """진행 중(또는 대기 중)인 회의 전사를 취소하고 recorded 로 되돌린다.
 
     동작:
-        - status == queued: 아직 워커가 잡지 않았으므로 즉시 force_set_status 로 recorded.
+        - status == queued: 아직 워커가 잡지 않았으면 CAS로 즉시 recorded.
         - status in (transcribing, diarizing, merging, embedding):
-          JobProcessor.request_cancellation() 으로 취소 요청 등록.
+          DB cancellation claim과 JobProcessor flag를 함께 등록.
           현재 실행 중인 단계가 끝난 뒤 다음 단계 경계에서 CancelledError 가 발생하여
           orchestrator 가 status 를 recorded 로 되돌리고 brodcast.
         - 그 외 상태: 409 (취소 대상 아님)
@@ -1583,7 +1640,7 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
     Raises:
         HTTPException: 회의 없음(404), 취소 대상 상태 아님(409)
     """
-    from core.job_queue import JobNotFoundError, JobStatus
+    from core.job_queue import InvalidTransitionError, JobNotFoundError, JobStatus
 
     queue = _get_job_queue(request)
 
@@ -1609,46 +1666,74 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
                 detail=f"취소할 수 있는 상태가 아닙니다: {job.status}",
             )
 
-        # queued: 즉시 recorded 로 강제 전환 (아직 워커가 잡지 않음)
+        job_processor = getattr(request.app.state, "job_processor", None)
+
+        # queued: recorded 전환을 먼저 CAS한다. 워커가 그 사이 작업을
+        # 선점했다면 durable cancellation claim을 남긴 뒤 process-local flag도
+        # 등록한다. claim은 요청 처리 직후 프로세스가 종료돼도 복구된다.
         if job.status == JobStatus.QUEUED.value:
-            updated_job = await asyncio.to_thread(
-                queue.queue.force_set_status,
-                job.id,
-                JobStatus.RECORDED,
-                "사용자가 취소함 (대기 중)",
-            )
-            # 혹시 이전에 in-progress 취소 요청이 등록되어 있을 수 있으니 정리
-            job_processor = getattr(request.app.state, "job_processor", None)
-            if job_processor is not None:
-                job_processor._cancellation_requests.discard(meeting_id)
+            try:
+                updated_job = await queue.cancel_queued_job(
+                    job.id,
+                    "사용자가 취소함 (대기 중)",
+                )
+            except InvalidTransitionError:
+                updated_job = await asyncio.to_thread(queue.queue.get_job, job.id)
+                if updated_job.status not in {
+                    JobStatus.TRANSCRIBING.value,
+                    JobStatus.DIARIZING.value,
+                    JobStatus.MERGING.value,
+                    JobStatus.EMBEDDING.value,
+                }:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"취소할 수 있는 상태가 아닙니다: {updated_job.status}",
+                    ) from None
+                if job_processor is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="JobProcessor 가 초기화되지 않아 취소할 수 없습니다.",
+                    ) from None
+                updated_job = await asyncio.to_thread(
+                    queue.queue.claim_active_job_for_cancellation,
+                    job.id,
+                    uuid.uuid4().hex,
+                )
+                job_processor.request_cancellation(meeting_id)
         else:
-            # 실행 중: JobProcessor 에 취소 요청 등록.
-            # 단계 경계에서 orchestrator 가 잡고 recorded 로 되돌린다.
-            job_processor = getattr(request.app.state, "job_processor", None)
+            # 실행 중: DB claim을 먼저 남기고 메모리 flag도 등록한다. API task가
+            # claim 직후 취소되어도 pipeline callback은 DB claim을 직접 확인한다.
             if job_processor is None:
                 raise HTTPException(
                     status_code=503,
                     detail="JobProcessor 가 초기화되지 않아 취소할 수 없습니다.",
                 )
+            updated_job = await asyncio.to_thread(
+                queue.queue.claim_active_job_for_cancellation,
+                job.id,
+                uuid.uuid4().hex,
+            )
             job_processor.request_cancellation(meeting_id)
-            # 현재 시점의 job 그대로 반환 — 프론트는 폴링/WebSocket 으로 갱신
-            updated_job = job
 
         logger.info(f"취소 요청 처리: {meeting_id} (이전 status={job.status})")
 
-        return MeetingItem(
-            id=updated_job.id,
-            meeting_id=updated_job.meeting_id,
-            audio_path=updated_job.audio_path,
-            status=updated_job.status,
-            retry_count=updated_job.retry_count,
-            error_message=updated_job.error_message,
-            created_at=updated_job.created_at,
-            updated_at=updated_job.updated_at,
-            title=getattr(updated_job, "title", "") or "",
+        pipeline_state = _read_pipeline_state_for_response(
+            _get_config(request),
+            meeting_id,
+        )
+        return _build_meeting_item(
+            updated_job,
+            pipeline_state=pipeline_state,
+            status_detail=(
+                "취소 요청이 저장되었습니다. 현재 외부 요청이 끝나는 즉시 중단합니다."
+                if updated_job.status == JobStatus.RECORDING.value
+                else ""
+            ),
         )
     except HTTPException:
         raise
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except JobNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
@@ -1686,6 +1771,16 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
     config = getattr(request.app.state, "config", None)
     if config is None:
         raise HTTPException(status_code=503, detail="설정이 초기화되지 않았습니다.")
+    from core.transcription_models import selection_from_config
+
+    try:
+        stt_selection = selection_from_config(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if stt_selection.external_upload:
+        from api.routers.transcription_models import require_loopback_server
+
+        require_loopback_server(config, request)
 
     try:
         job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
@@ -1718,6 +1813,8 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
             queue.queue.claim_for_retranscribe,
             job.id,
             claim_token,
+            stt_provider=stt_selection.provider,
+            stt_model=stt_selection.model,
         )
 
         purge_result: Any | None = None
@@ -1859,17 +1956,7 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
 
         logger.info(f"재전사 요청: {meeting_id} (job_id={job.id})")
 
-        return MeetingItem(
-            id=updated_job.id,
-            meeting_id=updated_job.meeting_id,
-            audio_path=updated_job.audio_path,
-            status=updated_job.status,
-            retry_count=updated_job.retry_count,
-            error_message=updated_job.error_message,
-            created_at=updated_job.created_at,
-            updated_at=updated_job.updated_at,
-            title=getattr(updated_job, "title", "") or "",
-        )
+        return _build_meeting_item(updated_job)
     except HTTPException:
         raise
     except InvalidTransitionError as e:
@@ -2153,12 +2240,19 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     """
     import asyncio
 
-    from core.job_queue import JobNotFoundError
-    from core.quarantine import QuarantineError, move_to_quarantine
+    from core.job_queue import InvalidTransitionError, JobNotFoundError, JobStatus
+    from core.quarantine import (
+        move_to_quarantine_exact,
+        restore_from_quarantine,
+    )
 
     _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
     config = _get_config(request)
+    delete_claim_token: str | None = None
+    delete_claim_job_id: int | None = None
+    delete_claim_committed = False
+    purge_result: IndexPurgeResult | None = None
 
     try:
         # meeting_id로 작업 조회
@@ -2171,12 +2265,35 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                 status_code=404,
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
+        if str(getattr(job, "status", "") or "") in {
+            "queued",
+            "recording",
+            "transcribing",
+            "diarizing",
+            "merging",
+            "embedding",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="처리 중인 회의는 취소 완료 후 삭제할 수 있습니다.",
+            )
+
+        candidate_token = uuid.uuid4().hex
+        job = await asyncio.to_thread(
+            queue.queue.claim_for_deletion,
+            job.id,
+            candidate_token,
+        )
+        delete_claim_token = candidate_token
+        delete_claim_job_id = job.id
 
         # 삭제 전 audio_path와 identity를 no-follow로 확보한다. raw base/quarantine
         # 경로도 destructive 작업 전에 검사해 symlink target으로 이동하지 않는다.
         audio_path_str = getattr(job, "audio_path", None)
         audio_path: Path | None = None
         audio_identity: AudioFileIdentity | None = None
+        durable_audio_identity: tuple[int, int, int, int] | None = None
+        quarantined_audio_path: Path | None = None
         quarantine_dir = _configured_lexical_path(config, "audio_quarantine_subdir")
         if audio_path_str:
             audio_path = _require_audio_in_config_base(config, Path(audio_path_str))
@@ -2209,34 +2326,79 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                     detail=f"INFRA_UNAVAILABLE: {exc}",
                 ) from exc
 
-        # 검색 인덱스 삭제. 실패하면 DB 레코드와 오디오 파일을 보존한다.
-        await _purge_meeting_search_index(config, meeting_id, "삭제")
+        # source를 입력 감시 폴더 밖으로 먼저 옮긴다. DB 행을 지운 뒤
+        # quarantine이 실패하면 watcher가 삭제한 회의를 재등록할 수 있다.
+        if audio_path is not None and audio_identity is not None:
+            durable_audio_identity = audio_identity[:4]
+            quarantined_audio_path = quarantine_dir / f"deleted-{candidate_token}.audio"
+            await asyncio.to_thread(
+                queue.queue.prepare_delete_quarantine,
+                job.id,
+                candidate_token,
+                source_path=str(audio_path),
+                quarantine_path=str(quarantined_audio_path),
+                source_identity=durable_audio_identity,
+            )
+            await asyncio.to_thread(
+                move_to_quarantine_exact,
+                audio_path,
+                quarantined_audio_path,
+                reason=f"사용자 삭제 준비: meeting_id={meeting_id}",
+                expected_identity=audio_identity,
+            )
+        await asyncio.to_thread(
+            queue.queue.update_delete_claim_phase,
+            job.id,
+            candidate_token,
+            "quarantined",
+        )
 
-        # DB 삭제 (인덱스 정리 후 — 파일 이동 실패해도 DB는 정리)
-        await asyncio.to_thread(queue.queue.delete_job, job.id)
+        # 검색 인덱스 삭제. 실패하면 DB 레코드와 오디오 파일을 보존한다.
+        await asyncio.to_thread(
+            queue.queue.update_delete_claim_phase,
+            job.id,
+            candidate_token,
+            "purging",
+        )
+        purge_result = await _purge_meeting_search_index(config, meeting_id, "삭제")
+
+        # 이 단계부터는 rollback하지 않고 startup이 삭제를 끝까지 roll-forward한다.
+        # raw provider cache를 먼저 비운 뒤에만 DB tombstone을 제거하므로,
+        # cleanup 실패나 SIGKILL에도 숨은 전사 원문이 고아로 남지 않는다.
+        await asyncio.to_thread(
+            queue.queue.update_delete_claim_phase,
+            job.id,
+            candidate_token,
+            "committing",
+        )
+        from steps.openai_transcriber import cleanup_meeting_openai_resume_caches
+
+        await asyncio.to_thread(
+            cleanup_meeting_openai_resume_caches,
+            config,
+            meeting_id,
+        )
+
+        # claim token이 일치하는 DB 행만 삭제한다. 인덱스 purge 중 수동 전사나
+        # 자동처리가 queued로 바꾸는 경쟁을 durable recording claim이 막는다.
+        await asyncio.to_thread(
+            queue.queue.delete_claimed_job,
+            job.id,
+            candidate_token,
+        )
+        delete_claim_committed = True
         logger.info(f"회의 DB 삭제: {meeting_id} (job_id={job.id})")
 
-        # 오디오 파일 quarantine 이동 (best-effort)
-        # watcher 재감지 루프를 끊기 위해 DB 삭제 직후에 수행한다.
-        if audio_path is not None and audio_identity is not None:
-            try:
-                new_path = await asyncio.to_thread(
-                    move_to_quarantine,
-                    audio_path,
-                    quarantine_dir,
-                    reason=f"사용자 삭제: meeting_id={meeting_id}",
-                    expected_identity=audio_identity,
-                )
-                logger.info(f"오디오 파일 격리 완료: {audio_path} → {new_path}")
-            except QuarantineError as e:
-                # 파일 이동 실패해도 DB 삭제는 이미 성공 — 경고만 남기고 진행
-                logger.warning(f"오디오 파일 격리 실패 (DB 삭제는 완료): {e}")
+        if quarantined_audio_path is not None:
+            logger.info("오디오 파일 격리와 DB 삭제 완료: %s", quarantined_audio_path)
         elif audio_path_str:
             logger.debug(f"오디오 파일이 이미 존재하지 않음: {audio_path_str}")
 
         return {"message": f"회의가 삭제되었습니다: {meeting_id}"}
     except HTTPException:
         raise
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except JobNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
@@ -2245,6 +2407,79 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
             status_code=500,
             detail=f"회의 삭제 중 오류가 발생했습니다: {e}",
         ) from e
+    finally:
+        if (
+            delete_claim_token is not None
+            and delete_claim_job_id is not None
+            and not delete_claim_committed
+        ):
+            recovery_ready = True
+            try:
+                claimed_job = await asyncio.to_thread(queue.queue.get_job, delete_claim_job_id)
+                durable_claim = parse_delete_claim(
+                    str(getattr(claimed_job, "requested_action", "") or "")
+                )
+                if durable_claim is None or durable_claim.token != delete_claim_token:
+                    raise JobQueueError("회의 삭제 durable claim을 확인할 수 없습니다")
+                if durable_claim.phase == "committing":
+                    raise JobQueueError(
+                        "회의 삭제 commit 단계는 startup roll-forward 대상으로 보존합니다"
+                    )
+                if durable_claim.source_identity is not None:
+                    await asyncio.to_thread(
+                        restore_from_quarantine,
+                        Path(durable_claim.source_path),
+                        Path(durable_claim.quarantine_path),
+                        expected_identity=durable_claim.source_identity,
+                        reason=f"회의 삭제 rollback: meeting_id={meeting_id}",
+                    )
+                if (
+                    durable_claim.phase == "purging"
+                    and durable_claim.original_status == JobStatus.COMPLETED.value
+                ):
+                    await asyncio.to_thread(
+                        _write_retranscribe_recovery_marker,
+                        config,
+                        meeting_id,
+                        "회의 삭제 index purge 중 중단되어 재색인이 필요합니다.",
+                        purge_result or IndexPurgeResult(meeting_id=meeting_id),
+                    )
+                    from core.reindex_recovery import (
+                        consume_reindex_required_marker,
+                        reindex_meeting_artifacts,
+                    )
+
+                    pipeline_manager = _get_pipeline_manager(request)
+                    await reindex_meeting_artifacts(
+                        config,
+                        pipeline_manager._model_manager,
+                        meeting_id,
+                    )
+                    await asyncio.to_thread(
+                        consume_reindex_required_marker,
+                        config,
+                        meeting_id,
+                    )
+            except Exception as recovery_error:  # noqa: BLE001 - durable claim을 보존한다.
+                recovery_ready = False
+                logger.error(
+                    "회의 삭제 파일/marker 복구 실패: job_id=%s, error=%s",
+                    delete_claim_job_id,
+                    recovery_error,
+                )
+            if recovery_ready:
+                try:
+                    await asyncio.to_thread(
+                        queue.queue.restore_delete_claim,
+                        delete_claim_job_id,
+                        delete_claim_token,
+                    )
+                except Exception as restore_error:  # noqa: BLE001 - 원래 오류를 보존한다.
+                    logger.error(
+                        "회의 삭제 claim 복구 실패: job_id=%s, error=%s",
+                        delete_claim_job_id,
+                        restore_error,
+                    )
 
 
 @router.get(

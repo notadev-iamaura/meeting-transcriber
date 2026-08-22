@@ -404,6 +404,8 @@ class PipelineState:
         default_factory=dict
     )  # {"system": "/path/system.wav", "mic": "/path/mic.wav"}
     is_multitrack: bool = False
+    stt_provider: str = ""
+    stt_model: str = ""
 
     def __post_init__(self) -> None:
         """생성/업데이트 시각 자동 설정."""
@@ -587,6 +589,10 @@ class PipelineManager:
             f"checkpoint={self._checkpoint_enabled}, "
             f"retry_max={self._retry_max}"
         )
+
+    def update_stt_config(self, stt_config: Any) -> None:
+        """다음 전사부터 사용할 STT 설정을 원자적인 모델 복사로 교체한다."""
+        self._config = self._config.model_copy(update={"stt": stt_config})
 
     def _generate_meeting_id(self, audio_path: Path) -> str:
         """회의 고유 식별자를 생성한다.
@@ -977,6 +983,72 @@ class PipelineManager:
         if asyncio.iscoroutine(result):
             await result
 
+    def _transcript_checkpoint_selection(self, restored: Any) -> tuple[str, str]:
+        """전사 체크포인트의 provider/model provenance를 안전하게 정규화한다."""
+        provider = str(getattr(restored, "provider", "local") or "local")
+        model = str(getattr(restored, "model", "") or "")
+        if provider not in {"local", "openai"}:
+            raise InvalidInputError(
+                "전사 체크포인트의 provider가 허용 목록과 다릅니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        if provider == "openai":
+            allowed_model = getattr(
+                self._config.stt,
+                "openai_model",
+                "gpt-4o-transcribe-diarize",
+            )
+            if model != allowed_model:
+                raise InvalidInputError(
+                    "전사 체크포인트의 OpenAI 모델이 허용 목록과 다릅니다.",
+                    failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+                )
+            return provider, model
+        return provider, model or "legacy-local"
+
+    def _validate_transcript_checkpoint_selection(
+        self,
+        restored: Any,
+        *,
+        selected_provider: str,
+        selected_model: str,
+    ) -> None:
+        """복원할 전사 결과가 파이프라인에 고정된 선택과 같은지 확인한다."""
+        restored_provider, restored_model = self._transcript_checkpoint_selection(restored)
+        mismatch = restored_provider != selected_provider
+        if not mismatch and selected_provider == "openai":
+            mismatch = restored_model != selected_model
+        elif not mismatch and selected_model != "legacy-local":
+            expected_models = {selected_model}
+            try:
+                selected_config = self._config.stt.model_copy(
+                    update={"provider": "local", "model_name": selected_model}
+                )
+                resolved_model = selected_config.resolve_model_path(
+                    base_dir=self._config.paths.resolved_base_dir
+                )
+                if isinstance(resolved_model, str) and resolved_model:
+                    expected_models.add(resolved_model)
+            except (AttributeError, OSError, TypeError, ValueError):
+                # provenance 비교는 모델 다운로드/로드를 유발하지 않는다. 설정 double이나
+                # 사라진 로컬 캐시는 요청 당시의 canonical model ID로만 비교한다.
+                pass
+            mismatch = restored_model not in expected_models
+        if mismatch:
+            raise InvalidInputError(
+                "전사 체크포인트의 provider/model이 고정된 파이프라인 선택과 다릅니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+
+    def _read_transcript_checkpoint(self, meeting_id: str) -> Any | None:
+        """존재하는 전사 체크포인트를 고정 저장소 경로에서 읽는다."""
+        checkpoint_path = self._get_checkpoint_path(meeting_id, PipelineStep.TRANSCRIBE)
+        if not checkpoint_path.exists():
+            return None
+        from steps.transcriber import TranscriptResult
+
+        return TranscriptResult.from_checkpoint(checkpoint_path)
+
     def _rebuild_state_from_checkpoints(self, meeting_id: str) -> PipelineState:
         """pipeline_state.json 이 유실되었을 때 기존 체크포인트로 상태를 재구성한다.
 
@@ -1011,6 +1083,13 @@ class PipelineManager:
             cp = self._get_checkpoint_path(meeting_id, step)
             if cp.exists() and step.value not in state.completed_steps:
                 state.completed_steps.append(step.value)
+
+        if PipelineStep.TRANSCRIBE.value in state.completed_steps:
+            restored = self._read_transcript_checkpoint(meeting_id)
+            if restored is not None:
+                state.stt_provider, state.stt_model = self._transcript_checkpoint_selection(
+                    restored
+                )
 
         # merge 체크포인트가 있으면 최소한 전사까지는 완료된 것으로 간주
         self._save_state(state, state_path)
@@ -1401,8 +1480,12 @@ class PipelineManager:
         self,
         wav_path: Path,
         checkpoint_path: Path,
+        *,
+        stt_provider: str | None = None,
+        stt_model: str | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> Any:
-        """전사 단계: mlx-whisper로 한국어 STT를 수행한다.
+        """전사 단계: 선택된 로컬 또는 OpenAI STT를 수행한다.
 
         VAD가 활성화되어 있으면 전사 전에 음성 구간을 감지하여
         clip_timestamps로 전달한다. 무음 구간의 환각을 방지한다.
@@ -1410,16 +1493,48 @@ class PipelineManager:
         Args:
             wav_path: WAV 오디오 파일 경로
             checkpoint_path: 체크포인트 저장 경로
+            should_cancel: 외부 청크 사이 사용자 취소 여부 확인 콜백
 
         Returns:
             TranscriptResult 인스턴스
         """
         from steps.transcriber import Transcriber, TranscriptResult
 
+        configured_provider = getattr(self._config.stt, "provider", "local")
+        if configured_provider not in {"local", "openai"}:
+            configured_provider = "local"
+        selected_provider = stt_provider or configured_provider
+        selected_model = stt_model or (
+            getattr(
+                self._config.stt,
+                "openai_model",
+                "gpt-4o-transcribe-diarize",
+            )
+            if selected_provider == "openai"
+            else getattr(
+                self._config.stt,
+                "model_name",
+                "mlx-community/whisper-large-v3-turbo",
+            )
+        )
+        if not isinstance(selected_model, str) or not selected_model:
+            selected_model = "mlx-community/whisper-large-v3-turbo"
+        if selected_provider not in {"local", "openai"}:
+            raise InvalidInputError(
+                "지원하지 않는 전사 provider입니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
             logger.info(f"전사 체크포인트 복원: {checkpoint_path}")
-            return TranscriptResult.from_checkpoint(checkpoint_path)
+            restored = TranscriptResult.from_checkpoint(checkpoint_path)
+            self._validate_transcript_checkpoint_selection(
+                restored,
+                selected_provider=selected_provider,
+                selected_model=selected_model,
+            )
+            return restored
 
         # 컨테이너 헤더 duration과 실제 디코딩 결과가 다른 손상 파일을 막기 위해
         # 변환된 WAV를 STT 모델 로드 전에 한 번 더 검증한다.
@@ -1436,7 +1551,7 @@ class PipelineManager:
             vad_enabled = bool(vad_enabled_flag) or (
                 isinstance(vad_mode, str) and vad_mode.lower() != "off"
             )
-        if vad_enabled:
+        if vad_enabled and selected_provider == "local":
             try:
                 from steps.vad_detector import VoiceActivityDetector
 
@@ -1453,13 +1568,26 @@ class PipelineManager:
                 logger.warning(f"VAD 처리 실패, 전체 오디오로 폴백: {e}")
                 vad_clip_timestamps = None
 
-        transcriber = Transcriber(self._config, self._model_manager)
+        if selected_provider == "openai":
+            from steps.openai_transcriber import OpenAITranscriber
 
-        # Phase 1: 동적 타임아웃 계산 — 오디오 길이에 비례
-        # 짧은 파일은 1800s 고정 타임아웃보다 빠르게 실패하고,
-        # 긴 파일은 충분한 여유를 확보해 불필요한 타임아웃을 방지한다.
+            stt_config = self._config.stt.model_copy(
+                update={"provider": "openai", "openai_model": selected_model}
+            )
+            execution_config = self._config.model_copy(update={"stt": stt_config})
+            transcriber: Any = OpenAITranscriber(execution_config)
+        else:
+            stt_config = self._config.stt.model_copy(
+                update={"provider": "local", "model_name": selected_model}
+            )
+            execution_config = self._config.model_copy(update={"stt": stt_config})
+            transcriber = Transcriber(execution_config, self._model_manager)
+
+        # 로컬 STT의 전체 단계 타임아웃만 오디오 길이에 비례해 계산한다.
+        # OpenAI 어댑터는 각 업로드 청크 요청마다 stt.openai_timeout_seconds를
+        # 적용하므로 전체 오디오 길이 기반 값을 전달하면 안 된다.
         timeout_override: int | None = None
-        if self._config.pipeline.dynamic_timeout_enabled:
+        if selected_provider == "local" and self._config.pipeline.dynamic_timeout_enabled:
             try:
                 duration = measure_audio_duration(wav_path)
                 timeout_override = compute_dynamic_timeout(
@@ -1477,11 +1605,22 @@ class PipelineManager:
                 # duration 측정 실패 시 config 기본값으로 폴백 (전사는 계속 진행)
                 logger.warning(f"duration 측정 실패, 기본 타임아웃 사용: {e}")
 
-        result = await transcriber.transcribe(
-            wav_path,
-            vad_clip_timestamps=vad_clip_timestamps,
-            timeout_override=timeout_override,
-        )
+        openai_resume_dir = checkpoint_path.parent / ".openai-transcribe-parts"
+        if selected_provider == "openai":
+            result = await transcriber.transcribe(
+                wav_path,
+                vad_clip_timestamps=vad_clip_timestamps,
+                timeout_override=None,
+                resume_dir=openai_resume_dir,
+                should_cancel=should_cancel,
+                expected_audio_identity=wav_identity,
+            )
+        else:
+            result = await transcriber.transcribe(
+                wav_path,
+                vad_clip_timestamps=vad_clip_timestamps,
+                timeout_override=timeout_override,
+            )
 
         # 환각 필터링 (hallucination_filter 설정에 따라)
         try:
@@ -1511,12 +1650,19 @@ class PipelineManager:
         if self._checkpoint_enabled:
             self._save_result_checkpoint(result, checkpoint_path)
 
+        if selected_provider == "openai":
+            try:
+                transcriber.cleanup_resume_cache(openai_resume_dir)
+            except Exception as exc:  # noqa: BLE001 - 최종 체크포인트는 이미 안전하다.
+                logger.warning(f"OpenAI 전사 재개 캐시 정리 실패: {exc}")
+
         return result
 
     async def _run_step_diarize(
         self,
         wav_path: Path,
         checkpoint_path: Path,
+        transcript_result: Any | None = None,
     ) -> Any:
         """화자분리 단계: pyannote-audio로 화자를 분리한다.
 
@@ -1527,12 +1673,44 @@ class PipelineManager:
         Returns:
             DiarizationResult 인스턴스
         """
-        from steps.diarizer import DiarizationResult, Diarizer
+        from steps.diarizer import (
+            DiarizationResult,
+            DiarizationSegment,
+            Diarizer,
+        )
 
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
             logger.info(f"화자분리 체크포인트 복원: {checkpoint_path}")
             return DiarizationResult.from_checkpoint(checkpoint_path)
+
+        transcript_segments = list(getattr(transcript_result, "segments", []) or [])
+        provider = str(getattr(transcript_result, "provider", "") or "")
+        if (
+            provider == "openai"
+            and transcript_segments
+            and all(getattr(segment, "speaker", None) for segment in transcript_segments)
+        ):
+            diarization_segments = [
+                DiarizationSegment(
+                    speaker=str(segment.speaker),
+                    start=float(segment.start),
+                    end=float(segment.end),
+                )
+                for segment in transcript_segments
+            ]
+            speakers = {segment.speaker for segment in diarization_segments}
+            result = DiarizationResult(
+                segments=diarization_segments,
+                num_speakers=len(speakers),
+                audio_path=str(wav_path),
+                model_name=f"openai:{getattr(transcript_result, 'model', '')}",
+                output_mode="provider",
+            )
+            if self._checkpoint_enabled:
+                self._save_result_checkpoint(result, checkpoint_path)
+            logger.info("OpenAI provider 화자 구간 사용: speakers=%d", len(speakers))
+            return result
 
         # 재개 경로에서도 pyannote 모델을 열기 전에 변환 WAV 전체를 검증한다.
         wav_identity = self._validate_input(wav_path)
@@ -1587,15 +1765,43 @@ class PipelineManager:
         Returns:
             MergedResult 인스턴스
         """
-        from steps.merger import MergedResult, Merger
+        from steps.merger import MergedResult, MergedUtterance, Merger
 
         # 체크포인트 복원 시도
         if self._checkpoint_enabled and checkpoint_path.exists():
             logger.info(f"병합 체크포인트 복원: {checkpoint_path}")
             return MergedResult.from_checkpoint(checkpoint_path)
 
-        merger = Merger()
-        result = await merger.merge(transcript_result, diarization_result)
+        transcript_segments = list(getattr(transcript_result, "segments", []) or [])
+        provider_speakers = (
+            str(getattr(diarization_result, "output_mode", "") or "") == "provider"
+            and str(getattr(transcript_result, "provider", "") or "") == "openai"
+            and transcript_segments
+            and all(getattr(segment, "speaker", None) for segment in transcript_segments)
+        )
+        if provider_speakers:
+            # OpenAI diarized_json은 텍스트·시간·화자가 같은 provider segment의
+            # 원자적 속성이다. 이를 동일 시간의 별도 diarization interval로 바꿔
+            # overlap 기반 Merger에 다시 넣으면 겹말에서 다른 화자가 선택될 수
+            # 있으므로 provider 화자를 그대로 보존한다.
+            utterances = [
+                MergedUtterance(
+                    text=str(segment.text),
+                    speaker=str(segment.speaker),
+                    start=float(segment.start),
+                    end=float(segment.end),
+                )
+                for segment in transcript_segments
+            ]
+            result = MergedResult(
+                utterances=utterances,
+                num_speakers=len({utterance.speaker for utterance in utterances}),
+                audio_path=str(getattr(transcript_result, "audio_path", "") or ""),
+                unknown_count=0,
+            )
+        else:
+            merger = Merger()
+            result = await merger.merge(transcript_result, diarization_result)
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
@@ -1970,6 +2176,9 @@ class PipelineManager:
         on_step_start: Callable[[str], Awaitable[None]] | None = None,
         on_step_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         skip_llm_steps: bool | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        stt_provider: str | None = None,
+        stt_model: str | None = None,
     ) -> PipelineState:
         """파이프라인 전체를 실행한다.
 
@@ -1986,6 +2195,9 @@ class PipelineManager:
                 - input_size: 입력 크기 (단계별 단위)
                 - elapsed: (complete 시) 실제 소요 시간 초
             skip_llm_steps: LLM 단계 스킵 여부 (None이면 config 설정값 사용)
+            should_cancel: OpenAI 청크 사이 사용자 취소 여부 확인 콜백
+            stt_provider: 큐 등록 시점에 고정한 provider (legacy는 None)
+            stt_model: 큐 등록 시점에 고정한 실제 모델 (legacy는 None)
 
         Returns:
             최종 파이프라인 상태 (PipelineState)
@@ -2019,10 +2231,104 @@ class PipelineManager:
                 output_dir=str(output_dir),
             )
 
+        requested_provider = str(stt_provider or "")
+        requested_model = str(stt_model or "")
+        if bool(requested_provider) != bool(requested_model):
+            raise InvalidInputError(
+                "큐에 고정된 전사 provider/model snapshot이 불완전합니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        if requested_provider and requested_provider not in {"local", "openai"}:
+            raise InvalidInputError(
+                "큐에 고정된 전사 provider가 유효하지 않습니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+
+        # 첫 실행 시 실제 전사 provider/model을 체크포인트 상태에 고정한다.
+        # 이후 설정이 바뀌어도 재개 작업은 같은 선택을 사용한다.
+        stt_selection_initialized = False
+        transcript_already_completed = PipelineStep.TRANSCRIBE.value in state.completed_steps
+        restored_transcript = (
+            self._read_transcript_checkpoint(meeting_id) if transcript_already_completed else None
+        )
+        restored_selection = (
+            self._transcript_checkpoint_selection(restored_transcript)
+            if restored_transcript is not None
+            else None
+        )
+        if not state.stt_provider:
+            # 상태 파일이 유실/구버전이어도 전사 체크포인트 provenance를 우선한다.
+            # provenance 자체가 없던 과거 결과만 legacy local로 이관한다.
+            if restored_selection is not None:
+                state.stt_provider = restored_selection[0]
+            elif transcript_already_completed:
+                state.stt_provider = "local"
+            elif requested_provider:
+                state.stt_provider = requested_provider
+            else:
+                configured_provider = getattr(self._config.stt, "provider", "local")
+                state.stt_provider = (
+                    configured_provider if configured_provider in {"local", "openai"} else "local"
+                )
+            stt_selection_initialized = True
+        if not state.stt_model:
+            if restored_selection is not None:
+                state.stt_model = restored_selection[1]
+            elif transcript_already_completed and state.stt_provider == "local":
+                state.stt_model = "legacy-local"
+            elif requested_model and state.stt_provider == requested_provider:
+                state.stt_model = requested_model
+            elif state.stt_provider == "openai":
+                state.stt_model = getattr(
+                    self._config.stt,
+                    "openai_model",
+                    "gpt-4o-transcribe-diarize",
+                )
+            else:
+                configured_model = getattr(
+                    self._config.stt,
+                    "model_name",
+                    "mlx-community/whisper-large-v3-turbo",
+                )
+                state.stt_model = (
+                    configured_model
+                    if isinstance(configured_model, str) and configured_model
+                    else "mlx-community/whisper-large-v3-turbo"
+                )
+            stt_selection_initialized = True
+        if state.stt_provider not in {"local", "openai"}:
+            raise InvalidInputError(
+                "파이프라인 상태의 전사 provider가 유효하지 않습니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        if requested_provider and (
+            state.stt_provider != requested_provider or state.stt_model != requested_model
+        ):
+            raise InvalidInputError(
+                "큐에 고정된 전사 선택과 파이프라인 상태의 선택이 다릅니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        allowed_openai_model = getattr(
+            self._config.stt,
+            "openai_model",
+            "gpt-4o-transcribe-diarize",
+        )
+        if state.stt_provider == "openai" and state.stt_model != allowed_openai_model:
+            raise InvalidInputError(
+                "파이프라인 상태의 OpenAI 전사 모델이 허용 목록과 다릅니다.",
+                failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        if restored_transcript is not None:
+            self._validate_transcript_checkpoint_selection(
+                restored_transcript,
+                selected_provider=state.stt_provider,
+                selected_model=state.stt_model,
+            )
+
         resume_idx = self._find_resume_step(state)
         if resume_idx is None:
             logger.info("모든 단계가 이미 완료되었습니다.")
-            if state.status != "completed" or state.current_step:
+            if state.status != "completed" or state.current_step or stt_selection_initialized:
                 state.status = "completed"
                 state.current_step = ""
                 self._save_state(state, state_path)
@@ -2235,6 +2541,9 @@ class PipelineManager:
                         transcript_result = await self._run_step_transcribe(
                             wav_path,
                             checkpoint_path,
+                            stt_provider=state.stt_provider,
+                            stt_model=state.stt_model,
+                            should_cancel=should_cancel,
                         )
 
                     elif step == PipelineStep.DIARIZE:
@@ -2242,6 +2551,7 @@ class PipelineManager:
                         diarization_result = await self._run_step_diarize(
                             wav_path,
                             checkpoint_path,
+                            transcript_result,
                         )
 
                     elif step == PipelineStep.MERGE:
@@ -2506,6 +2816,11 @@ class PipelineManager:
                 from steps.transcriber import TranscriptResult
 
                 transcript_result = TranscriptResult.from_checkpoint(cp)
+                self._validate_transcript_checkpoint_selection(
+                    transcript_result,
+                    selected_provider=state.stt_provider,
+                    selected_model=state.stt_model,
+                )
                 logger.info("전사 결과 체크포인트에서 복원")
 
         # diarize 완료 시 복원

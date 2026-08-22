@@ -35,9 +35,12 @@ _IN_PROGRESS_STATUSES = {
 class AutoProcessingItem:
     """자동 처리 대상 회의."""
 
+    job_id: int
     meeting_id: str
     classification: MeetingClassification
     audio_path: Path | None = None
+    stt_provider: str = ""
+    stt_model: str = ""
 
 
 @dataclass
@@ -107,7 +110,12 @@ class AutoProcessingRunner:
             if not is_action_eligible(action, classification):
                 continue
             status = str(getattr(job, "status", "") or "")
-            if not is_job_safe_to_auto_process(status, classification):
+            error_message = str(getattr(job, "error_message", "") or "")
+            if not is_job_safe_to_auto_process(
+                status,
+                classification,
+                error_message=error_message,
+            ):
                 logger.info(
                     "자동 처리: 현재 작업 상태 때문에 건너뜀 (%s: %s, %s)",
                     meeting_id,
@@ -129,9 +137,12 @@ class AutoProcessingRunner:
 
             items.append(
                 AutoProcessingItem(
+                    job_id=int(getattr(job, "id", 0) or 0),
                     meeting_id=meeting_id,
                     classification=classification,
                     audio_path=audio_path,
+                    stt_provider=str(getattr(job, "stt_provider", "") or ""),
+                    stt_model=str(getattr(job, "stt_model", "") or ""),
                 )
             )
 
@@ -187,16 +198,30 @@ class AutoProcessingRunner:
                     if item.audio_path is None:
                         result.skipped += 1
                         continue
-                    logger.info("자동 처리[%s] 전사 시작: %s", action, item.meeting_id)
-                    await self._pipeline.run(
-                        item.audio_path,
-                        meeting_id=item.meeting_id,
-                        skip_llm_steps=(action == "transcribe"),
+                    if item.job_id <= 0:
+                        raise ValueError("자동 처리 대상의 job_id가 올바르지 않습니다.")
+                    from core.transcription_models import selection_from_state_or_config
+
+                    get_status = getattr(type(self._pipeline), "get_status", None)
+                    pipeline_state = (
+                        get_status(self._pipeline, item.meeting_id)
+                        if callable(get_status)
+                        else None
                     )
-                    result.transcribed += 1
-                    if action == "full":
-                        result.summarized += 1
-                    logger.info("자동 처리[%s] 전사 완료: %s", action, item.meeting_id)
+                    stt_selection = selection_from_state_or_config(
+                        self._config,
+                        pipeline_state,
+                        job=item,
+                    )
+                    requested_action = "transcribe" if action == "transcribe" else "full"
+                    logger.info("자동 처리[%s] 전사 큐 등록: %s", action, item.meeting_id)
+                    await self._job_queue.queue_job(
+                        item.job_id,
+                        requested_action=requested_action,
+                        stt_provider=stt_selection.provider,
+                        stt_model=stt_selection.model,
+                    )
+                    logger.info("자동 처리[%s] 전사 큐 등록 완료: %s", action, item.meeting_id)
                 elif item.classification == "summarize":
                     logger.info("자동 처리[%s] 요약 시작: %s", action, item.meeting_id)
                     await self._pipeline.run_llm_steps(item.meeting_id)
@@ -247,7 +272,12 @@ def is_action_eligible(action: str, classification: str) -> bool:
     return False
 
 
-def is_job_safe_to_auto_process(status: str, classification: str) -> bool:
+def is_job_safe_to_auto_process(
+    status: str,
+    classification: str,
+    *,
+    error_message: str = "",
+) -> bool:
     """현재 작업 상태 기준으로 자동 처리해도 안전한지 반환한다.
 
     JobProcessor 가 이미 처리 중인 상태는 자동 스케줄러가 건드리지 않는다.
@@ -258,6 +288,8 @@ def is_job_safe_to_auto_process(status: str, classification: str) -> bool:
     if status in _IN_PROGRESS_STATUSES:
         return False
     if status == "failed":
+        return False
+    if status == "recorded" and error_message.startswith("사용자가 취소함"):
         return False
     if classification == "transcribe":
         return status == "recorded"

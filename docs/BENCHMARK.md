@@ -48,6 +48,11 @@
 6. **요약 품질 정량화 미완**
    요약은 SequenceMatcher 대신 사람 판단에 의존하는 부분이 있어 수치화가 제한적이다.
 
+7. **OpenAI 운영 옵션의 정확도 비교 미완**
+   2026-08-22 추가된 `gpt-4o-transcribe-diarize` 옵션은 API/화자·시간 계약과
+   비파괴 실행 경계만 검증했다. 독립적인 사람 정답으로 계산한 한국어 회의 CER/WER,
+   DER/JER가 없으므로 로컬 기본 모델보다 정확하다고 주장할 수 없다.
+
 ---
 
 ## 요약
@@ -57,7 +62,7 @@
 | 영역 | 기본값 | 근거 (요약) |
 |------|--------|-----------|
 | STT 모델 | **`mlx-community/whisper-large-v3-turbo`** (fp16) | **6 회의 다중 파일 평균 CER 49.8% — komixv2 대비 -16%p (§1.1)** |
-| VAD | ON (silero) | 환각 누적 차단, full pipeline 권장 |
+| VAD | OFF (silero 선택 가능) | 이 환경에서 ON 시 실행시간 증가·커버리지 저하 관찰 (§1) |
 | 화자분리 | `pyannote/speaker-diarization-community-1` + `output_mode=auto` | 3.1 대비 과분리 감소, exclusive 출력 우선 (§2.1) |
 | 화자 수 범위 | 2~4 bounded auto | 사용자가 입력하지 않아도 되는 내부 기본값. 완전 자동은 동일 품질이나 느림 (§2.1) |
 | 긴 무음 압축 | 60초/5% 이상 절약 시만 조건부 | 26.8초 절약 샘플은 속도 개선 미입증. 큰 무음에서만 적용 (§2.1) |
@@ -70,12 +75,32 @@
 
 ---
 
+## 1.0 선택적 OpenAI 전사 검증 상태 (2026-08-22)
+
+- 프로덕션 통합 모델: `gpt-4o-transcribe-diarize`
+- 선택 이유: 현재 병합 파이프라인에 필요한 발화 시작/종료 시각과 화자 label을 함께
+  반환한다. 일반 `gpt-4o-transcribe`는 텍스트 품질 후보이지만 이 파이프라인의 시간축
+  계약을 직접 만족하지 않는다.
+- 요청 계약: `response_format=diarized_json`, `chunking_strategy=auto`만 사용하며,
+  모델이 지원하지 않는 `language`, `prompt`, `timestamp_granularities`는 보내지 않는다.
+- 검증 완료: 고정 HTTPS endpoint, generic 업로드 파일명, 25MB 이하 청크 gate,
+  응답 schema/NFC/offset 변환, 화자 구간의 pyannote 우회, 다중 청크 pyannote fallback,
+  Keychain 비반사, loopback·동의 gate, 기존 결과를 보존하는 회의별 A/B 실행.
+- 검증하지 않음: 실제 OpenAI 호출, 독립 human-gold 정확도, 장시간 한국어 회의의
+  speaker continuity. CI는 mock transport만 사용한다.
+
+따라서 현재 기본값은 계속 로컬 `whisper-large-v3-turbo`이다. 회의별 OpenAI 결과는
+별도 A/B 산출물로 비교할 수 있지만, 모델 간 문자열 일치율이나 한 모델이 만든
+전사문을 정답으로 둔 CER만으로 기본값을 바꾸지 않는다.
+
+---
+
 ## 1.1 STT 4-Experiment Multi-File Benchmark (2026-04-26)
 
 ### 실험 설계
 
 - 데이터: 6 실제 Zoom 회의 (`testCase/`), 총 108분
-- 정답지: OpenAI gpt-4o-transcribe (검증 도구로만 사용, 운영 외부 API 호출 없음)
+- 정답지: OpenAI gpt-4o-transcribe (당시 검증 도구로만 사용; 현재 선택적 운영 옵션의 정확도 근거로 재사용하지 않음)
 - 평가: CER, WER, 용어집 hit율 (47개 회의 핵심 용어)
 - Harness: `/tmp/transcribe_lab/` (재현 스크립트 동일 위치)
 

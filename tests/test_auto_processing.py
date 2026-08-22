@@ -23,6 +23,10 @@ class _Job:
     audio_path: str
     created_at: str
     status: str = "completed"
+    id: int = 1
+    error_message: str = ""
+    stt_provider: str = ""
+    stt_model: str = ""
 
 
 class _Queue:
@@ -31,6 +35,23 @@ class _Queue:
 
     async def get_all_jobs(self) -> list[_Job]:
         return self._jobs
+
+    async def queue_job(
+        self,
+        job_id: int,
+        requested_action: str = "",
+        *,
+        stt_provider: str = "",
+        stt_model: str = "",
+    ) -> _Job:
+        """테스트 큐에서도 recorded→queued 예약만 수행한다."""
+        job = next(job for job in self._jobs if job.id == job_id)
+        if job.status != "recorded":
+            raise RuntimeError("recorded 작업만 큐잉할 수 있습니다.")
+        job.status = "queued"
+        job.stt_provider = stt_provider
+        job.stt_model = stt_model
+        return job
 
 
 def _make_config(tmp_path: Path) -> AppConfig:
@@ -84,10 +105,10 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     old = datetime(2020, 1, 1, 0, 0).isoformat()
     queue = _Queue(
         [
-            _Job("m1", str(audio), now),
-            _Job("m2", str(audio), now),
-            _Job("m3", str(audio), now),
-            _Job("old", str(audio), old),
+            _Job("m1", str(audio), now, id=1),
+            _Job("m2", str(audio), now, id=2),
+            _Job("m3", str(audio), now, id=3),
+            _Job("old", str(audio), old, id=4),
         ]
     )
     queue._jobs[0].status = "recorded"
@@ -97,11 +118,11 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     result = await runner.run(action="full", recent_hours=48)
 
     assert result.queued == 2
-    assert result.transcribed == 1
-    assert result.summarized == 2
+    assert result.transcribed == 0
+    assert result.summarized == 1
     assert result.failed == 0
-    pipeline.run.assert_awaited_once()
-    assert pipeline.run.await_args.kwargs["skip_llm_steps"] is False
+    pipeline.run.assert_not_awaited()
+    assert queue._jobs[0].status == "queued"
     pipeline.run_llm_steps.assert_awaited_once_with("m2")
 
 
@@ -117,8 +138,8 @@ async def test_auto_processing_runner는_기본적으로_1회_1건만_처리한�
     now = datetime.now().isoformat()
     queue = _Queue(
         [
-            _Job("m1", str(audio), now, status="recorded"),
-            _Job("m2", str(audio), now, status="recorded"),
+            _Job("m1", str(audio), now, status="recorded", id=1),
+            _Job("m2", str(audio), now, status="recorded", id=2),
         ]
     )
     pipeline = AsyncMock()
@@ -130,7 +151,8 @@ async def test_auto_processing_runner는_기본적으로_1회_1건만_처리한�
     assert result.queued == 1
     assert result.skipped == 1
     assert result.meeting_ids == ["m1"]
-    pipeline.run.assert_awaited_once()
+    pipeline.run.assert_not_awaited()
+    assert queue._jobs[0].status == "queued"
 
 
 @pytest.mark.asyncio
@@ -217,6 +239,37 @@ async def test_auto_processing_runner는_진행중인_작업을_건너뛴다(
     pipeline.run.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_사용자가_취소한_recorded_회의는_다음_자동실행에서_재큐잉하지_않는다(
+    tmp_path: Path,
+) -> None:
+    """명시적 취소 marker를 자동 OpenAI 업로드가 무동의로 재개하지 않는다."""
+    config = _make_config(tmp_path)
+    audio = config.paths.resolved_audio_input_dir / "cancelled.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+    job = _Job(
+        "cancelled",
+        str(audio),
+        datetime.now().isoformat(),
+        status="recorded",
+        id=9,
+        error_message="사용자가 취소함",
+    )
+    queue = _Queue([job])
+    pipeline = AsyncMock()
+
+    result = await AutoProcessingRunner(
+        config=config,
+        job_queue=queue,
+        pipeline=pipeline,
+    ).run(action="transcribe", recent_hours=48)
+
+    assert result.matched == 0
+    assert job.status == "recorded"
+    pipeline.run.assert_not_awaited()
+
+
 def test_scheduler_다음_실행_시각을_계산한다(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config = config.model_copy(
@@ -273,3 +326,30 @@ def test_auto_processing_run_now_api는_중복_실행을_거부한다(tmp_path: 
         resp = client.post("/api/auto-processing/run-now")
 
     assert resp.status_code == 409
+
+
+def test_auto_processing_run_now_transcribe는_악성_Host에서_실행하지_않는다(
+    tmp_path: Path,
+) -> None:
+    """pinned OpenAI 작업 가능성이 있는 transcribe/full 즉시 실행은 loopback 전용이다."""
+
+    class _Scheduler:
+        is_processing = False
+        run_once = AsyncMock()
+
+    app = FastAPI()
+    app.include_router(auto_processing_router, prefix="/api")
+    config = _make_config(tmp_path)
+    config.auto_processing.action = "full"
+    app.state.config = config
+    scheduler = _Scheduler()
+    app.state.auto_processing_scheduler = scheduler
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/auto-processing/run-now",
+            headers={"host": "attacker.example:8765"},
+        )
+
+    assert resp.status_code == 403
+    scheduler.run_once.assert_not_called()
