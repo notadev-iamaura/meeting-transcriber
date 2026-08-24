@@ -363,7 +363,10 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 **처리 위치 선택:** `stt.provider`의 기본값은 `local`이다. 설정 화면에서 OpenAI
 `gpt-4o-transcribe-diarize`를 기본값으로 선택할 수 있지만 macOS Keychain에 API 키를
 등록하고 외부 업로드에 한 번 동의해야 한다. 기본값을 OpenAI로 유지하는 동안 이후 새
-전사 작업의 음성도 OpenAI로 전송된다. 전사가 완료된 회의의 **다른 모델로 텍스트 변환하기…**는
+전사 작업의 음성도 OpenAI로 전송된다. 녹음 완료 회의의 **전사 시작**에서는 전역 기본값을
+바꾸지 않고 해당 회의에만 local/OpenAI를 선택할 수 있으며, OpenAI는 파일마다 외부 전송
+동의를 다시 요구하고 선택을 queue-time provider/model snapshot으로 고정한다. 전사가 완료된
+회의의 **다른 모델로 텍스트 변환하기…**는
 기존 산출물을 보존한 격리 A/B 작업이며 실행할 때마다 별도로 동의를 요구한다. 일반
 `gpt-4o-transcribe`는 현재 파이프라인이 요구하는 화자/시간 세그먼트를 제공하지 않으므로
 프로덕션 회의 전사 교체 모델로 사용하지 않는다. diarize 모델에는 지원되지 않는
@@ -698,9 +701,10 @@ pytest tests/ -x -q
 # 특정 모듈 테스트
 pytest tests/test_diarizer.py -v
 
-# Playwright E2E 테스트 (브라우저 기반, 약 24초, 별도 실행)
+# Playwright E2E 테스트 (브라우저 기반, 약 25초, 별도 실행)
 # 전제: `pip install -e ".[dev]"` + `playwright install chromium`
-pytest -m e2e tests/test_e2e_edit_playwright.py -v
+pytest -m e2e tests/test_e2e_edit_playwright.py \
+  tests/test_e2e_transcription_model_playwright.py -v
 
 # 린트
 python -m py_compile config.py

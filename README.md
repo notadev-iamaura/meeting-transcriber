@@ -454,7 +454,9 @@ python main.py --no-menubar
 설정의 **기본 전사 모델**에서 `이 Mac에서 처리` 또는 `OpenAI 서버에서 처리`를 선택할 수 있습니다. OpenAI를 선택하려면 같은 화면에서 API 키를 macOS Keychain에 등록하고 외부 업로드에 한 번 명시적으로 동의해야 합니다. 이 선택을 유지하는 동안 이후 새 전사는 OpenAI로 처리됩니다. 새 설치의 초기값은 로컬이며 자동 cloud fallback은 없습니다.
 `gpt-4o-transcribe-diarize`는 API의 `language` 힌트를 지원하지 않아 언어를 자동 감지하며, 설정의 전사 언어 값은 로컬 STT 경로에 적용됩니다.
 
-전사가 완료된 회의의 **다른 모델로 텍스트 변환하기…** 버튼은 현재 회의록을 지우지 않습니다. 현재 로컬 모델과 OpenAI 모델의 결과를 별도 A/B 작업으로 저장해 비교하며, 실행할 때마다 해당 파일의 외부 전송 동의를 다시 받습니다. 변환 WAV가 아직 없는 녹음완료·변환 전 실패 파일은 먼저 로컬 전사를 완료해야 합니다.
+아직 전사를 시작하지 않은 **녹음 완료** 회의에서는 `전사 시작`을 눌러 이번 회의에만 사용할 모델을 고를 수 있습니다. 전역 기본값이 로컬이어도 한 회의만 OpenAI로 보낼 수 있고, 반대로 전역 기본값이 OpenAI여도 한 회의만 로컬로 처리할 수 있습니다. 이 선택은 작업 큐에 해당 회의의 snapshot으로만 저장되어 설정의 기본값을 바꾸지 않습니다. OpenAI를 고르면 그 파일에 대해 외부 전송 동의를 매번 다시 받습니다.
+
+전사가 완료된 회의의 **다른 모델로 텍스트 변환하기…** 버튼은 현재 회의록을 지우지 않습니다. 현재 로컬 모델과 OpenAI 모델의 결과를 별도 A/B 작업으로 저장해 비교하며, 실행할 때마다 해당 파일의 외부 전송 동의를 다시 받습니다. 녹음 완료·변환 전 실패 파일은 먼저 해당 회의의 첫 전사를 완료해야 합니다.
 
 | 모델 | 베이스 | Zeroth CER | 회의 음성 | RAM | 디스크 | HuggingFace |
 |------|--------|-----------|----------|-----|--------|-------------|
@@ -601,6 +603,11 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 
 # 로컬/OpenAI 통합 전사 카탈로그와 API 키 등록 상태(키 값은 반환하지 않음)
 curl http://127.0.0.1:8765/api/transcription-models | python -m json.tool
+
+# 한 회의만 OpenAI로 전사 (전역 기본 설정은 변경하지 않음)
+curl -X POST http://127.0.0.1:8765/api/meetings/{meeting_id}/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"openai:gpt-4o-transcribe-diarize","external_upload_confirmed":true}'
 ```
 
 OpenAI API 키는 CLI 인자나 `config.yaml`에 넣지 말고 설정 화면에서 등록하는 것을 권장합니다. 앱은 키를 macOS Keychain에 저장하고 등록 여부만 API에 반환합니다.

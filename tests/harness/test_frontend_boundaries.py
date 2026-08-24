@@ -530,6 +530,47 @@ def test_viewer_alternate_transcription_is_confirmed_non_destructive_ab_test() -
     assert ".external-upload-consent" in style_css
 
 
+def test_viewer_recorded_meeting_has_one_off_transcription_model_selection() -> None:
+    """개별 전사 선택은 전역 설정과 분리되고 OpenAI 동의를 파일마다 요구한다."""
+    viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
+    style_css = Path("ui/web/style.css").read_text(encoding="utf-8")
+
+    start_flow = viewer_view[
+        viewer_view.index(
+            "ViewerView.prototype._openStartTranscriptionDialog"
+        ) : viewer_view.index("ViewerView.prototype._transcribeMeeting")
+    ]
+
+    assert 'if (data.status === "recorded") {' in viewer_view
+    assert 'transcribeBtn.setAttribute("aria-haspopup", "dialog")' in viewer_view
+    assert "이 회의 전사 시작" in start_flow
+    assert "이 선택은 이 회의에만 적용되며 기본 전사 모델은 바뀌지 않습니다." in start_flow
+    assert 'App.apiRequest("/transcription-models"' in start_flow
+    assert 'name = "meetingTranscriptionModel"' in start_flow
+    assert "model_id: selectedModel.id" in start_flow
+    assert "external_upload_confirmed: external" in start_flow
+    assert "consentInput.checked" in start_flow
+    assert 'Router.navigate("/app/settings?focus=openai")' in start_flow
+    assert 'App.apiPost("/settings"' not in start_flow
+    assert "localStorage" not in start_flow
+    assert "abortController.abort()" in start_flow
+    assert "abortController.signal" in start_flow
+    assert "setDialogDismissalBlocked(true)" in start_flow
+    assert "this._startTranscriptionCleanup(false)" in viewer_view
+
+    transcribe_flow = viewer_view[
+        viewer_view.index("ViewerView.prototype._transcribeMeeting") : viewer_view.index(
+            "ViewerView.prototype._retryMeeting"
+        )
+    ]
+    assert "signal: signal" in transcribe_flow
+    assert "if (signal && signal.aborted) return;" in transcribe_flow
+
+    assert ".transcription-model-choice-list" in style_css
+    assert ".transcription-model-choice.selected" in style_css
+    assert ".external-upload-warning[hidden]" in style_css
+
+
 def test_viewer_missing_transcript_uses_meeting_status_not_unconditional_polling() -> None:
     viewer_view = Path("ui/web/viewer-view.js").read_text(encoding="utf-8")
 

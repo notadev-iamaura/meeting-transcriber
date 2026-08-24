@@ -3075,6 +3075,423 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
         assert any("다시 전사" in text for text in groups["danger"])
 
 
+def test_recorded_viewer_can_choose_openai_for_only_this_meeting(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """전역 local 상태에서 한 회의만 OpenAI를 고르고 매번 동의한다."""
+    transcribe_payloads: list[dict] = []
+    settings_mutations: list[str] = []
+    meeting_status = {"value": "recorded"}
+
+    def viewer_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        method = route.request.method
+        if path == "/api/meetings/meeting-oneoff/transcribe" and method == "POST":
+            transcribe_payloads.append(json.loads(route.request.post_data or "{}"))
+            meeting_status["value"] = "queued"
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": 1,
+                        "meeting_id": "meeting-oneoff",
+                        "audio_path": "/tmp/meeting-oneoff.wav",
+                        "status": "queued",
+                        "stt_provider": "openai",
+                        "stt_model": "gpt-4o-transcribe-diarize",
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-oneoff" and method == "GET":
+            provider = "openai" if meeting_status["value"] == "queued" else ""
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": 1,
+                        "meeting_id": "meeting-oneoff",
+                        "audio_path": "/tmp/meeting-oneoff.wav",
+                        "created_at": "2026-08-24T16:27:00",
+                        "status": meeting_status["value"],
+                        "skipped_steps": [],
+                        "stt_provider": provider,
+                        "stt_model": ("gpt-4o-transcribe-diarize" if provider else ""),
+                    }
+                ),
+            )
+            return
+        if path == "/api/meetings/meeting-oneoff/transcript":
+            route.fulfill(
+                status=404,
+                content_type="application/json",
+                body='{"detail":"not ready"}',
+            )
+            return
+        if path == "/api/meetings/meeting-oneoff/summary":
+            route.fulfill(
+                status=404,
+                content_type="application/json",
+                body='{"detail":"not ready"}',
+            )
+            return
+        if path == "/api/meetings/meeting-oneoff/pipeline-state":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"missing","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        if path == "/api/transcription-models":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "default_model_id": "local",
+                        "openai_key": {"configured": True, "source": "keychain"},
+                        "models": [
+                            {
+                                "id": "local",
+                                "label": "이 Mac에서 처리 · Whisper Large-v3 Turbo",
+                                "provider": "local",
+                                "model": "mlx-community/whisper-large-v3-turbo",
+                                "external_upload": False,
+                                "available": True,
+                                "unavailable_reason": None,
+                                "is_default": True,
+                            },
+                            {
+                                "id": "openai:gpt-4o-transcribe-diarize",
+                                "label": (
+                                    "OpenAI 서버에서 처리 · GPT-4o Transcribe Diarize · 외부 전송"
+                                ),
+                                "provider": "openai",
+                                "model": "gpt-4o-transcribe-diarize",
+                                "external_upload": True,
+                                "available": True,
+                                "unavailable_reason": None,
+                                "is_default": False,
+                            },
+                        ],
+                    }
+                ),
+            )
+            return
+        if path == "/api/settings" and method != "GET":
+            settings_mutations.append(method)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-oneoff",
+        api_handler=viewer_api,
+    ) as page:
+        trigger = page.locator(".viewer-action-btn.transcribe")
+        trigger.wait_for()
+        trigger.click()
+        dialog = page.locator("dialog.start-transcription-dialog")
+        dialog.wait_for(state="visible")
+
+        assert (
+            "이 회의에만 적용" in dialog.locator("#startTranscriptionDescription").text_content()
+        )
+        local_radio = dialog.locator('input[value="local"]')
+        openai_radio = dialog.locator('input[value="openai:gpt-4o-transcribe-diarize"]')
+        assert local_radio.is_checked()
+        assert dialog.locator("#meetingExternalUploadWarning").is_hidden()
+        assert dialog.locator(".transcription-dialog-submit").is_enabled()
+
+        page.keyboard.press("Escape")
+        # native <dialog> close 이벤트와 DOM cleanup은 다음 task에서 완료될 수 있다.
+        # 즉시 count를 읽지 말고 실제 사용자 상태인 detached까지 기다린다.
+        dialog.wait_for(state="detached")
+        assert (
+            page.evaluate("() => document.activeElement?.classList.contains('transcribe')") is True
+        )
+
+        trigger.click()
+        dialog = page.locator("dialog.start-transcription-dialog")
+        dialog.wait_for(state="visible")
+        openai_radio = dialog.locator('input[value="openai:gpt-4o-transcribe-diarize"]')
+        openai_radio.check()
+        submit = dialog.locator(".transcription-dialog-submit")
+        assert dialog.locator("#meetingExternalUploadWarning").is_visible()
+        assert submit.is_disabled()
+
+        dialog.locator("#meetingExternalUploadConsent").check()
+        assert submit.is_enabled()
+        submit.click()
+        page.wait_for_function(
+            "() => !document.querySelector('dialog.start-transcription-dialog')"
+        )
+
+        assert transcribe_payloads == [
+            {
+                "model_id": "openai:gpt-4o-transcribe-diarize",
+                "external_upload_confirmed": True,
+            }
+        ]
+        assert "api_key" not in json.dumps(transcribe_payloads)
+        assert settings_mutations == []
+        page.wait_for_selector("#viewerMetaTranscription:not([hidden])")
+        assert "OpenAI 서버" in page.locator("#viewerMetaTranscription").text_content()
+
+
+def test_recorded_viewer_blocks_openai_when_key_is_missing(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """키 미등록 상태는 OpenAI 선택과 전사 POST를 모두 차단한다."""
+    mutation_requests: list[str] = []
+
+    def viewer_api(route: Route) -> None:
+        parsed = urlparse(route.request.url)
+        path = parsed.path
+        if path == "/api/meetings/meeting-no-key/transcribe":
+            mutation_requests.append(route.request.method)
+            route.fulfill(status=500, content_type="application/json", body="{}")
+            return
+        if path == "/api/meetings/meeting-no-key":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": 2,
+                        "meeting_id": "meeting-no-key",
+                        "audio_path": "/tmp/meeting-no-key.wav",
+                        "created_at": "2026-08-24T16:27:00",
+                        "status": "recorded",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path.endswith("/transcript") or path.endswith("/summary"):
+            route.fulfill(
+                status=404,
+                content_type="application/json",
+                body='{"detail":"not ready"}',
+            )
+            return
+        if path.endswith("/pipeline-state"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"status":"missing","step_results":[],"skipped_steps":[],"total_elapsed_seconds":0}',
+            )
+            return
+        if path == "/api/transcription-models":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "default_model_id": "local",
+                        "openai_key": {"configured": False, "source": None},
+                        "models": [
+                            {
+                                "id": "local",
+                                "label": "이 Mac에서 처리 · Whisper Large-v3 Turbo",
+                                "provider": "local",
+                                "model": "mlx-community/whisper-large-v3-turbo",
+                                "external_upload": False,
+                                "available": True,
+                                "unavailable_reason": None,
+                                "is_default": True,
+                            },
+                            {
+                                "id": "openai:gpt-4o-transcribe-diarize",
+                                "label": "OpenAI 서버에서 처리 · GPT-4o · 외부 전송",
+                                "provider": "openai",
+                                "model": "gpt-4o-transcribe-diarize",
+                                "external_upload": True,
+                                "available": False,
+                                "unavailable_reason": "설정에서 OpenAI API 키를 등록하세요.",
+                                "is_default": False,
+                            },
+                        ],
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-no-key",
+        api_handler=viewer_api,
+    ) as page:
+        page.locator(".viewer-action-btn.transcribe").click()
+        dialog = page.locator("dialog.start-transcription-dialog")
+        dialog.wait_for(state="visible")
+        assert dialog.locator('input[value="openai:gpt-4o-transcribe-diarize"]').is_disabled()
+        assert dialog.locator("#meetingMissingOpenAIKey").is_visible()
+        assert "API 키" in dialog.locator("#meetingMissingOpenAIKey").text_content()
+        dialog.locator(".transcription-dialog-cancel").click()
+
+    assert mutation_requests == []
+
+
+def test_recorded_viewer_aborts_pending_transcribe_when_navigating_away(
+    browser: Browser,
+    spa_static_server: str,
+) -> None:
+    """POST 대기 중 뷰를 떠나면 요청을 abort하고 폐기된 뷰를 reload하지 않는다."""
+
+    def viewer_api(route: Route) -> None:
+        path = urlparse(route.request.url).path
+        if path == "/api/meetings/meeting-nav-abort":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "id": 3,
+                        "meeting_id": "meeting-nav-abort",
+                        "audio_path": "/tmp/meeting-nav-abort.wav",
+                        "created_at": "2026-08-24T16:27:00",
+                        "status": "recorded",
+                        "skipped_steps": [],
+                    }
+                ),
+            )
+            return
+        if path.endswith("/transcript") or path.endswith("/summary"):
+            route.fulfill(
+                status=404,
+                content_type="application/json",
+                body='{"detail":"not ready"}',
+            )
+            return
+        if path.endswith("/pipeline-state"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=(
+                    '{"status":"missing","step_results":[],"skipped_steps":[],'
+                    '"total_elapsed_seconds":0}'
+                ),
+            )
+            return
+        if path == "/api/transcription-models":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "default_model_id": "local",
+                        "openai_key": {"configured": False, "source": None},
+                        "models": [
+                            {
+                                "id": "local",
+                                "label": "이 Mac에서 처리 · Whisper Large-v3 Turbo",
+                                "provider": "local",
+                                "model": "mlx-community/whisper-large-v3-turbo",
+                                "external_upload": False,
+                                "available": True,
+                                "unavailable_reason": None,
+                                "is_default": True,
+                            }
+                        ],
+                    }
+                ),
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/viewer/meeting-nav-abort",
+        api_handler=viewer_api,
+    ) as page:
+        trigger = page.locator(".viewer-action-btn.transcribe")
+        trigger.wait_for()
+        page.evaluate(
+            """
+            () => {
+                const app = window.MeetingApp;
+                const originalRequest = app.apiRequest;
+                const originalPost = app.apiPost;
+                const endpoint = "/meetings/meeting-nav-abort/transcribe";
+                const state = window.__pendingTranscribe = {
+                    calls: 0,
+                    signalProvided: false,
+                    aborted: false,
+                    meetingReloads: 0,
+                    dashboardRefreshes: 0,
+                    flushed: false,
+                };
+
+                function deferredRequest(signal) {
+                    state.calls += 1;
+                    state.signalProvided = !!signal;
+                    if (signal) {
+                        signal.addEventListener("abort", () => {
+                            state.aborted = true;
+                        }, { once: true });
+                    }
+                    return new Promise((resolve) => {
+                        window.__resolvePendingTranscribe = () => {
+                            resolve({ status: "queued" });
+                            setTimeout(() => { state.flushed = true; }, 0);
+                        };
+                    });
+                }
+
+                app.apiRequest = (requestEndpoint, options) => {
+                    if (requestEndpoint === endpoint && options?.method === "POST") {
+                        return deferredRequest(options.signal);
+                    }
+                    if (requestEndpoint === "/meetings/meeting-nav-abort") {
+                        state.meetingReloads += 1;
+                    }
+                    return originalRequest(requestEndpoint, options);
+                };
+                app.apiPost = (requestEndpoint, body) => {
+                    if (requestEndpoint === endpoint) return deferredRequest(null);
+                    return originalPost(requestEndpoint, body);
+                };
+                document.addEventListener("recap:dashboard-refresh", () => {
+                    state.dashboardRefreshes += 1;
+                });
+            }
+            """
+        )
+
+        trigger.click()
+        dialog = page.locator("dialog.start-transcription-dialog")
+        dialog.wait_for(state="visible")
+        dialog.locator(".transcription-dialog-submit").click()
+        page.wait_for_function("() => window.__pendingTranscribe.calls === 1")
+
+        page.evaluate("() => window.SPA.Router.navigate('/app')")
+        page.wait_for_url(f"{spa_static_server}/app")
+        dialog.wait_for(state="detached")
+        state_after_navigation = page.evaluate("() => window.__pendingTranscribe")
+        assert state_after_navigation["signalProvided"] is True
+        assert state_after_navigation["aborted"] is True
+
+        page.evaluate("() => window.__resolvePendingTranscribe()")
+        page.wait_for_function("() => window.__pendingTranscribe.flushed")
+        final_state = page.evaluate("() => window.__pendingTranscribe")
+        assert final_state["meetingReloads"] == 0
+        assert final_state["dashboardRefreshes"] == 0
+
+
 def test_viewer_draft_transcript_is_readonly_but_copyable(
     browser: Browser,
     spa_static_server: str,

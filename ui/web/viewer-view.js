@@ -68,6 +68,8 @@
             self._transcriptSignature = "";
             self._alternateTranscriptionDialog = null;
             self._alternateTranscriptionCleanup = null;
+            self._startTranscriptionDialog = null;
+            self._startTranscriptionCleanup = null;
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
             var urlParams = new URLSearchParams(window.location.search);
@@ -1443,8 +1445,10 @@
                 var transcribeBtn = document.createElement("button");
                 transcribeBtn.className = "viewer-action-btn transcribe";
                 transcribeBtn.innerHTML = Icons.play + ' 전사 시작';
+                transcribeBtn.setAttribute("aria-haspopup", "dialog");
+                transcribeBtn.title = "이 회의에 사용할 전사 모델을 선택합니다.";
                 transcribeBtn.addEventListener("click", function () {
-                    self._transcribeMeeting(data.meeting_id, transcribeBtn);
+                    self._openStartTranscriptionDialog(transcribeBtn);
                 });
                 primaryGroup.appendChild(transcribeBtn);
             }
@@ -1692,26 +1696,361 @@
         };
 
         /**
+         * 녹음 완료된 개별 회의에만 적용할 전사 모델 선택 대화상자를 연다.
+         * 전역 기본 설정은 변경하지 않으며 OpenAI는 파일마다 동의를 다시 받는다.
+         * @param {HTMLElement} trigger 닫힌 뒤 포커스를 되돌릴 버튼
+         */
+        ViewerView.prototype._openStartTranscriptionDialog = function (trigger) {
+            var self = this;
+            if (self._startTranscriptionCleanup) {
+                self._startTranscriptionCleanup(false);
+            }
+
+            var abortController = new AbortController();
+            var dialog = document.createElement("dialog");
+            dialog.className = "transcription-model-dialog start-transcription-dialog";
+            dialog.setAttribute("role", "dialog");
+            dialog.setAttribute("aria-modal", "true");
+            dialog.setAttribute("aria-labelledby", "startTranscriptionTitle");
+            dialog.setAttribute("aria-describedby", "startTranscriptionDescription");
+            dialog.innerHTML = [
+                '<div class="transcription-model-dialog-content">',
+                '  <header class="transcription-model-dialog-header">',
+                '    <div>',
+                '      <h2 id="startTranscriptionTitle">이 회의 전사 시작</h2>',
+                '      <p id="startTranscriptionDescription">이번 회의에서 사용할 모델을 선택하세요. 이 선택은 이 회의에만 적용되며 기본 전사 모델은 바뀌지 않습니다.</p>',
+                '    </div>',
+                '    <button type="button" class="transcription-dialog-close" aria-label="닫기">&#x2715;</button>',
+                '  </header>',
+                '  <div class="transcription-model-choice-list" id="meetingTranscriptionChoices" role="radiogroup" aria-label="이번 회의 전사 모델">',
+                '    <div class="transcription-model-status">모델 목록을 불러오는 중…</div>',
+                '  </div>',
+                '  <div class="external-upload-warning" id="meetingExternalUploadWarning" role="note" hidden>',
+                '    <strong>외부 전송 안내</strong>',
+                '    <span>OpenAI 모델을 선택하면 이 회의의 음성 파일이 OpenAI 서버로 업로드됩니다.</span>',
+                '  </div>',
+                '  <label class="external-upload-consent" id="meetingExternalUploadConsentLabel" hidden>',
+                '    <input type="checkbox" id="meetingExternalUploadConsent">',
+                '    <span>이 음성 파일을 OpenAI 서버로 전송하는 데 동의합니다.</span>',
+                '  </label>',
+                '  <div class="transcription-missing-key" id="meetingMissingOpenAIKey" hidden>',
+                '    <span>OpenAI API 키를 등록하면 이 회의에서 OpenAI 전사를 선택할 수 있습니다.</span>',
+                '    <button type="button" class="transcription-settings-link">설정에서 키 등록</button>',
+                '  </div>',
+                '  <div class="transcription-model-status" id="meetingTranscriptionStatus" role="status" aria-live="polite">모델 목록을 불러오는 중…</div>',
+                '  <footer class="transcription-model-dialog-actions">',
+                '    <button type="button" class="transcription-dialog-cancel">취소</button>',
+                '    <button type="button" class="transcription-dialog-submit" disabled>이 모델로 전사 시작</button>',
+                '  </footer>',
+                '</div>',
+            ].join("\n");
+
+            document.body.appendChild(dialog);
+            self._startTranscriptionDialog = dialog;
+
+            var closeBtn = dialog.querySelector(".transcription-dialog-close");
+            var cancelBtn = dialog.querySelector(".transcription-dialog-cancel");
+            var submitBtn = dialog.querySelector(".transcription-dialog-submit");
+            var settingsBtn = dialog.querySelector(".transcription-settings-link");
+            var choiceList = dialog.querySelector("#meetingTranscriptionChoices");
+            var warningEl = dialog.querySelector("#meetingExternalUploadWarning");
+            var consentLabel = dialog.querySelector("#meetingExternalUploadConsentLabel");
+            var consentInput = dialog.querySelector("#meetingExternalUploadConsent");
+            var missingKeyEl = dialog.querySelector("#meetingMissingOpenAIKey");
+            var statusEl = dialog.querySelector("#meetingTranscriptionStatus");
+            var catalog = null;
+            var requestInFlight = false;
+
+            function displayModelLabel(model) {
+                var label = String((model && (model.label || model.id)) || "");
+                return label
+                    .replace(/^이 Mac에서 처리\s*·\s*/, "")
+                    .replace(/^OpenAI 서버에서 처리\s*·\s*/, "")
+                    .replace(/\s*·\s*외부 전송$/, "");
+            }
+
+            function getSelectedModel() {
+                if (!catalog) return null;
+                var selected = choiceList.querySelector(
+                    'input[name="meetingTranscriptionModel"]:checked'
+                );
+                if (!selected) return null;
+                return (catalog.models || []).find(function (model) {
+                    return model.id === selected.value;
+                }) || null;
+            }
+
+            function setDialogDismissalBlocked(blocked) {
+                closeBtn.disabled = blocked;
+                cancelBtn.disabled = blocked;
+                settingsBtn.disabled = blocked;
+                choiceList.querySelectorAll('input[name="meetingTranscriptionModel"]').forEach(
+                    function (input) {
+                        input.disabled = blocked || input.dataset.available !== "true";
+                    }
+                );
+                consentInput.disabled = blocked;
+                if (blocked) {
+                    dialog.setAttribute("aria-busy", "true");
+                } else {
+                    dialog.removeAttribute("aria-busy");
+                }
+            }
+
+            function updateGate() {
+                var selectedModel = getSelectedModel();
+                choiceList.querySelectorAll(".transcription-model-choice").forEach(
+                    function (choice) {
+                        var input = choice.querySelector("input");
+                        choice.classList.toggle("selected", !!(input && input.checked));
+                    }
+                );
+                var keyConfigured = !!(
+                    catalog && catalog.openai_key && catalog.openai_key.configured
+                );
+                var external = !!(selectedModel && selectedModel.external_upload);
+                warningEl.hidden = !external;
+                consentLabel.hidden = !external;
+                missingKeyEl.hidden = keyConfigured;
+                if (!external) consentInput.checked = false;
+
+                var ready = !!(
+                    !requestInFlight &&
+                    selectedModel &&
+                    selectedModel.available &&
+                    (!external || (keyConfigured && consentInput.checked))
+                );
+                submitBtn.disabled = !ready;
+
+                if (!selectedModel) {
+                    statusEl.textContent = "사용할 수 있는 전사 모델을 선택해 주세요.";
+                    statusEl.className = "transcription-model-status warning";
+                } else if (!selectedModel.available) {
+                    statusEl.textContent =
+                        selectedModel.unavailable_reason || "선택한 모델을 사용할 수 없습니다.";
+                    statusEl.className = "transcription-model-status error";
+                } else if (external && !keyConfigured) {
+                    statusEl.textContent = "OpenAI API 키를 먼저 등록해 주세요.";
+                    statusEl.className = "transcription-model-status warning";
+                } else if (external && !consentInput.checked) {
+                    statusEl.textContent = "외부 전송 안내를 확인하고 동의해 주세요.";
+                    statusEl.className = "transcription-model-status warning";
+                } else if (external) {
+                    statusEl.textContent = "이 회의만 OpenAI 서버에서 전사합니다.";
+                    statusEl.className = "transcription-model-status success";
+                } else {
+                    statusEl.textContent = "이 회의는 이 Mac에서 전사하며 외부로 전송되지 않습니다.";
+                    statusEl.className = "transcription-model-status success";
+                }
+            }
+
+            var cleanup = function (restoreFocus) {
+                if (self._startTranscriptionDialog !== dialog) return;
+                abortController.abort();
+                dialog.removeEventListener("close", onClose);
+                dialog.removeEventListener("cancel", onDialogCancel);
+                dialog.removeEventListener("click", onBackdropClick);
+                closeBtn.removeEventListener("click", onDismiss);
+                cancelBtn.removeEventListener("click", onDismiss);
+                settingsBtn.removeEventListener("click", onOpenSettings);
+                choiceList.removeEventListener("change", onChoiceChange);
+                consentInput.removeEventListener("change", updateGate);
+                submitBtn.removeEventListener("click", onSubmit);
+                if (dialog.parentNode) dialog.parentNode.removeChild(dialog);
+                self._startTranscriptionDialog = null;
+                self._startTranscriptionCleanup = null;
+                if (restoreFocus) {
+                    var focusTarget = trigger && trigger.isConnected ? trigger : null;
+                    if (!focusTarget && self._els && self._els.viewerActions) {
+                        focusTarget = self._els.viewerActions.querySelector(".transcribe");
+                    }
+                    if (focusTarget) focusTarget.focus();
+                }
+            };
+
+            var onClose = function () { cleanup(true); };
+            var onDialogCancel = function (event) {
+                if (requestInFlight) event.preventDefault();
+            };
+            var onDismiss = function () {
+                if (requestInFlight) return;
+                dialog.close();
+            };
+            var onBackdropClick = function (event) {
+                if (!requestInFlight && event.target === dialog) dialog.close();
+            };
+            var onOpenSettings = function () {
+                if (requestInFlight) return;
+                cleanup(false);
+                Router.navigate("/app/settings?focus=openai");
+            };
+            var onChoiceChange = function () {
+                consentInput.checked = false;
+                updateGate();
+            };
+            var onSubmit = async function () {
+                var selectedModel = getSelectedModel();
+                var external = !!(selectedModel && selectedModel.external_upload);
+                if (
+                    requestInFlight ||
+                    !selectedModel ||
+                    !selectedModel.available ||
+                    (external && (
+                        !(catalog.openai_key && catalog.openai_key.configured) ||
+                        !consentInput.checked
+                    ))
+                ) {
+                    updateGate();
+                    return;
+                }
+
+                requestInFlight = true;
+                setDialogDismissalBlocked(true);
+                submitBtn.disabled = true;
+                submitBtn.textContent = "전사 요청 중…";
+                statusEl.textContent = "선택한 모델로 이 회의를 작업 큐에 넣고 있습니다…";
+                statusEl.className = "transcription-model-status";
+
+                try {
+                    await self._transcribeMeeting(self._meetingId, {
+                        model_id: selectedModel.id,
+                        external_upload_confirmed: external,
+                    }, abortController.signal);
+                    if (self._startTranscriptionDialog !== dialog) return;
+                    requestInFlight = false;
+                    setDialogDismissalBlocked(false);
+                    cleanup(false);
+                } catch (err) {
+                    if (err && err.name === "AbortError") return;
+                    if (self._startTranscriptionDialog !== dialog) return;
+                    requestInFlight = false;
+                    setDialogDismissalBlocked(false);
+                    submitBtn.textContent = "이 모델로 전사 시작";
+                    updateGate();
+                    statusEl.textContent =
+                        "전사 시작 실패: " + (err.message || String(err));
+                    statusEl.className = "transcription-model-status error";
+                }
+            };
+
+            dialog.addEventListener("close", onClose);
+            dialog.addEventListener("cancel", onDialogCancel);
+            dialog.addEventListener("click", onBackdropClick);
+            closeBtn.addEventListener("click", onDismiss);
+            cancelBtn.addEventListener("click", onDismiss);
+            settingsBtn.addEventListener("click", onOpenSettings);
+            choiceList.addEventListener("change", onChoiceChange);
+            consentInput.addEventListener("change", updateGate);
+            submitBtn.addEventListener("click", onSubmit);
+            self._startTranscriptionCleanup = cleanup;
+
+            if (typeof dialog.showModal === "function") {
+                dialog.showModal();
+            } else {
+                dialog.setAttribute("open", "");
+            }
+            closeBtn.focus();
+
+            App.apiRequest("/transcription-models", { signal: abortController.signal })
+                .then(function (data) {
+                    if (self._startTranscriptionDialog !== dialog) return;
+                    catalog = data || { models: [], openai_key: { configured: false } };
+                    var models = Array.isArray(catalog.models) ? catalog.models : [];
+                    choiceList.innerHTML = "";
+
+                    models.forEach(function (model) {
+                        var choice = document.createElement("label");
+                        choice.className = "transcription-model-choice " + model.provider;
+                        if (!model.available) {
+                            choice.classList.add("unavailable");
+                            choice.setAttribute("aria-disabled", "true");
+                        }
+
+                        var input = document.createElement("input");
+                        input.type = "radio";
+                        input.name = "meetingTranscriptionModel";
+                        input.value = model.id;
+                        input.dataset.available = model.available ? "true" : "false";
+                        input.disabled = !model.available;
+
+                        var content = document.createElement("span");
+                        content.className = "transcription-model-choice-content";
+                        var badge = document.createElement("span");
+                        badge.className = "processing-location-badge " +
+                            (model.external_upload ? "external" : "local");
+                        badge.textContent = model.external_upload
+                            ? "OpenAI 서버 · 외부 전송"
+                            : "이 Mac에서 처리";
+                        var name = document.createElement("strong");
+                        name.textContent = displayModelLabel(model);
+                        var detail = document.createElement("span");
+                        detail.className = "transcription-model-choice-detail";
+                        detail.textContent = model.available
+                            ? (model.external_upload
+                                ? "이 회의의 오디오를 OpenAI에 전송해 전사합니다."
+                                : "오디오가 외부로 전송되지 않습니다.")
+                            : (model.unavailable_reason || "현재 사용할 수 없습니다.");
+                        content.appendChild(badge);
+                        content.appendChild(name);
+                        content.appendChild(detail);
+                        choice.appendChild(input);
+                        choice.appendChild(content);
+                        choiceList.appendChild(choice);
+                    });
+
+                    var meetingProvider = self._lastMeetingData &&
+                        self._lastMeetingData.stt_provider;
+                    var desiredId = meetingProvider === "openai"
+                        ? "openai:gpt-4o-transcribe-diarize"
+                        : (meetingProvider === "local" ? "local" : catalog.default_model_id);
+                    var desiredInput = Array.from(
+                        choiceList.querySelectorAll('input[name="meetingTranscriptionModel"]')
+                    ).find(function (input) {
+                        return input.value === desiredId && !input.disabled;
+                    });
+                    var fallbackInput = choiceList.querySelector(
+                        'input[name="meetingTranscriptionModel"][data-available="true"]'
+                    );
+                    if (desiredInput || fallbackInput) {
+                        (desiredInput || fallbackInput).checked = true;
+                    }
+                    updateGate();
+                })
+                .catch(function (err) {
+                    if (err && err.name === "AbortError") return;
+                    if (self._startTranscriptionDialog !== dialog) return;
+                    catalog = { models: [], openai_key: { configured: false } };
+                    choiceList.innerHTML = "";
+                    statusEl.textContent =
+                        "전사 모델 목록을 불러오지 못했습니다: " +
+                        (err.message || String(err));
+                    statusEl.className = "transcription-model-status error";
+                    submitBtn.disabled = true;
+                });
+        };
+
+        /**
          * 녹음 완료된 회의의 전사를 시작한다.
          * @param {string} meetingId - 전사할 회의 ID
-         * @param {HTMLElement} btn - 클릭된 버튼 요소
+         * @param {Object} payload - 공개 model_id와 외부 전송 동의
+         * @param {AbortSignal} signal - dialog/view 수명에 묶인 요청 취소 신호
          */
-        ViewerView.prototype._transcribeMeeting = async function (meetingId, btn) {
-            var originalText = btn.textContent;
-            btn.disabled = true;
-            btn.textContent = "요청 중...";
-
-            try {
-                await App.apiPost("/meetings/" + encodeURIComponent(meetingId) + "/transcribe", {});
-                this._loadMeetingInfo();
-                ListPanel.loadMeetings();
-                // 홈 대시보드 카드(미전사/처리 대기 카운트) 즉시 갱신.
-                document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
-            } catch (e) {
-                errorBanner.show("전사 시작 실패: " + e.message);
-                btn.disabled = false;
-                btn.textContent = originalText;
-            }
+        ViewerView.prototype._transcribeMeeting = async function (meetingId, payload, signal) {
+            await App.apiRequest(
+                "/meetings/" + encodeURIComponent(meetingId) + "/transcribe",
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload || {}),
+                    signal: signal,
+                }
+            );
+            // abort 직전 응답이 완료되는 경합에서도 폐기된 뷰를 다시 로드하지 않는다.
+            if (signal && signal.aborted) return;
+            this._loadMeetingInfo();
+            ListPanel.loadMeetings();
+            // 홈 대시보드 카드(미전사/처리 대기 카운트) 즉시 갱신.
+            document.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
         };
 
         /**
@@ -3003,6 +3342,10 @@
          * 뷰를 정리한다.
          */
         ViewerView.prototype.destroy = function () {
+            if (this._startTranscriptionCleanup) {
+                this._startTranscriptionCleanup(false);
+            }
+
             // 외부 전사 대화상자의 네트워크 요청·리스너·DOM을 함께 정리한다.
             if (this._alternateTranscriptionCleanup) {
                 this._alternateTranscriptionCleanup(false);

@@ -242,9 +242,9 @@ def server(test_base_dir: Path, seeded_meeting_id: str):
         log_fd.close()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def browser():
-    """Playwright 브라우저 — 세션 내 1개."""
+    """Playwright 브라우저 — 모듈 내 1개."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         yield browser
