@@ -201,12 +201,16 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     thermal_manager = None
     pipeline_manager = None
     folder_watcher = None
-    job_processor = None
+    app.state.startup_scan_task = None
+    app.state.startup_scan_status = "disabled" if lightweight_runtime else "pending"
+    app.state.background_runtime_ready = lightweight_runtime
+    app.state.job_processor = None
+    app.state.lifecycle_scheduler = None
+    app.state.auto_processing_scheduler = None
     if lightweight_runtime:
         app.state.thermal_manager = None
         app.state.pipeline_manager = None
         app.state.folder_watcher = None
-        app.state.job_processor = None
         logger.info(f"백그라운드 런타임 컴포넌트 비활성화 (runtime_profile={runtime_profile})")
     else:
         # 7. ThermalManager 초기화 (lazy)
@@ -237,37 +241,20 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             folder_watcher = FolderWatcher(async_job_queue=async_queue, config=config)
             await folder_watcher.start()
-            await folder_watcher.scan_existing()
             app.state.folder_watcher = folder_watcher
-            logger.info("FolderWatcher 시작 완료")
+            logger.info("FolderWatcher 실시간 감시 시작 완료")
         except Exception as e:
+            if folder_watcher is not None:
+                try:
+                    await folder_watcher.stop()
+                except Exception as stop_error:
+                    logger.warning(
+                        f"FolderWatcher 부분 초기화 정리 실패: "
+                        f"{type(stop_error).__name__}: {stop_error}"
+                    )
+            folder_watcher = None
             app.state.folder_watcher = None
             logger.warning(f"FolderWatcher 초기화 실패: {e}")
-
-        # 10. JobProcessor 초기화 + start (lazy, pipeline과 thermal 필요)
-        if pipeline_manager is not None and thermal_manager is not None:
-            try:
-                from core.orchestrator import JobProcessor
-
-                job_processor = JobProcessor(
-                    job_queue=async_queue,
-                    pipeline=pipeline_manager,
-                    thermal_manager=thermal_manager,
-                    ws_manager=ws_manager,
-                    poll_interval=5.0,
-                )
-                await job_processor.start()
-                app.state.job_processor = job_processor
-                logger.info("JobProcessor 시작 완료")
-            except Exception as e:
-                app.state.job_processor = None
-                logger.warning(f"JobProcessor 초기화 실패: {e}")
-        else:
-            app.state.job_processor = None
-            if pipeline_manager is None or thermal_manager is None:
-                logger.warning(
-                    "PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화"
-                )
 
     # 11. STTModelDownloader 초기화 (STT 모델 선택기 지원)
     try:
@@ -283,51 +270,127 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.stt_downloader = None
         logger.warning(f"STTModelDownloader 초기화 실패: {e}")
 
-    # 12. LifecycleScheduler 초기화 (오디오 보존/삭제 정책 자동 실행)
+    # 기존 파일 감사는 HTTP readiness와 분리한다. 단, legacy
+    # queued row의 admission hold보다 큐 소비자가 먼저 실행되지 않도록
+    # JobProcessor/Lifecycle/AutoProcessing은 scan 완료 뒤 순서대로 시작한다.
     if lightweight_runtime:
-        app.state.lifecycle_scheduler = None
         logger.info(f"LifecycleScheduler 비활성화 (runtime_profile={runtime_profile})")
-    else:
-        try:
-            from security.lifecycle_scheduler import LifecycleScheduler
-
-            lifecycle_scheduler = LifecycleScheduler(config)
-            await lifecycle_scheduler.start()
-            app.state.lifecycle_scheduler = lifecycle_scheduler
-            logger.info("LifecycleScheduler 초기화 완료")
-        except Exception as e:
-            app.state.lifecycle_scheduler = None
-            logger.warning(f"LifecycleScheduler 초기화 실패: {e}")
-
-    # 13. AutoProcessingScheduler 초기화 (누락 전사/요약 자동 실행)
-    if lightweight_runtime:
-        app.state.auto_processing_scheduler = None
         logger.info(f"AutoProcessingScheduler 비활성화 (runtime_profile={runtime_profile})")
-    elif pipeline_manager is not None:
-        try:
-            from core.auto_processing_scheduler import AutoProcessingScheduler
-
-            auto_processing_scheduler = AutoProcessingScheduler(
-                config=config,
-                job_queue=async_queue,
-                pipeline=pipeline_manager,
-            )
-            await auto_processing_scheduler.start()
-            app.state.auto_processing_scheduler = auto_processing_scheduler
-            logger.info("AutoProcessingScheduler 초기화 완료")
-        except Exception as e:
-            app.state.auto_processing_scheduler = None
-            logger.warning(f"AutoProcessingScheduler 초기화 실패: {e}")
     else:
-        app.state.auto_processing_scheduler = None
-        logger.warning("PipelineManager 미초기화로 AutoProcessingScheduler 비활성화")
 
-    logger.info(f"FastAPI 서버 리소스 초기화 완료 — DB: {db_path}, 포트: {config.server.port}")
+        async def _bootstrap_background_runtime() -> None:
+            """기존 입력 감사 후 큐 소비자를 안전한 순서로 시작한다."""
+            try:
+                if folder_watcher is not None:
+                    app.state.startup_scan_status = "running"
+                    try:
+                        registered = await folder_watcher.scan_existing()
+                    except asyncio.CancelledError:
+                        app.state.startup_scan_status = "cancelled"
+                        raise
+                    except Exception as e:
+                        app.state.startup_scan_status = "failed"
+                        logger.exception(f"기존 파일 백그라운드 스캔 실패: {e}")
+                    else:
+                        app.state.startup_scan_status = "completed"
+                        logger.info(f"기존 파일 백그라운드 스캔 완료: {len(registered)}건 등록")
+                else:
+                    app.state.startup_scan_status = "unavailable"
+
+                # scan 실패는 요청 처리를 영구 비활성화하지 않는다.
+                if pipeline_manager is not None and thermal_manager is not None:
+                    try:
+                        from core.orchestrator import JobProcessor
+
+                        processor = JobProcessor(
+                            job_queue=async_queue,
+                            pipeline=pipeline_manager,
+                            thermal_manager=thermal_manager,
+                            ws_manager=ws_manager,
+                            poll_interval=5.0,
+                        )
+                        await processor.start()
+                        app.state.job_processor = processor
+                        logger.info("JobProcessor 시작 완료")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"JobProcessor 초기화 실패: {e}")
+                else:
+                    logger.warning(
+                        "PipelineManager 또는 ThermalManager 미초기화로 JobProcessor 비활성화"
+                    )
+
+                runtime_config = app.state.config
+                try:
+                    from security.lifecycle_scheduler import LifecycleScheduler
+
+                    lifecycle_scheduler = LifecycleScheduler(runtime_config)
+                    await lifecycle_scheduler.start()
+                    app.state.lifecycle_scheduler = lifecycle_scheduler
+                    logger.info("LifecycleScheduler 초기화 완료")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"LifecycleScheduler 초기화 실패: {e}")
+
+                if pipeline_manager is not None:
+                    try:
+                        from core.auto_processing_scheduler import AutoProcessingScheduler
+
+                        auto_processing_scheduler = AutoProcessingScheduler(
+                            config=runtime_config,
+                            job_queue=async_queue,
+                            pipeline=pipeline_manager,
+                        )
+                        await auto_processing_scheduler.start()
+                        app.state.auto_processing_scheduler = auto_processing_scheduler
+                        logger.info("AutoProcessingScheduler 초기화 완료")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"AutoProcessingScheduler 초기화 실패: {e}")
+                else:
+                    logger.warning("PipelineManager 미초기화로 AutoProcessingScheduler 비활성화")
+                app.state.background_runtime_ready = True
+            except asyncio.CancelledError:
+                if app.state.startup_scan_status in {"pending", "running"}:
+                    app.state.startup_scan_status = "cancelled"
+                raise
+
+        startup_scan_task = asyncio.create_task(
+            _bootstrap_background_runtime(),
+            name="startup-existing-audio-scan",
+        )
+        app.state.startup_scan_task = startup_scan_task
+        # 즉시 완료 mock/빈 폴더는 기존 시작 계약대로 한 tick 내
+        # 컴포넌트를 준비하되, 스캔이 대기하면 HTTP startup을 막지 않는다.
+        await asyncio.sleep(0)
+
+    logger.info(
+        f"FastAPI 서버 HTTP readiness 초기화 완료 — "
+        f"DB: {db_path}, 포트: {config.server.port}, "
+        f"startup_scan={app.state.startup_scan_status}"
+    )
 
     yield  # 앱 실행
 
     # --- Shutdown ---
     logger.info("FastAPI 서버 종료 — 리소스 정리 중...")
+
+    # startup scan/bootstrap이 watcher/DB를 더 이상 접근하지 않게
+    # 먼저 취소하고 완료를 확인한다.
+    shutdown_scan_task = getattr(app.state, "startup_scan_task", None)
+    if isinstance(shutdown_scan_task, asyncio.Task):
+        if not shutdown_scan_task.done():
+            shutdown_scan_task.cancel()
+        try:
+            await shutdown_scan_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"startup scan task 정리 중 오류: {e}")
+        logger.info("startup scan task 정리 완료")
 
     # AutoProcessingScheduler 정지
     if (

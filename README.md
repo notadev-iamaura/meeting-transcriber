@@ -630,6 +630,7 @@ bash scripts/setup_launchagent.sh
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
 | `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `false` (기본: 전체 8단계 실행) |
 | `server.port` | 웹 서버 포트 | `8765` |
+| `server.startup_timeout_seconds` | 메뉴바 실행 전 FastAPI HTTP readiness 최대 대기 | `10.0`초 |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
 | `thermal.cooldown_seconds` | 쿨다운 시간 | `180` (3분) |
 | `recording.enabled` | 녹음 기능 활성화 | `true` |
@@ -643,6 +644,8 @@ bash scripts/setup_launchagent.sh
 | `audio_quality.decode_timeout_factor` | 음성 길이 비례 timeout 계수 | `0.25` |
 | `audio_quality.decode_timeout_cap_seconds` | ffmpeg full-decode timeout 상한 | `900.0`초 |
 | `watcher.file_ready_timeout_seconds` | 쓰기 중인 입력 파일의 readiness 최대 대기 | `30.0`초 |
+| `watcher.startup_probe_concurrency` | 재시작 시 기존 파일 writable-open(`lsof`) 확인 최대 동시성 | `8` |
+| `watcher.startup_writer_attestation_max_age_seconds` | 기존 DB 작업이 없는 startup 신규 ACCEPT의 final writer 확인 재사용 상한 | `0.25`초 |
 
 `audio_quality.enabled: true`일 때 길이는 ffmpeg 16 kHz mono full-decode
 sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니다.
@@ -660,6 +663,19 @@ sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니
 무덮어쓰기 publish한 뒤, watcher의 같은 품질 gate를 거쳐야만 queue에 등록됩니다.
 기존 DB 작업을 격리할 때는 source identity와 예약 목적지를 journal에 먼저 기록하므로,
 격리 이동과 DB 정리 사이 앱이 종료돼도 다음 시작에서 안전하게 이어서 완료합니다.
+
+재시작 감사의 최초·최종 `lsof` 확인은 설정된 동시성 안에서 실행됩니다. 기존 DB 작업이
+없는 startup 신규 ACCEPT만 짧은 final 확인 결과를 재사용하며, 그 사이 fingerprint가
+바뀌거나 허용 시간이 지나면 적용 직전에 다시 확인합니다. 원본 격리와 기존 큐 복원은
+파괴적 또는 실행 의도를 바꾸는 작업이므로 항상 적용 직전에 직렬로 writer 상태를
+확인합니다.
+
+재시작 시 기존 오디오 감사는 FastAPI HTTP startup과 분리됩니다.
+writable-open 확인은 설정된 동시성 경계 안에서 실행하고, ffmpeg 품질 검증과
+DB/quarantine 변경은 순차 처리합니다. 감사 중에도 `/api/health`와
+`/api/status`는 응답하지만, JobProcessor·Lifecycle·AutoProcessing은 감사가
+끝난 뒤에만 시작합니다. 메뉴바는 설정된 timeout 동안 서버 readiness를
+확인하고, 포트 바인드나 lifespan 시작이 실패하면 실행되지 않습니다.
 
 환경변수로 오버라이드 가능:
 

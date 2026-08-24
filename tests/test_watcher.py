@@ -21,6 +21,8 @@ import asyncio
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,14 +30,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from core.job_queue import AsyncJobQueue, JobQueue, JobQueueError
+from core.job_queue import AsyncJobQueue, Job, JobQueue, JobQueueError
 from core.watcher import (
     AlreadyWatchingError,
     FolderWatcher,
     WatchDirectoryError,
     WatcherError,
     _AudioFileHandler,
+    _FileFingerprint,
     _OpenWriterState,
+    _PreparedReadyAction,
 )
 
 _REAL_WRITER_PROBE = FolderWatcher._probe_writable_open
@@ -80,6 +84,7 @@ def _make_config(tmp_path: Path) -> MagicMock:
     config.watcher.debounce_seconds = 0.3  # 테스트용 짧은 대기 시간
     config.watcher.check_interval_seconds = 0.1  # 테스트용 짧은 확인 간격
     config.watcher.file_ready_timeout_seconds = 1.0
+    config.watcher.startup_probe_concurrency = 8
     config.watcher.excluded_subdirs = ["audio_quarantine"]
 
     # 일반 watcher 단위 테스트는 품질 게이트와 독립적으로 큐 동작을 검증한다.
@@ -747,6 +752,56 @@ class TestLifecycle:
         assert watcher.is_watching is False
 
     @pytest.mark.asyncio
+    async def test_observer_부분_start_실패도_stop_join_정리(
+        self,
+        watcher: FolderWatcher,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """observer thread를 일부 만든 start 실패도 내부에서 회수한다."""
+
+        class _PartialObserver:
+            def __init__(self) -> None:
+                self.started = False
+                self.stop_calls = 0
+                self.join_calls = 0
+
+            def schedule(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+            def start(self) -> None:
+                self.started = True
+                raise RuntimeError("partial observer failure")
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+                self.started = False
+
+            def join(self, *, timeout: float) -> None:
+                assert timeout == 5.0
+                self.join_calls += 1
+
+        observer = _PartialObserver()
+
+        def _observer_factory(*, timeout: float) -> _PartialObserver:
+            assert timeout > 0
+            return observer
+
+        monkeypatch.setattr(
+            "core.watcher.PollingObserver",
+            _observer_factory,
+        )
+
+        with pytest.raises(RuntimeError, match="partial observer failure"):
+            await watcher.start()
+
+        assert observer.started is False
+        assert observer.stop_calls == 1
+        assert observer.join_calls == 1
+        assert watcher._observer is None
+        assert watcher._handler is None
+        assert watcher.is_watching is False
+
+    @pytest.mark.asyncio
     async def test_감시_디렉토리_자동_생성(
         self,
         job_queue: AsyncJobQueue,
@@ -840,6 +895,390 @@ class TestScanExisting:
         w = FolderWatcher(async_job_queue=job_queue, config=config)
         ids = await w.scan_existing()
         assert ids == []
+
+    @pytest.mark.asyncio
+    async def test_220개_startup_lsof는_bounded_concurrency(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """기존 파일 220개의 writer probe timeout을 순차 누적하지 않는다."""
+        watch_dir = tmp_path / "audio_input"
+        for index in range(220):
+            (watch_dir / f"bulk-{index:03d}.wav").write_bytes(b"audio")
+
+        watcher._debounce_seconds = 0.0
+        watcher._startup_probe_concurrency = 8
+        active = 0
+        maximum = 0
+        calls = 0
+
+        async def _slow_probe(file_path: Path, *, timeout: float) -> _OpenWriterState:
+            del file_path, timeout
+            nonlocal active, maximum, calls
+            active += 1
+            maximum = max(maximum, active)
+            calls += 1
+            await asyncio.sleep(0.01)
+            active -= 1
+            return _OpenWriterState.CLEAR
+
+        monkeypatch.setattr(watcher, "_probe_writable_open", _slow_probe)
+        apply_action = AsyncMock(return_value=None)
+        monkeypatch.setattr(watcher, "_apply_ready_action", apply_action)
+
+        started_at = asyncio.get_running_loop().time()
+        assert await watcher.scan_existing() == []
+        elapsed = asyncio.get_running_loop().time() - started_at
+
+        # 최초 preflight와 검증 뒤 final writer 확인 모두 같은 경계로 실행된다.
+        assert calls == 440
+        assert maximum == 8
+        assert elapsed < 1.2
+        assert apply_action.await_count == 220
+
+    @pytest.mark.asyncio
+    async def test_writer_probe_전역_semaphore는_live_retry에도_적용(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """startup 외 경로도 실제 lsof 호출을 설정된 수만큼만 실행한다."""
+        watcher._writer_probe_semaphore = asyncio.Semaphore(3)
+        active = 0
+        maximum = 0
+        counter_lock = threading.Lock()
+
+        def _slow_lsof(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            del args, kwargs
+            nonlocal active, maximum
+            with counter_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with counter_lock:
+                active -= 1
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+        monkeypatch.setattr(Path, "is_file", lambda _path: True)
+        monkeypatch.setattr(os, "access", lambda _path, _mode: True)
+        monkeypatch.setattr(subprocess, "run", _slow_lsof)
+        paths = [tmp_path / f"probe-{index}.wav" for index in range(16)]
+
+        results = await asyncio.gather(
+            *(_REAL_WRITER_PROBE(watcher, path, timeout=0.5) for path in paths)
+        )
+
+        assert results == [_OpenWriterState.CLEAR] * 16
+        assert maximum == 3
+
+    @pytest.mark.asyncio
+    async def test_startup_final_attestation_만료시_적용직전_재확인(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """병렬 final 확인이 오래되면 신규 ACCEPT도 세 번째로 확인한다."""
+        source = tmp_path / "audio_input" / "stale-attestation.wav"
+        source.write_bytes(b"audio")
+        watcher._debounce_seconds = 0.0
+        watcher._startup_writer_attestation_max_age_seconds = 0.25
+        clock = 0.0
+
+        def _monotonic() -> float:
+            nonlocal clock
+            clock += 1.0
+            return clock
+
+        probe = AsyncMock(return_value=_OpenWriterState.CLEAR)
+        apply_action = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "core.watcher.time",
+            SimpleNamespace(monotonic=_monotonic),
+        )
+        monkeypatch.setattr(watcher, "_probe_writable_open", probe)
+        monkeypatch.setattr(watcher, "_apply_ready_action", apply_action)
+
+        assert await watcher.scan_existing() == []
+
+        assert probe.await_count == 3
+        apply_action.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_startup_parallel_final_후_fingerprint_변경시_apply_차단(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """final writer 확인 직후 파일이 바뀌면 오래된 검증 결과를 적용하지 않는다."""
+        source = tmp_path / "audio_input" / "changed-after-final.wav"
+        source.write_bytes(b"audio")
+        watcher._debounce_seconds = 0.0
+        confirmations = 0
+
+        async def _confirm(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            nonlocal confirmations
+            confirmations += 1
+            if confirmations == 2:
+                source.write_bytes(b"changed-after-final")
+            return True
+
+        apply_action = AsyncMock(return_value=None)
+        monkeypatch.setattr(watcher, "_confirm_closed_unchanged", _confirm)
+        monkeypatch.setattr(watcher, "_apply_ready_action", apply_action)
+        monkeypatch.setattr(watcher, "_schedule_deferred_retry", MagicMock())
+
+        assert await watcher.scan_existing() == []
+
+        assert confirmations == 2
+        apply_action.assert_not_awaited()
+        assert source.read_bytes() == b"changed-after-final"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["existing", "quarantine"])
+    async def test_startup_기존큐와_quarantine은_apply직전_writer_직렬확인(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+    ) -> None:
+        """기존 큐 복원·격리는 신규 ACCEPT attestation cache를 사용하지 않는다."""
+        from core.audio_quality import AudioQualityStatus
+
+        paths = [tmp_path / "audio_input" / f"{mode}-{index}.wav" for index in range(2)]
+        for path in paths:
+            path.write_bytes(b"audio")
+            if mode == "existing":
+                job_id = await job_queue.add_job(
+                    path.stem,
+                    str(path),
+                    initial_status="recorded",
+                )
+                await asyncio.to_thread(job_queue.queue.queue_job, job_id, "full")
+        if mode == "quarantine":
+            watcher._audio_validator = MagicMock(
+                return_value=_quality_result(
+                    AudioQualityStatus.REJECT,
+                    failure_kind="media_invalid",
+                    quarantine_safe=True,
+                    reason="invalid",
+                )
+            )
+
+        watcher._debounce_seconds = 0.0
+        phase_final = False
+        active = 0
+        maximum = 0
+        events: list[str] = []
+        real_prepare = watcher._prepare_ready_action
+
+        async def _prepare(
+            safe_path: Path,
+            meeting_id: str,
+            expected: _FileFingerprint,
+            *,
+            existing: object | None,
+            quarantine_reason_prefix: str,
+            notify: bool,
+        ) -> _PreparedReadyAction | None:
+            nonlocal phase_final
+            action = await real_prepare(
+                safe_path,
+                meeting_id,
+                expected,
+                existing=existing,
+                quarantine_reason_prefix=quarantine_reason_prefix,
+                notify=notify,
+            )
+            phase_final = True
+            return action
+
+        async def _confirm(file_path: Path, *args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            nonlocal active, maximum
+            if not phase_final:
+                return True
+            active += 1
+            maximum = max(maximum, active)
+            events.append(f"confirm:{file_path.name}")
+            await asyncio.sleep(0.01)
+            active -= 1
+            return True
+
+        async def _apply(action: _PreparedReadyAction) -> None:
+            events.append(f"apply:{action.safe_path.name}")
+
+        monkeypatch.setattr(watcher, "_prepare_ready_action", _prepare)
+        monkeypatch.setattr(watcher, "_confirm_closed_unchanged", _confirm)
+        monkeypatch.setattr(watcher, "_apply_ready_action", _apply)
+
+        assert await watcher.scan_existing() == []
+
+        assert maximum == 1
+        assert events == [
+            f"confirm:{paths[0].name}",
+            f"apply:{paths[0].name}",
+            f"confirm:{paths[1].name}",
+            f"apply:{paths[1].name}",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_220개_반복_scan은_중복_등록이나_원본_삭제_없음(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """대량 startup scan을 반복해도 row와 source를 한 번만 보존한다."""
+        watch_dir = tmp_path / "audio_input"
+        expected: dict[str, bytes] = {}
+        for index in range(220):
+            name = f"idempotent-{index:03d}.wav"
+            payload = f"audio-{index}".encode()
+            expected[name] = payload
+            (watch_dir / name).write_bytes(payload)
+
+        watcher._debounce_seconds = 0.0
+        first_ids = await watcher.scan_existing()
+        second_ids = await watcher.scan_existing()
+        jobs = await job_queue.get_all_jobs()
+
+        assert len(first_ids) == 220
+        assert second_ids == []
+        assert len(jobs) == 220
+        assert len({job.meeting_id for job in jobs}) == 220
+        assert {
+            path.name: path.read_bytes() for path in sorted(watch_dir.glob("*.wav"))
+        } == expected
+
+    @pytest.mark.asyncio
+    async def test_startup_probe_하나_예외이_다음_파일을_막지_않음(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """lsof 파일별 오류를 격리하고 나머지 정상 파일을 계속 검사한다."""
+        watch_dir = tmp_path / "audio_input"
+        for name in ("before.wav", "broken.wav", "after.wav"):
+            (watch_dir / name).write_bytes(b"audio")
+        watcher._debounce_seconds = 0.0
+        finished: list[str] = []
+
+        async def _probe(file_path: Path, *, timeout: float) -> _OpenWriterState:
+            del timeout
+            if file_path.name == "broken.wav":
+                raise RuntimeError("probe failed")
+            return _OpenWriterState.CLEAR
+
+        async def _apply(action: _PreparedReadyAction) -> None:
+            finished.append(action.safe_path.name)
+
+        monkeypatch.setattr(watcher, "_probe_writable_open", _probe)
+        monkeypatch.setattr(watcher, "_apply_ready_action", _apply)
+        monkeypatch.setattr(watcher, "_schedule_deferred_retry", MagicMock())
+
+        assert await watcher.scan_existing() == []
+        assert finished == ["after.wav", "before.wav"]
+
+    @pytest.mark.asyncio
+    async def test_startup_scan은_DB_await_전_live_event와_소유권_공유(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """admission hold await 중 동일 파일 live event가 이중 검증하지 않는다."""
+        source = tmp_path / "audio_input" / "scan-live-race.wav"
+        source.write_bytes(b"audio")
+        await job_queue.add_job(
+            "scan-live-race",
+            str(source),
+            initial_status="queued",
+        )
+        watcher._debounce_seconds = 0.0
+        prepare_started = asyncio.Event()
+        prepare_release = asyncio.Event()
+        prepare_calls = 0
+
+        async def _prepare(existing: object, safe_path: Path) -> bool:
+            del existing, safe_path
+            nonlocal prepare_calls
+            prepare_calls += 1
+            prepare_started.set()
+            await prepare_release.wait()
+            return True
+
+        apply_action = AsyncMock(return_value=None)
+        monkeypatch.setattr(watcher, "_prepare_existing_audit", _prepare)
+        monkeypatch.setattr(watcher, "_apply_ready_action", apply_action)
+        monkeypatch.setattr(watcher, "_schedule_deferred_retry", MagicMock())
+
+        scan_task = asyncio.create_task(watcher.scan_existing())
+        await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
+        live_task = asyncio.create_task(watcher._handle_new_file(source))
+        await asyncio.sleep(0)
+        prepare_release.set()
+        await asyncio.gather(scan_task, live_task)
+
+        assert prepare_calls == 1
+        apply_action.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_startup_scan은_첫_DB조회_전_live_event와_소유권_공유(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """첫 DB await보다 먼저 pending을 예약해 live 처리와 중복하지 않는다."""
+        source = tmp_path / "audio_input" / "scan-db-race.wav"
+        source.write_bytes(b"audio")
+        watcher._debounce_seconds = 0.0
+        query_started = threading.Event()
+        query_release = threading.Event()
+        query_calls = 0
+        real_get = job_queue.queue.get_job_by_meeting_id
+
+        def _blocked_get(meeting_id: str) -> Job | None:
+            nonlocal query_calls
+            query_calls += 1
+            if query_calls == 1:
+                query_started.set()
+                assert query_release.wait(timeout=1.0)
+            return real_get(meeting_id)
+
+        real_prepare = watcher._prepare_ready_action
+        real_apply = watcher._apply_ready_action
+        prepare_action = AsyncMock(wraps=real_prepare)
+        apply_action = AsyncMock(wraps=real_apply)
+        monkeypatch.setattr(job_queue.queue, "get_job_by_meeting_id", _blocked_get)
+        monkeypatch.setattr(watcher, "_prepare_ready_action", prepare_action)
+        monkeypatch.setattr(watcher, "_apply_ready_action", apply_action)
+        monkeypatch.setattr(watcher, "_schedule_deferred_retry", MagicMock())
+
+        scan_task = asyncio.create_task(watcher.scan_existing())
+        assert await asyncio.to_thread(query_started.wait, 1.0)
+        live_task = asyncio.create_task(watcher._handle_new_file(source))
+        await asyncio.sleep(0)
+        query_release.set()
+        await asyncio.gather(scan_task, live_task)
+
+        assert query_calls == 1
+        prepare_action.assert_awaited_once()
+        apply_action.assert_awaited_once()
+        jobs = await job_queue.get_all_jobs()
+        assert len(jobs) == 1
+        assert jobs[0].meeting_id == "scan-db-race"
 
 
 # === 에러 처리 테스트 ===

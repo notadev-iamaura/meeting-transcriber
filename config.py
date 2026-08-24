@@ -677,6 +677,12 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1024, le=65535)
     log_level: str = "info"
+    startup_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=120.0,
+        description="메뉴바 시작 전 FastAPI readiness 대기 시간",
+    )
 
 
 class WindowConfig(BaseModel):
@@ -712,6 +718,18 @@ class WatcherConfig(BaseModel):
         ge=0.5,
         le=600.0,
         description="0-byte/growing/open-writer 파일의 최대 안정화 대기 시간",
+    )
+    startup_probe_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="재기동 기존 파일 writable-open 검사의 최대 동시성",
+    )
+    startup_writer_attestation_max_age_seconds: float = Field(
+        default=0.25,
+        ge=0.05,
+        le=2.0,
+        description="기존 DB 작업이 없는 startup 신규 ACCEPT final writer 확인 재사용 상한",
     )
     excluded_subdirs: list[str] = Field(
         default_factory=lambda: ["audio_quarantine"],

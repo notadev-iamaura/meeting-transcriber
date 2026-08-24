@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import signal
-import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +18,9 @@ import pytest
 
 # 테스트 대상 모듈은 sys.path에 meeting-transcriber가 포함된 상태에서 import
 from main import (
+    ServerStartupError,
     _ensure_minimal_dirs,
+    _ServerThread,
     _setup_signal_handlers,
     ensure_data_directories,
     load_config_with_overrides,
@@ -332,6 +334,60 @@ class TestStartServerThread:
             log_level="debug",
         )
 
+    def test_readiness_성공_후에만_반환(self) -> None:
+        """uvicorn.started가 true가 된 후 readiness 대기가 종료된다."""
+        server = MagicMock()
+        server.started = False
+        server.should_exit = False
+
+        def _run() -> None:
+            server.started = True
+            while not server.should_exit:
+                time.sleep(0.005)
+
+        server.run.side_effect = _run
+        thread = _ServerThread(server)
+        thread.start()
+        thread.wait_until_ready(1.0)
+
+        assert thread.is_ready is True
+        thread.request_shutdown()
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+
+    def test_readiness_timeout은_종료를_요청(self) -> None:
+        """startup timeout은 메뉴바를 실행하지 않고 uvicorn을 종료시킨다."""
+        server = MagicMock()
+        server.started = False
+        server.should_exit = False
+
+        def _run() -> None:
+            while not server.should_exit:
+                time.sleep(0.005)
+
+        server.run.side_effect = _run
+        thread = _ServerThread(server)
+        thread.start()
+
+        with pytest.raises(ServerStartupError, match="readiness"):
+            thread.wait_until_ready(0.05)
+
+        assert server.should_exit is True
+        thread.join(timeout=1.0)
+
+    def test_SystemExit를_시작_실패로_보존(self) -> None:
+        """uvicorn SystemExit(3)을 성공 조기 종료로 오판하지 않는다."""
+        server = MagicMock()
+        server.started = False
+        server.run.side_effect = SystemExit(3)
+        thread = _ServerThread(server)
+        thread.start()
+        thread.join(timeout=1.0)
+
+        assert isinstance(thread.exception, ServerStartupError)
+        with pytest.raises(ServerStartupError, match="exit_code=3"):
+            thread.wait_until_ready(0.1)
+
 
 # === TestSetupSignalHandlers ===
 
@@ -399,13 +455,15 @@ class TestMain:
         mock_run_menubar: MagicMock,
     ) -> None:
         """기본 실행 시 서버 스레드 + rumps 메뉴바를 실행한다."""
-        mock_server_thread.return_value = MagicMock(spec=threading.Thread)
+        server_thread = MagicMock(spec=_ServerThread)
+        mock_server_thread.return_value = server_thread
 
         main([])
 
         mock_ensure_dirs.assert_called_once()
         mock_server_thread.assert_called_once()
         mock_signal.assert_called_once()
+        server_thread.wait_until_ready.assert_called_once_with(10.0)
         mock_run_menubar.assert_called_once()
 
     @patch("api.server.run_server")
@@ -433,7 +491,7 @@ class TestMain:
         mock_run_menubar: MagicMock,
     ) -> None:
         """CLI 인자가 config에 반영되어 전달된다."""
-        mock_server_thread.return_value = MagicMock(spec=threading.Thread)
+        mock_server_thread.return_value = MagicMock(spec=_ServerThread)
 
         main(["--port", "9000", "--host", "0.0.0.0"])
 
@@ -469,13 +527,36 @@ class TestMain:
         mock_run_menubar: MagicMock,
     ) -> None:
         """KeyboardInterrupt 발생 시 정상 종료한다."""
-        mock_server_thread.return_value = MagicMock(spec=threading.Thread)
+        mock_server_thread.return_value = MagicMock(spec=_ServerThread)
         mock_run_menubar.side_effect = KeyboardInterrupt()
 
         # 예외 없이 정상 종료
         main([])
 
         mock_run_menubar.assert_called_once()
+
+    @patch("ui.menubar.run_menubar")
+    @patch("main.start_server_thread")
+    @patch("main._setup_signal_handlers")
+    @patch("main.ensure_data_directories")
+    def test_서버_readiness_실패시_메뉴바_미실행(
+        self,
+        mock_ensure_dirs: MagicMock,
+        mock_signal: MagicMock,
+        mock_server_thread: MagicMock,
+        mock_run_menubar: MagicMock,
+    ) -> None:
+        """port bind/lifespan 실패는 exit 1로 드러나고 메뉴바를 열지 않는다."""
+        server_thread = MagicMock(spec=_ServerThread)
+        server_thread.wait_until_ready.side_effect = ServerStartupError("port bind 실패")
+        mock_server_thread.return_value = server_thread
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+        assert exc_info.value.code == 1
+        server_thread.request_shutdown.assert_called_once()
+        mock_run_menubar.assert_not_called()
 
     @patch("api.server.run_server")
     @patch("main.ensure_data_directories")

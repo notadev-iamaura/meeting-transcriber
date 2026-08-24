@@ -14,6 +14,8 @@ FastAPI 백엔드 서버 테스트 모듈 (FastAPI Backend Server Test Module)
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -1155,6 +1157,33 @@ class TestLifespanOrchestration:
             assert app.state.folder_watcher is not None
             mocks["watcher"].start.assert_called_once()
 
+    def test_folder_watcher_start_실패시_scan하지_않고_부분상태_정리(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """observer start 실패 객체를 startup scan에 재사용하지 않는다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        config.recording.enabled = False
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+        mocks["watcher"].start.side_effect = RuntimeError("observer start failed")
+
+        with (
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            TestClient(app) as client,
+        ):
+            assert client.get("/api/health").status_code == 200
+            assert app.state.folder_watcher is None
+            assert app.state.startup_scan_status == "unavailable"
+            mocks["watcher"].scan_existing.assert_not_awaited()
+            mocks["watcher"].stop.assert_awaited_once()
+            mocks["processor"].start.assert_awaited_once()
+
     def test_pipeline_manager_초기화(self, tmp_path: Path) -> None:
         """app.state.pipeline_manager가 존재하는지 확인한다."""
         from api.server import create_app
@@ -1217,6 +1246,106 @@ class TestLifespanOrchestration:
             assert hasattr(app.state, "job_processor")
             assert app.state.job_processor is not None
             mocks["processor"].start.assert_called_once()
+
+    def test_기존_파일_스캔_중에도_HTTP는_먼저_readiness(self, tmp_path: Path) -> None:
+        """220건 스캔이 느려도 API는 5초 예산 안에 응답한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        config.recording.enabled = False
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+        scan_started = threading.Event()
+        scan_release = threading.Event()
+
+        async def _slow_scan() -> list[int]:
+            scan_started.set()
+            await asyncio.to_thread(scan_release.wait)
+            return []
+
+        mocks["watcher"].scan_existing.side_effect = _slow_scan
+        started_at = time.monotonic()
+        try:
+            with (
+                patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+                patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+                patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+                patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+                TestClient(app) as client,
+            ):
+                startup_elapsed = time.monotonic() - started_at
+                assert scan_started.wait(timeout=1.0)
+                assert startup_elapsed < 5.0
+                assert client.get("/api/health").status_code == 200
+                assert client.get("/api/status").status_code == 200
+                assert app.state.startup_scan_status == "running"
+                mocks["processor"].start.assert_not_awaited()
+
+                scan_release.set()
+                deadline = time.monotonic() + 1.0
+                while mocks["processor"].start.await_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                mocks["processor"].start.assert_awaited_once()
+        finally:
+            scan_release.set()
+
+    def test_startup_scan_실패해도_JobProcessor는_시작(self, tmp_path: Path) -> None:
+        """파일 하나의 startup 감사 실패가 큐 소비자를 영구 정지하지 않는다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        config.recording.enabled = False
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+        mocks["watcher"].scan_existing.side_effect = RuntimeError("scan failed")
+
+        with (
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            TestClient(app),
+        ):
+            mocks["processor"].start.assert_awaited_once()
+            assert app.state.startup_scan_status == "failed"
+
+    def test_shutdown은_startup_scan을_먼저_취소(self, tmp_path: Path) -> None:
+        """닫힌 watcher/DB 접근을 막기 위해 scan cancel를 watcher.stop보다 앞서 확인한다."""
+        from api.server import create_app
+
+        config = _make_test_config(tmp_path)
+        config.recording.enabled = False
+        app = create_app(config)
+        mocks = self._get_orchestration_patches()
+        scan_started = threading.Event()
+        events: list[str] = []
+
+        async def _blocked_scan() -> list[int]:
+            scan_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("scan_cancelled")
+                raise
+
+        async def _watcher_stop() -> None:
+            events.append("watcher_stopped")
+
+        mocks["watcher"].scan_existing.side_effect = _blocked_scan
+        mocks["watcher"].stop.side_effect = _watcher_stop
+
+        with (
+            patch("core.thermal_manager.ThermalManager", mocks["thermal_cls"]),
+            patch("core.pipeline.PipelineManager", mocks["pipeline_cls"]),
+            patch("core.watcher.FolderWatcher", mocks["watcher_cls"]),
+            patch("core.orchestrator.JobProcessor", mocks["processor_cls"]),
+            TestClient(app),
+        ):
+            assert scan_started.wait(timeout=1.0)
+            mocks["processor"].start.assert_not_awaited()
+
+        assert events == ["scan_cancelled", "watcher_stopped"]
+        mocks["processor"].start.assert_not_awaited()
 
     def test_shutdown시_job_processor_stop(self, tmp_path: Path) -> None:
         """종료 시 JobProcessor.stop()이 호출되는지 확인한다."""

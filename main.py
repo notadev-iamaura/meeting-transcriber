@@ -21,6 +21,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -239,6 +240,10 @@ def _ensure_minimal_dirs(config: AppConfig) -> None:
 # === FastAPI 서버 스레드 ===
 
 
+class ServerStartupError(RuntimeError):
+    """FastAPI 서버가 readiness에 도달하지 못한 시작 실패."""
+
+
 class _ServerThread(threading.Thread):
     """FastAPI 서버를 데몬 스레드에서 실행하며 예외를 저장하는 스레드.
 
@@ -255,9 +260,52 @@ class _ServerThread(threading.Thread):
         """서버를 실행하고 예외 발생 시 저장한다."""
         try:
             self._server.run()
+        except SystemExit as e:
+            # uvicorn은 port bind/lifespan 실패를 SystemExit(3)으로
+            # 올릴 수 있다. BaseException 계열을 비밀로 잃지 않고
+            # 메인 스레드가 판정할 수 있는 고정 오류로 변환한다.
+            self.exception = ServerStartupError(
+                f"uvicorn이 readiness 전 종료됨 (exit_code={e.code})"
+            )
+            logger.error(f"FastAPI 서버 시작 중 종료: {self.exception}")
         except Exception as e:  # noqa: BLE001 — 스레드 최상위 catch-all
             self.exception = e
             logger.error(f"FastAPI 서버 실행 중 오류: {e}", exc_info=True)
+
+    @property
+    def is_ready(self) -> bool:
+        """uvicorn이 lifespan과 socket bind를 완료했는지 반환한다."""
+        return bool(getattr(self._server, "started", False)) and self.is_alive()
+
+    def request_shutdown(self) -> None:
+        """시작 실패나 타임아웃 시 uvicorn에 종료를 요청한다."""
+        self._server.should_exit = True
+
+    def wait_until_ready(self, timeout_seconds: float) -> None:
+        """서버 readiness를 기다리고 실패 원인을 명확히 구분한다.
+
+        Args:
+            timeout_seconds: readiness 최대 대기 시간.
+
+        Raises:
+            ServerStartupError: 서버 스레드 종료, 예외, 타임아웃 시.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if self.exception is not None:
+                raise ServerStartupError(f"FastAPI 서버 시작 실패: {self.exception}") from None
+            if self.is_ready:
+                return
+            if not self.is_alive():
+                raise ServerStartupError("FastAPI 서버가 readiness 전 종료됨")
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.request_shutdown()
+                raise ServerStartupError(
+                    f"FastAPI 서버가 {timeout_seconds:.1f}초 내 readiness에 도달하지 못함"
+                )
+            self.join(timeout=min(0.05, remaining))
 
 
 def start_server_thread(config: AppConfig) -> _ServerThread:
@@ -413,10 +461,13 @@ def main(argv: list[str] | None = None) -> None:
         # 메뉴바 모드: 서버 데몬 스레드 + rumps 메인 스레드
         server_thread = start_server_thread(config)
 
-        # 서버 스레드가 즉시 실패했는지 짧은 대기 후 확인
-        server_thread.join(timeout=1.0)
-        if not server_thread.is_alive() and server_thread.exception is not None:
-            logger.critical(f"FastAPI 서버 시작 실패: {server_thread.exception}")
+        try:
+            server_thread.wait_until_ready(config.server.startup_timeout_seconds)
+        except ServerStartupError as e:
+            server_thread.request_shutdown()
+            server_thread.join(timeout=1.0)
+            logger.critical(str(e))
+            sys.stderr.write(f"\n❌ {e}\n\n")
             sys.exit(1)
 
         logger.info("메뉴바 모드 — rumps 앱 시작")

@@ -41,6 +41,9 @@
   + 2채널 다운믹스 가중치 + Swift 기반 자동 생성 스크립트.
 
 ### 수정됨
+- **기존 오디오 대량 환경 재시작 지연** (2026-08-24): startup 감사를
+  FastAPI HTTP readiness와 분리하고, bounded 최초·최종 `lsof` 확인과 메뉴바
+  readiness gate를 추가했다. 기존 큐·전사·원본 보존 순서는 유지한다.
 - **메모리 임계치 완화** (PR #15): `min_memory_free_gb` 2.0 → 1.5 GB.
   `degraded` 플래그를 disk 와 memory 로 분리. 누락된 요약 백필 스크립트 추가.
 - **ViewerView IIFE 스코프 누락** (PR #16): `ui/web/spa.js` 의

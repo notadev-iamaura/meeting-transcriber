@@ -1,8 +1,8 @@
 # 프로젝트 상태
 
-- 기준일: 2026-08-22
+- 기준일: 2026-08-24
 - 기준 브랜치: `main`
-- 시작 기준 커밋: `05682dd4703ad0e0bc873f85adad2ac79a52ea05`
+- 시작 기준 커밋: `2eb92c14b274dd34447c5a3a8b69dab9f1c9a45a`
 - 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 모두 main 반영
 
 ## 현재 판단
@@ -24,6 +24,32 @@
 - `.venv` 밖의 Python 캐시 산출물은 Git 추적 대상이 아닙니다.
 
 ## 완료된 주요 작업
+
+### 기존 오디오 대량 환경 시작 안정화 (2026-08-24)
+
+- `FolderWatcher.scan_existing()`를 FastAPI lifespan의 HTTP readiness 필수 경로에서
+  app-scoped background task로 분리했습니다.
+- 기존 파일의 최초·최종 writable-open(`lsof`) 확인을 기본 8-way bounded
+  concurrency로 실행하고, ffmpeg 품질 검증과 DB/quarantine mutation은 순차
+  계약을 유지합니다. 기존 DB 작업이 없는 startup 신규 ACCEPT의 짧은 final
+  attestation만 fingerprint를 재검사해 재사용하며, 기존 큐 복원과 quarantine
+  mutation은 적용 직전에 다시 확인합니다.
+  파일 하나의 timeout/예외는 다른 파일 감사를 막지 않습니다.
+- `JobProcessor`, `LifecycleScheduler`, `AutoProcessingScheduler`는 startup 감사 완료 후
+  시작하여 legacy queue admission 순서를 보존합니다. shutdown은 scan task를
+  먼저 cancel/await한 뒤 watcher와 DB를 닫습니다.
+- 메뉴바는 FastAPI readiness를 기본 10초 대기하며, port bind/lifespan
+  `SystemExit` 또는 timeout을 명확한 시작 실패로 표시하고 메뉴바를 열지 않습니다.
+- 220개 기존 파일의 느린 검사 중에도 `/api/health`·`/api/status`가
+  5초 이내 응답하고, 반복 scan이 중복 row·원본 삭제를 만들지 않는
+  회귀 테스트를 추가했습니다.
+
+집중 검증:
+
+```bash
+pytest tests/test_config.py tests/test_main.py tests/test_server.py tests/test_watcher.py -q
+pytest -m harness -q
+```
 
 ### 로컬 우선 OpenAI 전사 선택 (2026-08-22)
 

@@ -91,6 +91,27 @@ class _OpenWriterState(Enum):
     INDETERMINATE = "indeterminate"
 
 
+class _ReadyActionKind(Enum):
+    """검증된 startup/live 파일에 적용할 단일 후속 행동."""
+
+    ACCEPT = "accept"
+    QUARANTINE = "quarantine"
+    RELEASE = "release"
+
+
+@dataclass(frozen=True)
+class _PreparedReadyAction:
+    """ffmpeg 검증은 끝났지만 writer 확인과 mutation은 남은 행동."""
+
+    safe_path: Path
+    meeting_id: str
+    fingerprint: _FileFingerprint
+    existing: Any | None
+    kind: _ReadyActionKind
+    reason: str
+    notify: bool
+
+
 _CHECKPOINT_ARTIFACT_ALLOWLIST = frozenset(
     {
         "transcribe.json",
@@ -362,6 +383,27 @@ class FolderWatcher:
         self._debounce_seconds: float = self._config.watcher.debounce_seconds
         self._check_interval: float = self._config.watcher.check_interval_seconds
         self._file_ready_timeout_seconds: float = self._config.watcher.file_ready_timeout_seconds
+        startup_probe_concurrency = getattr(
+            self._config.watcher,
+            "startup_probe_concurrency",
+            8,
+        )
+        self._startup_probe_concurrency = (
+            startup_probe_concurrency if isinstance(startup_probe_concurrency, int) else 8
+        )
+        startup_writer_attestation_max_age = getattr(
+            self._config.watcher,
+            "startup_writer_attestation_max_age_seconds",
+            0.25,
+        )
+        self._startup_writer_attestation_max_age_seconds = (
+            float(startup_writer_attestation_max_age)
+            if isinstance(startup_writer_attestation_max_age, (int, float))
+            else 0.25
+        )
+        # startup preflight 뒤 예약되는 live retry까지 같은 경계를 공유하여
+        # timeout 파일이 많아도 lsof subprocess가 한꺼번에 폭주하지 않게 한다.
+        self._writer_probe_semaphore = asyncio.Semaphore(self._startup_probe_concurrency)
 
         # 지원 확장자 집합 (점 포함 소문자)
         self._supported_extensions: set[str] = {
@@ -407,6 +449,9 @@ class FolderWatcher:
         # writable/indeterminate timeout은 close 이벤트가 없어도 파일별 1회 재검사한다.
         self._close_retry_paths: set[Path] = set()
         self._scheduled_retry_paths: set[Path] = set()
+        # startup scan은 중복 호출을 직렬화하고, live event와는
+        # `_pending_files`를 공유해 동일 경로를 중복 검증하지 않는다.
+        self._startup_scan_lock = asyncio.Lock()
 
         # 콜백 목록
         self._sync_callbacks: list[SyncCallback] = []
@@ -565,14 +610,15 @@ class FolderWatcher:
         lsof = str(preferred_lsof)
 
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [lsof, "-n", "-P", "-F", "a", "--", str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=max(0.01, timeout),
-                check=False,
-            )
+            async with self._writer_probe_semaphore:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    [lsof, "-n", "-P", "-F", "a", "--", str(file_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(0.01, timeout),
+                    check=False,
+                )
         except subprocess.TimeoutExpired:
             logger.error(f"lsof writable writer 검사 timeout: {file_path}")
             return _OpenWriterState.INDETERMINATE
@@ -924,7 +970,7 @@ class FolderWatcher:
         logger.warning(f"legacy media-invalid job durable 정리 완료: {job.meeting_id}")
         return True
 
-    async def _finish_ready_file(
+    async def _prepare_ready_action(
         self,
         safe_path: Path,
         meeting_id: str,
@@ -933,8 +979,8 @@ class FolderWatcher:
         existing: Any | None,
         quarantine_reason_prefix: str,
         notify: bool,
-    ) -> int | None:
-        """안정화된 파일을 검증하고 마지막 readiness 확인 뒤 한 번만 행동한다."""
+    ) -> _PreparedReadyAction | None:
+        """ffmpeg 검증 결과를 변경 전의 후속 행동으로 변환한다."""
         if expected.size == 0 and self._audio_validator is None:
             logger.warning(f"0-byte 입력 보존·등록 차단 (품질 게이트 비활성): {safe_path.name}")
             if existing is not None:
@@ -955,74 +1001,130 @@ class FolderWatcher:
 
             if result.status != AudioQualityStatus.ACCEPT:
                 if getattr(result, "quarantine_safe", False) is True:
-                    if not await self._confirm_closed_unchanged(
-                        safe_path,
-                        validated_fingerprint,
-                        schedule_retry=True,
-                    ):
-                        if existing is not None:
-                            await self._release_legacy_job(
-                                existing,
-                                reason="quarantine 직전 source busy/변경",
-                            )
-                        return None
                     rejection_reason = (
                         f"{quarantine_reason_prefix}: {result.reason}"
                         if quarantine_reason_prefix
                         else result.reason or f"품질 검증 상태: {result.status.value}"
                     )
-                    if existing is not None:
-                        await self._reject_existing_media_invalid(
-                            existing,
-                            safe_path,
-                            validated_fingerprint,
-                            reason=rejection_reason,
-                        )
-                    else:
-                        await self._move_to_quality_quarantine(
-                            safe_path,
-                            reason=rejection_reason,
-                            expected=validated_fingerprint,
-                        )
-                elif existing is not None:
-                    await self._release_legacy_job(
-                        existing,
-                        reason=str(getattr(result, "failure_kind", "infra")),
+                    return _PreparedReadyAction(
+                        safe_path=safe_path,
+                        meeting_id=meeting_id,
+                        fingerprint=validated_fingerprint,
+                        existing=existing,
+                        kind=_ReadyActionKind.QUARANTINE,
+                        reason=rejection_reason,
+                        notify=notify,
                     )
-                else:
-                    logger.warning(
-                        f"품질 게이트 판단 보류, 원본 보존: {safe_path.name} "
-                        f"({getattr(result, 'failure_kind', 'unknown')})"
+                failure_kind = str(getattr(result, "failure_kind", "infra"))
+                if existing is not None:
+                    return _PreparedReadyAction(
+                        safe_path=safe_path,
+                        meeting_id=meeting_id,
+                        fingerprint=validated_fingerprint,
+                        existing=existing,
+                        kind=_ReadyActionKind.RELEASE,
+                        reason=failure_kind,
+                        notify=notify,
                     )
+                logger.warning(
+                    f"품질 게이트 판단 보류, 원본 보존: {safe_path.name} ({failure_kind})"
+                )
                 return None
 
-        if not await self._confirm_closed_unchanged(
-            safe_path,
-            validated_fingerprint,
-            schedule_retry=True,
-        ):
-            if existing is not None:
-                await self._release_legacy_job(existing, reason="queue 직전 source busy/변경")
+        return _PreparedReadyAction(
+            safe_path=safe_path,
+            meeting_id=meeting_id,
+            fingerprint=validated_fingerprint,
+            existing=existing,
+            kind=_ReadyActionKind.ACCEPT,
+            reason="",
+            notify=notify,
+        )
+
+    @staticmethod
+    def _ready_action_requires_writer_confirmation(action: _PreparedReadyAction) -> bool:
+        """원본 이동/큐 등록 직전 writer 확인이 필요한지 반환한다."""
+        return action.kind in {_ReadyActionKind.ACCEPT, _ReadyActionKind.QUARANTINE}
+
+    async def _apply_ready_action(self, action: _PreparedReadyAction) -> int | None:
+        """검증과 writer 확인이 끝난 행동을 한 번만 적용한다."""
+        if action.kind is _ReadyActionKind.QUARANTINE:
+            if action.existing is not None:
+                await self._reject_existing_media_invalid(
+                    action.existing,
+                    action.safe_path,
+                    action.fingerprint,
+                    reason=action.reason,
+                )
+            else:
+                await self._move_to_quality_quarantine(
+                    action.safe_path,
+                    reason=action.reason,
+                    expected=action.fingerprint,
+                )
             return None
 
-        if existing is not None:
-            await self._restore_held_queue(existing)
+        if action.kind is _ReadyActionKind.RELEASE:
+            if action.existing is not None:
+                await self._release_legacy_job(action.existing, reason=action.reason)
+            return None
+
+        if action.existing is not None:
+            await self._restore_held_queue(action.existing)
             return None
 
         from core.job_queue import JobStatus
 
         job_id = await self._job_queue.add_job(
-            meeting_id=meeting_id,
-            audio_path=str(safe_path),
+            meeting_id=action.meeting_id,
+            audio_path=str(action.safe_path),
             initial_status=JobStatus.RECORDED.value,
         )
         logger.info(
             f"작업 큐 등록 (녹음 완료, 전사 대기): job_id={job_id}, "
-            f"meeting_id={meeting_id}, file={safe_path.name}"
+            f"meeting_id={action.meeting_id}, file={action.safe_path.name}"
         )
-        if notify:
-            await self._notify_callbacks(safe_path)
+        if action.notify:
+            await self._notify_callbacks(action.safe_path)
         return job_id
+
+    async def _finish_ready_file(
+        self,
+        safe_path: Path,
+        meeting_id: str,
+        expected: _FileFingerprint,
+        *,
+        existing: Any | None,
+        quarantine_reason_prefix: str,
+        notify: bool,
+    ) -> int | None:
+        """안정화된 파일을 검증하고 마지막 readiness 확인 뒤 한 번만 행동한다."""
+        action = await self._prepare_ready_action(
+            safe_path,
+            meeting_id,
+            expected,
+            existing=existing,
+            quarantine_reason_prefix=quarantine_reason_prefix,
+            notify=notify,
+        )
+        if action is None:
+            return None
+        if self._ready_action_requires_writer_confirmation(
+            action
+        ) and not await self._confirm_closed_unchanged(
+            action.safe_path,
+            action.fingerprint,
+            schedule_retry=True,
+        ):
+            if action.existing is not None:
+                reason = (
+                    "quarantine 직전 source busy/변경"
+                    if action.kind is _ReadyActionKind.QUARANTINE
+                    else "queue 직전 source busy/변경"
+                )
+                await self._release_legacy_job(action.existing, reason=reason)
+            return None
+        return await self._apply_ready_action(action)
 
     def _generate_meeting_id(self, file_path: Path) -> str:
         """파일 경로에서 meeting_id를 생성한다.
@@ -1280,7 +1382,13 @@ class FolderWatcher:
             recursive=False,  # 하위 폴더 미감시
         )
 
-        self._observer.start()
+        try:
+            self._observer.start()
+        except Exception:
+            # 일부 emitter/thread를 만든 뒤 start가 실패할 수 있으므로
+            # 호출자에게 오류를 넘기기 전에 내부 observer를 먼저 정리한다.
+            await self.stop()
+            raise
         self._is_watching = True
 
         logger.info(f"폴더 감시 시작: {self._watch_dir}")
@@ -1302,19 +1410,28 @@ class FolderWatcher:
         self._pending_files.clear()
         self._dirty_files.clear()
 
-        if not self._is_watching:
+        observer = self._observer
+        if not self._is_watching and observer is None:
+            self._handler = None
             logger.debug("폴더 감시기가 이미 중지 상태입니다.")
             return
 
         self._is_watching = False
-
-        if self._observer is not None:
-            self._observer.stop()
-            # Observer 스레드 종료 대기 (블로킹 방지)
-            await asyncio.to_thread(self._observer.join, timeout=5.0)
-            self._observer = None
-
+        # start()가 observer thread를 일부 시작한 뒤 예외를 낸 경우에도
+        # `_is_watching`은 아직 False일 수 있다. 참조를 먼저 끊고 stop/join을
+        # 각각 best-effort로 수행해 실패 객체를 다음 scan에 재사용하지 않는다.
+        self._observer = None
         self._handler = None
+        if observer is not None:
+            try:
+                observer.stop()
+            except Exception as e:  # noqa: BLE001 — watchdog cleanup boundary
+                logger.warning(f"FolderWatcher observer stop 실패: {type(e).__name__}: {e}")
+            try:
+                # Observer 스레드 종료 대기 (블로킹 방지)
+                await asyncio.to_thread(observer.join, timeout=5.0)
+            except Exception as e:  # noqa: BLE001 — watchdog cleanup boundary
+                logger.warning(f"FolderWatcher observer join 실패: {type(e).__name__}: {e}")
         logger.info("폴더 감시 중지")
 
     @staticmethod
@@ -1591,6 +1708,15 @@ class FolderWatcher:
                 logger.exception(f"audio rejection recovery 예외 격리: {job.meeting_id} — {e}")
 
     async def scan_existing(self) -> list[int]:
+        """기존 오디오 감사를 하나의 startup scan으로 직렬화한다.
+
+        실시간 watcher 이벤트와는 파일별 pending 상태를 공유하므로,
+        scan과 event가 겹쳐도 동일 원본을 중복 등록하지 않는다.
+        """
+        async with self._startup_scan_lock:
+            return await self._scan_existing_once()
+
+    async def _scan_existing_once(self) -> list[int]:
         """감시 폴더에 이미 존재하는 오디오 파일을 스캔하여 큐에 등록한다.
 
         감시 시작 전 폴더에 이미 있는 파일을 처리할 때 사용한다.
@@ -1604,6 +1730,7 @@ class FolderWatcher:
         """
         registered_ids: list[int] = []
         retry_paths: set[Path] = set()
+        startup_owned_paths: set[Path] = set()
 
         # filesystem 목록 조회보다 먼저 DB journal을 복구해야 quarantine-only
         # transaction이 입력 root 부재에도 finalize되고, source-only claim이
@@ -1627,136 +1754,310 @@ class FolderWatcher:
                 except OSError:
                     pass
 
-        # startup에서는 파일마다 최대 readiness timeout을 순차 대기하지 않는다.
-        # 한 번의 공통 debounce 뒤 동일 fingerprint인 파일만 검사한다.
-        pending: list[tuple[Path, str, _FileFingerprint, Any | None]] = []
-        for file_path in candidates:
-            try:
-                if file_path.suffix.lower() not in self._supported_extensions:
-                    continue
+        # startup에서는 파일마다 lsof timeout을 순차 누적하지 않도록
+        # 최초 확인과 신규 ACCEPT의 final 확인을 bounded concurrency로
+        # 실행한다. ffmpeg 품질 검증과 DB/quarantine mutation은 아래의
+        # 정렬된 루프에서 계속 순차 실행한다.
+        zero_size: list[tuple[Path, str, _FileFingerprint, Any | None]] = []
+        nonzero: list[tuple[Path, str, _FileFingerprint, Any | None]] = []
 
-                # meeting_id/DB 조회는 lexical 파일명만 사용하므로 symlink target에
-                # 접근하지 않는다. SECURITY_BLOCKED legacy queued/failed도 여기서
-                # recorded로 돌려 startup processor 진입을 막는다.
-                meeting_id = self._generate_meeting_id(file_path)
-                existing = await asyncio.to_thread(
-                    self._job_queue.queue.get_job_by_meeting_id,
-                    meeting_id,
-                )
-                inspected = self._inspect_input_file(file_path)
-                if inspected is None:
-                    if existing is not None and not self._has_transcript_artifacts(meeting_id):
-                        try:
-                            blocked_path = _lexical_absolute(file_path)
-                            existing_path = _lexical_absolute(Path(existing.audio_path))
-                        except QuarantineError:
-                            pass
+        try:
+            for file_path in candidates:
+                try:
+                    if file_path.suffix.lower() not in self._supported_extensions:
+                        continue
+
+                    # meeting_id/DB 조회는 lexical 파일명만 사용하므로
+                    # symlink target에 접근하지 않는다.
+                    meeting_id = self._generate_meeting_id(file_path)
+                    inspected = self._inspect_input_file(file_path)
+                    if inspected is None:
+                        existing = await asyncio.to_thread(
+                            self._job_queue.queue.get_job_by_meeting_id,
+                            meeting_id,
+                        )
+                        if existing is not None and not self._has_transcript_artifacts(meeting_id):
+                            try:
+                                blocked_path = _lexical_absolute(file_path)
+                                existing_path = _lexical_absolute(Path(existing.audio_path))
+                            except QuarantineError:
+                                pass
+                            else:
+                                if existing_path == blocked_path:
+                                    await self._release_legacy_job(
+                                        existing,
+                                        reason="security blocked",
+                                    )
+                        continue
+                    safe_path, fingerprint = inspected
+                    if self._is_excluded(safe_path):
+                        continue
+
+                    if safe_path in self._pending_files:
+                        self._dirty_files.add(safe_path)
+                        logger.debug(f"startup scan과 live event 중복 합침: {safe_path.name}")
+                        continue
+
+                    # live event가 DB admission-hold await 사이를 파고들지
+                    # 않도록 어떤 await보다도 먼저 파일 소유권을 예약한다.
+                    self._pending_files[safe_path] = time.monotonic()
+                    startup_owned_paths.add(safe_path)
+                    keep_claim = False
+                    try:
+                        existing = await asyncio.to_thread(
+                            self._job_queue.queue.get_job_by_meeting_id,
+                            meeting_id,
+                        )
+                        if existing is not None and not await self._prepare_existing_audit(
+                            existing,
+                            safe_path,
+                        ):
+                            continue
+
+                        item = (safe_path, meeting_id, fingerprint, existing)
+                        if fingerprint.size == 0:
+                            zero_size.append(item)
                         else:
-                            if existing_path == blocked_path:
+                            nonzero.append(item)
+                        keep_claim = True
+                    finally:
+                        if not keep_claim:
+                            self._pending_files.pop(safe_path, None)
+                            startup_owned_paths.discard(safe_path)
+                            self._dirty_files.discard(safe_path)
+                            self._close_retry_paths.discard(safe_path)
+                except JobQueueError as e:
+                    logger.error(f"기존 파일 등록 실패: {file_path.name} — {e}")
+                except WatcherError as e:
+                    logger.error(f"기존 입력 파일 식별자 거부: {file_path.name} — {e}")
+                except Exception as e:
+                    logger.exception(f"기존 파일 스캔 중 예외 격리: {file_path.name} — {e}")
+
+            semaphore = asyncio.Semaphore(self._startup_probe_concurrency)
+
+            async def _preflight(
+                item: tuple[Path, str, _FileFingerprint, Any | None],
+            ) -> tuple[bool, str]:
+                safe_path, _meeting_id, expected, _existing = item
+                async with semaphore:
+                    after_debounce = self._inspect_input_file(safe_path)
+                    if after_debounce is None or after_debounce[1] != expected:
+                        logger.warning(f"startup debounce 중 파일 변경 감지: {safe_path.name}")
+                        return False, "source growing/변경"
+                    ready = await self._confirm_closed_unchanged(
+                        safe_path,
+                        expected,
+                        schedule_retry=True,
+                    )
+                    return ready, "" if ready else "source busy/indeterminate"
+
+            async def _process_batch(
+                items: list[tuple[Path, str, _FileFingerprint, Any | None]],
+                *,
+                debounce: bool,
+            ) -> None:
+                if not items:
+                    return
+                if debounce:
+                    await asyncio.sleep(self._debounce_seconds)
+                results = await asyncio.gather(
+                    *(_preflight(item) for item in items),
+                    return_exceptions=True,
+                )
+
+                def _finish_startup_item(safe_path: Path) -> None:
+                    self._pending_files.pop(safe_path, None)
+                    startup_owned_paths.discard(safe_path)
+                    should_retry = (
+                        safe_path in retry_paths
+                        or safe_path in self._dirty_files
+                        or safe_path in self._close_retry_paths
+                    )
+                    self._dirty_files.discard(safe_path)
+                    self._close_retry_paths.discard(safe_path)
+                    if should_retry:
+                        retry_paths.add(safe_path)
+
+                ready_items: list[tuple[Path, str, _FileFingerprint, Any | None]] = []
+                for item, result in zip(items, results, strict=True):
+                    safe_path, _meeting_id, _expected, existing = item
+                    item_ready = False
+                    try:
+                        if isinstance(result, BaseException):
+                            logger.error(
+                                f"startup writer 검사 예외 격리: "
+                                f"{safe_path.name} — {type(result).__name__}"
+                            )
+                            if existing is not None:
                                 await self._release_legacy_job(
                                     existing,
-                                    reason="security blocked",
+                                    reason="writer probe error",
                                 )
-                    continue
-                safe_path, fingerprint = inspected
-                if self._is_excluded(safe_path):
-                    continue
+                            retry_paths.add(safe_path)
+                            continue
 
-                if existing is not None and not await self._prepare_existing_audit(
-                    existing,
-                    safe_path,
-                ):
-                    continue
+                        ready, reason = result
+                        if not ready:
+                            if existing is not None:
+                                await self._release_legacy_job(existing, reason=reason)
+                            retry_paths.add(safe_path)
+                            continue
+                        ready_items.append(item)
+                        item_ready = True
+                    except JobQueueError as e:
+                        logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
+                    except Exception as e:
+                        logger.exception(f"기존 파일 스캔 중 예외 격리: {safe_path.name} — {e}")
+                    finally:
+                        if not item_ready:
+                            _finish_startup_item(safe_path)
 
-                if fingerprint.size != 0:
-                    pending.append((safe_path, meeting_id, fingerprint, existing))
-                    continue
+                # ffmpeg validation은 계속 순차 실행한다. 검증된 신규
+                # ACCEPT 파일의 final lsof만 작은 batch로 병렬하고,
+                # quarantine/legacy mutation은 기존처럼 apply 직전에 직렬 재검사한다.
+                for offset in range(0, len(ready_items), self._startup_probe_concurrency):
+                    item_batch = ready_items[offset : offset + self._startup_probe_concurrency]
+                    prepared: list[
+                        tuple[
+                            tuple[Path, str, _FileFingerprint, Any | None],
+                            _PreparedReadyAction,
+                        ]
+                    ] = []
+                    for item in item_batch:
+                        safe_path, meeting_id, expected, existing = item
+                        prepared_action: _PreparedReadyAction | None = None
+                        try:
+                            prepared_action = await self._prepare_ready_action(
+                                safe_path,
+                                meeting_id,
+                                expected,
+                                existing=existing,
+                                quarantine_reason_prefix="재기동 스캔 차단",
+                                notify=False,
+                            )
+                            if prepared_action is not None:
+                                prepared.append((item, prepared_action))
+                        except JobQueueError as e:
+                            logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
+                        except Exception as e:
+                            logger.exception(
+                                f"기존 파일 검증 중 예외 격리: {safe_path.name} — {e}"
+                            )
+                        finally:
+                            if prepared_action is None:
+                                _finish_startup_item(safe_path)
 
-                # closed 0-byte는 공통 debounce 없이 즉시 validator로 보낸다.
-                if not await self._confirm_closed_unchanged(
-                    safe_path,
-                    fingerprint,
-                    schedule_retry=True,
-                ):
-                    if existing is not None:
-                        await self._release_legacy_job(
-                            existing,
-                            reason="source busy/indeterminate",
+                    parallel_indexes: list[int] = []
+
+                    async def _parallel_final_confirmation(
+                        action: _PreparedReadyAction,
+                    ) -> tuple[bool, float]:
+                        ready = await self._confirm_closed_unchanged(
+                            action.safe_path,
+                            action.fingerprint,
+                            schedule_retry=True,
                         )
-                    if safe_path in self._close_retry_paths:
-                        self._close_retry_paths.discard(safe_path)
-                        retry_paths.add(safe_path)
-                    continue
+                        return ready, time.monotonic()
 
-                job_id = await self._finish_ready_file(
-                    safe_path,
-                    meeting_id,
-                    fingerprint,
-                    existing=existing,
-                    quarantine_reason_prefix="재기동 스캔 차단",
-                    notify=False,
-                )
-                if job_id is not None:
-                    registered_ids.append(job_id)
-                if safe_path in self._close_retry_paths:
-                    self._close_retry_paths.discard(safe_path)
-                    retry_paths.add(safe_path)
-            except JobQueueError as e:
-                logger.error(f"기존 파일 등록 실패: {file_path.name} — {e}")
-            except WatcherError as e:
-                logger.error(f"기존 입력 파일 식별자 거부: {file_path.name} — {e}")
-            except Exception as e:
-                # 한 파일의 quarantine/mkdir/검증 실패가 다음 파일 스캔을 막지 않는다.
-                logger.exception(f"기존 파일 스캔 중 예외 격리: {file_path.name} — {e}")
-
-        if pending:
-            await asyncio.sleep(self._debounce_seconds)
-
-        for safe_path, meeting_id, expected, existing in pending:
-            try:
-                after_debounce = self._inspect_input_file(safe_path)
-                if after_debounce is None or after_debounce[1] != expected:
-                    logger.warning(f"startup debounce 중 파일 변경 감지: {safe_path.name}")
-                    if existing is not None:
-                        await self._release_legacy_job(existing, reason="source growing/변경")
-                    retry_paths.add(safe_path)
-                    continue
-                if not await self._confirm_closed_unchanged(
-                    safe_path,
-                    expected,
-                    schedule_retry=True,
-                ):
-                    if existing is not None:
-                        await self._release_legacy_job(
-                            existing,
-                            reason="source busy/indeterminate",
+                    confirmation_results: list[tuple[bool, float] | BaseException | None] = [
+                        None
+                    ] * len(prepared)
+                    confirmation_tasks: list[Coroutine[Any, Any, tuple[bool, float]]] = []
+                    for index, (_item, action) in enumerate(prepared):
+                        if action.kind is _ReadyActionKind.ACCEPT and action.existing is None:
+                            parallel_indexes.append(index)
+                            confirmation_tasks.append(_parallel_final_confirmation(action))
+                    if confirmation_tasks:
+                        parallel_results = await asyncio.gather(
+                            *confirmation_tasks,
+                            return_exceptions=True,
                         )
-                    if safe_path in self._close_retry_paths:
-                        self._close_retry_paths.discard(safe_path)
-                        retry_paths.add(safe_path)
-                    continue
+                        for index, confirmation_result in zip(
+                            parallel_indexes,
+                            parallel_results,
+                            strict=True,
+                        ):
+                            confirmation_results[index] = confirmation_result
 
-                job_id = await self._finish_ready_file(
-                    safe_path,
-                    meeting_id,
-                    expected,
-                    existing=existing,
-                    quarantine_reason_prefix="재기동 스캔 차단",
-                    notify=False,
-                )
-                if job_id is not None:
-                    registered_ids.append(job_id)
-                    logger.info(
-                        f"기존 파일 등록 (녹음 완료, 전사 대기): "
-                        f"{safe_path.name} → job_id={job_id}"
-                    )
-                if safe_path in self._close_retry_paths:
-                    self._close_retry_paths.discard(safe_path)
-                    retry_paths.add(safe_path)
-            except JobQueueError as e:
-                logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
-            except Exception as e:
-                logger.exception(f"기존 파일 스캔 중 예외 격리: {safe_path.name} — {e}")
+                    for index, (item, action) in enumerate(prepared):
+                        safe_path, _meeting_id, _expected, _existing = item
+                        try:
+                            if action.kind is _ReadyActionKind.ACCEPT and action.existing is None:
+                                confirmation = confirmation_results[index]
+                                if isinstance(confirmation, BaseException):
+                                    logger.error(
+                                        f"startup final writer 검사 예외 격리: "
+                                        f"{safe_path.name} — {type(confirmation).__name__}"
+                                    )
+                                    retry_paths.add(safe_path)
+                                    continue
+                                if confirmation is None or not confirmation[0]:
+                                    retry_paths.add(safe_path)
+                                    continue
+
+                                current = self._inspect_input_file(action.safe_path)
+                                attestation_age = time.monotonic() - confirmation[1]
+                                if current is None or current[1] != action.fingerprint:
+                                    logger.warning(
+                                        f"startup final 확인 후 파일 변경 감지: {safe_path.name}"
+                                    )
+                                    retry_paths.add(safe_path)
+                                    continue
+                                if (
+                                    attestation_age
+                                    > self._startup_writer_attestation_max_age_seconds
+                                    and not await self._confirm_closed_unchanged(
+                                        action.safe_path,
+                                        action.fingerprint,
+                                        schedule_retry=True,
+                                    )
+                                ):
+                                    retry_paths.add(safe_path)
+                                    continue
+                            elif self._ready_action_requires_writer_confirmation(action):
+                                if not await self._confirm_closed_unchanged(
+                                    action.safe_path,
+                                    action.fingerprint,
+                                    schedule_retry=True,
+                                ):
+                                    if action.existing is not None:
+                                        reason = (
+                                            "quarantine 직전 source busy/변경"
+                                            if action.kind is _ReadyActionKind.QUARANTINE
+                                            else "queue 직전 source busy/변경"
+                                        )
+                                        await self._release_legacy_job(
+                                            action.existing,
+                                            reason=reason,
+                                        )
+                                    retry_paths.add(safe_path)
+                                    continue
+
+                            job_id = await self._apply_ready_action(action)
+                            if job_id is not None:
+                                registered_ids.append(job_id)
+                                logger.info(
+                                    f"기존 파일 등록 (녹음 완료, 전사 대기): "
+                                    f"{safe_path.name} → job_id={job_id}"
+                                )
+                        except JobQueueError as e:
+                            logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
+                        except Exception as e:
+                            logger.exception(
+                                f"기존 파일 적용 중 예외 격리: {safe_path.name} — {e}"
+                            )
+                        finally:
+                            _finish_startup_item(safe_path)
+
+            # 0-byte는 기존 계약대로 debounce 없이 검사한다.
+            await _process_batch(zero_size, debounce=False)
+            await _process_batch(nonzero, debounce=True)
+        finally:
+            # shutdown/task cancellation은 stale pending 상태를 남기지 않는다.
+            for safe_path in startup_owned_paths:
+                self._pending_files.pop(safe_path, None)
+                self._dirty_files.discard(safe_path)
+                self._close_retry_paths.discard(safe_path)
 
         for retry_path in retry_paths:
             self._schedule_deferred_retry(retry_path, delay=self._check_interval)

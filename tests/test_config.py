@@ -72,7 +72,10 @@ class TestConfigYamlParsing:
         assert config.embedding.batch_size == 64
         assert config.search.vector_weight == 0.6
         assert config.server.port == 8765
+        assert config.server.startup_timeout_seconds == 10.0
         assert config.watcher.file_ready_timeout_seconds == 30.0
+        assert config.watcher.startup_probe_concurrency == 8
+        assert config.watcher.startup_writer_attestation_max_age_seconds == 0.25
         # 환각 필터링 설정 검증
         assert config.hallucination_filter.enabled is True
         # 벤치마크 결과에 따라 0.9 로 상향 (docs/BENCHMARK.md §6 · config.yaml 주석 참조)
@@ -145,6 +148,18 @@ class TestConfigYamlParsing:
             (
                 default.watcher.file_ready_timeout_seconds,
                 loaded.watcher.file_ready_timeout_seconds,
+            ),
+            (
+                default.watcher.startup_probe_concurrency,
+                loaded.watcher.startup_probe_concurrency,
+            ),
+            (
+                default.watcher.startup_writer_attestation_max_age_seconds,
+                loaded.watcher.startup_writer_attestation_max_age_seconds,
+            ),
+            (
+                default.server.startup_timeout_seconds,
+                loaded.server.startup_timeout_seconds,
             ),
             (default.hallucination_filter.enabled, loaded.hallucination_filter.enabled),
             (default.text_postprocessing.enabled, loaded.text_postprocessing.enabled),
@@ -876,6 +891,21 @@ def test_WatcherConfig_file_ready_timeout_기본값과_커스텀값():
 
     assert WatcherConfig().file_ready_timeout_seconds == 30.0
     assert WatcherConfig(file_ready_timeout_seconds=7.5).file_ready_timeout_seconds == 7.5
+
+
+def test_ServerConfig_readiness_timeout_범_WatcherConfig_startup_동시성():
+    """서버 readiness와 기존 파일 probe의 유한 경계를 검증한다."""
+    from config import ServerConfig, WatcherConfig
+
+    assert ServerConfig().startup_timeout_seconds == 10.0
+    assert WatcherConfig().startup_probe_concurrency == 8
+    assert WatcherConfig().startup_writer_attestation_max_age_seconds == 0.25
+    with pytest.raises(ValidationError):
+        ServerConfig(startup_timeout_seconds=0.5)
+    with pytest.raises(ValidationError):
+        WatcherConfig(startup_probe_concurrency=0)
+    with pytest.raises(ValidationError):
+        WatcherConfig(startup_writer_attestation_max_age_seconds=0.01)
 
 
 def test_WatcherConfig_timeout은_debounce와_check_interval_합_이상이어야_함():
