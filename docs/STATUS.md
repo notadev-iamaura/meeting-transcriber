@@ -58,6 +58,9 @@ pytest -m harness -q
   선택할 수 있습니다. OpenAI 기본값은 한 번 동의하면 로컬로 되돌릴 때까지 이후 새
   전사에 적용됩니다. 키 원문은 설정 응답, YAML, DB, 체크포인트, 로그에 남기지 않습니다.
 - OpenAI 기본 전사 전환은 loopback 서버, 등록된 키, 외부 업로드 동의를 모두 요구합니다.
+- 녹음 완료 회의의 **전사 시작**에서 local/OpenAI를 회의별로 선택할 수 있습니다. 이 선택은
+  전역 기본값을 수정하지 않고 job의 queue-time provider/model snapshot에만 저장되며,
+  OpenAI는 해당 파일의 외부 전송 동의를 매번 다시 요구합니다.
 - 전사가 완료된 회의 뷰어의 **다른 모델로 텍스트 변환하기…**는 현재 로컬 모델과
   `gpt-4o-transcribe-diarize`를 격리 A/B 작업으로 실행합니다. 기존 전사·요약·검색
   인덱스는 보존하고 파일마다 외부 전송 동의를 다시 받습니다.
@@ -426,7 +429,8 @@ pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 `workflow_dispatch` 또는 주간 schedule diagnostic gate로 운용합니다.
 
 ```bash
-pytest -m e2e tests/test_e2e_edit_playwright.py -v
+pytest -m e2e tests/test_e2e_edit_playwright.py \
+  tests/test_e2e_transcription_model_playwright.py -v
 pytest -m ui tests/ui/ -v
 pytest -m native tests/ -v
 ```

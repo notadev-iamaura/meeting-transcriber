@@ -16,9 +16,9 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_job_queue as _get_job_queue
@@ -1223,6 +1223,34 @@ class MeetingItem(BaseModel):
     stt_model: str = ""
 
 
+class TranscribeMeetingRequest(BaseModel):
+    """개별 회의 전사에만 적용할 모델 선택 요청."""
+
+    model_id: str | None = None
+    external_upload_confirmed: bool = False
+
+
+def _parse_transcribe_meeting_request(body: Any) -> TranscribeMeetingRequest:
+    """비밀값을 오류 응답에 반사하지 않고 개별 전사 요청을 검증한다."""
+    if body is None:
+        return TranscribeMeetingRequest()
+    if not isinstance(body, dict) or not set(body).issubset(
+        {"model_id", "external_upload_confirmed"}
+    ):
+        raise HTTPException(status_code=400, detail="개별 전사 요청 형식이 올바르지 않습니다.")
+
+    model_id = body.get("model_id")
+    consent = body.get("external_upload_confirmed", False)
+    if model_id is not None and not isinstance(model_id, str):
+        raise HTTPException(status_code=400, detail="전사 모델 ID 형식이 올바르지 않습니다.")
+    if type(consent) is not bool:
+        raise HTTPException(status_code=400, detail="외부 전송 동의 값은 boolean이어야 합니다.")
+    return TranscribeMeetingRequest(
+        model_id=model_id,
+        external_upload_confirmed=consent,
+    )
+
+
 class TranscriptUtteranceItem(BaseModel):
     """전사문 개별 발화 스키마.
 
@@ -1511,6 +1539,7 @@ async def transcribe_meeting(
     request: Request,
     meeting_id: str,
     force: bool = False,
+    body: Annotated[Any | None, Body()] = None,
 ) -> MeetingItem:
     """녹음 완료된 회의의 전사를 시작한다.
 
@@ -1522,6 +1551,7 @@ async def transcribe_meeting(
         request: FastAPI Request 객체
         meeting_id: 전사할 회의 고유 식별자
         force: True이면 failed 상태도 강제로 재시도한다 (쿼리파라미터)
+        body: 이 회의에만 적용할 전사 모델과 외부 전송 동의
 
     Returns:
         MeetingItem: 업데이트된 회의 정보
@@ -1533,6 +1563,39 @@ async def transcribe_meeting(
 
     _validate_meeting_id(meeting_id)
     queue = _get_job_queue(request)
+    config = _get_config(request)
+    parsed_body = _parse_transcribe_meeting_request(body)
+
+    # 명시적 개별 선택은 회의/파일/Keychain을 읽기 전에 공개 model_id
+    # 화이트리스트와 외부 전송 동의를 먼저 검증한다. body가 없으면 기존처럼
+    # pipeline state → job snapshot → 전역 설정 순서로 선택한다.
+    requested_selection = None
+    if parsed_body.model_id is not None:
+        from core.transcription_models import selection_from_id
+
+        try:
+            requested_selection = selection_from_id(
+                parsed_body.model_id,
+                local_model=str(config.stt.model_name),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if requested_selection.external_upload:
+            if not parsed_body.external_upload_confirmed:
+                raise HTTPException(
+                    status_code=400,
+                    detail="이 음성 파일을 OpenAI로 전송하는 데 동의해야 합니다.",
+                )
+            from api.routers.transcription_models import require_loopback_server
+            from security.openai_keychain import get_status
+
+            require_loopback_server(config, request)
+            if not get_status().configured:
+                raise HTTPException(
+                    status_code=400,
+                    detail="OpenAI API 키를 먼저 등록해 주세요.",
+                )
 
     try:
         import asyncio
@@ -1555,18 +1618,53 @@ async def transcribe_meeting(
                 detail += ". 실패한 회의를 재시도하려면 ?force=true 를 붙여 요청하세요."
             raise HTTPException(status_code=409, detail=detail)
 
-        config = _get_config(request)
         pipeline_state = _read_pipeline_state_for_response(config, meeting_id)
         from core.transcription_models import selection_from_state_or_config
 
         try:
-            stt_selection = selection_from_state_or_config(
+            pinned_or_default_selection = selection_from_state_or_config(
                 config,
                 pipeline_state,
                 job=job,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        # 취소 후 재개되는 recorded 작업은 pipeline/job에 기존 모델이 고정돼
+        # 있을 수 있다. 이때 다른 모델을 큐잉하면 worker 단계에서 뒤늦게 실패하므로
+        # API에서 먼저 차단한다. 새 recorded 작업(고정값 없음)은 개별 선택을 허용한다.
+        state_provider = str((pipeline_state or {}).get("stt_provider", "") or "")
+        state_model = str((pipeline_state or {}).get("stt_model", "") or "")
+        if bool(state_provider) != bool(state_model):
+            raise HTTPException(
+                status_code=409,
+                detail="이 회의의 파이프라인 전사 모델 기록이 불완전합니다.",
+            )
+        # worker가 시작되기 전 queued 취소는 job snapshot만 남기므로 새 선택으로
+        # 안전하게 덮어쓸 수 있다. 실제 pipeline state가 생성된 재개 작업만 hard pin이다.
+        has_pinned_selection = bool(state_provider and state_model)
+        if requested_selection is not None and has_pinned_selection:
+            if (
+                requested_selection.provider == "local"
+                and pinned_or_default_selection.provider == "local"
+            ):
+                # 공개 `local` ID는 현재 기본 로컬 모델로 해석된다. 하지만
+                # 이미 pipeline state가 있는 재개 작업은 기본값이 바뀌어도
+                # 기존 pinned 로컬 모델을 계속 사용해야 체크포인트가 일관된다.
+                requested_selection = pinned_or_default_selection
+            elif (
+                requested_selection.provider != pinned_or_default_selection.provider
+                or requested_selection.model != pinned_or_default_selection.model
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "이 회의의 진행 기록에는 다른 전사 모델이 고정되어 있습니다. "
+                        "기존 모델로 재개하거나 처음부터 다시 전사해 주세요."
+                    ),
+                )
+
+        stt_selection = requested_selection or pinned_or_default_selection
         if stt_selection.external_upload:
             from api.routers.transcription_models import require_loopback_server
 
@@ -1600,15 +1698,21 @@ async def transcribe_meeting(
         if job_processor is not None:
             job_processor._cancellation_requests.discard(meeting_id)
 
-        logger.info(f"전사 시작 요청: {meeting_id} (job_id={job.id})")
+        logger.info(
+            "전사 시작 요청: %s (job_id=%s, provider=%s, model=%s)",
+            meeting_id,
+            job.id,
+            stt_selection.provider,
+            stt_selection.model,
+        )
 
         return _build_meeting_item(updated_job, pipeline_state=pipeline_state)
     except HTTPException:
         raise
-    except InvalidTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
     except JobNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except (InvalidTransitionError, JobQueueError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         logger.exception(f"전사 시작 실패: {e}")
         raise HTTPException(

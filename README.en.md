@@ -38,6 +38,7 @@ Recap started from a Korean-heavy meeting workflow, but the broader problem is l
 
 - **Recording and transcription**: local mlx-whisper by default, with optional OpenAI `gpt-4o-transcribe-diarize`.
 - **Transcription model management**: choose the default processing location and manage local STT models from the web UI.
+- **One-off model choice per recording**: keep the global default local while choosing local or OpenAI when starting transcription for one recorded meeting. OpenAI requires fresh upload consent for that file and does not change the default.
 - **Per-meeting alternate transcription**: for a completed meeting, create an isolated local-vs-OpenAI comparison without replacing the current transcript.
 - **Speaker diarization**: pyannote-audio based speaker separation.
 - **Local LLM correction and summarization**: MLX by default, Ollama optional.

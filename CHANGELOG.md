@@ -17,6 +17,9 @@
   CER/WER/메모리 메타값을 회의 도메인 평균으로 갱신.
 
 ### 추가됨
+- **회의별 전사 모델 선택** (2026-08-24): 녹음 완료 회의의 `전사 시작`에서 전역
+  기본값을 바꾸지 않고 local/OpenAI를 선택할 수 있다. OpenAI는 파일별 동의·Keychain
+  상태·loopback 검증 후 queue-time provider/model snapshot으로만 저장된다.
 - **LLM 단계 사전 메모리 경고** (PR #18): `ResourceGuard.check_llm_capacity()`
   신설. 가용 메모리 < `pipeline.llm_recommended_memory_gb` (기본 6.5GB) 일 때
   `llm_memory_low_warning` 콜백을 발송한다. 기존 차단(<1.5GB) 은 유지.

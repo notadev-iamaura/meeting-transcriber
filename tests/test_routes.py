@@ -3142,6 +3142,325 @@ class TestTranscribeMeetingEndpoint:
         # recorded 상태에서는 force_set_status 를 호출하지 않아야 한다
         queue.force_set_status.assert_not_called()
 
+    def test_transcribe_개별_OpenAI선택은_전역local을_바꾸지않고_snapshot한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """한 회의만 OpenAI를 선택해도 기본 설정은 local로 유지한다."""
+        from security.openai_keychain import OpenAICredentialStatus
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_oneoff_openai"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+        queued_job = MockJob(1, meeting_id, str(audio_path), "queued")
+
+        with (
+            TestClient(app, base_url="http://127.0.0.1") as client,
+            patch(
+                "security.openai_keychain.get_status",
+                return_value=OpenAICredentialStatus(configured=True, source="keychain"),
+            ) as key_status,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(return_value=queued_job)
+
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={
+                    "model_id": "openai:gpt-4o-transcribe-diarize",
+                    "external_upload_confirmed": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert app.state.config.stt.provider == "local"
+        key_status.assert_called_once_with()
+        queue.queue_job.assert_called_once_with(
+            1,
+            "",
+            stt_provider="openai",
+            stt_model="gpt-4o-transcribe-diarize",
+        )
+
+    def test_transcribe_개별_local선택은_전역OpenAI보다_우선한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """전역 OpenAI 상태에서도 이 회의만 local snapshot으로 큐잉할 수 있다."""
+        app = _make_test_app(tmp_path)
+        app.state.config.stt.provider = "openai"
+        meeting_id = "meeting_oneoff_local"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+        queued_job = MockJob(1, meeting_id, str(audio_path), "queued")
+
+        with (
+            TestClient(app) as client,
+            patch("security.openai_keychain.get_status") as key_status,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(return_value=queued_job)
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 200
+        assert app.state.config.stt.provider == "openai"
+        key_status.assert_not_called()
+        queue.queue_job.assert_called_once_with(
+            1,
+            "",
+            stt_provider="local",
+            stt_model="mlx-community/whisper-large-v3-turbo",
+        )
+
+    def test_transcribe_OpenAI동의누락은_Keychain과_회의조회전에_거부한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """명시적 파일 동의가 없으면 비밀·DB·오디오 경계에 진입하지 않는다."""
+        app = _make_test_app(tmp_path)
+
+        with (
+            TestClient(app) as client,
+            patch("security.openai_keychain.get_status") as key_status,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock()
+            queue.queue_job = MagicMock()
+            response = client.post(
+                "/api/meetings/consent_first/transcribe",
+                json={
+                    "model_id": "openai:gpt-4o-transcribe-diarize",
+                    "external_upload_confirmed": False,
+                },
+            )
+
+        assert response.status_code == 400
+        assert "동의" in response.json()["detail"]
+        key_status.assert_not_called()
+        queue.get_job_by_meeting_id.assert_not_called()
+        queue.queue_job.assert_not_called()
+
+    def test_transcribe_OpenAI키누락과_악성Origin은_queue전에_거부한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """키 미등록과 DNS-rebinding 요청은 DB·오디오 경계에 진입하지 않는다."""
+        from security.openai_keychain import OpenAICredentialStatus
+
+        app = _make_test_app(tmp_path)
+        payload = {
+            "model_id": "openai:gpt-4o-transcribe-diarize",
+            "external_upload_confirmed": True,
+        }
+
+        with (
+            TestClient(app, base_url="http://127.0.0.1") as client,
+            patch(
+                "security.openai_keychain.get_status",
+                return_value=OpenAICredentialStatus(configured=False, source=None),
+            ) as key_status,
+        ):
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock()
+            queue.queue_job = MagicMock()
+            no_key = client.post(
+                "/api/meetings/no_key/transcribe",
+                json=payload,
+            )
+            hostile_origin = client.post(
+                "/api/meetings/evil_origin/transcribe",
+                json=payload,
+                headers={"origin": "https://attacker.example"},
+            )
+
+        assert no_key.status_code == 400
+        assert "API 키" in no_key.json()["detail"]
+        assert hostile_origin.status_code == 403
+        key_status.assert_called_once_with()
+        queue.get_job_by_meeting_id.assert_not_called()
+        queue.queue_job.assert_not_called()
+
+    @pytest.mark.parametrize("invalid_consent", ["true", 1, 0, None])
+    def test_transcribe_외부동의는_boolean만_허용하고_입력을_반사하지않는다(
+        self,
+        tmp_path: Path,
+        invalid_consent: Any,
+    ) -> None:
+        """문자열·숫자 동의와 임의 비밀 필드는 고정 오류로 거부한다."""
+        app = _make_test_app(tmp_path)
+        secret = "sk-never-reflect-this-value-1234567890"
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/meetings/strict_consent/transcribe",
+                json={
+                    "model_id": "openai:gpt-4o-transcribe-diarize",
+                    "external_upload_confirmed": invalid_consent,
+                },
+            )
+            extra_response = client.post(
+                "/api/meetings/strict_consent/transcribe",
+                json={"model_id": "local", "api_key": secret},
+            )
+
+        assert response.status_code == 400
+        assert extra_response.status_code == 400
+        assert secret not in extra_response.text
+
+    def test_transcribe_pinned_pipeline과_다른_개별모델은_queue전에_409(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """실행 이력이 있는 취소 작업은 다른 모델로 몰래 재개하지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_pinned_openai"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        checkpoint_dir = app.state.config.paths.resolved_checkpoints_dir / meeting_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "pipeline_state.json").write_text(
+            json.dumps(
+                {
+                    "status": "pending",
+                    "stt_provider": "openai",
+                    "stt_model": "gpt-4o-transcribe-diarize",
+                }
+            ),
+            encoding="utf-8",
+        )
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock()
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 409
+        assert "고정" in response.json()["detail"]
+        queue.queue_job.assert_not_called()
+
+    def test_transcribe_pinned_local은_기본로컬모델이_바뀌어도_기존모델로_재개(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """local 공개 ID는 재개 시 현재 기본값 대신 pinned 모델을 유지한다."""
+        app = _make_test_app(tmp_path)
+        app.state.config.stt.model_name = "mlx-community/new-local-default"
+        meeting_id = "meeting_pinned_old_local"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        checkpoint_dir = app.state.config.paths.resolved_checkpoints_dir / meeting_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "pipeline_state.json").write_text(
+            json.dumps(
+                {
+                    "status": "pending",
+                    "stt_provider": "local",
+                    "stt_model": "mlx-community/old-local-pinned",
+                }
+            ),
+            encoding="utf-8",
+        )
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+        queued_job = MockJob(1, meeting_id, str(audio_path), "queued")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(return_value=queued_job)
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 200
+        queue.queue_job.assert_called_once_with(
+            1,
+            "",
+            stt_provider="local",
+            stt_model="mlx-community/old-local-pinned",
+        )
+
+    def test_transcribe_queued취소_snapshot은_새_개별선택으로_덮어쓴다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """worker 시작 전 취소된 snapshot은 pipeline state가 없어 재선택 가능하다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_cancelled_before_worker"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+        recorded_job.stt_provider = "openai"  # type: ignore[attr-defined]
+        recorded_job.stt_model = "gpt-4o-transcribe-diarize"  # type: ignore[attr-defined]
+        queued_job = MockJob(1, meeting_id, str(audio_path), "queued")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(return_value=queued_job)
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 200
+        queue.queue_job.assert_called_once_with(
+            1,
+            "",
+            stt_provider="local",
+            stt_model="mlx-community/whisper-large-v3-turbo",
+        )
+
+    def test_transcribe_동시queue_CAS경합은_409로_수렴한다(self, tmp_path: Path) -> None:
+        """중복 클릭으로 queue CAS가 경합해도 내부 오류 대신 명시적 충돌을 반환한다."""
+        from core.job_queue import JobQueueError
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_queue_race"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(side_effect=JobQueueError("queue CAS conflict"))
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 409
+        assert "CAS" in response.json()["detail"]
+
+    def test_transcribe_queue직전_동시삭제는_404를_반환한다(self, tmp_path: Path) -> None:
+        """최초 조회 후 삭제된 작업은 상위 queue 충돌이 아니라 not-found다."""
+        from core.job_queue import JobNotFoundError
+
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_deleted_during_queue"
+        audio_path = _make_audio_file(tmp_path, f"{meeting_id}.m4a")
+        recorded_job = MockJob(1, meeting_id, str(audio_path), "recorded")
+
+        with TestClient(app) as client:
+            queue = app.state.job_queue._queue
+            queue.get_job_by_meeting_id = MagicMock(return_value=recorded_job)
+            queue.queue_job = MagicMock(side_effect=JobNotFoundError(1))
+            response = client.post(
+                f"/api/meetings/{meeting_id}/transcribe",
+                json={"model_id": "local", "external_upload_confirmed": False},
+            )
+
+        assert response.status_code == 404
+        assert "찾을 수 없습니다" in response.json()["detail"]
+
     def test_transcribe는_취소된_OpenAI_state를_local_기본값으로_우회하지_않는다(
         self,
         tmp_path: Path,

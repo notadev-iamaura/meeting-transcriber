@@ -2930,6 +2930,76 @@ dialog.transcription-model-dialog::backdrop {
   color: var(--text-primary);
 }
 
+.transcription-model-choice-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.transcription-model-choice {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 14px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-macos),
+              background var(--duration-fast) var(--ease-macos),
+              opacity var(--duration-fast) var(--ease-macos);
+}
+
+.transcription-model-choice:hover:not(.unavailable) {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.transcription-model-choice.selected {
+  border-color: var(--accent);
+  background: rgba(0, 122, 255, 0.07);
+  box-shadow: inset 0 0 0 0.5px var(--accent);
+}
+
+.transcription-model-choice.unavailable {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.transcription-model-choice > input {
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.transcription-model-choice-content {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.transcription-model-choice-content .processing-location-badge {
+  margin-bottom: 7px;
+}
+
+.transcription-model-choice-content strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.transcription-model-choice-detail {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .transcription-comparison-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3031,6 +3101,11 @@ dialog.transcription-model-dialog::backdrop {
   font-size: 11px;
 }
 
+.external-upload-warning[hidden],
+.external-upload-consent[hidden] {
+  display: none;
+}
+
 .external-upload-consent {
   display: flex;
   align-items: flex-start;
@@ -3127,6 +3202,7 @@ dialog.transcription-model-dialog::backdrop {
 }
 
 .transcription-dialog-close:focus-visible,
+.transcription-model-choice > input:focus-visible,
 .transcription-model-select:focus-visible,
 .external-upload-consent input:focus-visible,
 .transcription-settings-link:focus-visible,
@@ -3150,6 +3226,10 @@ dialog.transcription-model-dialog::backdrop {
     grid-template-columns: 1fr;
   }
 
+  .transcription-model-choice-list {
+    grid-template-columns: 1fr;
+  }
+
   .transcription-missing-key,
   .transcription-model-dialog-actions {
     align-items: stretch;
@@ -3164,6 +3244,7 @@ dialog.transcription-model-dialog::backdrop {
 
 @media (prefers-reduced-motion: reduce) {
   .transcription-dialog-close,
+  .transcription-model-choice,
   .transcription-dialog-cancel,
   .transcription-dialog-submit {
     transition: none;

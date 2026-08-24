@@ -109,7 +109,7 @@ testpaths = ["tests"]
 # pytest-playwright 가 pytest-asyncio 의 auto 모드와 충돌하여
 # 함께 실행하면 async 테스트가 깨지는 문제가 있기 때문이다 (event loop 누수).
 # 브라우저/native 테스트는 별도로 실행:
-#   `pytest -m e2e tests/test_e2e_edit_playwright.py`
+#   `pytest -m e2e tests/test_e2e_edit_playwright.py tests/test_e2e_transcription_model_playwright.py`
 #   `pytest -m ui tests/ui/`
 #   `pytest -m native tests/`
 addopts = "-m 'not e2e and not ui and not native'"
