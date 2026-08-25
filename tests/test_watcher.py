@@ -3094,8 +3094,13 @@ async def test_zero_byte_closed는_timeout_대기_없이_즉시_검증·격리(
         "_probe_writable_open",
         AsyncMock(return_value=_OpenWriterState.CLEAR),
     )
+    readiness_sleep = AsyncMock(
+        side_effect=AssertionError("closed 0-byte readiness는 sleep하지 않아야 합니다")
+    )
+    monkeypatch.setattr("core.watcher.asyncio.sleep", readiness_sleep)
 
-    await asyncio.wait_for(watcher._handle_new_file(source), timeout=0.3)
+    await asyncio.wait_for(watcher._handle_new_file(source), timeout=3.0)
 
+    readiness_sleep.assert_not_awaited()
     assert not source.exists()
     assert await job_queue.get_all_jobs() == []

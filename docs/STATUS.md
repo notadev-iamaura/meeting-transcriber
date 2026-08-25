@@ -382,6 +382,9 @@ local_ready=true, distribution_ready=false 상태로 허용되며, DMG mount/ope
 
 - model/pipeline runtime gate와 테스트 프로파일을 정리했습니다.
 - CI는 기본 안정 gate, UI bulk actions gate, mypy 타입 검사 gate를 구분합니다.
+- mypy gate는 `pyproject.toml`의 `python_version = "3.11"`과 동일한 Python 3.11
+  runner를 사용합니다. 더 높은 runner가 설치한 dependency stub의 3.12+ 전용 문법이
+  3.11 target 분석을 시작 전에 깨뜨리지 않도록 harness 계약으로 고정합니다.
 - Ruff는 개발 extra와 CI 모두 `0.15.13`으로 고정해 로컬/CI 포맷 결과의 버전별 변동을
   차단합니다. 포맷터 버전 업그레이드는 전체 저장소 diff를 확인하는 별도 변경으로 진행합니다.
 - README, PR template, AGENTS.md, 평가 문서를 최신 정책에 맞췄습니다.
