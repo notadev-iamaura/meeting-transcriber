@@ -399,7 +399,26 @@ class DiarizationConfig(BaseModel):
     min_speakers: int | None = Field(default=2, ge=1)
     max_speakers: int | None = Field(default=4, ge=1, le=20)
     huggingface_token: str | None = None
-    timeout_seconds: int = Field(default=1800, ge=60, description="화자분리 타임아웃 (초)")
+    timeout_seconds: int = Field(
+        default=1800,
+        ge=60,
+        description="화자분리 실행 타임아웃 하한 (초)",
+    )
+    dynamic_timeout_enabled: bool = Field(
+        default=True,
+        description="오디오 길이에 비례해 화자분리 실행 타임아웃을 늘린다.",
+    )
+    dynamic_timeout_multiplier: float = Field(
+        default=1.25,
+        ge=0.1,
+        le=10.0,
+        description="화자분리 동적 타임아웃에 적용할 오디오 길이 배수",
+    )
+    dynamic_timeout_max_seconds: int = Field(
+        default=10800,
+        ge=60,
+        description="화자분리 동적 연장분의 타임아웃 상한 (초)",
+    )
     protect_zoom_meetings: bool = True
     zoom_protection_mode: str = Field(default="pause", pattern="^(pause|off)$")
     zoom_protection_poll_seconds: float = Field(default=1.0, ge=0.5, le=10.0)

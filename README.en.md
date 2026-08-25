@@ -40,7 +40,9 @@ Recap started from a Korean-heavy meeting workflow, but the broader problem is l
 - **Transcription model management**: choose the default processing location and manage local STT models from the web UI.
 - **One-off model choice per recording**: keep the global default local while choosing local or OpenAI when starting transcription for one recorded meeting. OpenAI requires fresh upload consent for that file and does not change the default.
 - **Per-meeting alternate transcription**: for a completed meeting, create an isolated local-vs-OpenAI comparison without replacing the current transcript.
-- **Speaker diarization**: pyannote-audio based speaker separation.
+- **Speaker diarization**: pyannote-audio based speaker separation with an audio-length-aware
+  execution timeout. A diarization timeout preserves the audio and transcript checkpoint so a
+  retry resumes from diarization instead of transcribing again.
 - **Local LLM correction and summarization**: MLX by default, Ollama optional.
 - **Decision Wiki**: turn decisions and action items into cited Markdown notes.
 - **Hybrid search**: transcript RAG search plus wiki search.

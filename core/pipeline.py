@@ -1731,8 +1731,17 @@ class PipelineManager:
             except Exception as e:
                 logger.warning(f"화자분리 긴 무음 압축 준비 실패, 원본 WAV 사용: {e}")
 
+        timeout_duration_seconds = (
+            float(silence_plan.original_duration) if silence_plan is not None else None
+        )
         diarizer = Diarizer(self._config, self._model_manager)
-        result = await diarizer.diarize(diarization_audio_path)
+        if timeout_duration_seconds is None:
+            result = await diarizer.diarize(diarization_audio_path)
+        else:
+            result = await diarizer.diarize(
+                diarization_audio_path,
+                timeout_duration_seconds=timeout_duration_seconds,
+            )
 
         if silence_plan is not None and getattr(silence_plan, "applied", False):
             from steps.diarization_silence import remap_diarization_result
@@ -2328,9 +2337,15 @@ class PipelineManager:
         resume_idx = self._find_resume_step(state)
         if resume_idx is None:
             logger.info("모든 단계가 이미 완료되었습니다.")
-            if state.status != "completed" or state.current_step or stt_selection_initialized:
+            if (
+                state.status != "completed"
+                or state.current_step
+                or state.error_message
+                or stt_selection_initialized
+            ):
                 state.status = "completed"
                 state.current_step = ""
+                state.error_message = ""
                 self._save_state(state, state_path)
             return state
 
@@ -2420,19 +2435,26 @@ class PipelineManager:
 
         # 이전에 완료된 단계의 결과 복원
         if resume_idx > 0:
-            (
-                wav_path,
-                transcript_result,
-                diarization_result,
-                merged_result,
-                corrected_result,
-                chunked_result,
-            ) = await self._restore_intermediate_results(
-                meeting_id,
-                resume_idx,
-                audio_path,
-                state,
-            )
+            try:
+                (
+                    wav_path,
+                    transcript_result,
+                    diarization_result,
+                    merged_result,
+                    corrected_result,
+                    chunked_result,
+                ) = await self._restore_intermediate_results(
+                    meeting_id,
+                    resume_idx,
+                    audio_path,
+                    state,
+                )
+            except PipelineError as exc:
+                state.status = "failed"
+                state.current_step = PIPELINE_STEPS[resume_idx].value
+                state.error_message = str(exc)
+                self._save_state(state, state_path)
+                raise
 
         # 각 단계 순차 실행
         pipeline_start = time.monotonic()
@@ -2721,6 +2743,7 @@ class PipelineManager:
         pipeline_elapsed = time.monotonic() - pipeline_start
         state.status = "completed"
         state.current_step = ""
+        state.error_message = ""
         self._save_state(state, state_path)
 
         # ── Step 9 (Phase 1): Wiki Compile (dry-run) ─────────────────────
@@ -2812,16 +2835,20 @@ class PipelineManager:
                 meeting_id,
                 PipelineStep.TRANSCRIBE,
             )
-            if cp.exists():
-                from steps.transcriber import TranscriptResult
-
-                transcript_result = TranscriptResult.from_checkpoint(cp)
-                self._validate_transcript_checkpoint_selection(
-                    transcript_result,
-                    selected_provider=state.stt_provider,
-                    selected_model=state.stt_model,
+            if not cp.exists():
+                raise PipelineError(
+                    "전사 완료 상태이지만 transcribe 체크포인트가 없습니다. "
+                    "기존 오디오와 상태는 보존되며 화자분리를 시작하지 않습니다."
                 )
-                logger.info("전사 결과 체크포인트에서 복원")
+            from steps.transcriber import TranscriptResult
+
+            transcript_result = TranscriptResult.from_checkpoint(cp)
+            self._validate_transcript_checkpoint_selection(
+                transcript_result,
+                selected_provider=state.stt_provider,
+                selected_model=state.stt_model,
+            )
+            logger.info("전사 결과 체크포인트에서 복원")
 
         # diarize 완료 시 복원
         if PipelineStep.DIARIZE.value in state.completed_steps:

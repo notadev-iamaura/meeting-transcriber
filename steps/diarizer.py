@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -28,9 +29,14 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
+from core.audio_quality import AudioMeasurementError, measure_audio_duration
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.runtime_safety import pyannote_offline_cache_issue
-from steps.diarization_process_guard import ZoomPauseGuard, terminate_process
+from steps.diarization_process_guard import (
+    WorkerSupervisionTimeout,
+    ZoomPauseGuard,
+    terminate_process,
+)
 from steps.transcriber import (
     AudioAdmissionError,
     AudioFileIdentity,
@@ -41,6 +47,27 @@ from steps.transcriber import (
 )
 
 logger = logging.getLogger(__name__)
+
+_WORKER_STDERR_TAIL_CHARS = 4096
+
+
+def compute_diarization_timeout(
+    *,
+    duration_seconds: float,
+    base_seconds: int,
+    multiplier: float,
+    max_seconds: int,
+) -> int:
+    """오디오 길이에 비례한 화자분리 실행 타임아웃을 계산한다.
+
+    정적 설정값은 짧은 회의와 모델 로드 시간을 위한 하한으로 유지하고,
+    긴 회의는 ``ceil(duration × multiplier)``까지 늘리되 동적 연장분의
+    상한을 넘지 않는다. 명시적으로 더 큰 고정 하한은 낮추지 않는다.
+    """
+    duration_budget = math.ceil(max(0.0, duration_seconds) * multiplier)
+    # max_seconds는 동적으로 늘어나는 부분의 상한이다. 기존 사용자가 더 큰
+    # 고정 timeout_seconds를 명시했다면 그 값을 낮추지 않는다.
+    return max(base_seconds, min(max_seconds, duration_budget))
 
 
 @dataclass
@@ -229,6 +256,15 @@ class Diarizer:
         self._max_speakers = self._config.diarization.max_speakers
         self._hf_token = self._config.diarization.huggingface_token
         self._timeout_seconds = self._config.diarization.timeout_seconds
+        self._dynamic_timeout_enabled = (
+            getattr(self._config.diarization, "dynamic_timeout_enabled", True) is True
+        )
+        self._dynamic_timeout_multiplier = float(
+            getattr(self._config.diarization, "dynamic_timeout_multiplier", 1.25)
+        )
+        self._dynamic_timeout_max_seconds = int(
+            getattr(self._config.diarization, "dynamic_timeout_max_seconds", 10800)
+        )
         self._selected_output_mode = str(self._output_mode)
         self._protect_zoom_meetings = bool(
             getattr(self._config.diarization, "protect_zoom_meetings", False)
@@ -247,9 +283,66 @@ class Diarizer:
             f"device={self._device}, "
             f"output_mode={self._output_mode}, "
             f"speakers={self._min_speakers}~{self._max_speakers}, "
-            f"timeout={self._timeout_seconds}초, "
+            f"timeout_min={self._timeout_seconds}초, "
+            f"timeout_dynamic={self._dynamic_timeout_enabled}, "
+            f"timeout_multiplier={self._dynamic_timeout_multiplier}, "
+            f"timeout_max={self._dynamic_timeout_max_seconds}초, "
             f"zoom_protection={self._zoom_protection_mode if self._protect_zoom_meetings else 'off'}"
         )
+
+    def _resolve_timeout_seconds(
+        self,
+        audio_path: Path,
+        *,
+        duration_seconds: float | None = None,
+    ) -> int:
+        """검증된 원본 오디오 길이에 맞는 실행 타임아웃을 반환한다."""
+        if not self._dynamic_timeout_enabled:
+            return self._timeout_seconds
+        if (
+            duration_seconds is None
+            or not math.isfinite(duration_seconds)
+            or duration_seconds <= 0
+        ):
+            try:
+                duration_seconds = measure_audio_duration(audio_path)
+            except AudioMeasurementError as exc:
+                logger.warning(
+                    f"화자분리 duration 측정 실패, 설정 하한 사용: "
+                    f"audio={audio_path.name}, timeout={self._timeout_seconds}초, reason={exc}"
+                )
+                return self._timeout_seconds
+
+        timeout_seconds = compute_diarization_timeout(
+            duration_seconds=duration_seconds,
+            base_seconds=self._timeout_seconds,
+            multiplier=self._dynamic_timeout_multiplier,
+            max_seconds=self._dynamic_timeout_max_seconds,
+        )
+        logger.info(
+            f"화자분리 실행 타임아웃 결정: audio={audio_path.name}, "
+            f"duration={duration_seconds:.2f}초, timeout={timeout_seconds}초, "
+            f"base={self._timeout_seconds}초, "
+            f"multiplier={self._dynamic_timeout_multiplier}, "
+            f"max={self._dynamic_timeout_max_seconds}초"
+        )
+        return timeout_seconds
+
+    def _sanitize_worker_stderr(self, stderr: str) -> str:
+        """worker stderr에서 토큰을 지우고 진단용 tail만 반환한다."""
+        sanitized = stderr
+        if self._hf_token:
+            sanitized = sanitized.replace(str(self._hf_token), "[REDACTED]")
+        sanitized = sanitized.strip()
+        if len(sanitized) > _WORKER_STDERR_TAIL_CHARS:
+            sanitized = f"…{sanitized[-_WORKER_STDERR_TAIL_CHARS:]}"
+        return sanitized
+
+    def _read_worker_stderr(self, stderr_file: Any) -> str:
+        """종료된 worker의 임시 stderr를 안전한 진단 문자열로 읽는다."""
+        stderr_file.flush()
+        stderr_file.seek(0)
+        return self._sanitize_worker_stderr(stderr_file.read())
 
     def _reserve_external_worker_slot(self) -> object:
         """worker 프로세스가 pyannote를 로드하는 동안 모델 슬롯을 예약한다.
@@ -479,10 +572,13 @@ class Diarizer:
         self,
         audio_path: Path,
         expected_identity: AudioFileIdentity | None = None,
+        timeout_seconds: int | None = None,
     ) -> DiarizationResult:
         """별도 worker 프로세스에서 화자분리를 실행하고 Zoom 중에는 일시정지한다."""
         if expected_identity is None:
             expected_identity = self._validate_audio(audio_path)
+        if timeout_seconds is None:
+            timeout_seconds = self._resolve_timeout_seconds(audio_path)
         self._validate_token()
         process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
         detection_backend = getattr(
@@ -497,10 +593,11 @@ class Diarizer:
         )
 
         try:
-            await asyncio.wait_for(guard.wait_until_idle(), timeout=self._timeout_seconds)
+            await asyncio.wait_for(guard.wait_until_idle(), timeout=timeout_seconds)
         except TimeoutError as e:
             raise DiarizationError(
-                "Zoom 회의가 지속되어 화자분리 worker 시작 대기가 시간 초과되었습니다."
+                "Zoom 회의가 지속되어 화자분리 worker 시작 대기가 "
+                f"시간 초과되었습니다 ({timeout_seconds}초)."
             ) from e
 
         self._assert_audio_identity(audio_path, expected_identity)
@@ -510,6 +607,7 @@ class Diarizer:
                 audio_path,
                 guard,
                 expected_identity,
+                timeout_seconds,
             )
 
     async def _run_zoom_protected_worker_with_guard(
@@ -517,6 +615,7 @@ class Diarizer:
         audio_path: Path,
         guard: ZoomPauseGuard,
         expected_identity: AudioFileIdentity,
+        timeout_seconds: int,
     ) -> DiarizationResult:
         """이미 ModelLoadManager 슬롯을 확보한 상태에서 worker를 실행한다."""
 
@@ -536,7 +635,7 @@ class Diarizer:
             )
 
             process: subprocess.Popen[str] | None = None
-            with stderr_path.open("w+", encoding="utf-8") as stderr_file:
+            with stderr_path.open("w+", encoding="utf-8", errors="replace") as stderr_file:
                 try:
                     process = subprocess.Popen(
                         [sys.executable, "-m", "steps.diarization_worker"],
@@ -555,13 +654,26 @@ class Diarizer:
                         f"Zoom 보호 화자분리 worker 시작: pid={process.pid}, "
                         f"audio={audio_path.name}"
                     )
-                    returncode = await guard.supervise(process, self._timeout_seconds)
-                    stderr_file.seek(0)
-                    stderr = stderr_file.read()
+                    returncode = await guard.supervise(process, timeout_seconds)
+                    stderr = self._read_worker_stderr(stderr_file)
                 except asyncio.CancelledError:
                     if process is not None:
                         terminate_process(process)
                     raise
+                except WorkerSupervisionTimeout as e:
+                    if process is not None:
+                        terminate_process(process)
+                    stderr = self._read_worker_stderr(stderr_file)
+                    stderr_tail = stderr or "<비어 있음>"
+                    logger.error(
+                        f"화자분리 worker timeout: pid={getattr(process, 'pid', 'unknown')}, "
+                        f"limit={e.timeout_seconds}초, "
+                        f"active_elapsed={e.active_elapsed_seconds:.1f}초, "
+                        f"zoom_paused_elapsed={e.paused_elapsed_seconds:.1f}초, "
+                        f"wall_elapsed={e.wall_elapsed_seconds:.1f}초, "
+                        f"worker_stderr_tail={stderr_tail}"
+                    )
+                    raise DiarizationError(str(e)) from e
                 except TimeoutError as e:
                     if process is not None:
                         terminate_process(process)
@@ -576,7 +688,7 @@ class Diarizer:
                     raise DiarizationError("화자분리 worker 실행 중 오류가 발생했습니다.") from e
 
             if returncode != 0:
-                detail = stderr.strip() or f"exit={returncode}"
+                detail = stderr or f"exit={returncode}"
                 raise DiarizationError(f"화자분리 worker 실패: {detail}")
             if not output_path.exists():
                 raise DiarizationError("화자분리 worker 결과 파일이 생성되지 않았습니다.")
@@ -651,7 +763,12 @@ class Diarizer:
 
         return segments
 
-    async def diarize(self, audio_path: Path) -> DiarizationResult:
+    async def diarize(
+        self,
+        audio_path: Path,
+        *,
+        timeout_duration_seconds: float | None = None,
+    ) -> DiarizationResult:
         """오디오 파일에서 화자분리를 수행한다.
 
         Zoom 보호가 활성화된 macOS 환경에서는 별도 worker 프로세스를 사용해
@@ -661,6 +778,8 @@ class Diarizer:
 
         Args:
             audio_path: 화자분리할 오디오 파일 경로 (16kHz mono WAV 권장)
+            timeout_duration_seconds: 무음 압축 전 원본 길이. 지정하면 동적
+                타임아웃 계산에 이 값을 사용한다.
 
         Returns:
             화자분리 결과 (DiarizationResult)
@@ -673,11 +792,19 @@ class Diarizer:
             DiarizationError: 화자분리 처리 중 오류 또는 타임아웃 발생 시
         """
         audio_identity = self._validate_audio(audio_path)
+        timeout_seconds = self._resolve_timeout_seconds(
+            audio_path,
+            duration_seconds=timeout_duration_seconds,
+        )
 
-        logger.info(f"화자분리 시작: {audio_path.name}")
+        logger.info(f"화자분리 시작: {audio_path.name} | 실행 타임아웃: {timeout_seconds}초")
 
         if self._should_use_zoom_protected_worker():
-            result = await self._run_zoom_protected_worker(audio_path, audio_identity)
+            result = await self._run_zoom_protected_worker(
+                audio_path,
+                audio_identity,
+                timeout_seconds,
+            )
             if not result.segments:
                 raise EmptyAudioError(
                     "화자를 식별할 수 없습니다. "
@@ -705,12 +832,12 @@ class Diarizer:
                             audio_path,
                             audio_identity,
                         ),
-                        timeout=self._timeout_seconds,
+                        timeout=timeout_seconds,
                     )
                 except TimeoutError as e:
                     raise DiarizationError(
-                        f"화자분리 시간이 초과되었습니다 ({self._timeout_seconds}초). "
-                        f"오디오 파일이 너무 길 수 있습니다. 1시간 이하 파일을 권장합니다."
+                        f"화자분리 시간이 초과되었습니다 ({timeout_seconds}초). "
+                        "diarization 동적 타임아웃 설정과 시스템 부하를 확인해주세요."
                     ) from e
         except (ModelNotAvailableError, TokenNotConfiguredError):
             raise

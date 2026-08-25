@@ -632,6 +632,10 @@ bash scripts/setup_launchagent.sh
 | `stt.provider` | 기본 전사 처리 위치 (`local` 또는 명시적 `openai`) | `local` |
 | `stt.model_name` | 로컬 Whisper 모델 (HuggingFace ID 또는 로컬 경로) | `mlx-community/whisper-large-v3-turbo` |
 | `stt.openai_model` | 외부 전사 선택 시 사용하는 화자분리 모델 | `gpt-4o-transcribe-diarize` |
+| `diarization.timeout_seconds` | 화자분리 실제 실행 타임아웃 하한 | `1800`초 |
+| `diarization.dynamic_timeout_enabled` | 긴 오디오의 화자분리 실행 예산을 길이에 비례해 확대 | `true` |
+| `diarization.dynamic_timeout_multiplier` | 화자분리 동적 타임아웃 길이 배수 | `1.25` |
+| `diarization.dynamic_timeout_max_seconds` | 화자분리 동적 연장분의 타임아웃 상한 | `10800`초 |
 | `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
 | `llm.mlx_model_name` | MLX 모델명 | `mlx-community/gemma-4-e4b-it-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
@@ -653,6 +657,12 @@ bash scripts/setup_launchagent.sh
 | `watcher.file_ready_timeout_seconds` | 쓰기 중인 입력 파일의 readiness 최대 대기 | `30.0`초 |
 | `watcher.startup_probe_concurrency` | 재시작 시 기존 파일 writable-open(`lsof`) 확인 최대 동시성 | `8` |
 | `watcher.startup_writer_attestation_max_age_seconds` | 기존 DB 작업이 없는 startup 신규 ACCEPT의 final writer 확인 재사용 상한 | `0.25`초 |
+
+화자분리의 실제 실행 제한은 `diarization.*`에서 관리합니다. 기본 공식은
+`max(timeout_seconds, min(dynamic_timeout_max_seconds, ceil(오디오 길이 × dynamic_timeout_multiplier)))`입니다.
+따라서 명시적으로 더 크게 설정한 고정 하한은 낮추지 않습니다. Zoom 보호로 worker가 일시정지된 시간은
+실행 제한에서 제외됩니다. 화자분리 timeout이 발생해도 원본·변환 WAV·전사 체크포인트는
+보존되며 재시도는 마지막 성공 단계 다음인 화자분리부터 재개합니다.
 
 `audio_quality.enabled: true`일 때 길이는 ffmpeg 16 kHz mono full-decode
 sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니다.

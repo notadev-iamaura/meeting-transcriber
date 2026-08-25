@@ -35,6 +35,10 @@ diarization:
   output_mode: "auto"                        # regular | exclusive | auto (exclusive 출력이 있으면 우선 사용)
   min_speakers: 2                            # 사용자 입력 요구 없음. null이면 완전 자동 추정
   max_speakers: 4                            # 일반 회의 bounded auto. 대형 회의는 null 또는 더 큰 값으로 조정
+  timeout_seconds: 1800                      # 실행 타임아웃 하한 (초, 기본 30분)
+  dynamic_timeout_enabled: true              # 긴 오디오는 길이에 비례해 실행 예산 확대
+  dynamic_timeout_multiplier: 1.25           # timeout = max(하한, ceil(duration × 1.25))
+  dynamic_timeout_max_seconds: 10800         # 동적 연장분 상한 (초, 3시간). 더 큰 고정 하한은 보존
   protect_zoom_meetings: true                # Zoom 회의 중 화자분리 worker 일시정지
   zoom_protection_mode: "pause"              # pause: 별도 worker 를 SIGSTOP/SIGCONT 로 제어
   zoom_protection_poll_seconds: 1.0          # Zoom 상태 확인 간격 (초)
@@ -163,7 +167,6 @@ pipeline:
   min_disk_free_gb: 1.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 1.5                    # Graceful Degradation: 메모리 최소 여유 (GB) — 실측 21건 최대 가용 1.9GB 기준으로 2.0에서 완화
   skip_llm_steps: false  # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
-  diarization_timeout_seconds: 600           # PERF: 화자분리 타임아웃 (초, 10분)
   step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화
 
 # === 서멀 관리 설정 ===

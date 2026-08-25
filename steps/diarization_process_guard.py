@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from steps.zoom_activity import ZoomAudioActivityChecker
@@ -30,6 +31,30 @@ class ProcessLike(Protocol):
     def kill(self) -> None: ...
 
 
+class WorkerSupervisionTimeout(TimeoutError):
+    """화자분리 worker의 실제 실행 예산이 소진된 경우의 진단 예외."""
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int,
+        active_elapsed_seconds: float,
+        paused_elapsed_seconds: float,
+        wall_elapsed_seconds: float,
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.active_elapsed_seconds = active_elapsed_seconds
+        self.paused_elapsed_seconds = paused_elapsed_seconds
+        self.wall_elapsed_seconds = wall_elapsed_seconds
+        super().__init__(
+            "화자분리 worker 시간이 초과되었습니다 "
+            f"(제한={timeout_seconds}초, "
+            f"실제 실행={active_elapsed_seconds:.1f}초, "
+            f"Zoom 일시정지={paused_elapsed_seconds:.1f}초, "
+            f"전체 경과={wall_elapsed_seconds:.1f}초)."
+        )
+
+
 class ZoomPauseGuard:
     """Zoom 회의 중 worker 프로세스를 일시정지/재개한다."""
 
@@ -39,6 +64,7 @@ class ZoomPauseGuard:
         poll_interval_seconds: float,
         prefer_coreaudio: bool = True,
         activity_checker: ZoomAudioActivityChecker | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._process_name = process_name
         self._poll_interval_seconds = poll_interval_seconds
@@ -46,6 +72,7 @@ class ZoomPauseGuard:
             process_name=process_name,
             prefer_coreaudio=prefer_coreaudio,
         )
+        self._clock = clock or time.monotonic
 
     async def is_zoom_active(self) -> bool:
         """Zoom 회의 오디오 활동이 있는지 확인한다."""
@@ -85,13 +112,21 @@ class ZoomPauseGuard:
         """
         paused = False
         active_elapsed = 0.0
-        last_tick = time.monotonic()
+        paused_elapsed = 0.0
+        last_tick = self._clock()
+
+        def accumulate_elapsed(now: float) -> None:
+            """직전 상태 기준으로 실행/일시정지 시간을 각각 누적한다."""
+            nonlocal active_elapsed, paused_elapsed, last_tick
+            delta = max(0.0, now - last_tick)
+            if paused:
+                paused_elapsed += delta
+            else:
+                active_elapsed += delta
+            last_tick = now
 
         while True:
-            now = time.monotonic()
-            if not paused:
-                active_elapsed += now - last_tick
-            last_tick = now
+            accumulate_elapsed(self._clock())
 
             returncode = process.poll()
             if returncode is not None:
@@ -103,6 +138,7 @@ class ZoomPauseGuard:
                 return returncode
 
             zoom_active = await self.is_zoom_active()
+            accumulate_elapsed(self._clock())
             if zoom_active and not paused:
                 try:
                     self.pause(process.pid)
@@ -122,9 +158,18 @@ class ZoomPauseGuard:
                 paused = False
                 logger.info("Zoom 회의 종료 감지: 화자분리 worker 재개")
 
-            if not paused and active_elapsed > timeout_seconds:
+            if not paused and active_elapsed >= timeout_seconds:
+                # Zoom 확인 중 worker가 정상 종료된 경합이면 결과를 보존한다.
+                returncode = process.poll()
+                if returncode is not None:
+                    return returncode
                 process.kill()
-                raise TimeoutError(f"화자분리 worker 시간이 초과되었습니다 ({timeout_seconds}초).")
+                raise WorkerSupervisionTimeout(
+                    timeout_seconds=timeout_seconds,
+                    active_elapsed_seconds=active_elapsed,
+                    paused_elapsed_seconds=paused_elapsed,
+                    wall_elapsed_seconds=active_elapsed + paused_elapsed,
+                )
 
             await asyncio.sleep(self._poll_interval_seconds)
 
