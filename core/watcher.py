@@ -23,7 +23,8 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -112,6 +113,40 @@ class _PreparedReadyAction:
     notify: bool
 
 
+@dataclass(frozen=True)
+class AudioInputScanReport:
+    """startup/recovery 오디오 감사의 공개 가능한 집계 스냅샷."""
+
+    phase: str = "idle"
+    mode: str = ""
+    candidate_count: int = 0
+    registered_count: int = 0
+    already_registered_count: int = 0
+    deferred_count: int = 0
+    preserved_count: int = 0
+    failed_count: int = 0
+    conflict_count: int = 0
+    registered_meeting_ids: tuple[str, ...] = ()
+    recent_registered_meeting_ids: tuple[str, ...] = ()
+    started_at: str = ""
+    finished_at: str = ""
+
+
+@dataclass
+class _AudioInputScanCounters:
+    """단일 스캔 실행 중 집계하는 내부 mutable 카운터."""
+
+    candidate_count: int = 0
+    already_registered_count: int = 0
+    registered_job_ids: list[int] = field(default_factory=list)
+    registered_meeting_ids: list[str] = field(default_factory=list)
+    recent_registered_meeting_ids: list[str] = field(default_factory=list)
+    deferred_paths: set[Path] = field(default_factory=set)
+    preserved_paths: set[Path] = field(default_factory=set)
+    failed_paths: set[Path] = field(default_factory=set)
+    conflict_paths: set[Path] = field(default_factory=set)
+
+
 _CHECKPOINT_ARTIFACT_ALLOWLIST = frozenset(
     {
         "transcribe.json",
@@ -131,6 +166,47 @@ _OUTPUT_ARTIFACT_ALLOWLIST = frozenset(
         "meeting_minutes.md",
     }
 )
+
+
+def _known_unrelated_lsof_warnings(stderr: str, target: Path) -> bool:
+    """대상과 무관한 macOS 임시 HFS/APFS stat warning만 허용한다.
+
+    lsof는 다른 프로세스가 마운트한 임시 파일시스템을 stat하지 못해도
+    전체 조회 stderr에 warning을 섞을 수 있다. warning을 숨기지 않고 정확한
+    블록만 분류하며, 대상이 그 mount 아래라면 판정 불능으로 남긴다.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    warning_prefixes = (
+        "lsof: WARNING: can't stat() hfs file system ",
+        "lsof: WARNING: can't stat() apfs file system ",
+    )
+    continuation = "Output information may be incomplete."
+    target_path = _lexical_absolute(target)
+    saw_warning = False
+
+    for line in lines:
+        prefix = next((item for item in warning_prefixes if line.startswith(item)), None)
+        if prefix is not None:
+            mount_text = line[len(prefix) :]
+            try:
+                mount_path = _lexical_absolute(Path(mount_text))
+            except QuarantineError:
+                return False
+            temp_roots = (Path("/private/var/folders"), Path("/var/folders"))
+            if not any(mount_path.is_relative_to(root) for root in temp_roots):
+                return False
+            if target_path == mount_path or target_path.is_relative_to(mount_path):
+                return False
+            saw_warning = True
+            continue
+        if line == continuation and saw_warning:
+            continue
+        return False
+
+    return saw_warning
 
 
 def _configured_lexical_path(
@@ -383,6 +459,14 @@ class FolderWatcher:
         self._debounce_seconds: float = self._config.watcher.debounce_seconds
         self._check_interval: float = self._config.watcher.check_interval_seconds
         self._file_ready_timeout_seconds: float = self._config.watcher.file_ready_timeout_seconds
+        writer_probe_timeout = getattr(
+            self._config.watcher,
+            "writer_probe_timeout_seconds",
+            2.0,
+        )
+        self._writer_probe_timeout_seconds = (
+            float(writer_probe_timeout) if isinstance(writer_probe_timeout, (int, float)) else 2.0
+        )
         startup_probe_concurrency = getattr(
             self._config.watcher,
             "startup_probe_concurrency",
@@ -452,6 +536,10 @@ class FolderWatcher:
         # startup scan은 중복 호출을 직렬화하고, live event와는
         # `_pending_files`를 공유해 동일 경로를 중복 검증하지 않는다.
         self._startup_scan_lock = asyncio.Lock()
+        self._active_scan_counters: _AudioInputScanCounters | None = None
+        self._active_scan_mode = ""
+        self._active_scan_started_at = ""
+        self._last_scan_report = AudioInputScanReport()
 
         # 콜백 목록
         self._sync_callbacks: list[SyncCallback] = []
@@ -473,6 +561,25 @@ class FolderWatcher:
     def watch_dir(self) -> Path:
         """감시 대상 디렉토리 경로를 반환한다."""
         return self._watch_dir
+
+    @property
+    def is_scan_running(self) -> bool:
+        """startup/recovery 스캔이 현재 실행 중인지 반환한다."""
+        return self._startup_scan_lock.locked()
+
+    @property
+    def scan_report(self) -> AudioInputScanReport:
+        """경로·오류 원문을 제외한 최신 오디오 감사 집계를 반환한다."""
+        counters = self._active_scan_counters
+        if counters is None:
+            return self._last_scan_report
+        return self._build_scan_report(
+            phase="running",
+            mode=self._active_scan_mode,
+            counters=counters,
+            started_at=self._active_scan_started_at,
+            finished_at="",
+        )
 
     def on_file_registered(self, callback: SyncCallback | AsyncCallback) -> None:
         """파일 등록 완료 콜백을 등록한다.
@@ -631,7 +738,20 @@ class FolderWatcher:
         access_lines = {line.strip() for line in stdout.splitlines() if line.startswith("a")}
         if "aw" in access_lines or "au" in access_lines:
             return _OpenWriterState.BUSY
-        if result.returncode == 1 and not stdout.strip() and not stderr.strip():
+
+        stderr_is_known_warning = _known_unrelated_lsof_warnings(stderr, file_path)
+        if stderr.strip() and not stderr_is_known_warning:
+            logger.error(
+                f"lsof writable writer 결과 해석 불가: returncode={result.returncode}, "
+                f"stderr={stderr[-200:]}"
+            )
+            return _OpenWriterState.INDETERMINATE
+        if stderr_is_known_warning:
+            logger.warning(
+                f"대상과 무관한 macOS 임시 파일시스템 lsof warning 무시: {file_path.name}"
+            )
+
+        if result.returncode == 1 and not stdout.strip():
             return _OpenWriterState.CLEAR
         if result.returncode == 0 and access_lines and access_lines <= {"ar"}:
             return _OpenWriterState.CLEAR
@@ -659,7 +779,7 @@ class FolderWatcher:
 
         writer_state = await self._probe_writable_open(
             before[0],
-            timeout=min(2.0, max(0.5, self._check_interval)),
+            timeout=self._writer_probe_timeout_seconds,
         )
         after = self._inspect_input_file(before[0])
         if after is None or after[1] != expected:
@@ -1184,7 +1304,7 @@ class FolderWatcher:
                 # 즉시 보낸다. writable/indeterminate인 경우만 보존·재검사한다.
                 writer_state = await self._probe_writable_open(
                     safe_path,
-                    timeout=min(2.0, max(0.1, deadline - now)),
+                    timeout=min(self._writer_probe_timeout_seconds, max(0.1, deadline - now)),
                 )
                 after_probe = self._inspect_input_file(safe_path)
                 if after_probe is None:
@@ -1206,7 +1326,7 @@ class FolderWatcher:
                         break
                     writer_state = await self._probe_writable_open(
                         safe_path,
-                        timeout=min(2.0, remaining),
+                        timeout=min(self._writer_probe_timeout_seconds, remaining),
                     )
                     after_probe = self._inspect_input_file(safe_path)
                     if after_probe is None:
@@ -1707,16 +1827,135 @@ class FolderWatcher:
                 # 손상된 한 row가 나머지 recovery와 일반 startup scan을 막지 않는다.
                 logger.exception(f"audio rejection recovery 예외 격리: {job.meeting_id} — {e}")
 
+    @staticmethod
+    def _build_scan_report(
+        *,
+        phase: str,
+        mode: str,
+        counters: _AudioInputScanCounters,
+        started_at: str,
+        finished_at: str,
+    ) -> AudioInputScanReport:
+        """내부 카운터를 경로 비노출 공개 스냅샷으로 변환한다."""
+        return AudioInputScanReport(
+            phase=phase,
+            mode=mode,
+            candidate_count=counters.candidate_count,
+            registered_count=len(counters.registered_job_ids),
+            already_registered_count=counters.already_registered_count,
+            deferred_count=len(counters.deferred_paths),
+            preserved_count=len(counters.preserved_paths),
+            failed_count=len(counters.failed_paths),
+            conflict_count=len(counters.conflict_paths),
+            registered_meeting_ids=tuple(counters.registered_meeting_ids),
+            recent_registered_meeting_ids=tuple(counters.recent_registered_meeting_ids),
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    async def _run_existing_scan(
+        self,
+        *,
+        mode: str,
+        recovery_only: bool,
+        recent_days: int | None,
+    ) -> tuple[AudioInputScanReport, list[int]]:
+        """startup/recovery 스캔을 단일 lock 아래 실행하고 집계를 남긴다."""
+        async with self._startup_scan_lock:
+            counters = _AudioInputScanCounters()
+            started_at = datetime.now(UTC).isoformat()
+            self._active_scan_counters = counters
+            self._active_scan_mode = mode
+            self._active_scan_started_at = started_at
+            recent_cutoff_ns = 0
+            if recent_days is not None:
+                recent_cutoff_ns = time.time_ns() - recent_days * 24 * 60 * 60 * 1_000_000_000
+
+            try:
+                await self._scan_existing_once(
+                    counters,
+                    recovery_only=recovery_only,
+                    recent_cutoff_ns=recent_cutoff_ns,
+                )
+            except asyncio.CancelledError:
+                report = self._build_scan_report(
+                    phase="cancelled",
+                    mode=mode,
+                    counters=counters,
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC).isoformat(),
+                )
+                self._last_scan_report = report
+                raise
+            except Exception:
+                report = self._build_scan_report(
+                    phase="failed",
+                    mode=mode,
+                    counters=counters,
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC).isoformat(),
+                )
+                self._last_scan_report = report
+                raise
+            else:
+                report = self._build_scan_report(
+                    phase="completed",
+                    mode=mode,
+                    counters=counters,
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC).isoformat(),
+                )
+                self._last_scan_report = report
+                logger.info(
+                    f"오디오 입력 스캔 완료: mode={mode}, "
+                    f"candidates={report.candidate_count}, "
+                    f"registered={report.registered_count}, "
+                    f"already_registered={report.already_registered_count}, "
+                    f"deferred={report.deferred_count}, "
+                    f"preserved={report.preserved_count}, "
+                    f"failed={report.failed_count}, conflicts={report.conflict_count}"
+                )
+                return report, list(counters.registered_job_ids)
+            finally:
+                self._active_scan_counters = None
+                self._active_scan_mode = ""
+                self._active_scan_started_at = ""
+
     async def scan_existing(self) -> list[int]:
         """기존 오디오 감사를 하나의 startup scan으로 직렬화한다.
 
         실시간 watcher 이벤트와는 파일별 pending 상태를 공유하므로,
         scan과 event가 겹쳐도 동일 원본을 중복 등록하지 않는다.
         """
-        async with self._startup_scan_lock:
-            return await self._scan_existing_once()
+        _report, registered_ids = await self._run_existing_scan(
+            mode="startup",
+            recovery_only=False,
+            recent_days=None,
+        )
+        return registered_ids
 
-    async def _scan_existing_once(self) -> list[int]:
+    async def recover_unregistered_files(self, *, recent_days: int = 7) -> AudioInputScanReport:
+        """DB 미등록 입력만 비파괴 검사해 ``recorded``로 복구한다.
+
+        기존 row·rejection claim은 건드리지 않고, 품질 거부/판정 불능 파일은
+        이동·삭제·quarantine 없이 보고서에 보존/보류로만 남긴다.
+        """
+        if not 1 <= recent_days <= 365:
+            raise WatcherError("recent_days는 1 이상 365 이하여야 합니다")
+        report, _registered_ids = await self._run_existing_scan(
+            mode="recovery",
+            recovery_only=True,
+            recent_days=recent_days,
+        )
+        return report
+
+    async def _scan_existing_once(
+        self,
+        counters: _AudioInputScanCounters,
+        *,
+        recovery_only: bool,
+        recent_cutoff_ns: int,
+    ) -> None:
         """감시 폴더에 이미 존재하는 오디오 파일을 스캔하여 큐에 등록한다.
 
         감시 시작 전 폴더에 이미 있는 파일을 처리할 때 사용한다.
@@ -1725,17 +1964,17 @@ class FolderWatcher:
         품질 게이트와 제외 경로를 적용한다. 크래시 후 launchd 재기동 시 저볼륨
         파일이 검증 없이 큐 재진입하여 동일 크래시를 유발하던 누수를 차단한다.
 
-        Returns:
-            등록된 작업 ID 리스트 (비정상 파일은 격리되고 리스트에 포함되지 않음)
+        recovery_only 모드에서는 기존 row와 rejection claim을 변경하지 않고,
+        ACCEPT된 DB 미등록 파일만 등록한다.
         """
-        registered_ids: list[int] = []
         retry_paths: set[Path] = set()
         startup_owned_paths: set[Path] = set()
 
         # filesystem 목록 조회보다 먼저 DB journal을 복구해야 quarantine-only
         # transaction이 입력 root 부재에도 finalize되고, source-only claim이
         # 일반 legacy audit/validator로 다시 들어가지 않는다.
-        await self.recover_audio_rejection_claims()
+        if not recovery_only:
+            await self.recover_audio_rejection_claims()
 
         watch_fd: int | None = None
         try:
@@ -1743,10 +1982,11 @@ class FolderWatcher:
             candidates = [self._watch_dir / name for name in sorted(os.listdir(watch_fd))]
         except FileNotFoundError:
             logger.warning(f"감시 디렉토리가 존재하지 않습니다: {self._watch_dir}")
-            return []
+            return
         except (OSError, QuarantineError) as e:
             logger.error(f"기존 파일 목록 조회 실패: {self._watch_dir} — {e}")
-            return []
+            counters.failed_paths.add(self._watch_dir)
+            return
         finally:
             if watch_fd is not None:
                 try:
@@ -1766,12 +2006,16 @@ class FolderWatcher:
                 try:
                     if file_path.suffix.lower() not in self._supported_extensions:
                         continue
+                    counters.candidate_count += 1
 
                     # meeting_id/DB 조회는 lexical 파일명만 사용하므로
                     # symlink target에 접근하지 않는다.
                     meeting_id = self._generate_meeting_id(file_path)
                     inspected = self._inspect_input_file(file_path)
                     if inspected is None:
+                        counters.failed_paths.add(file_path)
+                        if recovery_only:
+                            continue
                         existing = await asyncio.to_thread(
                             self._job_queue.queue.get_job_by_meeting_id,
                             meeting_id,
@@ -1795,6 +2039,7 @@ class FolderWatcher:
 
                     if safe_path in self._pending_files:
                         self._dirty_files.add(safe_path)
+                        counters.deferred_paths.add(safe_path)
                         logger.debug(f"startup scan과 live event 중복 합침: {safe_path.name}")
                         continue
 
@@ -1808,6 +2053,19 @@ class FolderWatcher:
                             self._job_queue.queue.get_job_by_meeting_id,
                             meeting_id,
                         )
+                        if recovery_only and existing is not None:
+                            try:
+                                existing_path = _lexical_absolute(Path(existing.audio_path))
+                            except QuarantineError:
+                                counters.conflict_paths.add(safe_path)
+                            else:
+                                if existing_path == safe_path:
+                                    counters.already_registered_count += 1
+                                else:
+                                    counters.conflict_paths.add(safe_path)
+                            continue
+                        if existing is not None:
+                            counters.already_registered_count += 1
                         if existing is not None and not await self._prepare_existing_audit(
                             existing,
                             safe_path,
@@ -1827,10 +2085,13 @@ class FolderWatcher:
                             self._dirty_files.discard(safe_path)
                             self._close_retry_paths.discard(safe_path)
                 except JobQueueError as e:
+                    counters.failed_paths.add(file_path)
                     logger.error(f"기존 파일 등록 실패: {file_path.name} — {e}")
                 except WatcherError as e:
+                    counters.failed_paths.add(file_path)
                     logger.error(f"기존 입력 파일 식별자 거부: {file_path.name} — {e}")
                 except Exception as e:
+                    counters.failed_paths.add(file_path)
                     logger.exception(f"기존 파일 스캔 중 예외 격리: {file_path.name} — {e}")
 
             semaphore = asyncio.Semaphore(self._startup_probe_concurrency)
@@ -1894,6 +2155,7 @@ class FolderWatcher:
                                     reason="writer probe error",
                                 )
                             retry_paths.add(safe_path)
+                            counters.failed_paths.add(safe_path)
                             continue
 
                         ready, reason = result
@@ -1905,8 +2167,10 @@ class FolderWatcher:
                         ready_items.append(item)
                         item_ready = True
                     except JobQueueError as e:
+                        counters.failed_paths.add(safe_path)
                         logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
                     except Exception as e:
+                        counters.failed_paths.add(safe_path)
                         logger.exception(f"기존 파일 스캔 중 예외 격리: {safe_path.name} — {e}")
                     finally:
                         if not item_ready:
@@ -1935,11 +2199,26 @@ class FolderWatcher:
                                 quarantine_reason_prefix="재기동 스캔 차단",
                                 notify=False,
                             )
+                            if (
+                                recovery_only
+                                and prepared_action is not None
+                                and prepared_action.kind is not _ReadyActionKind.ACCEPT
+                            ):
+                                counters.preserved_paths.add(safe_path)
+                                logger.warning(
+                                    f"복구 스캔 비수락 입력 보존: {safe_path.name} "
+                                    f"({prepared_action.kind.value})"
+                                )
+                                prepared_action = None
                             if prepared_action is not None:
                                 prepared.append((item, prepared_action))
+                            elif recovery_only and safe_path not in counters.preserved_paths:
+                                counters.deferred_paths.add(safe_path)
                         except JobQueueError as e:
+                            counters.failed_paths.add(safe_path)
                             logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
                         except Exception as e:
+                            counters.failed_paths.add(safe_path)
                             logger.exception(
                                 f"기존 파일 검증 중 예외 격리: {safe_path.name} — {e}"
                             )
@@ -1990,6 +2269,7 @@ class FolderWatcher:
                                         f"{safe_path.name} — {type(confirmation).__name__}"
                                     )
                                     retry_paths.add(safe_path)
+                                    counters.failed_paths.add(safe_path)
                                     continue
                                 if confirmation is None or not confirmation[0]:
                                     retry_paths.add(safe_path)
@@ -2035,14 +2315,49 @@ class FolderWatcher:
 
                             job_id = await self._apply_ready_action(action)
                             if job_id is not None:
-                                registered_ids.append(job_id)
+                                counters.registered_job_ids.append(job_id)
+                                counters.registered_meeting_ids.append(action.meeting_id)
+                                if (
+                                    recent_cutoff_ns > 0
+                                    and action.fingerprint.mtime_ns >= recent_cutoff_ns
+                                ):
+                                    counters.recent_registered_meeting_ids.append(
+                                        action.meeting_id
+                                    )
                                 logger.info(
                                     f"기존 파일 등록 (녹음 완료, 전사 대기): "
                                     f"{safe_path.name} → job_id={job_id}"
                                 )
                         except JobQueueError as e:
-                            logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
+                            if recovery_only:
+                                raced = await asyncio.to_thread(
+                                    self._job_queue.queue.get_job_by_meeting_id,
+                                    action.meeting_id,
+                                )
+                                try:
+                                    raced_path = (
+                                        _lexical_absolute(Path(raced.audio_path))
+                                        if raced is not None
+                                        else None
+                                    )
+                                except QuarantineError:
+                                    raced_path = None
+                                if raced_path == action.safe_path:
+                                    counters.already_registered_count += 1
+                                    logger.info(
+                                        f"복구 등록 경합은 기등록로 합침: {safe_path.name}"
+                                    )
+                                else:
+                                    counters.conflict_paths.add(safe_path)
+                                    logger.error(
+                                        f"복구 meeting_id 경로 충돌, 원본 보존: "
+                                        f"{safe_path.name} — {e}"
+                                    )
+                            else:
+                                counters.failed_paths.add(safe_path)
+                                logger.error(f"기존 파일 등록 실패: {safe_path.name} — {e}")
                         except Exception as e:
+                            counters.failed_paths.add(safe_path)
                             logger.exception(
                                 f"기존 파일 적용 중 예외 격리: {safe_path.name} — {e}"
                             )
@@ -2059,13 +2374,10 @@ class FolderWatcher:
                 self._dirty_files.discard(safe_path)
                 self._close_retry_paths.discard(safe_path)
 
-        for retry_path in retry_paths:
-            self._schedule_deferred_retry(retry_path, delay=self._check_interval)
-
-        if registered_ids:
-            logger.info(f"기존 파일 스캔 완료: {len(registered_ids)}건 등록")
-
-        return registered_ids
+        counters.deferred_paths.update(retry_paths)
+        if not recovery_only:
+            for retry_path in retry_paths:
+                self._schedule_deferred_retry(retry_path, delay=self._check_interval)
 
     async def _move_to_quality_quarantine(
         self,

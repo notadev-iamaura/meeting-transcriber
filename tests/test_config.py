@@ -78,6 +78,7 @@ class TestConfigYamlParsing:
         assert config.server.port == 8765
         assert config.server.startup_timeout_seconds == 10.0
         assert config.watcher.file_ready_timeout_seconds == 30.0
+        assert config.watcher.writer_probe_timeout_seconds == 2.0
         assert config.watcher.startup_probe_concurrency == 8
         assert config.watcher.startup_writer_attestation_max_age_seconds == 0.25
         assert "diarization_timeout_seconds" not in config_path.read_text(encoding="utf-8")
@@ -153,6 +154,10 @@ class TestConfigYamlParsing:
             (
                 default.watcher.file_ready_timeout_seconds,
                 loaded.watcher.file_ready_timeout_seconds,
+            ),
+            (
+                default.watcher.writer_probe_timeout_seconds,
+                loaded.watcher.writer_probe_timeout_seconds,
             ),
             (
                 default.watcher.startup_probe_concurrency,
@@ -914,12 +919,15 @@ def test_ServerConfig_readiness_timeout_범_WatcherConfig_startup_동시성():
     from config import ServerConfig, WatcherConfig
 
     assert ServerConfig().startup_timeout_seconds == 10.0
+    assert WatcherConfig().writer_probe_timeout_seconds == 2.0
     assert WatcherConfig().startup_probe_concurrency == 8
     assert WatcherConfig().startup_writer_attestation_max_age_seconds == 0.25
     with pytest.raises(ValidationError):
         ServerConfig(startup_timeout_seconds=0.5)
     with pytest.raises(ValidationError):
         WatcherConfig(startup_probe_concurrency=0)
+    with pytest.raises(ValidationError):
+        WatcherConfig(writer_probe_timeout_seconds=0.1)
     with pytest.raises(ValidationError):
         WatcherConfig(startup_writer_attestation_max_age_seconds=0.01)
 

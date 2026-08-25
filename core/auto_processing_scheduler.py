@@ -82,26 +82,72 @@ class AutoProcessingScheduler:
     async def run_once(self) -> AutoProcessingResult:
         """자동 처리를 즉시 1회 실행한다."""
         async with self._run_lock:
-            self.last_started_at = datetime.now()
-            self.last_error = None
-            try:
-                runner = AutoProcessingRunner(
-                    config=self._config,
-                    job_queue=self._job_queue,
-                    pipeline=self._pipeline,
-                )
-                result = await runner.run(
-                    action=self._config.auto_processing.action,
-                    recent_hours=self._config.auto_processing.recent_hours,
-                )
-                self.last_result = result
-                self.last_completed_at = datetime.now()
-                return result
-            except Exception as exc:
-                self.last_error = str(exc)
-                self.last_completed_at = datetime.now()
-                logger.exception("자동 전사/요약 실행 실패: %s", exc)
-                raise
+            return await self._execute_run_once(self._config)
+
+    async def reserve_run_once(self) -> asyncio.Task[AutoProcessingResult] | None:
+        """이 호출 소유의 자동 처리 실행을 non-blocking 방식으로 예약한다.
+
+        이미 다른 수동/예약 실행이 lock을 소유하면 ``None``을 반환한다. lock이
+        비어 있으면 현재 이벤트 루프 turn에서 즉시 선점한 뒤, 설정 스냅샷을
+        사용하는 task에 lock 해제 책임을 넘긴다.
+        """
+        if self._run_lock.locked():
+            return None
+        await self._run_lock.acquire()
+        config_snapshot = self._config
+        started = False
+
+        async def _reserved_wrapper() -> AutoProcessingResult:
+            nonlocal started
+            started = True
+            return await self._run_reserved_once(config_snapshot)
+
+        def _release_if_never_started(_task: asyncio.Task[AutoProcessingResult]) -> None:
+            # create_task 직후 요청이 취소되면 coroutine 본문과 finally가 한 번도
+            # 실행되지 않는다. 그 경우에만 예약자가 아직 가진 lock을 회수한다.
+            if not started and self._run_lock.locked():
+                self._run_lock.release()
+
+        try:
+            task = asyncio.create_task(
+                _reserved_wrapper(),
+                name="auto-processing-reserved-run",
+            )
+            task.add_done_callback(_release_if_never_started)
+            return task
+        except Exception:
+            self._run_lock.release()
+            raise
+
+    async def _run_reserved_once(self, config_snapshot: AppConfig) -> AutoProcessingResult:
+        """예약된 실행을 완료하고 어떤 종료 경로에서도 run lock을 해제한다."""
+        try:
+            return await self._execute_run_once(config_snapshot)
+        finally:
+            self._run_lock.release()
+
+    async def _execute_run_once(self, config_snapshot: AppConfig) -> AutoProcessingResult:
+        """이미 선점된 run lock 아래에서 설정 스냅샷으로 배치를 실행한다."""
+        self.last_started_at = datetime.now()
+        self.last_error = None
+        try:
+            runner = AutoProcessingRunner(
+                config=config_snapshot,
+                job_queue=self._job_queue,
+                pipeline=self._pipeline,
+            )
+            result = await runner.run(
+                action=config_snapshot.auto_processing.action,
+                recent_hours=config_snapshot.auto_processing.recent_hours,
+            )
+            self.last_result = result
+            self.last_completed_at = datetime.now()
+            return result
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.last_completed_at = datetime.now()
+            logger.exception("자동 전사/요약 실행 실패: %s", exc)
+            raise
 
     def get_status(self) -> dict[str, Any]:
         """상태 조회용 직렬화 가능한 딕셔너리를 반환한다."""

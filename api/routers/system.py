@@ -7,9 +7,9 @@ import logging
 import shutil
 import subprocess
 import sys
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_job_queue as _get_job_queue
@@ -37,15 +37,26 @@ class SystemResourcesResponse(BaseModel):
     loaded_model: str | None = None
 
 
-class StatusResponse(BaseModel):
-    """시스템 상태 응답 스키마.
+class AudioInputScanStatusResponse(BaseModel):
+    """경로·stderr를 제외한 오디오 입력 감사 집계."""
 
-    Attributes:
-        status: 서버 동작 상태 ("ok")
-        queue_summary: 상태별 작업 수 집계
-        active_jobs: 현재 진행 중인 작업 수
-        total_jobs: 전체 작업 수
-    """
+    phase: str = "unavailable"
+    mode: str = ""
+    candidate_count: int = 0
+    registered_count: int = 0
+    already_registered_count: int = 0
+    deferred_count: int = 0
+    preserved_count: int = 0
+    failed_count: int = 0
+    conflict_count: int = 0
+    registered_meeting_ids: list[str] = Field(default_factory=list)
+    recent_registered_meeting_ids: list[str] = Field(default_factory=list)
+    started_at: str = ""
+    finished_at: str = ""
+
+
+class StatusResponse(BaseModel):
+    """시스템 상태와 작업 큐·입력 감사 현황 응답 스키마."""
 
     status: str = "ok"
     queue_summary: dict[str, int] = Field(default_factory=dict)
@@ -53,6 +64,11 @@ class StatusResponse(BaseModel):
     total_jobs: int = 0
     is_recording: bool = False
     recording_duration: float = 0.0
+    startup_scan_status: str = "unknown"
+    background_runtime_ready: bool = False
+    audio_input_scan: AudioInputScanStatusResponse = Field(
+        default_factory=AudioInputScanStatusResponse
+    )
 
 
 class DashboardStatsResponse(BaseModel):
@@ -110,6 +126,29 @@ def _get_routes_compat_attr(name: str, fallback: Any) -> Any:
     if routes_module is None:
         return fallback
     return getattr(routes_module, name, fallback)
+
+
+def _audio_scan_status(request: Request) -> AudioInputScanStatusResponse:
+    """FolderWatcher의 공개 가능한 감사 스냅샷만 API 모델로 복사한다."""
+    watcher = getattr(request.app.state, "folder_watcher", None)
+    report = getattr(watcher, "scan_report", None) if watcher is not None else None
+    if report is None:
+        return AudioInputScanStatusResponse()
+    return AudioInputScanStatusResponse(
+        phase=str(getattr(report, "phase", "unavailable")),
+        mode=str(getattr(report, "mode", "")),
+        candidate_count=int(getattr(report, "candidate_count", 0)),
+        registered_count=int(getattr(report, "registered_count", 0)),
+        already_registered_count=int(getattr(report, "already_registered_count", 0)),
+        deferred_count=int(getattr(report, "deferred_count", 0)),
+        preserved_count=int(getattr(report, "preserved_count", 0)),
+        failed_count=int(getattr(report, "failed_count", 0)),
+        conflict_count=int(getattr(report, "conflict_count", 0)),
+        registered_meeting_ids=list(getattr(report, "registered_meeting_ids", ())),
+        recent_registered_meeting_ids=list(getattr(report, "recent_registered_meeting_ids", ())),
+        started_at=str(getattr(report, "started_at", "")),
+        finished_at=str(getattr(report, "finished_at", "")),
+    )
 
 
 async def _get_reconciled_jobs(queue: Any, config: Any) -> list[Any]:
@@ -185,6 +224,11 @@ async def get_status(request: Request) -> StatusResponse:
             total_jobs=len(all_jobs),
             is_recording=is_recording,
             recording_duration=recording_duration,
+            startup_scan_status=str(getattr(request.app.state, "startup_scan_status", "unknown")),
+            background_runtime_ready=bool(
+                getattr(request.app.state, "background_runtime_ready", False)
+            ),
+            audio_input_scan=_audio_scan_status(request),
         )
     except Exception as e:
         logger.exception(f"상태 조회 실패: {e}")
@@ -315,6 +359,75 @@ async def get_dashboard_stats(request: Request) -> DashboardStatsResponse:
         failed=failed,
         audio_input_dir=str(config.paths.resolved_audio_input_dir),
     )
+
+
+@router.post(
+    "/system/audio-input/recover",
+    response_model=AudioInputScanStatusResponse,
+)
+async def recover_unregistered_audio(
+    request: Request,
+    recent_days: Annotated[int, Query(ge=1, le=365)] = 7,
+) -> AudioInputScanStatusResponse:
+    """audio_input의 DB 미등록 파일만 비파괴 방식으로 복구한다.
+
+    원본 이동·삭제·quarantine과 기존 row 변경은 하지 않는다. 응답의
+    ``recent_registered_meeting_ids``는 source mtime 기준이므로, 운영자가
+    해당 ID에만 명시적 로컬 전사 요청을 보낼 수 있다.
+    """
+    from api.openai_settings_guard import get_openai_settings_mutation_lock
+    from api.routers.transcription_models import require_loopback_server
+
+    # 장시간 복구 lock을 기다리기 전에 명백한 비-loopback 요청을 즉시 거부한다.
+    # lock 획득 뒤 최신 runtime config로 다시 검사해 설정 경합도 닫는다.
+    require_loopback_server(_get_config(request), request, feature_label="오디오 복구")
+
+    # 설정에서 auto-processing을 켜거나 수동 run-now를 호출하는 요청과
+    # 복구 전체를 직렬화한다. 그렇지 않으면 복구 도중 생긴 recorded row가
+    # 사용자가 선택한 recent/local 범위를 우회해 전역 provider로 큐잉될 수 있다.
+    async with get_openai_settings_mutation_lock(request):
+        config = _get_config(request)
+        require_loopback_server(config, request, feature_label="오디오 복구")
+
+        auto_processing = getattr(config, "auto_processing", None)
+        scheduler = getattr(request.app.state, "auto_processing_scheduler", None)
+        if getattr(auto_processing, "enabled", False) is True or bool(
+            getattr(scheduler, "is_processing", False)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "비파괴 복구 중 자동 전사 경합을 막기 위해 "
+                    "auto_processing을 비활성화한 뒤 다시 시도하세요."
+                ),
+            )
+
+        watcher = getattr(request.app.state, "folder_watcher", None)
+        if watcher is None:
+            raise HTTPException(
+                status_code=503,
+                detail="FolderWatcher가 초기화되지 않아 오디오 복구를 실행할 수 없습니다.",
+            )
+        if bool(getattr(watcher, "is_scan_running", False)):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "오디오 입력 스캔이 이미 실행 중입니다. /api/status에서 완료를 확인하세요."
+                ),
+            )
+
+        try:
+            await watcher.recover_unregistered_files(recent_days=recent_days)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception(f"오디오 입력 복구 실패: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="오디오 입력 복구 중 오류가 발생했습니다. 원본 파일은 보존되었습니다.",
+            ) from e
+
+    return _audio_scan_status(request)
 
 
 @router.post("/system/open-audio-folder", response_model=OpenFolderResponse)

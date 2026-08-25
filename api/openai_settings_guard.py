@@ -1,4 +1,4 @@
-"""OpenAI 자격 증명과 기본 provider 변경을 직렬화하는 API 잠금."""
+"""설정·자격 증명·자동 처리와 입력 복구를 직렬화하는 API 잠금."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from fastapi import Request
 
 
 def get_openai_settings_mutation_lock(request: Request) -> asyncio.Lock:
-    """현재 서버 이벤트 루프에 바인딩된 설정/키 공용 잠금을 반환한다."""
+    """현재 루프에 바인딩된 설정/키/복구/자동처리 공용 잠금을 반환한다."""
     loop = asyncio.get_running_loop()
     state = request.app.state
     lock = getattr(state, "openai_settings_mutation_lock", None)

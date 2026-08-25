@@ -221,6 +221,79 @@ class TestDashboardStatsEndpoint:
         assert response.status_code == 503
 
 
+class TestAudioInputRecoveryEndpoint:
+    """POST /api/system/audio-input/recover 비파괴 복구 계약."""
+
+    def test_복구후_회의목록과_status에_recorded_및집계노출(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """실제 temp SQLite까지 관통해 누락 파일을 한 번만 UI 목록에 노출한다."""
+        from core.watcher import FolderWatcher, _OpenWriterState
+
+        app = _make_test_app(tmp_path)
+        original = b"stable recovered recording"
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            app.state.config.audio_quality.enabled = False
+            watcher = FolderWatcher(app.state.job_queue, config=app.state.config)
+            watcher._debounce_seconds = 0.0
+            watcher._probe_writable_open = AsyncMock(return_value=_OpenWriterState.CLEAR)
+            app.state.folder_watcher = watcher
+            source = app.state.config.paths.resolved_audio_input_dir / "meeting_recover_api.wav"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(original)
+
+            response = client.post("/api/system/audio-input/recover?recent_days=7")
+            meetings = client.get("/api/meetings")
+            status = client.get("/api/status")
+            repeated = client.post("/api/system/audio-input/recover?recent_days=7")
+
+        assert response.status_code == 200
+        assert response.json()["registered_count"] == 1
+        assert response.json()["recent_registered_meeting_ids"] == ["meeting_recover_api"]
+        assert meetings.status_code == 200
+        recovered = [
+            item
+            for item in meetings.json()["meetings"]
+            if item["meeting_id"] == "meeting_recover_api"
+        ]
+        assert len(recovered) == 1
+        assert recovered[0]["status"] == "recorded"
+        assert status.status_code == 200
+        assert status.json()["audio_input_scan"]["phase"] == "completed"
+        assert status.json()["audio_input_scan"]["registered_count"] == 1
+        assert repeated.status_code == 200
+        assert repeated.json()["registered_count"] == 0
+        assert repeated.json()["already_registered_count"] == 1
+        assert source.read_bytes() == original
+
+    def test_복구는_자동처리활성_또는_비loopback요청을_거부(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """복구 등록 직후 외부 provider로 자동 큐잉되는 경합을 차단한다."""
+        app = _make_test_app(tmp_path)
+        watcher = SimpleNamespace(
+            is_scan_running=False,
+            recover_unregistered_files=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            app.state.folder_watcher = watcher
+            app.state.config.auto_processing.enabled = True
+            auto_response = client.post("/api/system/audio-input/recover")
+
+            app.state.config.auto_processing.enabled = False
+            hostile_response = client.post(
+                "/api/system/audio-input/recover",
+                headers={"host": "attacker.example:8765"},
+            )
+
+        assert auto_response.status_code == 409
+        assert hostile_response.status_code == 403
+        watcher.recover_unregistered_files.assert_not_awaited()
+
+
 # === POST /api/system/open-audio-folder ===
 
 

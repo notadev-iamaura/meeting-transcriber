@@ -738,6 +738,12 @@ class WatcherConfig(BaseModel):
         le=600.0,
         description="0-byte/growing/open-writer 파일의 최대 안정화 대기 시간",
     )
+    writer_probe_timeout_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=10.0,
+        description="macOS system lsof 단일 writable-open 검사 timeout",
+    )
     startup_probe_concurrency: int = Field(
         default=8,
         ge=1,

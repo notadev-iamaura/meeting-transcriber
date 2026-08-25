@@ -25,6 +25,28 @@
 
 ## 완료된 주요 작업
 
+### 녹음 완료 파일 등록 복구 및 lsof 경고 판정 (2026-08-25)
+
+- macOS `lsof`가 writer 없이 종료 코드 1을 반환하면서 대상과 무관한 임시 HFS/APFS
+  mount stat warning을 stderr에 남기는 경우만 좁게 분류해 정상 판정을 계속합니다.
+  대상 mount, 권한 오류, 알 수 없는 stderr, timeout은 계속 fail-closed로 보류합니다.
+- 단일 `lsof` 예산을 `watcher.writer_probe_timeout_seconds`(기본 2초)로 분리하고,
+  startup/live/deferred 검사는 기존 전역 bounded concurrency를 공유합니다.
+- `POST /api/system/audio-input/recover`는 DB 미등록 입력만 preserve-only로 검사해
+  ACCEPT 파일을 `recorded`로 멱등 등록합니다. 기존 row·rejection claim·원본·quarantine은
+  변경하지 않으며 auto-processing 활성 상태와 비-loopback 요청을 거부합니다.
+- `GET /api/status`는 startup 상태와 후보/등록/기등록/보류/보존/실패/충돌 집계를
+  `audio_input_scan`으로 반환합니다. 최근 복구 ID는 DB 생성시각이 아닌 source mtime을
+  기준으로 계산해 명시적 local 전사 요청에 사용할 수 있습니다.
+
+집중 검증:
+
+```bash
+pytest tests/test_config.py tests/test_watcher.py \
+  tests/test_routes_home_dashboard.py tests/test_auto_processing.py \
+  tests/test_routes.py tests/test_server.py -q
+```
+
 ### 긴 회의 화자분리 timeout 및 재개 안정화 (2026-08-25)
 
 - 적용되지 않던 `pipeline.diarization_timeout_seconds`를 기본 YAML에서 제거하고 실제
@@ -360,6 +382,9 @@ local_ready=true, distribution_ready=false 상태로 허용되며, DMG mount/ope
 
 - model/pipeline runtime gate와 테스트 프로파일을 정리했습니다.
 - CI는 기본 안정 gate, UI bulk actions gate, mypy 타입 검사 gate를 구분합니다.
+- mypy gate는 `pyproject.toml`의 `python_version = "3.11"`과 동일한 Python 3.11
+  runner를 사용합니다. 더 높은 runner가 설치한 dependency stub의 3.12+ 전용 문법이
+  3.11 target 분석을 시작 전에 깨뜨리지 않도록 harness 계약으로 고정합니다.
 - Ruff는 개발 extra와 CI 모두 `0.15.13`으로 고정해 로컬/CI 포맷 결과의 버전별 변동을
   차단합니다. 포맷터 버전 업그레이드는 전체 저장소 diff를 확인하는 별도 변경으로 진행합니다.
 - README, PR template, AGENTS.md, 평가 문서를 최신 정책에 맞췄습니다.
