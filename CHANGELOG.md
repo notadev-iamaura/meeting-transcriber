@@ -44,6 +44,11 @@
   + 2채널 다운믹스 가중치 + Swift 기반 자동 생성 스크립트.
 
 ### 수정됨
+- **긴 회의 화자분리 timeout** (2026-08-25): 적용되지 않던
+  `pipeline.diarization_timeout_seconds`를 제거하고 canonical
+  `diarization.timeout_seconds`와 길이 기반 동적 상한을 연결했다. timeout 로그는 실제
+  실행·Zoom pause·전체 경과와 redacted worker stderr tail을 기록하며, 재시도는 보존된
+  전사 체크포인트를 사용해 diarize부터 재개한다.
 - **기존 오디오 대량 환경 재시작 지연** (2026-08-24): startup 감사를
   FastAPI HTTP readiness와 분리하고, bounded 최초·최종 `lsof` 확인과 메뉴바
   readiness gate를 추가했다. 기존 큐·전사·원본 보존 순서는 유지한다.

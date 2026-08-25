@@ -1394,6 +1394,52 @@ class TestPipelineResume:
             await pipeline.resume("nonexistent_meeting")
 
     @pytest.mark.asyncio
+    async def test_transcribe완료_state의_checkpoint누락은_diarize전에_중단한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """전사 체크포인트가 없으면 비싼 diarize를 시작하거나 파일을 변경하지 않는다."""
+        meeting_id = "resume_missing_transcribe_checkpoint"
+        output_dir = pipeline._get_output_dir(meeting_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = output_dir / "missing_checkpoint_16k.wav"
+        wav_path.write_bytes(b"preserve wav")
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(audio_file),
+            status="failed",
+            current_step="diarize",
+            completed_steps=["convert", "transcribe"],
+            wav_path=str(wav_path),
+            output_dir=str(output_dir),
+            stt_provider="local",
+            stt_model="whisper-medium-ko-zeroth",
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+        original_audio = audio_file.read_bytes()
+        original_wav = wav_path.read_bytes()
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+            ) as diarize_mock,
+            pytest.raises(PipelineError, match="transcribe 체크포인트가 없습니다"),
+        ):
+            await pipeline.resume(meeting_id)
+
+        diarize_mock.assert_not_awaited()
+        assert audio_file.read_bytes() == original_audio
+        assert wav_path.read_bytes() == original_wav
+        failed_state = pipeline.get_status(meeting_id)
+        assert failed_state is not None
+        assert failed_state.status == "failed"
+        assert failed_state.current_step == "diarize"
+        assert "transcribe 체크포인트가 없습니다" in failed_state.error_message
+
+    @pytest.mark.asyncio
     async def test_resume_all_completed(
         self,
         pipeline: PipelineManager,
@@ -1406,6 +1452,8 @@ class TestPipelineResume:
             meeting_id=meeting_id,
             audio_path=str(audio_file),
             status="completed",
+            current_step="diarize",
+            error_message="이전 화자분리 timeout",
             completed_steps=[
                 "convert",
                 "transcribe",
@@ -1430,6 +1478,8 @@ class TestPipelineResume:
 
         result = await pipeline.resume(meeting_id)
         assert result.status == "completed"
+        assert result.current_step == ""
+        assert result.error_message == ""
 
     @pytest.mark.asyncio
     async def test_completed_resume는_resource_guard전에_즉시_반환한다(
@@ -2029,6 +2079,57 @@ class TestIndividualSteps:
         validate.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_run_step_diarize는_무음압축전_원본길이를_timeout에_전달(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        tmp_path: Path,
+    ) -> None:
+        """압축된 pyannote 입력도 원본 50분 길이로 실행 예산을 계산한다."""
+        pipeline._config.diarization.silence_compression_enabled = True
+        compressed_path = tmp_path / "compressed.wav"
+        compressed_path.write_bytes(b"compressed diarization audio")
+        checkpoint_path = tmp_path / "diarize.json"
+        plan = MagicMock(
+            audio_path=compressed_path,
+            original_duration=3014.65,
+            applied=True,
+        )
+        result = _make_mock_diarization()
+        diarizer = MagicMock()
+        diarizer.diarize = AsyncMock(return_value=result)
+
+        with (
+            patch.object(pipeline, "_validate_input", return_value=MagicMock()),
+            patch.object(
+                pipeline,
+                "_validate_audio_duration",
+                new=AsyncMock(return_value=3014.65),
+            ),
+            patch(
+                "steps.diarization_silence.prepare_diarization_audio",
+                return_value=plan,
+            ),
+            patch(
+                "steps.diarization_silence.remap_diarization_result",
+                return_value=result,
+            ),
+            patch("steps.diarizer.Diarizer", return_value=diarizer),
+            patch.object(pipeline, "_save_result_checkpoint"),
+        ):
+            actual = await pipeline._run_step_diarize(
+                audio_file,
+                checkpoint_path,
+                _make_mock_transcript(),
+            )
+
+        assert actual is result
+        diarizer.diarize.assert_awaited_once_with(
+            compressed_path,
+            timeout_duration_seconds=3014.65,
+        )
+
+    @pytest.mark.asyncio
     async def test_run_step_summarize_saves_markdown(
         self,
         pipeline: PipelineManager,
@@ -2566,6 +2667,140 @@ class TestE2EFullPipeline:
 
 class TestE2ECheckpointResume:
     """체크포인트 기반 파이프라인 재개 E2E 통합 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_50분_diarize_timeout은_전사를_보존하고_diarize부터_재개한다(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        """긴 회의의 diarize timeout 뒤에도 원본/전사 체크포인트를 그대로 재사용한다."""
+        from steps.diarizer import DiarizationError
+
+        meeting_id = "meeting_50min_diarize_resume"
+        output_dir = pipeline._get_output_dir(meeting_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = output_dir / "meeting_50min_16k.wav"
+        wav_path.write_bytes(b"synthetic 50 minute wav bytes")
+
+        transcript = _make_real_transcript_result(str(wav_path))
+        transcript.provider = "local"
+        transcript.model = "whisper-medium-ko-zeroth"
+        transcript_path = pipeline._get_checkpoint_path(
+            meeting_id,
+            PipelineStep.TRANSCRIBE,
+        )
+        transcript.save_checkpoint(transcript_path)
+
+        state = PipelineState(
+            meeting_id=meeting_id,
+            audio_path=str(audio_file),
+            status="failed",
+            current_step="diarize",
+            completed_steps=["convert", "transcribe"],
+            wav_path=str(wav_path),
+            output_dir=str(output_dir),
+            audio_duration_seconds=3014.65,
+            stt_provider="local",
+            stt_model="whisper-medium-ko-zeroth",
+            error_message="화자분리 worker 시간이 초과되었습니다 (1800초).",
+        )
+        state.save(pipeline._get_state_path(meeting_id))
+        pipeline._retry_max = 1
+
+        original_audio_bytes = audio_file.read_bytes()
+        original_wav_bytes = wav_path.read_bytes()
+        original_transcript_bytes = transcript_path.read_bytes()
+
+        with (
+            patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock) as convert_mock,
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+            ) as transcribe_mock,
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                side_effect=DiarizationError(
+                    "화자분리 worker 시간이 초과되었습니다 "
+                    "(제한=3769초, 실제 실행=3769.2초, Zoom 일시정지=0.0초)."
+                ),
+            ) as diarize_mock,
+            pytest.raises(PipelineStepError),
+        ):
+            await pipeline.resume(meeting_id)
+
+        convert_mock.assert_not_awaited()
+        transcribe_mock.assert_not_awaited()
+        diarize_mock.assert_awaited_once()
+        failed_state = pipeline.get_status(meeting_id)
+        assert failed_state is not None
+        assert failed_state.status == "failed"
+        assert failed_state.current_step == "diarize"
+        assert failed_state.completed_steps == ["convert", "transcribe"]
+        assert audio_file.read_bytes() == original_audio_bytes
+        assert wav_path.read_bytes() == original_wav_bytes
+        assert transcript_path.read_bytes() == original_transcript_bytes
+
+        with (
+            patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock) as convert_mock,
+            patch.object(
+                pipeline,
+                "_run_step_transcribe",
+                new_callable=AsyncMock,
+            ) as transcribe_mock,
+            patch.object(
+                pipeline,
+                "_run_step_diarize",
+                new_callable=AsyncMock,
+                return_value=_make_real_diarization_result(str(wav_path)),
+            ) as diarize_mock,
+            patch.object(
+                pipeline,
+                "_run_step_merge",
+                new_callable=AsyncMock,
+                return_value=_make_real_merged_result(str(wav_path)),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_real_corrected_result(str(wav_path)),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_real_summary_result(str(wav_path)),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ),
+        ):
+            completed_state = await pipeline.resume(meeting_id)
+
+        convert_mock.assert_not_awaited()
+        transcribe_mock.assert_not_awaited()
+        diarize_mock.assert_awaited_once()
+        restored_transcript = diarize_mock.await_args.args[2]
+        assert restored_transcript.full_text == transcript.full_text
+        assert completed_state.status == "completed"
+        assert completed_state.current_step == ""
+        assert completed_state.error_message == ""
+        assert audio_file.read_bytes() == original_audio_bytes
+        assert wav_path.read_bytes() == original_wav_bytes
+        assert transcript_path.read_bytes() == original_transcript_bytes
 
     @pytest.mark.asyncio
     async def test_e2e_resume_from_merge_step(

@@ -462,6 +462,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
 9. **HTTP readiness와 startup 감사 분리**: 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency로 제한한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
+10. **긴 회의 화자분리 실행 예산**: 실제 필드는 `diarization.timeout_seconds`이며 동적 예산은 기본 `max(1800, ceil(duration × 1.25))`다. 동적 연장분 상한은 10800초이고, 사용자가 더 크게 설정한 고정 하한은 보존한다. Zoom pause는 실행 시간에서 제외하고 timeout 로그에는 실제 실행·pause·전체 경과와 redacted worker stderr tail을 남긴다. diarize 실패는 원본·WAV·`transcribe.json`을 보존하며 재시도는 diarize부터 시작한다.
 
 ### 파이프라인 흐름
 

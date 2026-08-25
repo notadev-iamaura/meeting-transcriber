@@ -57,6 +57,10 @@ class TestConfigYamlParsing:
         assert config.diarization.output_mode == "auto"
         assert config.diarization.min_speakers == 2
         assert config.diarization.max_speakers == 4
+        assert config.diarization.timeout_seconds == 1800
+        assert config.diarization.dynamic_timeout_enabled is True
+        assert config.diarization.dynamic_timeout_multiplier == 1.25
+        assert config.diarization.dynamic_timeout_max_seconds == 10800
         assert config.diarization.protect_zoom_meetings is True
         assert config.diarization.zoom_protection_mode == "pause"
         assert config.diarization.silence_compression_enabled is True
@@ -76,6 +80,7 @@ class TestConfigYamlParsing:
         assert config.watcher.file_ready_timeout_seconds == 30.0
         assert config.watcher.startup_probe_concurrency == 8
         assert config.watcher.startup_writer_attestation_max_age_seconds == 0.25
+        assert "diarization_timeout_seconds" not in config_path.read_text(encoding="utf-8")
         # 환각 필터링 설정 검증
         assert config.hallucination_filter.enabled is True
         # 벤치마크 결과에 따라 0.9 로 상향 (docs/BENCHMARK.md §6 · config.yaml 주석 참조)
@@ -340,6 +345,17 @@ class TestValidation:
         """diarization device='mps' 입력은 하위 호환을 위해 허용한다."""
         diar = DiarizationConfig(device="mps")
         assert diar.device == "mps"
+
+    def test_화자분리_고정_timeout은_동적_연장상한보다_클수있다(self) -> None:
+        """기존의 큰 고정 timeout 설정은 동적 연장 상한 때문에 깨지지 않는다."""
+        config = DiarizationConfig(
+            timeout_seconds=14400,
+            dynamic_timeout_enabled=False,
+            dynamic_timeout_max_seconds=10800,
+        )
+
+        assert config.timeout_seconds == 14400
+        assert config.dynamic_timeout_max_seconds == 10800
 
     def test_device_cpu_옵션_유지(self) -> None:
         """diarization device를 'cpu'로 설정하면 그대로 유지되는지 확인한다 (하위 호환)."""

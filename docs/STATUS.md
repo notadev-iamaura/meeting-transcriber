@@ -1,8 +1,8 @@
 # 프로젝트 상태
 
-- 기준일: 2026-08-24
+- 기준일: 2026-08-25
 - 기준 브랜치: `main`
-- 시작 기준 커밋: `2eb92c14b274dd34447c5a3a8b69dab9f1c9a45a`
+- 시작 기준 커밋: `42c53f3658ac6fa609dd06f89375dd6db89a846e`
 - 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 모두 main 반영
 
 ## 현재 판단
@@ -24,6 +24,26 @@
 - `.venv` 밖의 Python 캐시 산출물은 Git 추적 대상이 아닙니다.
 
 ## 완료된 주요 작업
+
+### 긴 회의 화자분리 timeout 및 재개 안정화 (2026-08-25)
+
+- 적용되지 않던 `pipeline.diarization_timeout_seconds`를 기본 YAML에서 제거하고 실제
+  실행 경로인 `diarization.timeout_seconds`를 명시했습니다.
+- 화자분리 실행 예산은 기본 `max(1800, ceil(오디오 길이 × 1.25))`로 계산합니다.
+  동적 연장분 상한은 10800초이며 더 크게 설정한 고정 하한은 보존합니다. 3014.65초
+  입력은 3769초를 확보하며 Zoom pause 시간은 실행 예산에서 제외됩니다.
+- worker timeout 로그에 제한값, 실제 실행 시간, Zoom pause 시간, 전체 경과 시간과
+  토큰을 가리고 길이를 제한한 stderr tail을 남깁니다.
+- diarize 실패 시 원본·변환 WAV·`transcribe.json`을 변경하지 않습니다. 재시도는
+  convert/transcribe를 건너뛰고 diarize부터 시작하며, 성공 시 이전 timeout 오류를
+  상태에서 지웁니다.
+
+집중 검증:
+
+```bash
+pytest tests/test_config.py tests/test_diarization_process_guard.py \
+  tests/test_diarizer.py tests/test_pipeline.py -q
+```
 
 ### 기존 오디오 대량 환경 시작 안정화 (2026-08-24)
 

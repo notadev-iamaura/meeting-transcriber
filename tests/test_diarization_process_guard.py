@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from steps.diarization_process_guard import ZoomPauseGuard
+from steps.diarization_process_guard import WorkerSupervisionTimeout, ZoomPauseGuard
 
 
 class FakeProcess:
@@ -74,4 +74,30 @@ async def test_wait_until_idle_defers_while_zoom_active(
 
     await guard.wait_until_idle()
 
+    assert sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_timeout은_실행_Zoom_pause_전체경과를_구분해_보존한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker timeout 진단은 Zoom 일시정지를 실행 예산에서 제외해 기록한다."""
+    guard = RecordingGuard(active_results=[True, False, False])
+    process = FakeProcess(poll_results=[None, None, None, None])
+    sleep = AsyncMock()
+    monotonic_values = iter([0.0, 0.0, 0.5, 1.5, 2.5, 3.0, 3.0])
+    monkeypatch.setattr("steps.diarization_process_guard.asyncio.sleep", sleep)
+    guard._clock = lambda: next(monotonic_values)
+
+    with pytest.raises(WorkerSupervisionTimeout) as exc_info:
+        await guard.supervise(process, timeout_seconds=1)
+
+    diagnostic = exc_info.value
+    assert process.killed is True
+    assert diagnostic.timeout_seconds == 1
+    assert diagnostic.active_elapsed_seconds == pytest.approx(1.0)
+    assert diagnostic.paused_elapsed_seconds == pytest.approx(2.0)
+    assert diagnostic.wall_elapsed_seconds == pytest.approx(3.0)
+    assert "실제 실행=1.0초" in str(diagnostic)
+    assert "Zoom 일시정지=2.0초" in str(diagnostic)
     assert sleep.await_count == 2

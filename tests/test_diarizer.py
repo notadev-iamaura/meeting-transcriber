@@ -31,6 +31,7 @@ from steps.diarizer import (
     EmptyAudioError,
     ModelNotAvailableError,
     TokenNotConfiguredError,
+    compute_diarization_timeout,
 )
 
 # === Fixture ===
@@ -57,6 +58,9 @@ def mock_config():
     config.diarization.max_speakers = 4
     config.diarization.huggingface_token = "hf_test_token_12345"
     config.diarization.timeout_seconds = 1800
+    config.diarization.dynamic_timeout_enabled = False
+    config.diarization.dynamic_timeout_multiplier = 1.25
+    config.diarization.dynamic_timeout_max_seconds = 10800
     config.diarization.protect_zoom_meetings = False
     config.diarization.zoom_protection_mode = "off"
     config.diarization.zoom_protection_poll_seconds = 1.0
@@ -111,6 +115,87 @@ def _make_mock_annotation(
 
     annotation.itertracks.return_value = tracks
     return annotation
+
+
+def test_50분_오디오는_관측_성공시간보다_긴_동적_timeout을_사용한다() -> None:
+    """50분 15초 입력은 과거 성공 관측치 2035초보다 긴 예산을 확보한다."""
+    timeout_seconds = compute_diarization_timeout(
+        duration_seconds=3014.65,
+        base_seconds=1800,
+        multiplier=1.25,
+        max_seconds=10800,
+    )
+
+    assert timeout_seconds == 3769
+    assert timeout_seconds > 2035
+
+
+def test_화자분리_동적_timeout은_짧은파일_하한과_긴파일_상한을_지킨다() -> None:
+    """짧은 오디오는 하한, 매우 긴 오디오는 상한으로 제한한다."""
+    assert (
+        compute_diarization_timeout(
+            duration_seconds=60.0,
+            base_seconds=1800,
+            multiplier=1.25,
+            max_seconds=10800,
+        )
+        == 1800
+    )
+    assert (
+        compute_diarization_timeout(
+            duration_seconds=20000.0,
+            base_seconds=1800,
+            multiplier=1.25,
+            max_seconds=10800,
+        )
+        == 10800
+    )
+    assert (
+        compute_diarization_timeout(
+            duration_seconds=20000.0,
+            base_seconds=14400,
+            multiplier=1.25,
+            max_seconds=10800,
+        )
+        == 14400
+    )
+
+
+def test_Diarizer는_검증된_입력길이로_동적_timeout을_결정한다(
+    mock_config: MagicMock,
+    mock_manager: tuple[MagicMock, MagicMock],
+    sample_audio: Path,
+) -> None:
+    """Diarizer 실행 경로가 canonical diarization 설정으로 길이 예산을 계산한다."""
+    manager, _ = mock_manager
+    mock_config.diarization.dynamic_timeout_enabled = True
+    diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+    with patch("steps.diarizer.measure_audio_duration", return_value=3014.65):
+        timeout_seconds = diarizer._resolve_timeout_seconds(sample_audio)
+
+    assert timeout_seconds == 3769
+
+
+def test_Diarizer_duration_측정실패는_timeout_하한으로_폴백한다(
+    mock_config: MagicMock,
+    mock_manager: tuple[MagicMock, MagicMock],
+    sample_audio: Path,
+) -> None:
+    """ffprobe 진단 실패는 화자분리를 막지 않고 canonical 하한을 사용한다."""
+    from core.audio_quality import AudioMeasurementError
+
+    manager, _ = mock_manager
+    mock_config.diarization.dynamic_timeout_enabled = True
+    diarizer = Diarizer(config=mock_config, model_manager=manager)
+
+    with patch(
+        "steps.diarizer.measure_audio_duration",
+        side_effect=AudioMeasurementError("ffprobe 실패"),
+    ):
+        timeout_seconds = diarizer._resolve_timeout_seconds(sample_audio)
+
+    assert timeout_seconds == 1800
 
 
 # === DiarizationSegment 테스트 ===
@@ -593,8 +678,44 @@ class TestDiarize:
             result = await diarizer.diarize(sample_audio)
 
         assert result is worker_result
-        run_worker.assert_awaited_once_with(sample_audio, ANY)
+        run_worker.assert_awaited_once_with(sample_audio, ANY, 1800)
         manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_원본_50분길이의_동적_timeout을_worker에_전달한다(
+        self,
+        mock_config: MagicMock,
+        mock_manager: tuple[MagicMock, MagicMock],
+        sample_audio: Path,
+    ) -> None:
+        """무음 압축 입력이어도 원본 길이 기준 3769초를 worker에 전달한다."""
+        manager, _ = mock_manager
+        mock_config.diarization.dynamic_timeout_enabled = True
+        mock_config.diarization.protect_zoom_meetings = True
+        mock_config.diarization.zoom_protection_mode = "pause"
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        worker_result = DiarizationResult(
+            segments=[DiarizationSegment("SPEAKER_00", 0.0, 5.0)],
+            num_speakers=1,
+            audio_path=str(sample_audio),
+        )
+
+        with (
+            patch("steps.diarizer.measure_audio_duration") as measure_duration,
+            patch.object(
+                diarizer,
+                "_run_zoom_protected_worker",
+                new=AsyncMock(return_value=worker_result),
+            ) as run_worker,
+        ):
+            result = await diarizer.diarize(
+                sample_audio,
+                timeout_duration_seconds=3014.65,
+            )
+
+        assert result is worker_result
+        measure_duration.assert_not_called()
+        run_worker.assert_awaited_once_with(sample_audio, ANY, 3769)
 
     @pytest.mark.asyncio
     async def test_Zoom_보호_worker는_ModelLoadManager_슬롯을_예약한다(
@@ -626,7 +747,7 @@ class TestDiarize:
         assert result is worker_result
         fake_guard.wait_until_idle.assert_awaited_once()
         manager.acquire.assert_called_once_with("pyannote", diarizer._reserve_external_worker_slot)
-        run_worker.assert_awaited_once_with(sample_audio, fake_guard, ANY)
+        run_worker.assert_awaited_once_with(sample_audio, fake_guard, ANY, 1800)
 
     @pytest.mark.asyncio
     async def test_Zoom_보호_worker_시작_대기는_타임아웃된다(
@@ -655,6 +776,85 @@ class TestDiarize:
         fake_guard.wait_until_idle.assert_awaited_once()
         manager.acquire.assert_not_called()
         run_worker.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_worker_timeout은_실행_pause_stderr를_남기고_토큰은_가린다(
+        self,
+        mock_config: MagicMock,
+        mock_manager: tuple[MagicMock, MagicMock],
+        sample_audio: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """timeout 진단 로그는 시간과 stderr tail을 남기되 HF 토큰을 반사하지 않는다."""
+        from steps.diarization_process_guard import WorkerSupervisionTimeout
+
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        expected_identity = diarizer._validate_audio(sample_audio)
+        secret = mock_config.diarization.huggingface_token
+
+        class FakeStdin:
+            """worker JSON 입력을 소비하는 테스트용 stdin."""
+
+            def write(self, _payload: str) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakePopen:
+            """stderr를 기록하고 종료 가능한 테스트용 worker."""
+
+            def __init__(self, stderr_file: Any) -> None:
+                self.pid = 4321
+                self.stdin = FakeStdin()
+                self.killed = False
+                stderr_file.write(f"{'x' * 5000}\nworker detail {secret}\nlast diagnostic")
+                stderr_file.flush()
+
+            def poll(self) -> int | None:
+                return -9 if self.killed else None
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def wait(self, timeout: int) -> int:
+                assert timeout == 5
+                return -9
+
+        guard = MagicMock()
+        guard.supervise = AsyncMock(
+            side_effect=WorkerSupervisionTimeout(
+                timeout_seconds=3769,
+                active_elapsed_seconds=3769.2,
+                paused_elapsed_seconds=125.5,
+                wall_elapsed_seconds=3894.7,
+            )
+        )
+
+        with (
+            patch.object(diarizer, "_validate_offline_cache"),
+            patch(
+                "steps.diarizer.subprocess.Popen",
+                side_effect=lambda *args, **kwargs: FakePopen(kwargs["stderr"]),
+            ),
+            caplog.at_level("ERROR", logger="steps.diarizer"),
+            pytest.raises(DiarizationError) as exc_info,
+        ):
+            await diarizer._run_zoom_protected_worker_with_guard(
+                sample_audio,
+                guard,
+                expected_identity,
+                3769,
+            )
+
+        assert secret not in caplog.text
+        assert secret not in str(exc_info.value)
+        assert "[REDACTED]" in caplog.text
+        assert "active_elapsed=3769.2초" in caplog.text
+        assert "zoom_paused_elapsed=125.5초" in caplog.text
+        assert "last diagnostic" in caplog.text
+        assert len(caplog.text) < 5000
 
     @pytest.mark.asyncio
     async def test_파일_없으면_FileNotFoundError(self, mock_config, mock_manager, tmp_path):
