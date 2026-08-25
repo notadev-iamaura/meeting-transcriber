@@ -68,8 +68,13 @@ def _loopback_authority(value: str, *, origin: bool) -> bool:
     return is_loopback_host(hostname)
 
 
-def require_loopback_server(config: Any, request: Request) -> None:
-    """bind 설정과 실제 Host/Origin이 모두 loopback일 때만 외부 기능을 허용한다."""
+def require_loopback_server(
+    config: Any,
+    request: Request,
+    *,
+    feature_label: str = "OpenAI 기능",
+) -> None:
+    """bind 설정과 실제 Host/Origin이 모두 loopback일 때만 민감 기능을 허용한다."""
     host = str(getattr(getattr(config, "server", None), "host", ""))
     request_host = request.headers.get("host", "")
     origin = request.headers.get("origin")
@@ -81,7 +86,7 @@ def require_loopback_server(config: Any, request: Request) -> None:
         raise HTTPException(
             status_code=403,
             detail=(
-                "OpenAI 기능은 로컬 주소(127.0.0.1, localhost 또는 ::1)에서 "
+                f"{feature_label}은 로컬 주소(127.0.0.1, localhost 또는 ::1)에서 "
                 "연 앱 요청으로만 사용할 수 있습니다."
             ),
         )

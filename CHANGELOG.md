@@ -44,6 +44,10 @@
   + 2채널 다운믹스 가중치 + Swift 기반 자동 생성 스크립트.
 
 ### 수정됨
+- **녹음 완료 파일 UI/큐 등록 누락** (2026-08-25): writer가 없는 조회에 섞인
+  대상 무관 macOS 임시 HFS/APFS `lsof` warning만 안전하게 분류하고 단일 probe
+  timeout을 2초 설정으로 분리했다. DB 미등록 파일만 원본·quarantine 변경 없이
+  `recorded`로 복구하는 loopback API와 `/api/status` 감사 집계를 추가했다.
 - **긴 회의 화자분리 timeout** (2026-08-25): 적용되지 않던
   `pipeline.diarization_timeout_seconds`를 제거하고 canonical
   `diarization.timeout_seconds`와 길이 기반 동적 상한을 연결했다. timeout 로그는 실제

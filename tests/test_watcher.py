@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -436,6 +437,106 @@ class TestDebounce:
         assert command[-3:] == ["a", "--", str(source)]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("returncode", "stdout", "stderr", "expected"),
+        [
+            (
+                1,
+                "",
+                "lsof: WARNING: can't stat() hfs file system "
+                "/private/var/folders/aa/bb/T/transient-volume\n"
+                "      Output information may be incomplete.\n",
+                _OpenWriterState.CLEAR,
+            ),
+            (
+                0,
+                "p123\nf4\nar\n",
+                "lsof: WARNING: can't stat() apfs file system "
+                "/private/var/folders/aa/bb/T/transient-volume\n"
+                "      Output information may be incomplete.\n",
+                _OpenWriterState.CLEAR,
+            ),
+            (
+                1,
+                "",
+                "lsof: WARNING: can't stat() hfs file system "
+                "/private/var/folders/aa/bb/T/transient-volume\n"
+                "      Output information may be incomplete.\n"
+                "lsof: Permission denied\n",
+                _OpenWriterState.INDETERMINATE,
+            ),
+            (
+                0,
+                "p123\nf4\nar\n",
+                "lsof: Operation not permitted\n",
+                _OpenWriterState.INDETERMINATE,
+            ),
+            (
+                0,
+                "p123\nf4\naw\n",
+                "lsof: WARNING: can't stat() hfs file system "
+                "/private/var/folders/aa/bb/T/transient-volume\n",
+                _OpenWriterState.BUSY,
+            ),
+        ],
+    )
+    async def test_lsof_대상과_무관한_임시_mount_warning만_허용(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        expected: _OpenWriterState,
+    ) -> None:
+        """알려진 임시 mount warning만 무시하고 나머지는 fail-closed 한다."""
+        source = tmp_path / "audio_input" / "warning-probe.wav"
+        source.write_bytes(b"audio")
+        run = MagicMock(
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        )
+        monkeypatch.setattr(Path, "is_file", lambda path: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(os, "access", lambda path, mode: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(subprocess, "run", run)
+
+        assert await _REAL_WRITER_PROBE(watcher, source, timeout=0.5) is expected
+        assert "-w" not in run.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_lsof_warning_mount가_대상_상위면_INDETERMINATE(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """warning이 대상 mount 자체를 가리키면 unrelated로 오인하지 않는다."""
+        del tmp_path
+        mount = Path("/private/var/folders/aa/bb/T/target-volume")
+        source = mount / "target-warning.wav"
+        stderr = (
+            f"lsof: WARNING: can't stat() hfs file system {mount}\n"
+            "      Output information may be incomplete.\n"
+        )
+        monkeypatch.setattr(Path, "is_file", lambda path: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(os, "access", lambda path, mode: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)),
+        )
+
+        assert (
+            await _REAL_WRITER_PROBE(watcher, source, timeout=0.5)
+            is _OpenWriterState.INDETERMINATE
+        )
+
+    @pytest.mark.asyncio
     async def test_lsof_timeout은_INDETERMINATE로_원본보존(
         self,
         watcher: FolderWatcher,
@@ -851,6 +952,304 @@ class TestScanExisting:
         assert job2 is not None
 
     @pytest.mark.asyncio
+    async def test_startup_scan은_비치명_lsof_warning에도_안정파일을_한번등록(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """제보된 rc=1/HFS warning을 최초·final 검사 모두에서 안전 통과한다."""
+        source = tmp_path / "audio_input" / "warning-startup.wav"
+        original = b"stable audio"
+        source.write_bytes(original)
+        watcher._debounce_seconds = 0.0
+        warning = (
+            "lsof: WARNING: can't stat() hfs file system "
+            "/private/var/folders/aa/bb/T/unrelated-volume\n"
+            "      Output information may be incomplete.\n"
+        )
+        run = MagicMock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=warning))
+        monkeypatch.setattr(Path, "is_file", lambda path: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(os, "access", lambda path, mode: path == Path("/usr/sbin/lsof"))
+        monkeypatch.setattr(subprocess, "run", run)
+
+        async def _real_probe(file_path: Path, *, timeout: float) -> _OpenWriterState:
+            return await _REAL_WRITER_PROBE(watcher, file_path, timeout=timeout)
+
+        monkeypatch.setattr(watcher, "_probe_writable_open", _real_probe)
+
+        ids = await watcher.scan_existing()
+        job = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "warning-startup",
+        )
+
+        assert len(ids) == 1
+        assert job is not None and job.status == "recorded"
+        assert run.call_count == 2
+        assert source.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_복구스캔은_미등록_파일만_recorded로_멱등등록(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """비파괴 복구는 원본을 유지하고 같은 row를 한 번만 만든다."""
+        source = tmp_path / "audio_input" / "recover-once.wav"
+        original = b"stable recovery audio"
+        source.write_bytes(original)
+        watcher._debounce_seconds = 0.0
+
+        first = await watcher.recover_unregistered_files(recent_days=7)
+        second = await watcher.recover_unregistered_files(recent_days=7)
+        job = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "recover-once",
+        )
+
+        assert first.phase == "completed"
+        assert first.mode == "recovery"
+        assert first.candidate_count == 1
+        assert first.registered_count == 1
+        assert first.registered_meeting_ids == ("recover-once",)
+        assert first.recent_registered_meeting_ids == ("recover-once",)
+        assert second.registered_count == 0
+        assert second.already_registered_count == 1
+        assert job is not None
+        assert job.status == "recorded"
+        assert Path(job.audio_path) == source
+        assert source.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_복구스캔은_media_invalid도_quarantine하지_않음(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """복구 모드의 비수락 파일은 이동·삭제 없이 보존한다."""
+        from core.audio_quality import AudioQualityStatus
+
+        source = tmp_path / "audio_input" / "recover-invalid.wav"
+        original = b"invalid but preserved"
+        source.write_bytes(original)
+        watcher._debounce_seconds = 0.0
+        watcher._audio_validator = MagicMock(
+            return_value=_quality_result(
+                AudioQualityStatus.REJECT,
+                failure_kind="media_invalid",
+                quarantine_safe=True,
+                reason="synthetic invalid",
+            )
+        )
+
+        report = await watcher.recover_unregistered_files(recent_days=7)
+
+        assert report.registered_count == 0
+        assert report.preserved_count == 1
+        assert source.read_bytes() == original
+        assert not (tmp_path / "audio_quarantine").exists()
+        assert (
+            await asyncio.to_thread(
+                job_queue.queue.get_job_by_meeting_id,
+                "recover-invalid",
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_복구스캔_BUSY는_보류하고_CLEAR_재스캔에서_등록(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """실제 writable writer 증거는 등록하지 않고 다음 복구 때 다시 본다."""
+        source = tmp_path / "audio_input" / "recover-busy.wav"
+        original = b"writer-held audio"
+        source.write_bytes(original)
+        watcher._debounce_seconds = 0.0
+        probe = AsyncMock(return_value=_OpenWriterState.BUSY)
+        monkeypatch.setattr(watcher, "_probe_writable_open", probe)
+
+        deferred = await watcher.recover_unregistered_files(recent_days=7)
+        assert deferred.registered_count == 0
+        assert deferred.deferred_count == 1
+        assert source.read_bytes() == original
+        assert (
+            await asyncio.to_thread(
+                job_queue.queue.get_job_by_meeting_id,
+                "recover-busy",
+            )
+            is None
+        )
+
+        probe.return_value = _OpenWriterState.CLEAR
+        recovered = await watcher.recover_unregistered_files(recent_days=7)
+        job = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "recover-busy",
+        )
+        assert recovered.registered_count == 1
+        assert job is not None and job.status == "recorded"
+        assert source.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_복구스캔_same_meeting_id_다른경로는_충돌로_보존(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """같은 stem의 기존 row를 다른 원본으로 덮어쓰지 않는다."""
+        source = tmp_path / "audio_input" / "recover-conflict.wav"
+        source.write_bytes(b"new source stays")
+        other_path = tmp_path / "audio_input" / "recover-conflict.mp3"
+        await job_queue.add_job(
+            "recover-conflict",
+            str(other_path),
+            initial_status="recorded",
+        )
+        watcher._debounce_seconds = 0.0
+
+        report = await watcher.recover_unregistered_files(recent_days=7)
+        existing = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "recover-conflict",
+        )
+
+        assert report.registered_count == 0
+        assert report.conflict_count == 1
+        assert existing is not None and Path(existing.audio_path) == other_path
+        assert source.read_bytes() == b"new source stays"
+
+    @pytest.mark.asyncio
+    async def test_복구스캔은_source_mtime으로_최근7일_ID를_분리(
+        self,
+        watcher: FolderWatcher,
+        tmp_path: Path,
+    ) -> None:
+        """DB 생성시각이 아니라 검증된 source mtime으로 최근 목록을 만든다."""
+        old_source = tmp_path / "audio_input" / "recover-old.wav"
+        recent_source = tmp_path / "audio_input" / "recover-recent.wav"
+        old_source.write_bytes(b"old")
+        recent_source.write_bytes(b"recent")
+        old_time = time.time() - 8 * 24 * 60 * 60
+        os.utime(old_source, (old_time, old_time))
+        watcher._debounce_seconds = 0.0
+
+        report = await watcher.recover_unregistered_files(recent_days=7)
+
+        assert report.registered_count == 2
+        assert report.registered_meeting_ids == ("recover-old", "recover-recent")
+        assert report.recent_registered_meeting_ids == ("recover-recent",)
+
+    @pytest.mark.asyncio
+    async def test_복구스캔은_recordings_temp를_후보로_보지_않음(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+    ) -> None:
+        """녹음 중 임시 파일은 완료 입력 디렉토리로 이동되기 전 등록하지 않는다."""
+        temp_source = tmp_path / "recordings_temp" / "meeting-still-recording.wav"
+        temp_source.parent.mkdir(parents=True, exist_ok=True)
+        original = b"still recording"
+        temp_source.write_bytes(original)
+
+        report = await watcher.recover_unregistered_files(recent_days=7)
+
+        assert report.candidate_count == 0
+        assert report.registered_count == 0
+        assert (
+            await asyncio.to_thread(
+                job_queue.queue.get_job_by_meeting_id,
+                "meeting-still-recording",
+            )
+            is None
+        )
+        assert temp_source.read_bytes() == original
+
+    @pytest.mark.asyncio
+    async def test_복구스캔은_0건도_완료집계를_로그에_남김(
+        self,
+        watcher: FolderWatcher,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """운영 진단을 위해 빈 스캔도 후보·등록·보류·실패 합계를 기록한다."""
+        with caplog.at_level(logging.INFO, logger="core.watcher"):
+            report = await watcher.recover_unregistered_files(recent_days=7)
+
+        assert report.candidate_count == 0
+        assert report.registered_count == 0
+        assert any(
+            "오디오 입력 스캔 완료: mode=recovery" in record.message
+            and "candidates=0" in record.message
+            and "registered=0" in record.message
+            and "deferred=0" in record.message
+            and "failed=0" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_복구스캔_중에도_새_live_파일은_starvation없이_등록(
+        self,
+        watcher: FolderWatcher,
+        job_queue: AsyncJobQueue,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """복구 lock은 서로 다른 live 파일의 watcher 처리를 막지 않는다."""
+        recovery_source = tmp_path / "audio_input" / "recover-slow.wav"
+        live_source = tmp_path / "audio_input" / "live-during-recovery.wav"
+        recovery_source.write_bytes(b"recovery")
+        watcher._debounce_seconds = 0.0
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_prepare = watcher._prepare_ready_action
+
+        async def _prepare(
+            safe_path: Path,
+            meeting_id: str,
+            expected: _FileFingerprint,
+            *,
+            existing: object | None,
+            quarantine_reason_prefix: str,
+            notify: bool,
+        ) -> _PreparedReadyAction | None:
+            if safe_path == recovery_source:
+                entered.set()
+                await release.wait()
+            return await real_prepare(
+                safe_path,
+                meeting_id,
+                expected,
+                existing=existing,
+                quarantine_reason_prefix=quarantine_reason_prefix,
+                notify=notify,
+            )
+
+        monkeypatch.setattr(watcher, "_prepare_ready_action", _prepare)
+        recovery_task = asyncio.create_task(watcher.recover_unregistered_files(recent_days=7))
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        live_source.write_bytes(b"live")
+        await asyncio.wait_for(watcher._handle_new_file(live_source), timeout=1.0)
+        live_job = await asyncio.to_thread(
+            job_queue.queue.get_job_by_meeting_id,
+            "live-during-recovery",
+        )
+        assert live_job is not None and live_job.status == "recorded"
+
+        release.set()
+        report = await asyncio.wait_for(recovery_task, timeout=1.0)
+        assert report.registered_meeting_ids == ("recover-slow",)
+
+    @pytest.mark.asyncio
     async def test_빈_파일_건너뜀(
         self,
         watcher: FolderWatcher,
@@ -935,7 +1334,10 @@ class TestScanExisting:
         # 최초 preflight와 검증 뒤 final writer 확인 모두 같은 경계로 실행된다.
         assert calls == 440
         assert maximum == 8
-        assert elapsed < 1.2
+        # 직렬 실행이면 synthetic probe만 4.4초가 필요하다. 절대 1.2초 상한은
+        # CI 부하에 민감하므로 직렬 하한의 절반 안에 끝나는 구조만 고정한다.
+        serial_probe_seconds = calls * 0.01
+        assert elapsed < serial_probe_seconds / 2
         assert apply_action.await_count == 220
 
     @pytest.mark.asyncio

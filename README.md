@@ -579,9 +579,11 @@ curl -X POST http://127.0.0.1:8765/api/recording/stop
 curl http://127.0.0.1:8765/api/recording/devices
 ```
 
-### 자동 전사 (폴더 감시)
+### 녹음 파일 자동 등록 (폴더 감시)
 
-`~/.meeting-transcriber/audio_input/`에 오디오 파일을 넣으면 자동 전사됩니다.
+`~/.meeting-transcriber/audio_input/`에 오디오 파일을 넣으면 안전 검사를 거쳐
+`recorded` 회의로 등록됩니다. `auto_processing.enabled: false`이면 UI의 **전사 시작**을
+눌러야 하며, 이는 파일이 DB에 등록되지 않은 상태와 구분됩니다.
 
 ### STT 모델 API (CLI)
 
@@ -608,7 +610,21 @@ curl http://127.0.0.1:8765/api/transcription-models | python -m json.tool
 curl -X POST http://127.0.0.1:8765/api/meetings/{meeting_id}/transcribe \
   -H "Content-Type: application/json" \
   -d '{"model_id":"openai:gpt-4o-transcribe-diarize","external_upload_confirmed":true}'
+
+# audio_input에는 있지만 DB/UI에 없는 파일만 비파괴 복구
+# auto_processing.enabled=false인 로컬 앱에서만 실행 가능
+curl -X POST 'http://127.0.0.1:8765/api/system/audio-input/recover?recent_days=7' \
+  | python -m json.tool
+
+# 위 응답의 recent_registered_meeting_ids에만 명시적으로 로컬 전사 요청
+curl -X POST http://127.0.0.1:8765/api/meetings/{meeting_id}/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"local","external_upload_confirmed":false}'
 ```
+
+복구 API는 `audio_input` 직접 자식 중 DB 미등록 파일만 검사하며 기존 row, 원본,
+quarantine을 변경하지 않습니다. 최근 7일 목록은 DB 등록 시각이 아니라 검증된 원본
+mtime 기준입니다. 진행/완료 집계는 `GET /api/status`의 `audio_input_scan`에서 확인합니다.
 
 OpenAI API 키는 CLI 인자나 `config.yaml`에 넣지 말고 설정 화면에서 등록하는 것을 권장합니다. 앱은 키를 macOS Keychain에 저장하고 등록 여부만 API에 반환합니다.
 
@@ -655,6 +671,7 @@ bash scripts/setup_launchagent.sh
 | `audio_quality.decode_timeout_factor` | 음성 길이 비례 timeout 계수 | `0.25` |
 | `audio_quality.decode_timeout_cap_seconds` | ffmpeg full-decode timeout 상한 | `900.0`초 |
 | `watcher.file_ready_timeout_seconds` | 쓰기 중인 입력 파일의 readiness 최대 대기 | `30.0`초 |
+| `watcher.writer_probe_timeout_seconds` | macOS system `lsof` 단일 writable-open 검사 제한 | `2.0`초 |
 | `watcher.startup_probe_concurrency` | 재시작 시 기존 파일 writable-open(`lsof`) 확인 최대 동시성 | `8` |
 | `watcher.startup_writer_attestation_max_age_seconds` | 기존 DB 작업이 없는 startup 신규 ACCEPT의 final writer 확인 재사용 상한 | `0.25`초 |
 
@@ -685,7 +702,9 @@ sample count와 성공한 ffprobe duration 중 더 짧은 값으로 판정합니
 없는 startup 신규 ACCEPT만 짧은 final 확인 결과를 재사용하며, 그 사이 fingerprint가
 바뀌거나 허용 시간이 지나면 적용 직전에 다시 확인합니다. 원본 격리와 기존 큐 복원은
 파괴적 또는 실행 의도를 바꾸는 작업이므로 항상 적용 직전에 직렬로 writer 상태를
-확인합니다.
+확인합니다. writer가 없는 정상 조회에서 macOS가 대상과 무관한 임시 HFS/APFS mount
+warning만 출력한 경우에는 이를 별도 경고로 기록하고 계속 판정하지만, 대상 mount·권한
+오류·알 수 없는 stderr·timeout은 계속 보류합니다.
 
 재시작 시 기존 오디오 감사는 FastAPI HTTP startup과 분리됩니다.
 writable-open 확인은 설정된 동시성 경계 안에서 실행하고, ffmpeg 품질 검증과

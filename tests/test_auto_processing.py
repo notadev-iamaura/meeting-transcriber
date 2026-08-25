@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routers.auto_processing import router as auto_processing_router
+from api.routers.system import router as system_router
 from config import AppConfig, PathsConfig
-from core.auto_processing import AutoProcessingRunner, classify_meeting
+from core.auto_processing import AutoProcessingResult, AutoProcessingRunner, classify_meeting
 from core.auto_processing_scheduler import AutoProcessingScheduler
+from core.watcher import AudioInputScanReport
 
 
 @dataclass
@@ -353,3 +357,251 @@ def test_auto_processing_run_now_transcribe는_악성_Host에서_실행하지_�
 
     assert resp.status_code == 403
     scheduler.run_once.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_복구스캔과_run_now는_동시에_실행되지_않는다(tmp_path: Path) -> None:
+    """복구 중 생성된 recorded row를 자동 처리 요청이 선점하지 못한다."""
+
+    class _Watcher:
+        def __init__(self) -> None:
+            self.running = False
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.scan_report = AudioInputScanReport()
+
+        @property
+        def is_scan_running(self) -> bool:
+            return self.running
+
+        async def recover_unregistered_files(self, *, recent_days: int) -> None:
+            assert recent_days == 7
+            self.running = True
+            self.entered.set()
+            try:
+                await self.release.wait()
+                self.scan_report = AudioInputScanReport(
+                    phase="completed",
+                    mode="recovery",
+                )
+            finally:
+                self.running = False
+
+    class _Scheduler:
+        is_processing = False
+        run_once = AsyncMock()
+
+    app = FastAPI()
+    app.include_router(auto_processing_router, prefix="/api")
+    app.include_router(system_router, prefix="/api")
+    config = _make_config(tmp_path)
+    config.auto_processing.enabled = False
+    watcher = _Watcher()
+    scheduler = _Scheduler()
+    app.state.config = config
+    app.state.folder_watcher = watcher
+    app.state.auto_processing_scheduler = scheduler
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        recovery_task = asyncio.create_task(
+            client.post("/api/system/audio-input/recover?recent_days=7")
+        )
+        await asyncio.wait_for(watcher.entered.wait(), timeout=1.0)
+        assert app.state.openai_settings_mutation_lock.locked()
+
+        hostile_recovery = await asyncio.wait_for(
+            client.post(
+                "/api/system/audio-input/recover?recent_days=7",
+                headers={"host": "attacker.example:8765"},
+            ),
+            timeout=0.5,
+        )
+        assert hostile_recovery.status_code == 403
+
+        run_now = await client.post("/api/auto-processing/run-now")
+        assert run_now.status_code == 409
+        scheduler.run_once.assert_not_awaited()
+
+        watcher.release.set()
+        recovery = await asyncio.wait_for(recovery_task, timeout=1.0)
+
+    assert recovery.status_code == 200
+    scheduler.run_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_now_배치중에는_설정lock을_놓고_복구를_거부한다(tmp_path: Path) -> None:
+    """자동 처리 선점 뒤 긴 배치는 공용 lock을 독점하지 않는다."""
+
+    class _Watcher:
+        is_scan_running = False
+        recover_unregistered_files = AsyncMock()
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.processing = False
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        @property
+        def is_processing(self) -> bool:
+            return self.processing
+
+        async def reserve_run_once(self) -> asyncio.Task[AutoProcessingResult] | None:
+            if self.processing:
+                return None
+            self.processing = True
+
+            async def _run() -> AutoProcessingResult:
+                self.entered.set()
+                try:
+                    await self.release.wait()
+                finally:
+                    self.processing = False
+                return AutoProcessingResult(action="full", recent_hours=48)
+
+            return asyncio.create_task(_run())
+
+    app = FastAPI()
+    app.include_router(auto_processing_router, prefix="/api")
+    app.include_router(system_router, prefix="/api")
+    config = _make_config(tmp_path)
+    config.auto_processing.enabled = False
+    watcher = _Watcher()
+    scheduler = _Scheduler()
+    app.state.config = config
+    app.state.folder_watcher = watcher
+    app.state.auto_processing_scheduler = scheduler
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8765",
+    ) as client:
+        run_task = asyncio.create_task(client.post("/api/auto-processing/run-now"))
+        await asyncio.wait_for(scheduler.entered.wait(), timeout=1.0)
+
+        assert not app.state.openai_settings_mutation_lock.locked()
+        recovery = await asyncio.wait_for(
+            client.post("/api/system/audio-input/recover?recent_days=7"),
+            timeout=0.5,
+        )
+        assert recovery.status_code == 409
+        watcher.recover_unregistered_files.assert_not_awaited()
+
+        scheduler.release.set()
+        run_response = await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert run_response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reservation은_호출소유권을_즉시_선점한다(tmp_path: Path) -> None:
+    """예약 task만 run lock을 소유하고 중복 예약은 대기 없이 거부한다."""
+    config = _make_config(tmp_path)
+    scheduler = AutoProcessingScheduler(
+        config=config,
+        job_queue=_Queue([]),
+        pipeline=AsyncMock(),
+    )
+
+    reserved = await scheduler.reserve_run_once()
+
+    assert reserved is not None
+    assert scheduler.is_processing is True
+    assert await scheduler.reserve_run_once() is None
+    result = await reserved
+    assert result.action == config.auto_processing.action
+    assert scheduler.is_processing is False
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reservation은_background_owner를_가로채지_않는다(
+    tmp_path: Path,
+) -> None:
+    """기존 background run이 소유한 lock을 수동 예약이 오인하지 않는다."""
+
+    class _BlockingQueue(_Queue):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def get_all_jobs(self) -> list[_Job]:
+            self.entered.set()
+            await self.release.wait()
+            return []
+
+    config = _make_config(tmp_path)
+    queue = _BlockingQueue()
+    scheduler = AutoProcessingScheduler(
+        config=config,
+        job_queue=queue,
+        pipeline=AsyncMock(),
+    )
+    background = asyncio.create_task(scheduler.run_once())
+    await asyncio.wait_for(queue.entered.wait(), timeout=1.0)
+
+    assert scheduler.is_processing is True
+    assert await scheduler.reserve_run_once() is None
+
+    queue.release.set()
+    await asyncio.wait_for(background, timeout=1.0)
+    assert scheduler.is_processing is False
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reserved_task_취소도_lock을_해제한다(tmp_path: Path) -> None:
+    """HTTP 요청 취소가 예약 task와 run lock을 고아로 남기지 않는다."""
+
+    class _BlockingQueue(_Queue):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def get_all_jobs(self) -> list[_Job]:
+            self.entered.set()
+            await self.release.wait()
+            return []
+
+    config = _make_config(tmp_path)
+    queue = _BlockingQueue()
+    scheduler = AutoProcessingScheduler(
+        config=config,
+        job_queue=queue,
+        pipeline=AsyncMock(),
+    )
+    reserved = await scheduler.reserve_run_once()
+    assert reserved is not None
+    await asyncio.wait_for(queue.entered.wait(), timeout=1.0)
+
+    reserved.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reserved
+
+    assert scheduler.is_processing is False
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reserved_task_시작전취소도_lock을_해제한다(tmp_path: Path) -> None:
+    """예약 coroutine 첫 turn 전 취소도 done callback으로 lock을 회수한다."""
+    scheduler = AutoProcessingScheduler(
+        config=_make_config(tmp_path),
+        job_queue=_Queue([]),
+        pipeline=AsyncMock(),
+    )
+    reserved = await scheduler.reserve_run_once()
+    assert reserved is not None
+    assert scheduler.is_processing is True
+
+    reserved.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reserved
+    await asyncio.sleep(0)
+
+    assert scheduler.is_processing is False

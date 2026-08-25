@@ -438,7 +438,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
 9. **짧거나 측정 불가능한 오디오는 전사 금지** — `audio_quality.min_duration_seconds` 기본 30초. 16 kHz mono full-decode sample count와 성공한 ffprobe duration 중 더 짧은 값으로 경계를 판정한다. 파일 자체 결함이 확정된 `MEDIA_INVALID`만 `audio_quarantine/`으로 격리하고, 길이를 확정할 수 없는 인프라·busy·보안 실패는 원본을 보존한 채 큐/STT 진입을 차단한다. 입력 및 저장 경로의 symlink는 지원하지 않는다.
-10. **HTTP readiness와 startup 감사 분리** — 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency로 제한한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
+10. **HTTP readiness와 startup 감사 분리** — 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency와 설정된 단일 probe timeout으로 제한한다. 대상과 무관한 macOS 임시 HFS/APFS stat warning만 좁게 허용하고 권한·대상 mount·unknown stderr는 보류한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 수동 복구는 missing-only preserve 경로로만 수행하며 기존 row·원본·quarantine을 변경하지 않는다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
 11. **긴 회의 화자분리 실행 예산** — 실제 필드는 `diarization.timeout_seconds`이며 동적 예산은 기본 `max(1800, ceil(duration × 1.25))`다. 동적 연장분 상한은 10800초이고, 사용자가 더 크게 설정한 고정 하한은 보존한다. Zoom pause는 실행 시간에서 제외하고 timeout 로그에는 실제 실행·pause·전체 경과와 redacted worker stderr tail을 남긴다. diarize 실패는 원본·WAV·`transcribe.json`을 보존하며 재시도는 diarize부터 시작한다.
 
 ### 파이프라인 흐름

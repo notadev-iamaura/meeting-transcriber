@@ -65,6 +65,7 @@ router = APIRouter(prefix="/api", tags=["api"])
 from api.routers import system as _system_router  # noqa: E402
 
 DashboardStatsResponse = _system_router.DashboardStatsResponse
+AudioInputScanStatusResponse = _system_router.AudioInputScanStatusResponse
 OpenFolderResponse = _system_router.OpenFolderResponse
 StatusResponse = _system_router.StatusResponse
 SystemResourcesResponse = _system_router.SystemResourcesResponse
@@ -78,6 +79,7 @@ get_dashboard_stats = _system_router.get_dashboard_stats
 get_status = _system_router.get_status
 get_system_resources = _system_router.get_system_resources
 open_audio_folder = _system_router.open_audio_folder
+recover_unregistered_audio = _system_router.recover_unregistered_audio
 
 router.include_router(_system_router.router)
 
