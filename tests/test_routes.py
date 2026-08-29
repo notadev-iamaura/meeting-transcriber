@@ -2902,6 +2902,30 @@ class TestSystemResourcesEndpoint:
         data = response.json()
         assert 0 <= data["ram_percent"] <= 100
 
+    def test_get_system_resources_native_cleanup_pending_관찰(self, tmp_path: Path) -> None:
+        """native worker 정리 대기 상태를 비밀 없이 API에 노출한다."""
+        app = _make_test_app(tmp_path)
+        model_manager = MagicMock()
+        model_manager.get_status.return_value = {
+            "current_model_name": "whisper",
+            "native_cleanup_pending": True,
+            "native_cleanup_model_name": "whisper",
+            "native_cleanup_pending_workers": 1,
+            "native_cleanup_started_at": 123.5,
+        }
+
+        with TestClient(app) as client:
+            app.state.model_manager = model_manager
+            response = client.get("/api/system/resources")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["loaded_model"] == "whisper"
+        assert data["native_cleanup_pending"] is True
+        assert data["native_cleanup_model_name"] == "whisper"
+        assert data["native_cleanup_pending_workers"] == 1
+        assert data["native_cleanup_started_at"] == 123.5
+
 
 # === TestSummarizeMeetingEndpoint ===
 
@@ -2948,9 +2972,26 @@ class TestSummarizeMeetingEndpoint:
                 encoding="utf-8",
             )
 
+        # 온디맨드 요약은 완료된 DB 작업에만 허용된다. 상태나 merge가 있는
+        # legacy/정상 테스트 회의는 실제 계약과 같은 completed row도 만든다.
+        if create_state or create_merge_cp:
+            queue_wrapper = app.state.job_queue
+            raw_queue = getattr(
+                queue_wrapper,
+                "queue",
+                getattr(queue_wrapper, "_queue", queue_wrapper),
+            )
+            if raw_queue.get_job_by_meeting_id(meeting_id) is None:
+                raw_queue.add_job(
+                    meeting_id=meeting_id,
+                    audio_path=str(tmp_path / "audio_input" / f"{meeting_id}.wav"),
+                    initial_status="completed",
+                )
+
         mock_pipeline = MagicMock()
         mock_pipeline._get_state_path = MagicMock(return_value=state_path)
         mock_pipeline._get_checkpoint_path = MagicMock(return_value=merge_cp_path)
+        mock_pipeline.validate_llm_steps_non_destructive = MagicMock()
         mock_pipeline.run_llm_steps = AsyncMock()
 
         app.state.pipeline_manager = mock_pipeline
@@ -2971,6 +3012,29 @@ class TestSummarizeMeetingEndpoint:
         assert data["status"] == "ok"
         assert data["meeting_id"] == "meeting_001"
         assert "요약" in data["message"]
+
+    def test_summarize_meeting_처리중인_DB_작업은_409(self, tmp_path: Path) -> None:
+        """전체 파이프라인이 같은 회의를 쓰는 동안 지연 LLM을 시작하지 않는다."""
+        from core.job_queue import JobStatus
+
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, "meeting_processing")
+            queue_wrapper = app.state.job_queue
+            raw_queue = getattr(
+                queue_wrapper,
+                "queue",
+                getattr(queue_wrapper, "_queue", queue_wrapper),
+            )
+            job = raw_queue.get_job_by_meeting_id("meeting_processing")
+            assert job is not None
+            raw_queue.force_set_status(job.id, JobStatus.EMBEDDING)
+
+            response = client.post("/api/meetings/meeting_processing/summarize")
+
+        assert response.status_code == 409
+        mock_pipeline.run_llm_steps.assert_not_called()
 
     def test_summarize_meeting_존재하지_않는_회의_404(self, tmp_path: Path) -> None:
         """상태 파일과 merge 체크포인트가 모두 없는 meeting_id 는 404 를 반환한다.
@@ -3032,8 +3096,118 @@ class TestSummarizeMeetingEndpoint:
         # run_llm_steps가 호출되었는지 확인
         mock_pipeline.run_llm_steps.assert_called_once_with("meeting_003")
 
-    def test_summarize_meeting_state_유실_자동_재구성(self, tmp_path: Path) -> None:
-        """이슈 I: state 파일이 없고 merge 체크포인트만 있을 때 자동 재구성 후 요약 시작."""
+    def test_summarize_meeting_레거시_충돌은_task전에_409(self, tmp_path: Path) -> None:
+        """기존 교체 대상이 있으면 백그라운드 작업을 만들지 않는다."""
+        from core.pipeline import PipelineError
+
+        app = _make_test_app(tmp_path)
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, "meeting_conflict")
+            mock_pipeline.validate_llm_steps_non_destructive.side_effect = PipelineError(
+                "SECURITY_BLOCKED: 기존 파일 보존"
+            )
+            response = client.post("/api/meetings/meeting_conflict/summarize")
+
+        assert response.status_code == 409
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        mock_pipeline.run_llm_steps.assert_not_called()
+
+    @patch("api.routers.meeting_detail.os.unlink")
+    def test_force_summarize_preserves_existing_regular_artifacts(
+        self,
+        mock_unlink: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """force 요약은 기존 산출물을 모두 보존하고 fail-closed한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_force_clean"
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, meeting_id)
+            checkpoint_dir = tmp_path / "checkpoints" / meeting_id
+            for filename in ("correct.json", "summarize.json"):
+                (checkpoint_dir / filename).write_text("{}", encoding="utf-8")
+            output_dir = tmp_path / "outputs" / meeting_id
+            output_dir.mkdir(parents=True)
+            for filename in (
+                "summary.md",
+                "meeting_minutes.md",
+                "summary.json",
+                "corrected.json",
+            ):
+                (output_dir / filename).write_text("old", encoding="utf-8")
+
+            response = client.post(f"/api/meetings/{meeting_id}/summarize?force=true")
+
+        assert response.status_code == 409, response.text
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        assert all(
+            (checkpoint_dir / filename).read_text(encoding="utf-8") == "{}"
+            for filename in ("correct.json", "summarize.json")
+        )
+        assert all(
+            (output_dir / filename).read_text(encoding="utf-8") == "old"
+            for filename in (
+                "summary.md",
+                "meeting_minutes.md",
+                "summary.json",
+                "corrected.json",
+            )
+        )
+        mock_unlink.assert_not_called()
+        mock_pipeline.run_llm_steps.assert_not_called()
+
+    def test_force_summarize_without_existing_artifacts_is_still_blocked(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """force 요청은 artifact 상태와 무관하게 task 시작 전 거부한다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = "meeting_force_retry"
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, meeting_id)
+            response = client.post(f"/api/meetings/{meeting_id}/summarize?force=true")
+
+        assert response.status_code == 409, response.text
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        mock_pipeline.run_llm_steps.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("unsafe_root", "victim_filename"),
+        (("checkpoints", "correct.json"), ("outputs", "summary.md")),
+    )
+    def test_force_summarize_rejects_meeting_directory_symlink(
+        self,
+        tmp_path: Path,
+        unsafe_root: str,
+        victim_filename: str,
+    ) -> None:
+        """force 요약은 checkpoint/output meeting symlink의 외부 파일을 지우지 않는다."""
+        app = _make_test_app(tmp_path)
+        meeting_id = f"meeting_force_link_{unsafe_root}"
+
+        with TestClient(app) as client:
+            mock_pipeline = self._setup_pipeline(app, tmp_path, meeting_id)
+            linked_dir = tmp_path / unsafe_root / meeting_id
+            linked_dir.mkdir(parents=True, exist_ok=True)
+            external_dir = tmp_path / f"external-force-{unsafe_root}"
+            linked_dir.rename(external_dir)
+            victim = external_dir / victim_filename
+            victim.write_text("external-sentinel", encoding="utf-8")
+            linked_dir.symlink_to(external_dir, target_is_directory=True)
+
+            response = client.post(f"/api/meetings/{meeting_id}/summarize?force=true")
+
+        assert response.status_code == 409, response.text
+        assert "SECURITY_BLOCKED" in response.json()["detail"]
+        assert victim.read_text(encoding="utf-8") == "external-sentinel"
+        assert linked_dir.is_symlink()
+        mock_pipeline.run_llm_steps.assert_not_called()
+
+    def test_summarize_meeting_state_유실은_task에서_재구성(self, tmp_path: Path) -> None:
+        """이슈 I: state 재구성은 사전 검증 후 백그라운드 task에서 시작한다."""
         app = _make_test_app(tmp_path)
 
         with TestClient(app) as client:
@@ -3047,9 +3221,9 @@ class TestSummarizeMeetingEndpoint:
             mock_pipeline._rebuild_state_from_checkpoints = MagicMock()
             response = client.post("/api/meetings/meeting_legacy/summarize")
 
-        # 404 가 아닌 200 을 받아야 한다 — state 재구성 경로
+        # 404 가 아닌 200 을 받아야 한다 — task 내 state 재구성 경로
         assert response.status_code == 200
-        mock_pipeline._rebuild_state_from_checkpoints.assert_called_once_with("meeting_legacy")
+        mock_pipeline._rebuild_state_from_checkpoints.assert_not_called()
         mock_pipeline.run_llm_steps.assert_called_once_with("meeting_legacy")
 
     def test_summarize_meeting_state_merge_모두_없음_404(self, tmp_path: Path) -> None:

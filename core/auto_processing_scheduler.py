@@ -159,6 +159,7 @@ class AutoProcessingScheduler:
             "run_at": self._config.auto_processing.run_at,
             "recent_hours": self._config.auto_processing.recent_hours,
             "action": self._config.auto_processing.action,
+            "max_items_per_run": self._config.auto_processing.max_items_per_run,
             "run_on_startup_if_missed": self._config.auto_processing.run_on_startup_if_missed,
             "next_run_at": self._next_run_at().isoformat(),
             "last_started_at": self.last_started_at.isoformat()
@@ -178,6 +179,7 @@ class AutoProcessingScheduler:
                 "transcribed": result.transcribed,
                 "summarized": result.summarized,
                 "skipped": result.skipped,
+                "skipped_by_limit": result.skipped_by_limit,
                 "failed": result.failed,
                 "meeting_ids": result.meeting_ids,
                 "errors": result.errors,

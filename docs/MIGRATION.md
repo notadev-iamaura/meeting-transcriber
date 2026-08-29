@@ -4,6 +4,32 @@
 
 ---
 
+## 새벽 자동 처리 backlog 누락 수정 (2026-08-30)
+
+자동 전사가 파이프라인 직접 실행에서 JobProcessor 큐 등록으로 바뀐 뒤에도
+기본 1건 상한이 남아 있었습니다. 최신 순 선택과 48시간 대상 window 때문에
+오래된 `recorded` 회의가 영구히 자동 전사되지 않을 수 있어 기본을 다음처럼
+변경했습니다.
+
+```yaml
+auto_processing:
+  max_items_per_run: 0                # 누락분 전체를 순차 큐에 등록
+  run_on_startup_if_missed: true       # 당일 예약 시각을 놓친 경우 1회 catch-up
+```
+
+- `auto_processing.enabled` 자체는 계속 명시적 opt-in입니다.
+- 기존 별도 설정 파일에 `max_items_per_run: 1` 또는
+  `run_on_startup_if_missed: false`가 명시되어 있으면 자동으로 덮어쓰지 않습니다.
+  누락분 전체 처리가 필요하면 설정 화면에서 **1회 처리 상한=0**,
+  **놓친 실행 따라잡기=켬**을 확인하세요.
+- 여러 건을 한꺼번에 병렬 전사하는 변경은 아닙니다. JobProcessor가 기존
+  서멀 배치/쿨다운 규칙으로 순차 처리합니다.
+- 같은 회의의 전사·지연 요약·검색 재색인·재전사·삭제·수동 편집은 회의별로 직렬화됩니다.
+  `POST /api/meetings/{id}/summarize`, `POST /api/meetings/{id}/reindex`와
+  회의록·전사문 편집 API는 DB 작업이 `completed`가 아니면 `409`를 반환합니다.
+
+---
+
 ## 짧은·손상 오디오 차단 강화 (2026-08-18)
 
 전사할 가치가 낮은 짧은 파일과 길이·볼륨을 정상 측정할 수 없는 손상 파일이

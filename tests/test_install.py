@@ -22,7 +22,8 @@ import subprocess
 from pathlib import Path
 
 # 스크립트 경로
-_SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "install.sh"
+_PROJECT_ROOT = Path(__file__).parent.parent
+_SCRIPT_PATH = _PROJECT_ROOT / "scripts" / "install.sh"
 
 
 def _create_mock_env(
@@ -738,10 +739,19 @@ class TestScriptContents:
         content = _SCRIPT_PATH.read_text(encoding="utf-8")
         assert "127.0.0.1:11434" in content
 
-    def test_huggingface_토큰_안내(self) -> None:
-        """HuggingFace 토큰 설정 안내가 포함되어 있는지 확인한다."""
+    def test_huggingface_CLI_자격증명_안내(self) -> None:
+        """LaunchAgent 호환 HuggingFace CLI 로그인 안내가 포함되어 있는지 확인한다."""
         content = _SCRIPT_PATH.read_text(encoding="utf-8")
-        assert "HUGGINGFACE_TOKEN" in content
+        assert "hf auth login" in content
+        assert ".cache/huggingface/token" in content
+
+    def test_agent_setup_docs_use_launchagent_compatible_hf_login(self) -> None:
+        """에이전트 셋업 문서가 셸 export가 아닌 CLI 캐시를 기본으로 안내한다."""
+        for filename in ("AGENTS.md", "CLAUDE.md", "README.md"):
+            content = (_PROJECT_ROOT / filename).read_text(encoding="utf-8")
+            assert "hf auth login" in content, filename
+            assert "chmod 600 ~/.cache/huggingface/token" in content, filename
+            assert "huggingface-cli login" not in content, filename
 
     def test_launchagent_안내(self) -> None:
         """LaunchAgent 설정 안내가 포함되어 있는지 확인한다."""

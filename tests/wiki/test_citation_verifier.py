@@ -35,12 +35,15 @@ PRD §6 D2 핵심 요구사항:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 # ─── Phase 4 대상 모듈 (아직 미구현 → ImportError Red) ──────────────────────
 from core.wiki.citation_verifier import (  # type: ignore[import]  # noqa: E402
+    CheckpointCitationVerifier,
     UtterancesCitationVerifier,
 )
 
@@ -505,3 +508,105 @@ class TestDictUtteranceCompatibility:
         result = await verifier.fetch_utterance(MEETING_M1, 2)
 
         assert result == "JSON 로드 발화"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. CheckpointCitationVerifier — 누적 위키의 과거 citation fail-closed 검증
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_checkpoint(
+    checkpoints_dir: Path,
+    meeting_id: str,
+    filename: str,
+    payload: object,
+) -> Path:
+    """테스트용 historical checkpoint를 생성한다."""
+    checkpoint_path = checkpoints_dir / meeting_id / filename
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return checkpoint_path
+
+
+class TestCheckpointCitationVerifier:
+    """과거 action item citation을 저장된 원장으로만 검증하는지 확인한다."""
+
+    @pytest.mark.asyncio
+    async def test_과거_correct_checkpoint_원장으로_citation을_검증한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """현재 map에 없는 과거 회의도 correct.json의 실제 구간이면 통과한다."""
+        checkpoints_dir = (tmp_path / "checkpoints").resolve()
+        _write_checkpoint(
+            checkpoints_dir,
+            MEETING_M1,
+            "correct.json",
+            {
+                "utterances": [
+                    {"speaker": "SPEAKER_00", "text": "과거 원장 발화", "start": 60.0, "end": 65.0}
+                ]
+            },
+        )
+        verifier = CheckpointCitationVerifier(checkpoints_dir=checkpoints_dir)
+
+        assert isinstance(verifier, CitationVerifier)
+        assert await verifier.verify_exists(MEETING_M1, 62) is True
+        assert await verifier.verify_exists(MEETING_M1, 90) is False
+        assert await verifier.fetch_utterance(MEETING_M1, 62) == "과거 원장 발화"
+
+    @pytest.mark.asyncio
+    async def test_correct가_없을때만_merge_checkpoint로_폴백한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """legacy 회의는 correct 부재시에만 merge 원장을 D2 근거로 사용한다."""
+        checkpoints_dir = (tmp_path / "checkpoints").resolve()
+        _write_checkpoint(
+            checkpoints_dir,
+            MEETING_M1,
+            "merge.json",
+            {"utterances": [{"text": "병합 원장", "start": 10.0, "end": 12.0}]},
+        )
+        verifier = CheckpointCitationVerifier(checkpoints_dir=checkpoints_dir)
+
+        assert await verifier.verify_exists(MEETING_M1, 11) is True
+
+    @pytest.mark.asyncio
+    async def test_과거_correct_checkpoint이_깨졌으면_merge를_우회하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """기본 원장이 존재하지만 불량이면 valid merge가 있어도 fail-closed한다."""
+        checkpoints_dir = (tmp_path / "checkpoints").resolve()
+        _write_checkpoint(
+            checkpoints_dir, MEETING_M1, "correct.json", {"utterances": "not-a-list"}
+        )
+        _write_checkpoint(
+            checkpoints_dir,
+            MEETING_M1,
+            "merge.json",
+            {"utterances": [{"text": "우회되면 안 되는 원장", "start": 10.0, "end": 12.0}]},
+        )
+        verifier = CheckpointCitationVerifier(checkpoints_dir=checkpoints_dir)
+
+        assert await verifier.verify_exists(MEETING_M1, 11) is False
+
+    @pytest.mark.asyncio
+    async def test_과거_checkpoint_symlink는_target을_따르지_않고_false를_반환한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """checkpoint symlink는 외부 원장을 신뢰하지 않아 D2 phantom으로 처리한다."""
+        checkpoints_dir = (tmp_path / "checkpoints").resolve()
+        external = tmp_path / "external-correct.json"
+        external.write_text(
+            json.dumps({"utterances": [{"text": "외부", "start": 10.0, "end": 12.0}]}),
+            encoding="utf-8",
+        )
+        checkpoint_dir = checkpoints_dir / MEETING_M1
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "correct.json").symlink_to(external)
+        verifier = CheckpointCitationVerifier(checkpoints_dir=checkpoints_dir)
+
+        assert await verifier.verify_exists(MEETING_M1, 11) is False

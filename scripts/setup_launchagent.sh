@@ -50,6 +50,7 @@ readonly PYTHON_BIN="${VENV_DIR}/bin/python"
 readonly LOG_DIR="${HOME}/.meeting-transcriber/logs"
 readonly STDOUT_LOG="${LOG_DIR}/launchagent.stdout.log"
 readonly STDERR_LOG="${LOG_DIR}/launchagent.stderr.log"
+readonly HF_CLI_TOKEN_CACHE="${HOME}/.cache/huggingface/token"
 
 # === 유틸리티 함수 ===
 
@@ -71,6 +72,73 @@ _success() {
 }
 
 # === 사전 검증 ===
+
+validate_huggingface_cli_cache() {
+    # launchd는 .zshrc/.zprofile의 export를 상속하지 않는다. 토큰 값을 읽거나
+    # 출력하지 않고 HuggingFace CLI의 기본 사용자 캐시만 존재·권한으로 검증한다.
+    if [[ -L "${HF_CLI_TOKEN_CACHE}" || ! -f "${HF_CLI_TOKEN_CACHE}" || ! -s "${HF_CLI_TOKEN_CACHE}" || ! -r "${HF_CLI_TOKEN_CACHE}" ]]; then
+        _error "LaunchAgent용 HuggingFace CLI 토큰 캐시를 찾을 수 없습니다."
+        _error "셸 export는 로그인 자동 시작에 전달되지 않습니다. 먼저 직접 실행하세요:"
+        _error "  hf auth login"
+        exit 1
+    fi
+
+    local token_mode token_owner current_uid
+    token_mode="$(stat -f "%Lp" "${HF_CLI_TOKEN_CACHE}")"
+    if [[ ! "${token_mode}" =~ ^[0-7]{3,4}$ || "${token_mode: -2}" != "00" ]]; then
+        _error "HuggingFace CLI 토큰 캐시는 소유자 전용 권한이어야 합니다."
+        _error "토큰 값은 표시하지 않습니다. 권한만 직접 보정하세요:"
+        _error "  chmod 600 ~/.cache/huggingface/token"
+        exit 1
+    fi
+
+    token_owner="$(stat -f "%u" "${HF_CLI_TOKEN_CACHE}")"
+    current_uid="$(id -u)"
+    if [[ ! "${token_owner}" =~ ^[0-9]+$ || "${token_owner}" != "${current_uid}" ]]; then
+        _error "HuggingFace CLI 토큰 캐시는 현재 사용자 소유여야 합니다."
+        _error "토큰 값은 표시하지 않습니다. 현재 사용자 계정에서 다시 로그인하세요:"
+        _error "  hf auth login"
+        exit 1
+    fi
+
+    if ! (cd "${PROJECT_DIR}" && "${PYTHON_BIN}" -m core.huggingface_credentials --check "${HF_CLI_TOKEN_CACHE}"); then
+        _error "HuggingFace CLI 토큰 캐시가 비어 있거나 런타임에서 읽을 수 없습니다."
+        _error "현재 사용자 계정에서 다시 로그인하세요 (토큰 값은 표시하지 않음):"
+        _error "  hf auth login"
+        exit 1
+    fi
+}
+
+check_huggingface_cli_cache_status() {
+    # 상태 조회도 토큰 값·파일 내용을 읽지 않는다.
+    if [[ -L "${HF_CLI_TOKEN_CACHE}" || ! -f "${HF_CLI_TOKEN_CACHE}" || ! -s "${HF_CLI_TOKEN_CACHE}" || ! -r "${HF_CLI_TOKEN_CACHE}" ]]; then
+        _warn "HuggingFace CLI 토큰 캐시: 준비되지 않음 (hf auth login 필요)"
+        return 1
+    fi
+
+    local token_mode token_owner current_uid
+    token_mode="$(stat -f "%Lp" "${HF_CLI_TOKEN_CACHE}")"
+    if [[ ! "${token_mode}" =~ ^[0-7]{3,4}$ || "${token_mode: -2}" != "00" ]]; then
+        _warn "HuggingFace CLI 토큰 캐시: 권한 보정 필요 (chmod 600 ~/.cache/huggingface/token)"
+        return 1
+    fi
+
+
+    token_owner="$(stat -f "%u" "${HF_CLI_TOKEN_CACHE}")"
+    current_uid="$(id -u)"
+    if [[ ! "${token_owner}" =~ ^[0-9]+$ || "${token_owner}" != "${current_uid}" ]]; then
+        _warn "HuggingFace CLI 토큰 캐시: 현재 사용자 소유가 아님 (hf auth login 필요)"
+        return 1
+    fi
+
+    if [[ ! -x "${PYTHON_BIN}" ]] || ! (cd "${PROJECT_DIR}" && "${PYTHON_BIN}" -m core.huggingface_credentials --check "${HF_CLI_TOKEN_CACHE}"); then
+        _warn "HuggingFace CLI 토큰 캐시: 런타임 검증 실패 (hf auth login 필요)"
+        return 1
+    fi
+
+    _info "HuggingFace CLI 토큰 캐시: 준비됨 (값은 표시하지 않음)"
+    return 0
+}
 
 validate_environment() {
     # macOS 확인
@@ -94,6 +162,8 @@ validate_environment() {
         _error "main.py를 찾을 수 없습니다: ${MAIN_PY}"
         exit 1
     fi
+
+    validate_huggingface_cli_cache
 
     # LaunchAgents 디렉토리 확인/생성
     if [[ ! -d "${PLIST_DIR}" ]]; then
@@ -288,10 +358,11 @@ check_status() {
         _info "로드 상태: 로드되지 않음"
     fi
 
+    check_huggingface_cli_cache_status || true
+
     # 로그 파일 확인
     if [[ -f "${STDERR_LOG}" ]]; then
-        _info "최근 에러 로그 (마지막 5줄):"
-        tail -5 "${STDERR_LOG}" 2>/dev/null || true
+        _info "에러 로그: 존재 (토큰 보호를 위해 내용은 표시하지 않음)"
     fi
 }
 

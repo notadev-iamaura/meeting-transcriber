@@ -2559,6 +2559,7 @@ def test_settings_auto_processing_gui_save_and_run_now(
                         "auto_processing_run_at": "02:00",
                         "auto_processing_recent_hours": 48,
                         "auto_processing_action": "full",
+                        "auto_processing_max_items_per_run": 1,
                         "auto_processing_run_on_startup_if_missed": False,
                         "available_models": [
                             {
@@ -2630,7 +2631,8 @@ def test_settings_auto_processing_gui_save_and_run_now(
                 "processing": False,
                 "run_at": "03:30",
                 "recent_hours": 72,
-                "action": "summarize",
+                "action": "transcribe",
+                "max_items_per_run": 1,
                 "run_on_startup_if_missed": True,
                 "next_run_at": "2026-05-21T03:30:00",
                 "last_started_at": None,
@@ -2640,15 +2642,16 @@ def test_settings_auto_processing_gui_save_and_run_now(
             }
             if state["has_result"]:
                 body["last_result"] = {
-                    "action": "summarize",
+                    "action": "transcribe",
                     "recent_hours": 72,
-                    "matched": 2,
-                    "queued": 2,
+                    "matched": 3,
+                    "queued": 1,
                     "transcribed": 0,
-                    "summarized": 2,
-                    "skipped": 0,
+                    "summarized": 0,
+                    "skipped": 2,
+                    "skipped_by_limit": 2,
                     "failed": 0,
-                    "meeting_ids": ["m1", "m2"],
+                    "meeting_ids": ["m1"],
                     "errors": [],
                 }
             route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
@@ -2663,15 +2666,16 @@ def test_settings_auto_processing_gui_save_and_run_now(
                     {
                         "status": "ok",
                         "result": {
-                            "action": "summarize",
+                            "action": "transcribe",
                             "recent_hours": 72,
-                            "matched": 2,
-                            "queued": 2,
+                            "matched": 3,
+                            "queued": 1,
                             "transcribed": 0,
-                            "summarized": 2,
-                            "skipped": 0,
+                            "summarized": 0,
+                            "skipped": 2,
+                            "skipped_by_limit": 2,
                             "failed": 0,
-                            "meeting_ids": ["m1", "m2"],
+                            "meeting_ids": ["m1"],
                             "errors": [],
                         },
                     }
@@ -2703,7 +2707,11 @@ def test_settings_auto_processing_gui_save_and_run_now(
         )
         page.locator("#settingsAutoProcessingRunAt").fill("03:30")
         page.locator("#settingsAutoProcessingRecentHours").fill("72")
-        page.locator("#settingsAutoProcessingAction").select_option("summarize")
+        page.locator("#settingsAutoProcessingMaxItems").fill("3")
+        page.wait_for_function(
+            "() => document.querySelector('#settingsSaveStatus').textContent.includes('저장되지 않은 변경')"
+        )
+        page.locator("#settingsAutoProcessingAction").select_option("transcribe")
         page.evaluate(
             """() => {
                 document.querySelector('#settingsAutoProcessingRunOnStartup').checked = true;
@@ -2720,7 +2728,8 @@ def test_settings_auto_processing_gui_save_and_run_now(
         assert payload["auto_processing_enabled"] is True
         assert payload["auto_processing_run_at"] == "03:30"
         assert payload["auto_processing_recent_hours"] == 72
-        assert payload["auto_processing_action"] == "summarize"
+        assert payload["auto_processing_action"] == "transcribe"
+        assert payload["auto_processing_max_items_per_run"] == 3
         assert payload["auto_processing_run_on_startup_if_missed"] is True
         assert payload["stt_provider"] == "local"
         assert payload["stt_openai_model"] == "gpt-4o-transcribe-diarize"
@@ -2728,8 +2737,11 @@ def test_settings_auto_processing_gui_save_and_run_now(
 
         page.locator("#settingsAutoProcessingRunNow").click()
         page.wait_for_function(
-            "() => document.querySelector('#settingsAutoProcessingStatus').textContent.includes('최근 2건')"
+            "() => document.querySelector('#settingsAutoProcessingStatus').textContent.includes('큐 등록 1건')"
         )
+        status_text = page.locator("#settingsAutoProcessingStatus").inner_text()
+        assert "상한 보류 2건" in status_text
+        assert "실패 0건" not in status_text
 
     assert run_now_calls
 
@@ -3043,6 +3055,19 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
                 ),
             )
             return
+        if url.endswith("/api/meetings/meeting-a/summary"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "meeting_id": "meeting-a",
+                        "markdown": "# 안전한 회의록",
+                        "num_speakers": 1,
+                    }
+                ),
+            )
+            return
         if url.endswith("/api/meetings/meeting-a/pipeline-state"):
             route.fulfill(
                 status=200,
@@ -3073,6 +3098,13 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
         assert any("바꾸기" in text for text in groups["secondary"])
         assert any("삭제" in text for text in groups["danger"])
         assert any("다시 전사" in text for text in groups["danger"])
+
+        page.locator("#viewerTabSummary").click()
+        page.wait_for_selector("#viewerSummaryContent .summary-toolbar")
+        assert (
+            page.locator("#viewerSummaryContent .summary-toolbar").get_by_text("편집").count() == 1
+        )
+        assert page.get_by_text("요약 재생성", exact=True).count() == 0
 
 
 def test_recorded_viewer_can_choose_openai_for_only_this_meeting(

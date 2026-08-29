@@ -77,9 +77,9 @@ brew install ffmpeg
 # ollama pull exaone3.5:7.8b-instruct-q4_K_M
 # config.yaml의 llm.backend: "ollama"로 변경
 
-# 4단계: HuggingFace 토큰 (화자분리용, 아래 "수동 개입 필요" 참고)
-export HUGGINGFACE_TOKEN=hf_xxxxx
-export HF_TOKEN=hf_xxxxx
+# 4단계: HuggingFace CLI 로그인 (화자분리용, 아래 "수동 개입 필요" 참고)
+hf auth login
+chmod 600 ~/.cache/huggingface/token
 
 # 5단계: 데이터 디렉토리 생성
 mkdir -p ~/.meeting-transcriber/audio_input
@@ -95,10 +95,13 @@ chmod 700 ~/.meeting-transcriber
 1. **Ollama 앱 설치**: https://ollama.com 에서 macOS 앱 다운로드 (brew 불가)
 2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 사용자가 직접:
    - https://huggingface.co/join 가입
-   - https://huggingface.co/pyannote/speaker-diarization-3.1 → "Agree" 클릭
+   - https://huggingface.co/pyannote/speaker-diarization-community-1 → "Agree" 클릭
    - https://huggingface.co/pyannote/segmentation-3.0 → "Agree" 클릭
    - https://huggingface.co/settings/tokens → Read 토큰 발급
-   - `export HUGGINGFACE_TOKEN=hf_xxxxx` 및 `export HF_TOKEN=hf_xxxxx` 설정
+   - `hf auth login` 실행 후 토큰 입력
+   - `chmod 600 ~/.cache/huggingface/token`으로 소유자 전용 권한 확인
+   - 셸 환경변수는 수동 실행 폴백일 뿐 LaunchAgent에 전달되지 않으므로, 로그인 자동
+     시작·새벽 자동 처리에는 CLI 캐시가 필수
    - ⚠️ 토큰 없이 우회 금지 — 게이트 모델은 약관 동의가 필수이며 에이전트가
      대신 동의하거나 공개 미러를 찾아 사용하면 안 됩니다.
 3. **BlackHole 2ch 설치**: 시스템 오디오 루프백을 위한 가상 드라이버.
@@ -459,10 +462,24 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
 5. **MLX는 in-process** (기본), Ollama 사용 시 localhost만 (`http://127.0.0.1:11434`)
 6. **rumps는 메인 스레드**, FastAPI는 데몬 스레드
-7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능
+7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능. 상태 JSON의 부모는
+   no-follow `mkdirat` chain으로 만들고, 기존 상태와 새 상태를 원자 교환하며 이전
+   inode는 숨김 previous entry로 보존한다. correct 스킵 의도는 회의 ID에 결합된
+   no-replace `llm_deferred.json` marker로 별도 보존한다. 지연 LLM 산출물은 최종 이름을
+   `O_EXCL`로 직접 생성하며, 기존 부분 산출물이나 generation hard-link는 자동 재개
+   근거로 신뢰하지 않고 모두 보존·차단한다.
+   로컬 저장소는 현재 macOS 사용자 계정 소유의 신뢰 경계다. no-follow/pinned-FD는
+   symlink 탈출과 관측된 namespace 경쟁의 외부 overwrite/delete를 막지만, 같은 사용자
+   권한의 악성 프로세스가 파일·DB·코드를 변조하는 경우의 authenticity는 보장하지 않는다.
+   전체 `run()`, 지연 `run_llm_steps()`, 재색인, 재전사, 삭제, 회의록·전사문 편집은 앱과
+   `PipelineManager`가 공유하는 회의별 mutation coordinator를 반드시 거친다. 지연 요약과
+   수동 편집은 DB `completed` 상태에서만 시작하고 background task는 응답 전에 같은
+   회의의 FIFO lease 대기열에 등록한다. 재색인은 source read부터 index/checkpoint 게시까지
+   lease를 유지하고 lexical no-follow source와 pinned checkpoint writer만 사용한다.
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
-9. **HTTP readiness와 startup 감사 분리**: 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency와 설정된 단일 probe timeout으로 제한한다. 대상과 무관한 macOS 임시 HFS/APFS stat warning만 좁게 허용하고 권한·대상 mount·unknown stderr는 보류한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 수동 복구는 missing-only preserve 경로로만 수행하며 기존 row·원본·quarantine을 변경하지 않는다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
-10. **긴 회의 화자분리 실행 예산**: 실제 필드는 `diarization.timeout_seconds`이며 동적 예산은 기본 `max(1800, ceil(duration × 1.25))`다. 동적 연장분 상한은 10800초이고, 사용자가 더 크게 설정한 고정 하한은 보존한다. Zoom pause는 실행 시간에서 제외하고 timeout 로그에는 실제 실행·pause·전체 경과와 redacted worker stderr tail을 남긴다. diarize 실패는 원본·WAV·`transcribe.json`을 보존하며 재시도는 diarize부터 시작한다.
+9. **자동 처리 backlog 보존**: 자동 처리를 활성화하면 기본 `max_items_per_run=0`으로 누락분 전체를 JobProcessor 순차 큐에 등록한다. startup 감사가 예약 시각을 넘긴 경우도 `run_on_startup_if_missed=true`로 당일 1회 catch-up한다.
+10. **HTTP readiness와 startup 감사 분리**: 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency와 설정된 단일 probe timeout으로 제한한다. 대상과 무관한 macOS 임시 HFS/APFS stat warning만 좁게 허용하고 권한·대상 mount·unknown stderr는 보류한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 수동 복구는 missing-only preserve 경로로만 수행하며 기존 row·원본·quarantine을 변경하지 않는다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
+11. **긴 회의 화자분리 실행 예산**: 실제 필드는 `diarization.timeout_seconds`이며 동적 예산은 기본 `max(1800, ceil(duration × 1.25))`다. 동적 연장분 상한은 10800초이고, 사용자가 더 크게 설정한 고정 하한은 보존한다. Zoom pause는 실행 시간에서 제외하고 timeout 로그에는 실제 실행·pause·전체 경과와 redacted worker stderr tail을 남긴다. diarize 실패는 원본·WAV·`transcribe.json`을 보존하며 재시도는 diarize부터 시작한다.
 
 ### 파이프라인 흐름
 
@@ -692,8 +709,8 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 
 | 변수 | 용도 | 예시 |
 |------|------|------|
-| `HUGGINGFACE_TOKEN` | pyannote 모델 다운로드 인증 | `hf_xxxxx` |
-| `HF_TOKEN` | huggingface_hub 라이브러리 인증 | `hf_xxxxx` (위와 동일값) |
+| `HUGGINGFACE_TOKEN` | 현재 프로세스용 pyannote 인증 폴백 | `hf_xxxxx` |
+| `HF_TOKEN` | 현재 프로세스용 huggingface_hub 인증 폴백 | `hf_xxxxx` (위와 동일값) |
 | `MT_BASE_DIR` | 데이터 디렉토리 오버라이드 | `~/.meeting-transcriber` |
 | `MT_SERVER_PORT` | 웹서버 포트 오버라이드 | `8765` |
 | `MT_LLM_HOST` | Ollama 호스트 오버라이드 | `http://127.0.0.1:11434` |
@@ -762,7 +779,7 @@ python -m py_compile main.py
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
-| `TokenNotConfiguredError` | HuggingFace 토큰 미설정 | `export HUGGINGFACE_TOKEN=hf_xxx` |
+| `TokenNotConfiguredError` | HuggingFace 토큰 미설정 | `hf auth login` 후 CLI 캐시 권한 확인 |
 | pyannote 모델 403 에러 | 게이트 모델 미동의 | HuggingFace에서 모델 페이지 방문 후 Agree 클릭 |
 | `NotImplementedError: beam_size` | mlx-whisper 0.4.x | transcriber.py에서 beam_size 파라미터 제거 |
 | Ollama 연결 실패 | Ollama 미실행 (backend=ollama일 때) | Ollama 앱 실행 또는 `ollama serve` |

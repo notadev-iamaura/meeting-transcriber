@@ -14,23 +14,29 @@ import os
 import stat
 import threading
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_job_queue as _get_job_queue
-from api.dependencies import get_outputs_dir as _get_outputs_dir
+from api.dependencies import (
+    get_meeting_mutation_coordinator as _get_meeting_mutation_coordinator,
+)
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
 from core.audio_quality import (
     AudioFailureKind,
     AudioQualityStatus,
     validate_audio_quality,
 )
-from core.io_utils import atomic_write_json as _atomic_write_json
-from core.io_utils import atomic_write_text as _atomic_write_text
+from core.io_utils import atomic_write_json as _atomic_write_json  # noqa: F401
+from core.io_utils import atomic_write_json_pinned as _atomic_write_json_pinned
+from core.io_utils import atomic_write_text as _atomic_write_text  # noqa: F401
+from core.io_utils import atomic_write_text_pinned as _atomic_write_text_pinned
+from core.io_utils import read_text_no_follow
 from core.job_queue import (
     RETRANSCRIBE_OUTPUT_FILES,
     JobQueueError,
@@ -60,6 +66,35 @@ from steps.transcriber import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _meeting_mutation_lease(
+    request: Request,
+    meeting_id: str,
+) -> AsyncIterator[None]:
+    """회의별 편집·재전사·삭제를 상태 확인 전부터 완료까지 직렬화한다."""
+    _validate_meeting_id(meeting_id)
+    coordinator = _get_meeting_mutation_coordinator(request)
+    async with coordinator.lease(meeting_id):
+        yield
+
+
+async def _run_llm_steps_with_meeting_lease(
+    request: Request,
+    pipeline: Any,
+    meeting_id: str,
+    admission_started: asyncio.Event,
+) -> Any:
+    """background LLM task를 같은 회의 mutation lease 안에서 실행한다.
+
+    `admission_started`는 lease 진입을 시작하기 직전에 설정한다. 이 task가 다음
+    await에서 제어를 돌려줄 때에는 lock을 이미 획득했거나 FIFO waiter로 등록되어
+    있으므로, 응답 직후 도착한 재전사/편집이 먼저 추월할 수 없다.
+    """
+    coordinator = _get_meeting_mutation_coordinator(request)
+    admission_started.set()
+    async with coordinator.lease(meeting_id):
+        return await pipeline.run_llm_steps(meeting_id)
 
 
 class _RetranscribeStagingIntegrityError(HTTPException):
@@ -163,6 +198,31 @@ def _safe_child_path(root: Path, *parts: str) -> Path:
             detail="유효하지 않은 파일 경로입니다.",
         )
     return candidate
+
+
+def _artifact_io_http_exception(operation: str, exc: OSError) -> HTTPException:
+    """산출물 I/O 실패를 보안 차단과 일반 저장 실패로 구분한다."""
+    security_markers = (
+        "identity",
+        "symlink",
+        "안전하지 않",
+        "일반 파일이 아닙",
+        "단일 일반 파일",
+        "상위 디렉터리가 변경",
+        "경로 component",
+    )
+    is_security_error = exc.errno in {errno.ELOOP, errno.ENOTDIR} or any(
+        marker in str(exc) for marker in security_markers
+    )
+    if is_security_error:
+        return HTTPException(
+            status_code=409,
+            detail=f"SECURITY_BLOCKED: {operation} 경로가 안전하지 않습니다.",
+        )
+    return HTTPException(
+        status_code=500,
+        detail=f"{operation} 중 저장소 오류가 발생했습니다: {exc}",
+    )
 
 
 def _get_config(request: Request) -> Any:
@@ -1848,7 +1908,10 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
         ) from e
 
 
-@router.post("/meetings/{meeting_id}/re-transcribe")
+@router.post(
+    "/meetings/{meeting_id}/re-transcribe",
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
 async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
     """기존 전사 결과를 폐기하고 처음부터 다시 전사한다.
 
@@ -2264,8 +2327,7 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
     if audio_path is None:
         raise HTTPException(
             status_code=404,
-            detail=f"재생 가능한 음성 파일이 없습니다: {meeting_id} "
-            "(라이프사이클 정책에 따라 30~90일 후 삭제될 수 있습니다)",
+            detail=f"재생 가능한 음성 파일이 없습니다: {meeting_id}",
         )
 
     file_size = audio_path.stat().st_size
@@ -2322,7 +2384,10 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
     )
 
 
-@router.delete("/meetings/{meeting_id}")
+@router.delete(
+    "/meetings/{meeting_id}",
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
 async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
     """회의를 삭제한다 (검색 인덱스 + DB 레코드 + 오디오 파일 → quarantine).
 
@@ -2558,6 +2623,7 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                         config,
                         pipeline_manager._model_manager,
                         meeting_id,
+                        meeting_mutation_coordinator=(_get_meeting_mutation_coordinator(request)),
                     )
                     await asyncio.to_thread(
                         consume_reindex_required_marker,
@@ -2617,42 +2683,62 @@ async def get_transcript(
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
-    outputs_dir = config.paths.resolved_outputs_dir
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
+    checkpoints_dir = _configured_lexical_path(config, "checkpoints_dir")
 
     # 폴백 순서: corrected.json → correct.json → merge.json → transcribe.json
     candidates = [
         (
-            _safe_child_path(outputs_dir, meeting_id, "corrected.json"),
+            outputs_dir / meeting_id / "corrected.json",
             "corrected",
             False,
         ),
         (
-            _safe_child_path(checkpoints_dir, meeting_id, "correct.json"),
+            checkpoints_dir / meeting_id / "correct.json",
             "correct",
             False,
         ),
         (
-            _safe_child_path(checkpoints_dir, meeting_id, "merge.json"),
+            checkpoints_dir / meeting_id / "merge.json",
             "merge",
             True,
         ),
         (
-            _safe_child_path(checkpoints_dir, meeting_id, "transcribe.json"),
+            checkpoints_dir / meeting_id / "transcribe.json",
             "transcribe",
             True,
         ),
     ]
 
     transcript_path: Path | None = None
+    data: dict[str, Any] | None = None
     source_stage = ""
     readonly = True
     for candidate, candidate_stage, candidate_readonly in candidates:
-        if candidate.is_file():
-            transcript_path = candidate
-            source_stage = candidate_stage
-            readonly = candidate_readonly
-            break
+        try:
+            raw_candidate = await asyncio.to_thread(read_text_no_follow, candidate)
+        except FileNotFoundError:
+            continue
+        except UnicodeDecodeError as exc:
+            logger.exception("전사문 UTF-8 디코딩 실패: %s", candidate)
+            raise HTTPException(
+                status_code=500,
+                detail=f"전사문 조회 중 오류가 발생했습니다: {exc}",
+            ) from exc
+        except OSError as exc:
+            raise _artifact_io_http_exception("전사문 조회", exc) from exc
+        transcript_path = candidate
+        source_stage = candidate_stage
+        readonly = candidate_readonly
+        try:
+            data = cast(dict[str, Any], json.loads(raw_candidate))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.exception("전사문 JSON 파싱 실패: %s", candidate)
+            raise HTTPException(
+                status_code=500,
+                detail=f"전사문 조회 중 오류가 발생했습니다: {exc}",
+            ) from exc
+        break
 
     if transcript_path is None:
         raise HTTPException(
@@ -2661,10 +2747,7 @@ async def get_transcript(
         )
 
     try:
-        import asyncio
-
-        # PERF: mtime 기반 JSON 캐시 사용 (매 요청마다 파싱하지 않음)
-        data = await asyncio.to_thread(_json_cache.get, transcript_path)
+        assert data is not None
 
         if source_stage == "transcribe":
             utterances = [
@@ -2748,7 +2831,8 @@ async def get_summary(
         HTTPException: 유효하지 않은 ID(400), 파일 미존재(404), 서버 에러(500)
     """
     _validate_meeting_id(meeting_id)
-    outputs_dir = _get_outputs_dir(request)
+    config = _get_config(request)
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
     meeting_dir = outputs_dir / meeting_id
 
     # 폴백 순서: summary.md → meeting_minutes.md → summary.json → checkpoints/summarize.json
@@ -2756,57 +2840,54 @@ async def get_summary(
     minutes_md_path = meeting_dir / "meeting_minutes.md"
     summary_json_path = meeting_dir / "summary.json"
     # 체크포인트 폴백
-    config = getattr(request.app.state, "config", None)
-    checkpoints_dir = (
-        config.paths.resolved_checkpoints_dir
-        if config
-        else meeting_dir.parent.parent / "checkpoints"
-    )
+    checkpoints_dir = _configured_lexical_path(config, "checkpoints_dir")
     checkpoint_path = checkpoints_dir / meeting_id / "summarize.json"
 
-    if (
-        not summary_md_path.is_file()
-        and not minutes_md_path.is_file()
-        and not summary_json_path.is_file()
-        and not checkpoint_path.is_file()
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail=f"회의록을 찾을 수 없습니다: {meeting_id}",
-        )
-
     try:
-        import asyncio
-
         markdown = ""
-        meta: dict = {}
+        meta: dict[str, Any] = {}
+        found_artifact = False
 
         # 마크다운 파일 읽기 (폴백 순서: summary.md → meeting_minutes.md)
-        md_file = None
-        if summary_md_path.is_file():
-            md_file = summary_md_path
-        elif minutes_md_path.is_file():
-            md_file = minutes_md_path
+        for md_file in (summary_md_path, minutes_md_path):
+            try:
+                markdown = await asyncio.to_thread(read_text_no_follow, md_file)
+            except FileNotFoundError:
+                continue
+            found_artifact = True
+            break
 
-        if md_file:
-
-            def _read_md() -> str:
-                return md_file.read_text(encoding="utf-8")
-
-            markdown = await asyncio.to_thread(_read_md)
-
-        # PERF: mtime 기반 JSON 캐시 사용
-        if summary_json_path.is_file():
-            meta = await asyncio.to_thread(_json_cache.get, summary_json_path)
+        try:
+            raw_meta = await asyncio.to_thread(read_text_no_follow, summary_json_path)
+        except FileNotFoundError:
+            pass
+        else:
+            found_artifact = True
+            meta = cast(dict[str, Any], json.loads(raw_meta))
             if not markdown and meta.get("markdown"):
-                markdown = meta["markdown"]
+                markdown = str(meta["markdown"])
 
         # 체크포인트 폴백 (outputs에 없을 때)
-        if not markdown and checkpoint_path.is_file():
-            cp_data = await asyncio.to_thread(_json_cache.get, checkpoint_path)
-            if cp_data.get("markdown"):
-                markdown = cp_data["markdown"]
-                meta = cp_data
+        if not markdown:
+            try:
+                raw_checkpoint = await asyncio.to_thread(
+                    read_text_no_follow,
+                    checkpoint_path,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                found_artifact = True
+                cp_data = cast(dict[str, Any], json.loads(raw_checkpoint))
+                if cp_data.get("markdown"):
+                    markdown = str(cp_data["markdown"])
+                    meta = cp_data
+
+        if not found_artifact:
+            raise HTTPException(
+                status_code=404,
+                detail=f"회의록을 찾을 수 없습니다: {meeting_id}",
+            )
 
         return SummaryResponse(
             markdown=markdown,
@@ -2818,6 +2899,9 @@ async def get_summary(
         )
     except HTTPException:
         raise
+    except OSError as exc:
+        logger.warning("회의록 no-follow 조회 차단: %s", exc)
+        raise _artifact_io_http_exception("회의록 조회", exc) from exc
     except Exception as e:
         logger.exception(f"회의록 조회 실패: {e}")
         raise HTTPException(
@@ -2834,9 +2918,9 @@ async def get_summary(
 #
 # 저장 원칙:
 #   - 기존 파일(meeting_minutes.md, correct.json)을 직접 덮어쓴다.
-#   - 원자적 쓰기: {파일}.tmp 에 쓰고 os.replace 로 교체
-#   - 직전 버전은 {파일}.bak 으로 백업 (복구용)
-#   - force 재생성 시에도 .bak 로 보존되어 수동 편집을 복구할 수 있다.
+#   - 부모 디렉터리와 파일을 no-follow FD로 고정해 원자 교체한다.
+#   - 직전 버전은 같은 no-follow 계약으로 {파일}.bak 에 백업한다.
+#   - 기존 요약 산출물의 force 재생성은 데이터 보존을 위해 fail-closed한다.
 # ===========================================================================
 
 
@@ -2857,6 +2941,7 @@ class SummaryUpdateRequest(BaseModel):
 @router.put(
     "/meetings/{meeting_id}/summary",
     response_model=SummaryResponse,
+    dependencies=[Depends(_meeting_mutation_lease)],
 )
 async def update_summary(
     request: Request,
@@ -2868,8 +2953,8 @@ async def update_summary(
     기존 `meeting_minutes.md` (없으면 `summary.md`) 파일을 덮어쓰고,
     직전 버전을 `.bak` 로 백업한다. 이후 `GET /summary` 는 수정본을 반환한다.
 
-    주의: `POST /summarize?force=true` 로 AI 재생성 시 현재 수정본은 .bak 로만
-    남고 다시 AI 출력으로 대체된다. 프론트엔드에서 재생성 전 경고를 표시하세요.
+    기존 요약 산출물이 있는 `POST /summarize?force=true` 요청은 현재 수정본을
+    보존하고 409로 거부한다.
 
     Raises:
         HTTPException 400: 유효하지 않은 meeting_id
@@ -2877,36 +2962,59 @@ async def update_summary(
         HTTPException 500: 파일 쓰기 실패
     """
     _validate_meeting_id(meeting_id)
-    outputs_dir = _get_outputs_dir(request)
+    config = _get_config(request)
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
     meeting_dir = outputs_dir / meeting_id
 
-    if not meeting_dir.exists():
+    try:
+        meeting_stat = meeting_dir.lstat()
+    except FileNotFoundError:
         raise HTTPException(
             status_code=404,
             detail=f"회의 출력 폴더를 찾을 수 없습니다: {meeting_id}",
+        ) from None
+    if not stat.S_ISDIR(meeting_stat.st_mode):
+        raise HTTPException(
+            status_code=409,
+            detail="SECURITY_BLOCKED: 회의 출력 경로가 안전한 디렉터리가 아닙니다.",
         )
 
-    # 기존 파일 결정: meeting_minutes.md 우선, 없으면 summary.md
+    await _ensure_completed_meeting_mutation_allowed(
+        request,
+        meeting_id,
+        artifact_label="회의록 편집",
+    )
+
+    # 기존 파일 결정: meeting_minutes.md 우선, 없으면 summary.md. 존재 확인도
+    # no-follow로 수행해 정적 symlink를 다른 산출물로 오인하지 않는다.
     minutes_md = meeting_dir / "meeting_minutes.md"
     summary_md = meeting_dir / "summary.md"
-    if minutes_md.exists():
-        target = minutes_md
-    elif summary_md.exists():
-        target = summary_md
-    else:
-        # 둘 다 없으면 meeting_minutes.md 로 새로 생성
-        target = minutes_md
 
     try:
-        await asyncio.to_thread(_atomic_write_text, target, body.markdown)
+        try:
+            await asyncio.to_thread(read_text_no_follow, minutes_md)
+        except FileNotFoundError:
+            try:
+                await asyncio.to_thread(read_text_no_follow, summary_md)
+            except FileNotFoundError:
+                # 둘 다 없으면 meeting_minutes.md 로 새로 생성한다.
+                target = minutes_md
+            else:
+                target = summary_md
+        else:
+            target = minutes_md
+
+        await asyncio.to_thread(
+            _atomic_write_text_pinned,
+            target,
+            body.markdown,
+            backup=True,
+        )
         # JSON 캐시 무효화 (다음 GET 에서 수정본 반영되도록)
         _json_cache.invalidate(target)
     except OSError as exc:
         logger.exception(f"회의록 저장 실패: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"회의록 저장 중 오류가 발생했습니다: {exc}",
-        ) from exc
+        raise _artifact_io_http_exception("회의록 저장", exc) from exc
 
     logger.info(
         "회의록 수동 편집 저장: meeting_id=%s, path=%s, length=%d",
@@ -2976,39 +3084,66 @@ def _find_transcript_file(config: Any, meeting_id: str) -> tuple[Path | None, st
     Returns:
         (파일 경로, 'output'|'checkpoint') 튜플, 없으면 (None, "")
     """
-    outputs_dir = config.paths.resolved_outputs_dir
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
+    outputs_dir = _configured_lexical_path(config, "outputs_dir")
+    checkpoints_dir = _configured_lexical_path(config, "checkpoints_dir")
 
     # 1순위: outputs/{id}/corrected.json
-    corrected = _safe_child_path(outputs_dir, meeting_id, "corrected.json")
-    if corrected.is_file():
+    corrected = outputs_dir / meeting_id / "corrected.json"
+    try:
+        read_text_no_follow(corrected)
+    except FileNotFoundError:
+        pass
+    except UnicodeDecodeError:
+        # 안전한 regular file entry는 존재한다. 실제 편집 로드에서 손상 응답을 낸다.
+        return corrected, "output"
+    else:
         return corrected, "output"
 
     # 2순위: checkpoints/{id}/correct.json
-    checkpoint = _safe_child_path(checkpoints_dir, meeting_id, "correct.json")
-    if checkpoint.is_file():
+    checkpoint = checkpoints_dir / meeting_id / "correct.json"
+    try:
+        read_text_no_follow(checkpoint)
+    except FileNotFoundError:
+        pass
+    except UnicodeDecodeError:
+        return checkpoint, "checkpoint"
+    else:
         return checkpoint, "checkpoint"
 
     return None, ""
 
 
-async def _ensure_transcript_edit_allowed(request: Request, meeting_id: str) -> None:
-    """완료되지 않은 파이프라인의 전사문 수정 요청을 거부한다."""
+async def _ensure_completed_meeting_mutation_allowed(
+    request: Request,
+    meeting_id: str,
+    *,
+    artifact_label: str,
+) -> None:
+    """완료된 DB 회의에 대해서만 후속 산출물 mutation을 허용한다."""
     from core.job_queue import JobStatus
 
     queue = _get_job_queue(request)
     raw_queue = getattr(queue, "queue", queue)
     job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
-    if job is not None and job.status != JobStatus.COMPLETED.value:
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"회의를 찾을 수 없습니다: {meeting_id}",
+        )
+    if job.status != JobStatus.COMPLETED.value:
         raise HTTPException(
             status_code=409,
-            detail="파이프라인 처리 중에는 전사문을 수정할 수 없습니다. 완료 후 다시 시도해 주세요.",
+            detail=(
+                f"파이프라인 처리 중에는 {artifact_label} 작업을 시작할 수 없습니다. "
+                "완료 후 다시 시도해 주세요."
+            ),
         )
 
 
 @router.put(
     "/meetings/{meeting_id}/transcript",
     response_model=TranscriptResponse,
+    dependencies=[Depends(_meeting_mutation_lease)],
 )
 async def update_transcript(
     request: Request,
@@ -3027,20 +3162,27 @@ async def update_transcript(
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
-    target, _ = _find_transcript_file(config, meeting_id)
+    await _ensure_completed_meeting_mutation_allowed(
+        request,
+        meeting_id,
+        artifact_label="전사문 편집",
+    )
+
+    try:
+        target, _ = await asyncio.to_thread(_find_transcript_file, config, meeting_id)
+    except OSError as exc:
+        logger.warning("전사문 편집 대상 no-follow 확인 차단: %s", exc)
+        raise _artifact_io_http_exception("전사문 편집 대상 확인", exc) from exc
     if target is None:
         raise HTTPException(
             status_code=404,
             detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id} (먼저 파이프라인을 실행하세요)",
         )
 
-    await _ensure_transcript_edit_allowed(request, meeting_id)
-
     try:
         # 기존 데이터 로드 (num_speakers 등 메타 필드 보존)
         def _load() -> dict[str, Any]:
-            with open(target, encoding="utf-8") as f:
-                return cast(dict[str, Any], json.load(f))
+            return cast(dict[str, Any], json.loads(read_text_no_follow(target)))
 
         existing = await asyncio.to_thread(_load)
 
@@ -3052,10 +3194,18 @@ async def update_transcript(
         speakers = sorted({u["speaker"] for u in new_utterances if u["speaker"] != "UNKNOWN"})
         existing["num_speakers"] = len(speakers)
 
-        await asyncio.to_thread(_atomic_write_json, target, existing)
+        await asyncio.to_thread(
+            _atomic_write_json_pinned,
+            target,
+            existing,
+            backup=True,
+        )
         _json_cache.invalidate(target)
     except OSError as exc:
         logger.exception(f"전사문 저장 실패: {exc}")
+        raise _artifact_io_http_exception("전사문 저장", exc) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.exception("전사문 편집 원본 파싱 실패: %s", target)
         raise HTTPException(
             status_code=500,
             detail=f"전사문 저장 중 오류가 발생했습니다: {exc}",
@@ -3091,6 +3241,7 @@ async def update_transcript(
 @router.post(
     "/meetings/{meeting_id}/transcript/replace",
     response_model=TranscriptReplaceResponse,
+    dependencies=[Depends(_meeting_mutation_lease)],
 )
 async def replace_transcript_pattern(
     request: Request,
@@ -3126,20 +3277,27 @@ async def replace_transcript_pattern(
             detail="find와 replace가 같습니다. 다른 값을 입력해 주세요.",
         )
 
-    target, _ = _find_transcript_file(config, meeting_id)
+    await _ensure_completed_meeting_mutation_allowed(
+        request,
+        meeting_id,
+        artifact_label="전사문 편집",
+    )
+
+    try:
+        target, _ = await asyncio.to_thread(_find_transcript_file, config, meeting_id)
+    except OSError as exc:
+        logger.warning("전사문 치환 대상 no-follow 확인 차단: %s", exc)
+        raise _artifact_io_http_exception("전사문 치환 대상 확인", exc) from exc
     if target is None:
         raise HTTPException(
             status_code=404,
             detail=f"편집 가능한 전사 파일이 없습니다: {meeting_id}",
         )
 
-    await _ensure_transcript_edit_allowed(request, meeting_id)
-
     try:
 
         def _load() -> dict[str, Any]:
-            with open(target, encoding="utf-8") as f:
-                return cast(dict[str, Any], json.load(f))
+            return cast(dict[str, Any], json.loads(read_text_no_follow(target)))
 
         existing = await asyncio.to_thread(_load)
         utterances = existing.get("utterances", [])
@@ -3165,7 +3323,12 @@ async def replace_transcript_pattern(
             )
 
         existing["utterances"] = utterances
-        await asyncio.to_thread(_atomic_write_json, target, existing)
+        await asyncio.to_thread(
+            _atomic_write_json_pinned,
+            target,
+            existing,
+            backup=True,
+        )
         _json_cache.invalidate(target)
 
         # 용어집 자동 등록
@@ -3212,6 +3375,9 @@ async def replace_transcript_pattern(
 
     except OSError as exc:
         logger.exception(f"전사문 치환 실패: {exc}")
+        raise _artifact_io_http_exception("전사문 치환", exc) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.exception("전사문 치환 원본 파싱 실패: %s", target)
         raise HTTPException(
             status_code=500,
             detail=f"전사문 치환 중 오류가 발생했습니다: {exc}",
@@ -3233,7 +3399,10 @@ async def replace_transcript_pattern(
     )
 
 
-@router.post("/meetings/{meeting_id}/summarize")
+@router.post(
+    "/meetings/{meeting_id}/summarize",
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
 async def summarize_meeting(
     request: Request,
     meeting_id: str,
@@ -3248,21 +3417,35 @@ async def summarize_meeting(
     Args:
         request: FastAPI Request 객체
         meeting_id: 회의 고유 식별자
-        force: True이면 기존 요약 체크포인트를 삭제하고 재생성
+        force: 현재는 데이터 보존을 위해 항상 409로 거부한다.
 
     Returns:
         요약 시작 확인 메시지
 
     Raises:
         HTTPException: 유효하지 않은 ID(400), 상태 파일 미존재(404),
-                       체크포인트 미존재(400), 파이프라인 미초기화(503)
+                       체크포인트 미존재(400), 비파괴 실행 충돌(409),
+                       파이프라인 미초기화(503)
     """
     import asyncio
 
-    from core.pipeline import PipelineStep
+    from core.pipeline import PipelineError, PipelineStep
 
     _validate_meeting_id(meeting_id)
+    if force:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "SECURITY_BLOCKED: 기존 요약을 지우는 force 재생성은 비활성화되어 있습니다. "
+                "현재 산출물은 그대로 보존됩니다."
+            ),
+        )
     pipeline = _get_pipeline_manager(request)
+    await _ensure_completed_meeting_mutation_allowed(
+        request,
+        meeting_id,
+        artifact_label="요약 생성",
+    )
 
     # 상태 파일 / 체크포인트 존재 여부를 사전 검증
     try:
@@ -3280,32 +3463,23 @@ async def summarize_meeting(
                 detail=f"merge 체크포인트가 없습니다. 파이프라인을 먼저 실행하세요: {meeting_id}",
             )
 
-        # 이슈 I: merge 체크포인트는 있는데 state 파일만 유실된 경우 자동 재구성.
-        # 404 로 차단하지 않고 체크포인트 기반으로 state 를 복원하여 summarize 진행.
+        # 이슈 I: merge 체크포인트는 있는데 state 파일만 유실된 경우도
+        # 404로 차단하지 않는다. 다만 요청 핸들러에서 state를 먼저 쓰지 않고,
+        # 백그라운드 실행이 비파괴 충돌 검사를 끝낸 뒤 재구성한다.
         state_path = pipeline._get_state_path(meeting_id)
         if not state_path.exists():
-            logger.warning(f"state 파일 유실, merge 체크포인트 기반 재구성: {meeting_id}")
-            pipeline._rebuild_state_from_checkpoints(meeting_id)
+            try:
+                pipeline.validate_llm_steps_non_destructive(meeting_id)
+            except PipelineError as e:
+                raise HTTPException(status_code=409, detail=str(e)) from e
+            logger.warning(f"state 파일 유실, 백그라운드 재구성 예정: {meeting_id}")
 
-        # force=True: 기존 요약 체크포인트/출력 삭제 (재생성)
-        if force:
-            outputs_dir = _get_outputs_dir(request)
-            # 체크포인트 삭제
-            for cp_name in ("correct.json", "summarize.json"):
-                cp_path = pipeline._get_checkpoint_path(
-                    meeting_id,
-                    PipelineStep.CORRECT if "correct" in cp_name else PipelineStep.SUMMARIZE,
-                )
-                if cp_path.exists():
-                    cp_path.unlink()
-                    logger.info(f"기존 체크포인트 삭제: {cp_path}")
-            # 출력 파일 삭제
-            meeting_out = outputs_dir / meeting_id
-            for fname in ("summary.md", "meeting_minutes.md", "summary.json", "corrected.json"):
-                fpath = meeting_out / fname
-                if fpath.exists():
-                    fpath.unlink()
-                    logger.info(f"기존 출력 파일 삭제: {fpath}")
+        # 백그라운드 task를 만들기 전에 레거시 pass-through/stale 산출물
+        # 충돌을 동기적으로 알려준다. 기존 파일은 어떤 것도 변경하지 않는다.
+        try:
+            pipeline.validate_llm_steps_non_destructive(meeting_id)
+        except PipelineError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
 
     except HTTPException:
         raise
@@ -3317,8 +3491,14 @@ async def summarize_meeting(
         ) from e
 
     # 백그라운드 태스크로 LLM 단계 실행
+    admission_started = asyncio.Event()
     task = asyncio.create_task(
-        pipeline.run_llm_steps(meeting_id),
+        _run_llm_steps_with_meeting_lease(
+            request,
+            pipeline,
+            meeting_id,
+            admission_started,
+        ),
         name=f"llm-steps-{meeting_id}",
     )
     task.add_done_callback(_log_task_exception)
@@ -3326,6 +3506,10 @@ async def summarize_meeting(
     if running_tasks is not None:
         running_tasks.add(task)
         task.add_done_callback(running_tasks.discard)
+
+    # background task가 shared meeting lease를 획득했거나 FIFO 대기열에 들어간
+    # 뒤에만 성공 응답한다. 응답과 task 시작 사이의 재전사 추월 창을 닫는다.
+    await admission_started.wait()
 
     logger.info(f"온디맨드 요약 시작: {meeting_id} (force={force})")
 

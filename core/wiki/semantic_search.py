@@ -204,10 +204,9 @@ def _make_default_embed_query(
     """
 
     async def _embed(query: str) -> list[float]:
-        import asyncio
         import unicodedata
 
-        from core.model_manager import get_model_manager
+        from core.model_manager import await_native_inference, get_model_manager
 
         emb = config.embedding
         manager = model_manager or get_model_manager()
@@ -223,7 +222,7 @@ def _make_default_embed_query(
             return [float(v) for v in vec[0].tolist()]
 
         async with manager.acquire("e5_search", _load) as model:
-            return await asyncio.to_thread(_encode, model)
+            return await await_native_inference(_encode, model)
 
     return _embed
 

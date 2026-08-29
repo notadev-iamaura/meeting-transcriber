@@ -538,6 +538,54 @@ class TestSummaryResult:
             content = f.read()
         assert content == "## 회의 개요\n- 테스트 회의록"
 
+    def test_마크다운_symlink는_외부_파일을_덮어쓰지_않는다(
+        self,
+        tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        """SummaryResult의 직접 저장도 정적 symlink를 거부한다."""
+        result = SummaryResult(
+            markdown="## 새 회의록",
+            audio_path="/tmp/test.wav",
+            num_speakers=1,
+            speakers=["A"],
+            num_utterances=1,
+        )
+        external = tmp_path / "external.md"
+        sentinel = "외부 원문"
+        external.write_text(sentinel, encoding="utf-8")
+        target = tmp_path / "meeting_minutes.md"
+        target.symlink_to(external)
+
+        with pytest.raises(OSError):
+            result.save_markdown(target)
+
+        assert external.read_text(encoding="utf-8") == sentinel
+        assert target.is_symlink()
+
+    def test_체크포인트_symlink는_외부_파일을_덮어쓰지_않는다(
+        self,
+        tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        """SummaryResult 체크포인트 저장도 정적 symlink를 거부한다."""
+        result = SummaryResult(
+            markdown="# 테스트",
+            audio_path="/tmp/test.wav",
+            num_speakers=1,
+            speakers=["A"],
+            num_utterances=1,
+        )
+        external = tmp_path / "external.json"
+        sentinel = '{"external": true}'
+        external.write_text(sentinel, encoding="utf-8")
+        target = tmp_path / "summary.json"
+        target.symlink_to(external)
+
+        with pytest.raises(OSError):
+            result.save_checkpoint(target)
+
+        assert external.read_text(encoding="utf-8") == sentinel
+        assert target.is_symlink()
+
     def test_중첩_디렉토리_자동_생성(self, tmp_path: pytest.TempPathFactory) -> None:
         """저장 시 부모 디렉토리가 자동 생성된다."""
         result = SummaryResult(

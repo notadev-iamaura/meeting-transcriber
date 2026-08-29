@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
+from core.io_utils import read_text_no_follow
 from steps.corrector import CorrectedResult, CorrectedUtterance
 
 logger = logging.getLogger(__name__)
@@ -157,8 +158,7 @@ class ChunkedResult:
             FileNotFoundError: 체크포인트 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(checkpoint_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(checkpoint_path))
 
         chunks = [Chunk(**c) for c in data.get("chunks", [])]
 

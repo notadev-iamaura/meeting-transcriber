@@ -1,7 +1,7 @@
-"""라이프사이클 자동 실행 스케줄러.
+"""라이프사이클 자동 분류·보존 점검 스케줄러.
 
-삭제/압축 작업은 ``security.lifecycle.LifecycleManager`` 에 위임하고, 이 모듈은
-서버 생명주기에 맞춘 주기 실행과 설정 변경 반영만 담당한다.
+파일을 변경하지 않는 분류·보고는 ``security.lifecycle.LifecycleManager`` 에 위임하고,
+이 모듈은 서버 생명주기에 맞춘 주기 실행과 설정 변경 반영만 담당한다.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class LifecycleScheduler:
-    """데이터 라이프사이클 관리를 주기적으로 실행한다.
+    """데이터 라이프사이클 분류·보존 점검을 주기적으로 실행한다.
 
     ``LifecycleConfig.enabled`` 가 false 이면 태스크를 만들지 않는다. 설정 화면에서
     값을 바꾸면 ``update_config`` 로 현재 태스크를 재시작해 새 주기를 즉시 반영한다.
@@ -79,8 +79,7 @@ class LifecycleScheduler:
         self._config = config
         if was_running:
             await self.stop()
-        # 설정 저장 직후에는 데이터 삭제가 즉시 발생하지 않게 한다. run_on_startup은
-        # 실제 서버 startup 경로에서만 적용된다.
+        # run_on_startup은 실제 서버 startup 경로에서만 적용한다.
         await self.start(run_on_startup=False)
 
     async def run_once(self) -> LifecycleResult:
@@ -122,6 +121,7 @@ class LifecycleScheduler:
                 "compressed": result.compressed,
                 "deleted": result.deleted,
                 "skipped": result.skipped,
+                "skipped_reasons": result.skipped_reasons,
                 "errors": result.errors,
                 "bytes_saved": result.bytes_saved,
             },

@@ -500,6 +500,30 @@ class TestMain:
         assert call_config.server.port == 9000
         assert call_config.server.host == "0.0.0.0"
 
+    @patch("ui.menubar.run_menubar")
+    @patch("main.start_server_thread")
+    @patch("main._setup_signal_handlers")
+    @patch("main.ensure_data_directories")
+    def test_명시_config_경로를_서버에_전달한다(
+        self,
+        mock_ensure_dirs: MagicMock,
+        mock_signal: MagicMock,
+        mock_server_thread: MagicMock,
+        mock_run_menubar: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """--config 대상과 API 설정 writer 대상이 일치하도록 경로를 전달한다."""
+        custom_config = tmp_path / "custom.yaml"
+        custom_config.write_text(
+            f'paths:\n  base_dir: "{tmp_path / "meeting-data"}"\n',
+            encoding="utf-8",
+        )
+        mock_server_thread.return_value = MagicMock(spec=_ServerThread)
+
+        main(["--config", str(custom_config)])
+
+        assert mock_server_thread.call_args.kwargs["config_path"] == custom_config.resolve()
+
     @patch("main.load_config_with_overrides")
     @patch("main.setup_logging")
     def test_설정_로드_실패시_종료(

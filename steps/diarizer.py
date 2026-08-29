@@ -30,7 +30,7 @@ from typing import Any
 
 from config import AppConfig, get_config
 from core.audio_quality import AudioMeasurementError, measure_audio_duration
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.runtime_safety import pyannote_offline_cache_issue
 from steps.diarization_process_guard import (
     WorkerSupervisionTimeout,
@@ -826,7 +826,7 @@ class Diarizer:
                 # 타임아웃으로 무한 대기 방지 (STAB-029)
                 try:
                     annotation = await asyncio.wait_for(
-                        asyncio.to_thread(
+                        await_native_inference(
                             self._run_pipeline,
                             pipeline,
                             audio_path,

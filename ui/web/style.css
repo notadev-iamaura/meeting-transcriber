@@ -3732,15 +3732,7 @@ dialog.transcription-model-dialog::backdrop {
   cursor: not-allowed;
 }
 
-/* 요약 재생성 버튼 */
-.summary-regenerate {
-  margin-top: 24px;
-  padding-top: 16px;
-  border-top: 0.5px solid var(--border);
-  text-align: right;
-}
-
-.btn-regenerate {
+.btn-summary-save {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -3754,18 +3746,16 @@ dialog.transcription-model-dialog::backdrop {
   transition: all var(--duration-base) var(--ease-macos);
 }
 
-.btn-regenerate:hover {
+.btn-summary-save:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
   border-color: var(--accent);
 }
 
-.btn-regenerate:disabled,
-.btn-regenerate.loading {
+.btn-summary-save:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-
 
 /* ═══��══════════════════════════════════════
    13. 채팅뷰 — AI 대화 인터페이스

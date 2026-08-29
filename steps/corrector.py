@@ -14,7 +14,6 @@ EXAONE 전사문 보정기 모듈 (Transcript Corrector Module)
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -25,13 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
+from core.io_utils import read_text_no_follow
 from core.llm_backend import (
     LLMBackend,
     LLMConnectionError,
     LLMGenerationError,
     create_backend,
 )
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.user_settings import build_corrector_snapshot
 from steps.merger import MergedResult, MergedUtterance
 
@@ -191,8 +191,7 @@ class CorrectedResult:
             FileNotFoundError: 체크포인트 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(checkpoint_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(checkpoint_path))
 
         utterances = [CorrectedUtterance(**u) for u in data.get("utterances", [])]
 
@@ -837,7 +836,7 @@ class Corrector:
                     )
 
                     # 별도 스레드에서 실행 (동기 호출이 블로킹이므로)
-                    corrected, batch_corrected, batch_failed = await asyncio.to_thread(
+                    corrected, batch_corrected, batch_failed = await await_native_inference(
                         self._correct_batch, backend, batch, system_prompt
                     )
 

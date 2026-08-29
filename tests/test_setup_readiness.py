@@ -11,6 +11,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from config import AppConfig, DiarizationConfig, PathsConfig, RecordingConfig, STTConfig
+from core.huggingface_credentials import (
+    HuggingFaceCliCacheStatus,
+    inspect_huggingface_cli_token_cache,
+)
 from security.setup_readiness import (
     ReadinessAction,
     ReadinessCheck,
@@ -79,6 +83,32 @@ def _patch_ready_stt(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *_args, **_kwargs: ModelStatus.READY,
         raising=False,
     )
+
+
+def _patch_hf_cli_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    usable: bool,
+    exists: bool | None = None,
+    private: bool | None = None,
+    reason: str | None = None,
+) -> None:
+    """HuggingFace CLI 캐시 점검 결과를 테스트용으로 고정한다."""
+    monkeypatch.setattr(
+        "security.setup_readiness.inspect_huggingface_cli_token_cache",
+        lambda: HuggingFaceCliCacheStatus(
+            exists=usable if exists is None else exists,
+            usable=usable,
+            private=usable if private is None else private,
+            reason=reason,
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_hf_cli_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """기존 readiness 시나리오는 안전한 CLI 캐시가 준비된 상태로 시작한다."""
+    _patch_hf_cli_cache(monkeypatch, usable=True)
 
 
 class _FakeLauncherSpec:
@@ -185,6 +215,7 @@ def test_collect_setup_readiness_ready_when_required_items_present(
     _patch_coreaudio_aggregate_names(monkeypatch)
     _patch_ready_stt(monkeypatch)
     _patch_python_runtime(monkeypatch, tmp_path)
+    _patch_hf_cli_cache(monkeypatch, usable=True)
 
     report = collect_setup_readiness(config)
 
@@ -463,17 +494,60 @@ def test_setup_readiness_python_runtime_never_exposes_secret_values(
     assert secret not in str(report)
 
 
-def test_hf_token_check_never_exposes_secret(tmp_path: Path) -> None:
-    """토큰 설정 여부만 반환하고 토큰 값은 노출하지 않는다."""
+def test_hf_token_check_never_exposes_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """셸/설정 토큰만 있으면 LaunchAgent 준비 경고를 내되 값을 노출하지 않는다."""
     secret = "hf_should_not_be_serialized"
     config = _make_config(tmp_path / "meeting-data", token=secret)
+    _patch_hf_cli_cache(monkeypatch, usable=False, exists=False, private=False, reason="missing")
 
     check = check_hf_token_configured(config)
 
-    assert check.status == "pass"
+    assert check.status == "warn"
+    assert check.ready is False
     assert secret not in str(check)
     assert check.details["configured"] is True
     assert check.details["config_token_configured"] is True
+    assert check.details["launchagent_credential_ready"] is False
+
+
+def test_hf_cli_private_cache_is_launchagent_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """안전한 CLI 캐시가 있으면 shell export 없이도 준비 상태를 통과한다."""
+    _patch_hf_cli_cache(monkeypatch, usable=True)
+
+    check = check_hf_token_configured(_make_config(tmp_path / "meeting-data", token=None))
+
+    assert check.status == "pass"
+    assert check.ready is True
+    assert check.details["launchagent_credential_ready"] is True
+
+
+def test_hf_cli_blank_cache_is_not_launchagent_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """권한이 안전해도 런타임이 읽지 못하는 cache는 readiness를 통과하지 않는다."""
+    token_path = tmp_path / "token"
+    token_path.write_text(" \n\t", encoding="utf-8")
+    token_path.chmod(0o600)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "security.setup_readiness.inspect_huggingface_cli_token_cache",
+        lambda: inspect_huggingface_cli_token_cache(token_path),
+    )
+
+    check = check_hf_token_configured(_make_config(tmp_path / "meeting-data", token=None))
+
+    assert check.status == "fail"
+    assert check.ready is False
+    assert check.details["launchagent_credential_ready"] is False
+    assert check.details["persistent_cache_issue"] == "blank"
 
 
 def test_hf_token_env_names_are_reported_without_values(
@@ -483,32 +557,40 @@ def test_hf_token_env_names_are_reported_without_values(
     """환경변수 이름은 알려주되 값은 응답에 포함하지 않는다."""
     secret = "hf_env_secret_value"
     monkeypatch.setenv("HF_TOKEN", secret)
+    _patch_hf_cli_cache(monkeypatch, usable=False, exists=False, private=False, reason="missing")
     config = _make_config(tmp_path / "meeting-data", token=None)
 
     check = check_hf_token_configured(config)
 
-    assert check.status == "pass"
+    assert check.status == "warn"
+    assert check.ready is False
     assert check.details["environment_variables_present"] == ["HF_TOKEN"]
     assert secret not in str(check)
 
 
-def test_missing_token_blocks_configuration(tmp_path: Path) -> None:
+def test_missing_token_blocks_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """화자분리 토큰이 없으면 configured=false의 원인이 된다."""
     config = _make_config(tmp_path / "meeting-data", token=None)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    _patch_hf_cli_cache(monkeypatch, usable=False, exists=False, private=False, reason="missing")
 
     check = check_hf_token_configured(config)
     actions = _actions_by_id(check)
 
     assert check.status == "fail"
     assert check.ready is False
-    assert "HUGGINGFACE_TOKEN" in check.action_hint
+    assert "HuggingFace CLI" in check.action_hint
     assert actions["open_pyannote_diarization_terms"].kind == "external_link"
     assert actions["open_pyannote_diarization_terms"].value.startswith(
         "https://huggingface.co/pyannote/"
     )
     assert actions["open_hf_token_settings"].value == "https://huggingface.co/settings/tokens"
-    assert actions["export_hf_token_placeholder"].kind == "command"
-    assert "hf_xxxxx" in actions["export_hf_token_placeholder"].value
+    assert actions["login_hf_cli"].kind == "command"
+    assert actions["login_hf_cli"].value == "hf auth login"
     assert "hf_test_secret" not in str(check)
 
 

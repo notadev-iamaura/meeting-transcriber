@@ -92,6 +92,7 @@ def test_MT_WIKI_DISABLE_TOPIC이면_topic_extractor를_주입하지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """대량 백필 속도 측정을 위해 topic 추출만 환경변수로 끌 수 있다."""
+    from core.wiki.citation_verifier import CheckpointCitationVerifier
     from core.wiki.store import WikiStore
     from steps.wiki_compiler import _create_wiki_compiler_v2
 
@@ -108,6 +109,7 @@ def test_MT_WIKI_DISABLE_TOPIC이면_topic_extractor를_주입하지_않는다(
     )
 
     assert compiler._topic_extractor is None
+    assert isinstance(compiler._guard._verifier, CheckpointCitationVerifier)
 
 
 @pytest.mark.asyncio

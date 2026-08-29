@@ -1,4 +1,4 @@
-"""Wiki citation verifier — D2 인용 실재성 실제 검증 (Phase 4)
+"""Wiki citation verifier — D2 인용 실재성 실제 검증.
 
 목적: Phase 3 의 `_NullVerifier` (steps/wiki_compiler.py) 를 교체한다.
 LLM 이 출력한 [meeting:{id}@HH:MM:SS] 인용이 실제 회의의 utterances 시간대에
@@ -9,10 +9,10 @@ PRD §6 D2 핵심 요구사항:
     - timestamp ±tolerance(기본 2초) 윈도우 안에 실제 발화가 존재하는지
     - 보수적 정책: 검증 정보가 없는 회의의 인용은 False (phantom 처리)
 
-Phase 4 범위 (단일 회의):
-    utterances_by_meeting 은 **현재 회의만** 보장한다. cross-meeting 인용
-    검증(예: 결정 페이지가 다른 회의를 참조) 은 Phase 5 에서 ChromaDB
-    메타데이터 기반 verifier 로 별도 구현된다.
+현재 회의는 메모리의 보정 발화로 즉시 검증한다. 누적 위키에 다시 포함되는 과거
+회의 인용은 `checkpoints/{meeting_id}/correct.json`(없을 때만 `merge.json`)을
+no-follow로 읽어 검증한다. 체크포인트가 없거나 안전하게 읽을 수 없으면 보수적으로
+phantom 처리한다.
 
 의존성:
     - core.wiki.guard.CitationVerifier (Protocol — 만족시킴)
@@ -21,8 +21,14 @@ Phase 4 범위 (단일 회의):
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import math
+import os
+import stat
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,165 @@ def _utterance_start_sort_key(utterance: Any) -> float:
         return _read_utterance_float(utterance, "start")
     except (TypeError, ValueError, AttributeError):
         return float("inf")
+
+
+def _checkpoint_root_lexical_path(path: Path) -> Path:
+    """체크포인트 root를 symlink 해석 없이 안전한 절대 경로로 정규화한다."""
+    raw_path = Path(path).expanduser()
+    raw_text = os.fspath(raw_path)
+    raw_parts = raw_path.parts[1:] if raw_path.is_absolute() else raw_path.parts
+    if "\x00" in raw_text or any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError("안전하지 않은 체크포인트 root 경로입니다.")
+    if not raw_path.is_absolute():
+        raw_path = Path.cwd() / raw_path
+    return Path(os.path.abspath(os.fspath(raw_path)))
+
+
+def _is_safe_meeting_id(meeting_id: str) -> bool:
+    """체크포인트 direct-child 조회에 쓸 meeting_id를 검증한다."""
+    return (
+        isinstance(meeting_id, str)
+        and bool(meeting_id)
+        and meeting_id not in {".", ".."}
+        and "\x00" not in meeting_id
+        and "/" not in meeting_id
+        and "\\" not in meeting_id
+        and Path(meeting_id).name == meeting_id
+    )
+
+
+def _directory_open_flags() -> int:
+    """체크포인트 directory walk용 no-follow open flags를 반환한다."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("O_NOFOLLOW를 지원하지 않아 체크포인트를 안전하게 열 수 없습니다.")
+    return int(
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | no_follow
+    )
+
+
+def _file_open_flags() -> int:
+    """체크포인트 파일 읽기용 no-follow open flags를 반환한다."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("O_NOFOLLOW를 지원하지 않아 체크포인트를 안전하게 열 수 없습니다.")
+    return int(os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow)
+
+
+def _open_directory_tree_no_follow(path: Path) -> int:
+    """root부터 모든 경로 요소를 openat+O_NOFOLLOW로 열어 directory fd를 반환한다."""
+    directory_flags = _directory_open_flags()
+    current_fd = os.open(path.anchor, directory_flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            try:
+                if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                    raise OSError(f"디렉터리가 아닌 체크포인트 경로 요소입니다: {component}")
+            except BaseException:
+                os.close(next_fd)
+                raise
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _read_checkpoint_json_no_follow(
+    checkpoints_dir: Path,
+    meeting_id: str,
+    filename: str,
+) -> tuple[str, object | None]:
+    """안전한 direct-child checkpoint JSON을 읽는다.
+
+    Returns:
+        ("ok", payload): 정상 읽기.
+        ("missing", None): root/회의/파일이 존재하지 않음.
+        ("invalid", None): symlink·비정규 파일·읽기/JSON 오류 등 신뢰 불가 상태.
+    """
+    root_fd: int | None = None
+    meeting_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        try:
+            root_fd = _open_directory_tree_no_follow(checkpoints_dir)
+        except FileNotFoundError:
+            return ("missing", None)
+        except OSError as exc:
+            logger.warning("D2 과거 체크포인트 root 안전 열기 실패: %r", exc)
+            return ("invalid", None)
+
+        try:
+            meeting_fd = os.open(meeting_id, _directory_open_flags(), dir_fd=root_fd)
+        except FileNotFoundError:
+            return ("missing", None)
+        except OSError as exc:
+            logger.warning("D2 과거 체크포인트 회의 디렉터리 안전 열기 실패: %r", exc)
+            return ("invalid", None)
+
+        try:
+            file_fd = os.open(filename, _file_open_flags(), dir_fd=meeting_fd)
+        except FileNotFoundError:
+            return ("missing", None)
+        except OSError as exc:
+            logger.warning("D2 과거 체크포인트 파일 안전 열기 실패: %r", exc)
+            return ("invalid", None)
+
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            logger.warning("D2 과거 체크포인트가 일반 파일이 아님")
+            return ("invalid", None)
+
+        with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
+            file_fd = None
+            try:
+                return ("ok", json.load(handle))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                logger.warning("D2 과거 체크포인트 JSON 파싱 실패: %r", exc)
+                return ("invalid", None)
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if meeting_fd is not None:
+            os.close(meeting_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _checkpoint_utterances(payload: object) -> list[dict[str, Any]] | None:
+    """체크포인트 payload의 발화 시간 원장을 엄격하게 검증해 반환한다."""
+    if not isinstance(payload, Mapping):
+        return None
+    raw_utterances = payload.get("utterances")
+    if not isinstance(raw_utterances, list):
+        return None
+
+    utterances: list[dict[str, Any]] = []
+    for raw_utterance in raw_utterances:
+        if not isinstance(raw_utterance, Mapping):
+            return None
+        text = raw_utterance.get("text")
+        start_raw = raw_utterance.get("start")
+        end_raw = raw_utterance.get("end")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or start_raw is None
+            or end_raw is None
+            or isinstance(start_raw, bool)
+            or isinstance(end_raw, bool)
+        ):
+            return None
+        try:
+            start = float(start_raw)
+            end = float(end_raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+            return None
+        utterances.append({"text": text, "start": start, "end": end})
+    return utterances
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -224,3 +389,109 @@ class UtterancesCitationVerifier:
                     best_text = text
 
         return best_text
+
+
+class CheckpointCitationVerifier(UtterancesCitationVerifier):
+    """현재 발화와 과거 체크포인트를 함께 사용하는 fail-closed D2 verifier.
+
+    현재 ingest의 발화는 상위 ``UtterancesCitationVerifier``처럼 메모리에서
+    검증한다. 이 인스턴스가 모르는 과거 meeting_id는 해당 회의의 ``correct.json``을
+    우선 읽고, 파일 자체가 없을 때만 ``merge.json`` 원장을 사용한다. 어느 단계에서든
+    신뢰할 수 없는 상태면 False를 반환하므로 guard가 기존 action page를 덮어쓰지
+    못하게 한다.
+    """
+
+    _CHECKPOINT_FILENAMES: tuple[str, ...] = ("correct.json", "merge.json")
+
+    def __init__(
+        self,
+        *,
+        checkpoints_dir: Path,
+        utterances_by_meeting: dict[str, list[Utterance]] | None = None,
+        tolerance_seconds: int = 2,
+    ) -> None:
+        """현재 발화와 영속 체크포인트 root를 받는다.
+
+        Args:
+            checkpoints_dir: ``checkpoints/`` root. 모든 component를 no-follow로 연다.
+            utterances_by_meeting: 현재 ingest 등 이미 메모리에 있는 검증 원장.
+            tolerance_seconds: timestamp 허용 오차(±초).
+        """
+        super().__init__(utterances_by_meeting or {}, tolerance_seconds=tolerance_seconds)
+        try:
+            self._checkpoints_dir: Path | None = _checkpoint_root_lexical_path(checkpoints_dir)
+        except (TypeError, ValueError) as exc:
+            logger.warning("D2 과거 체크포인트 root 거부: %r", exc)
+            self._checkpoints_dir = None
+        self._checkpoint_load_attempted: set[str] = set()
+
+    async def _load_historical_meeting(self, meeting_id: str) -> None:
+        """아직 없는 과거 meeting 원장을 checkpoint에서 1회만 안전하게 적재한다."""
+        if (
+            meeting_id in self._utterances_by_meeting
+            or meeting_id in self._checkpoint_load_attempted
+        ):
+            return
+        self._checkpoint_load_attempted.add(meeting_id)
+        if self._checkpoints_dir is None or not _is_safe_meeting_id(meeting_id):
+            logger.warning("D2 phantom: 과거 meeting_id/checkpoint root를 신뢰할 수 없음")
+            return
+
+        try:
+            utterances = await asyncio.to_thread(
+                self._load_checkpoint_utterances,
+                self._checkpoints_dir,
+                meeting_id,
+            )
+        except Exception as exc:  # noqa: BLE001 -- verifier는 guard로 예외를 전파하지 않는다.
+            logger.warning("D2 과거 체크포인트 원장 읽기 실패: %r", exc)
+            return
+        if utterances is None:
+            logger.warning("D2 phantom: 과거 회의 원장을 검증할 수 없음")
+            return
+        self._utterances_by_meeting[meeting_id] = sorted(
+            utterances,
+            key=_utterance_start_sort_key,
+        )
+
+    @classmethod
+    def _load_checkpoint_utterances(
+        cls,
+        checkpoints_dir: Path,
+        meeting_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """correct 우선, 파일 부재시에만 merge 원장을 안전하게 읽는다."""
+        for filename in cls._CHECKPOINT_FILENAMES:
+            status, payload = _read_checkpoint_json_no_follow(
+                checkpoints_dir,
+                meeting_id,
+                filename,
+            )
+            if status == "missing":
+                continue
+            if status != "ok":
+                return None
+            utterances = _checkpoint_utterances(payload)
+            if utterances is None:
+                logger.warning("D2 과거 체크포인트 발화 스키마가 올바르지 않음")
+                return None
+            return utterances
+        return None
+
+    async def verify_exists(
+        self,
+        meeting_id: str,
+        timestamp_seconds: int,
+    ) -> bool:
+        """현재/과거 회의 원장을 모두 이용해 citation 실재성을 검증한다."""
+        await self._load_historical_meeting(meeting_id)
+        return await super().verify_exists(meeting_id, timestamp_seconds)
+
+    async def fetch_utterance(
+        self,
+        meeting_id: str,
+        timestamp_seconds: int,
+    ) -> str | None:
+        """현재/과거 checkpoint 원장에서 citation에 대응하는 발화를 반환한다."""
+        await self._load_historical_meeting(meeting_id)
+        return await super().fetch_utterance(meeting_id, timestamp_seconds)

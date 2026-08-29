@@ -437,12 +437,10 @@
         /**
          * 온디맨드 요약 생성을 요청한다.
          */
-        ViewerView.prototype._requestSummarize = async function (force) {
+        ViewerView.prototype._requestSummarize = async function () {
             var self = this;
             var els = self._els;
-            // force=true면 재생성 버튼에서 호출, false면 최초 생성 버튼에서 호출
-            var btn = force ? els.summaryContent.querySelector(".btn-regenerate") : els.summarizeBtn;
-            if (!btn) btn = els.summarizeBtn;
+            var btn = els.summarizeBtn;
             var originalText = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = Icons.gear + ' 요약 준비 중...';
@@ -450,7 +448,6 @@
 
             try {
                 var url = "/meetings/" + encodeURIComponent(self._meetingId) + "/summarize";
-                if (force) url += "?force=true";
                 await App.apiPost(url, {});
 
                 // 2초 간격 폴링: 진행 단계 감지 + 완료 감지 (최대 5분)
@@ -483,11 +480,9 @@
                         if (summary.markdown) {
                             clearInterval(pollTimer);
                             btn.classList.remove("loading");
-                            // _renderSummaryView 를 거쳐야 편집/재생성 툴바가 다시 그려지고
-                            // _currentSummaryMd / _summaryDirty 가 올바르게 갱신된다.
-                            // (이전 버그: innerHTML 직접 덮어쓰기 → 툴바 사라지고 dirty 추적 깨짐)
+                            // _renderSummaryView 를 거쳐야 편집 툴바가 다시 그려지고
+                            // _currentSummaryMd 가 올바르게 갱신된다.
                             self._currentSummaryMd = summary.markdown;
-                            self._summaryDirty = false;
                             els.summaryEmpty.style.display = "none";
                             if (els.summarizeBtn) els.summarizeBtn.style.display = "none";
                             self._renderSummaryView(summary.markdown);
@@ -2759,8 +2754,7 @@
                 if (sumTab) sumTab.click();
             }
             // 액션 버튼은 _loadMeetingInfo 가 다시 렌더하므로 별도 복원 불필요.
-            // _requestSummarize 가 summarizeBtn 또는 toolbar 의 재생성 버튼을 사용한다.
-            await this._requestSummarize(false);
+            await this._requestSummarize();
         };
 
         ViewerView.prototype._normalizeTranscriptStage = function (stage) {
@@ -3190,9 +3184,7 @@
                 }
 
                 // 현재 마크다운 보관 (편집 시 기준값)
-                // dirty 플래그도 리셋 — 서버의 진실을 받았으므로 깨끗한 상태
                 self._currentSummaryMd = data.markdown;
-                self._summaryDirty = false;
                 self._renderSummaryView(data.markdown);
 
                 // 요약 생성 버튼 숨기기
@@ -3215,7 +3207,7 @@
         };
 
         /**
-         * 요약 뷰 모드 (마크다운 렌더링 + 편집/재생성 버튼) 를 그린다.
+         * 요약 뷰 모드 (마크다운 렌더링 + 편집 버튼) 를 그린다.
          * @param {string} markdown
          */
         ViewerView.prototype._renderSummaryView = function (markdown) {
@@ -3224,7 +3216,8 @@
 
             els.summaryContent.innerHTML = "";
 
-            // 툴바: [편집] [재생성]
+            // 기존 산출물의 파괴적 force 재생성은 same-UID namespace 경쟁 때문에
+            // 서버가 fail-closed하므로 UI에도 안전한 편집 동작만 노출한다.
             var toolbar = document.createElement("div");
             toolbar.className = "summary-toolbar";
 
@@ -3236,21 +3229,6 @@
                 self._beginEditSummary();
             });
             toolbar.appendChild(editBtn);
-
-            var regenerateBtn = document.createElement("button");
-            regenerateBtn.type = "button";
-            regenerateBtn.className = "btn-regenerate";
-            regenerateBtn.innerHTML = Icons.gear + " 요약 재생성";
-            regenerateBtn.addEventListener("click", function () {
-                if (self._summaryDirty) {
-                    if (!window.confirm(
-                        "직접 편집한 내용이 있어요. 재생성하면 편집본이 사라지고 " +
-                        "보정 결과로 덮어쓰여요 (.bak 에 백업). 계속할까요?"
-                    )) return;
-                }
-                self._requestSummarize(true);
-            });
-            toolbar.appendChild(regenerateBtn);
 
             els.summaryContent.appendChild(toolbar);
 
@@ -3294,7 +3272,7 @@
 
             var saveBtn = document.createElement("button");
             saveBtn.type = "button";
-            saveBtn.className = "btn-regenerate";
+            saveBtn.className = "btn-summary-save";
             saveBtn.textContent = "저장";
             saveBtn.addEventListener("click", async function () {
                 // 변경 없으면 저장 스킵 + dirty 마킹도 안 함 (회귀 방지)
@@ -3321,8 +3299,6 @@
                     }
                     var data = await resp.json();
                     self._currentSummaryMd = data.markdown;
-                    // 사용자가 직접 편집해 저장한 상태 — 재생성 시 confirm 필요
-                    self._summaryDirty = true;
                     self._renderSummaryView(data.markdown);
                 } catch (e) {
                     errorBanner.show("회의록 저장 실패: " + (e.message || e));

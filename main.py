@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import uvicorn
 
-from config import AppConfig, load_config, reset_config
+from config import AppConfig, load_config, reset_config, resolve_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +308,11 @@ class _ServerThread(threading.Thread):
             self.join(timeout=min(0.05, remaining))
 
 
-def start_server_thread(config: AppConfig) -> _ServerThread:
+def start_server_thread(
+    config: AppConfig,
+    *,
+    config_path: Path | None = None,
+) -> _ServerThread:
     """FastAPI 서버를 데몬 스레드에서 시작한다.
 
     uvicorn.Server를 직접 사용하여 비메인 스레드에서도
@@ -316,6 +320,7 @@ def start_server_thread(config: AppConfig) -> _ServerThread:
 
     Args:
         config: 앱 설정
+        config_path: CLI가 실제로 사용한 설정 파일 경로
 
     Returns:
         시작된 서버 데몬 스레드 (_ServerThread)
@@ -324,7 +329,7 @@ def start_server_thread(config: AppConfig) -> _ServerThread:
 
     from api.server import create_app
 
-    app = create_app(config)
+    app = create_app(config, config_path=config_path)
 
     uv_config = uvicorn.Config(
         app,
@@ -392,9 +397,10 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("=== 한국어 로컬 AI 회의 전사 시스템 시작 ===")
 
     # 3. 설정 로드
+    config_path = resolve_config_path(args.config)
     try:
         config = load_config_with_overrides(
-            config_path=args.config,
+            config_path=config_path,
             host=args.host,
             port=args.port,
             log_level=args.log_level,
@@ -454,12 +460,12 @@ def main(argv: list[str] | None = None) -> None:
         from api.server import run_server
 
         try:
-            run_server(config)
+            run_server(config, config_path=config_path)
         except KeyboardInterrupt:
             logger.info("키보드 인터럽트 수신 — 종료")
     else:
         # 메뉴바 모드: 서버 데몬 스레드 + rumps 메인 스레드
-        server_thread = start_server_thread(config)
+        server_thread = start_server_thread(config, config_path=config_path)
 
         try:
             server_thread.wait_until_ready(config.server.startup_timeout_seconds)

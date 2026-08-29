@@ -166,7 +166,7 @@ pipeline:
   dynamic_timeout_max_seconds: 10800         # Phase 1: 최대 3시간 (폭주 방지)
   min_disk_free_gb: 1.0                      # Graceful Degradation: 디스크 최소 여유 (GB)
   min_memory_free_gb: 1.5                    # Graceful Degradation: 메모리 최소 여유 (GB) — 실측 21건 최대 가용 1.9GB 기준으로 2.0에서 완화
-  skip_llm_steps: false  # true: 전사만 진행 (LLM 단계 스킵), false: 6단계 모두 실행
+  skip_llm_steps: false  # true: correct와 의존 summarize/chunk/embed 보류, false: 전체 8단계 실행
   step_log_timing: true                      # PERF: 단계별 소요 시간 로깅 활성화
 
 # === 서멀 관리 설정 ===
@@ -228,12 +228,12 @@ recording:
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:
-  enabled: false                            # 자동 실행 여부 (기본 OFF: 기존 오디오 자동 삭제 방지)
-  hot_days: 30                               # Hot 보존 기간 (일, WAV 원본 유지)
-  warm_days: 90                              # Warm 보존 기간 (일, FLAC 압축)
-  cold_action: "delete_audio"                # Cold 정책: delete_audio | archive
+  enabled: false                            # 자동 분류·보존 점검 여부 (파일은 변경하지 않음)
+  hot_days: 30                               # Warm 분류 시작 기준 (일)
+  warm_days: 90                              # Cold 분류 시작 기준 (일)
+  cold_action: "delete_audio"                # 레거시 수동 정책(자동 실행에서는 미사용)
   interval_hours: 24                         # 자동 점검 주기 (시간)
-  run_on_startup: false                      # 서버 시작 직후 1회 실행 여부
+  run_on_startup: false                      # 서버 시작 직후 분류·보존 점검 1회 실행 여부
 
 # === 자동 전사/요약 설정 ===
 auto_processing:
@@ -241,9 +241,9 @@ auto_processing:
   run_at: "02:00"                            # 실행 시각 (HH:MM, 로컬 시간)
   recent_hours: 48                           # 최근 N시간 내 회의만 대상
   action: "full"                             # transcribe | summarize | full
-  run_on_startup_if_missed: false            # 시작 시 오늘 실행 시간이 지났으면 1회 실행
+  run_on_startup_if_missed: true             # 시작/감사 완료 시 오늘 실행 시간이 지났으면 1회 실행
   safety_checks_enabled: true                # HF offline/cache/thermal 위험 조합이면 자동처리 보류
-  max_items_per_run: 1                       # 자동 처리 1회당 최대 회의 수 (0=제한 없음)
+  max_items_per_run: 0                       # 자동 처리 1회당 큐 등록 상한 (0=제한 없음)
   block_hf_offline_cache_miss: true          # HF offline + pyannote 캐시 불완전 시 전사 자동 실행 차단
   max_thermal_batch_size: 2                  # 자동 전사 허용 thermal.batch_size 상한
   min_thermal_cooldown_seconds: 180          # 자동 전사 허용 cooldown 하한 (초)

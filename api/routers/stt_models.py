@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _request_config_path(request: Request) -> Path:
+    """앱 시작 시 고정한 설정 경로를 우선해 STT 설정 저장 경로를 반환한다."""
+    configured_path = getattr(request.app.state, "config_path", None)
+    if configured_path is not None:
+        return Path(configured_path).expanduser().resolve()
+    return _get_config_path()
+
+
 class STTModelInfo(BaseModel):
     """STT 모델 한 건의 정적 메타데이터 + 런타임 상태."""
 
@@ -291,7 +299,7 @@ async def activate_stt_model(request: Request, model_id: str) -> dict[str, Any]:
     else:
         new_path = spec_path
 
-    config_path = _get_config_path()
+    config_path = _request_config_path(request)
     try:
         try:
             with open(config_path, encoding="utf-8") as f:

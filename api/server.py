@@ -33,9 +33,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import AppConfig, get_config
+from config import AppConfig, get_config, resolve_config_path
 from core import __version__
 from core.job_queue import AsyncJobQueue, JobQueue
+from core.meeting_mutation import MeetingMutationCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from core.pipeline import PipelineManager
 
-            pipeline_manager = PipelineManager(config=config)
+            pipeline_manager = PipelineManager(
+                config=config,
+                meeting_mutation_coordinator=app.state.meeting_mutation_coordinator,
+            )
             app.state.pipeline_manager = pipeline_manager
             logger.info("PipelineManager 초기화 완료")
         except Exception as e:
@@ -470,6 +474,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(
     config: AppConfig | None = None,
     runtime_profile: RuntimeProfile = DEFAULT_RUNTIME_PROFILE,
+    *,
+    config_path: Path | None = None,
 ) -> FastAPI:
     """FastAPI 애플리케이션을 생성하고 설정한다.
 
@@ -479,6 +485,8 @@ def create_app(
         config: 앱 설정. None이면 config.yaml에서 로드.
         runtime_profile: 실행 프로필. desktop은 전체 런타임, api-test/unit-test는
             API 테스트용 경량 런타임.
+        config_path: CLI에서 실제로 로드한 설정 파일 경로. 지정되면 설정 변경
+            API와 STT 모델 선택기가 같은 파일에만 저장한다.
 
     Returns:
         설정 완료된 FastAPI 인스턴스
@@ -500,6 +508,9 @@ def create_app(
     # config를 app.state에 저장 (lifespan에서 접근)
     app.state.config = config
     app.state.runtime_profile = runtime_profile
+    app.state.meeting_mutation_coordinator = MeetingMutationCoordinator()
+    if config_path is not None:
+        app.state.config_path = resolve_config_path(config_path)
 
     # CORS 미들웨어 — localhost만 허용
     _setup_cors(app, config)
@@ -817,20 +828,25 @@ def _setup_spa_routes(app: FastAPI) -> None:
 # === uvicorn 실행 헬퍼 ===
 
 
-def run_server(config: AppConfig | None = None) -> None:
+def run_server(
+    config: AppConfig | None = None,
+    *,
+    config_path: Path | None = None,
+) -> None:
     """uvicorn으로 FastAPI 서버를 실행한다.
 
     단독 실행 시 사용. main.py에서는 데몬 스레드로 별도 실행.
 
     Args:
         config: 앱 설정. None이면 config.yaml에서 로드.
+        config_path: CLI가 실제로 사용한 설정 파일 경로.
     """
     import uvicorn
 
     if config is None:
         config = get_config()
 
-    app = create_app(config)
+    app = create_app(config, config_path=config_path)
 
     uvicorn.run(
         app,

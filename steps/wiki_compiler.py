@@ -70,7 +70,7 @@ def _create_wiki_compiler_v2(
         WikiCompilerV2 인스턴스 (또는 mock).
     """
     # Lazy import — 실제 LLM 호출 경로에서만 로드
-    from core.wiki.citation_verifier import UtterancesCitationVerifier
+    from core.wiki.citation_verifier import CheckpointCitationVerifier
     from core.wiki.compiler import WikiCompilerV2
     from core.wiki.extractors.action_item import ActionItemExtractor
     from core.wiki.extractors.decision import DecisionExtractor
@@ -84,11 +84,14 @@ def _create_wiki_compiler_v2(
 
     llm = MlxWikiClient(config=config, model_manager=model_manager)
 
-    # Phase 4: 실제 utterances 기반 verifier
+    # 현재 회의는 실제 utterances로, 누적 페이지의 과거 인용은 안전하게 읽은
+    # correct/merge checkpoint 원장으로 D2를 검증한다. 원장이 없거나 신뢰할 수
+    # 없으면 false를 반환하여 guard가 기존 페이지를 보존한다.
     utts_map: dict[str, list[Any]] = {}
     if utterances and meeting_id:
         utts_map[meeting_id] = utterances
-    verifier = UtterancesCitationVerifier(
+    verifier = CheckpointCitationVerifier(
+        checkpoints_dir=config.paths.resolved_checkpoints_dir,
         utterances_by_meeting=utts_map,
         tolerance_seconds=2,
     )

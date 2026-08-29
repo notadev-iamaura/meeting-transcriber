@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 
 from config import AppConfig
 from core.coreaudio_helper import get_aggregate_device_names
+from core.huggingface_credentials import inspect_huggingface_cli_token_cache
 from core.stt_model_registry import STT_MODELS
 from core.stt_model_status import (
     ModelStatus,
@@ -181,7 +182,7 @@ def _ffmpeg_actions() -> tuple[ReadinessAction, ...]:
 
 
 def _hf_token_actions() -> tuple[ReadinessAction, ...]:
-    """HuggingFace 토큰 설정 안내 액션을 반환한다."""
+    """HuggingFace CLI 영구 자격 증명 설정 안내 액션을 반환한다."""
     return (
         ReadinessAction(
             id="open_pyannote_diarization_terms",
@@ -202,11 +203,21 @@ def _hf_token_actions() -> tuple[ReadinessAction, ...]:
             value=_HF_TOKEN_SETTINGS_URL,
         ),
         ReadinessAction(
-            id="export_hf_token_placeholder",
-            label="환경변수 설정 예시",
+            id="login_hf_cli",
+            label="HuggingFace CLI 로그인",
             kind="command",
-            value="export HUGGINGFACE_TOKEN=hf_xxxxx\nexport HF_TOKEN=hf_xxxxx",
-            description="실제 토큰 값은 readiness 응답이나 화면에 표시하지 않습니다.",
+            value="hf auth login",
+            description=(
+                "로그인한 사용자의 안전한 CLI 캐시에만 토큰을 저장합니다. "
+                "LaunchAgent는 셸 export를 상속하지 않습니다."
+            ),
+        ),
+        ReadinessAction(
+            id="fix_hf_cli_cache_permissions",
+            label="CLI 캐시 권한 점검 예시",
+            kind="command",
+            value="chmod 600 ~/.cache/huggingface/token",
+            description="토큰 캐시는 소유자만 읽을 수 있어야 합니다.",
         ),
     )
 
@@ -480,33 +491,55 @@ def check_python_runtime() -> ReadinessCheck:
 
 
 def check_hf_token_configured(config: AppConfig) -> ReadinessCheck:
-    """HuggingFace 토큰 설정 여부를 값 노출 없이 확인한다."""
+    """LaunchAgent가 사용할 HuggingFace CLI 캐시를 값 노출 없이 확인한다."""
     env_present = [name for name in _HF_TOKEN_ENV_NAMES if bool(os.environ.get(name))]
     config_token_configured = bool(getattr(config.diarization, "huggingface_token", None))
-    configured = bool(env_present or config_token_configured)
+    cache_status = inspect_huggingface_cli_token_cache()
+    configured = bool(env_present or config_token_configured or cache_status.usable)
     details = {
         "configured": configured,
         "environment_variables": list(_HF_TOKEN_ENV_NAMES),
         "environment_variables_present": env_present,
         "config_token_configured": config_token_configured,
+        "persistent_cache_exists": cache_status.exists,
+        "persistent_cache_private": cache_status.private,
+        "launchagent_credential_ready": cache_status.usable,
+        "persistent_cache_issue": cache_status.reason,
     }
 
-    if configured:
+    if cache_status.usable:
         return ReadinessCheck(
             id="hf_token_env",
             status="pass",
             ready=True,
-            message="화자분리용 HuggingFace 토큰이 설정되어 있습니다.",
+            message="화자분리용 HuggingFace CLI 영구 자격 증명이 준비되었습니다.",
             details=details,
+        )
+
+    if configured:
+        return ReadinessCheck(
+            id="hf_token_env",
+            status="warn",
+            ready=False,
+            message=(
+                "현재 프로세스의 HuggingFace 토큰은 감지됐지만, "
+                "LaunchAgent용 영구 CLI 캐시가 준비되지 않았습니다."
+            ),
+            action_hint=(
+                "LaunchAgent는 셸 export를 읽지 않습니다. HuggingFace CLI 로그인 후 "
+                "토큰 캐시를 소유자 전용 권한으로 준비하세요."
+            ),
+            details=details,
+            actions=_hf_token_actions(),
         )
 
     return ReadinessCheck(
         id="hf_token_env",
         status="fail",
         ready=False,
-        message="화자분리용 HuggingFace 토큰이 설정되지 않았습니다.",
+        message="화자분리용 HuggingFace CLI 영구 자격 증명이 설정되지 않았습니다.",
         action_hint=(
-            "pyannote 모델 약관에 동의한 뒤 HUGGINGFACE_TOKEN 또는 HF_TOKEN 환경변수를 설정하세요."
+            "pyannote 모델 약관에 동의한 뒤 HuggingFace CLI로 로그인해 영구 캐시를 준비하세요."
         ),
         details=details,
         actions=_hf_token_actions(),
