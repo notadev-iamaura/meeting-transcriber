@@ -40,7 +40,15 @@ from core.audio_quality import (
     measure_audio_duration,
     validate_audio_quality,
 )
-from core.io_utils import atomic_write_json, atomic_write_text
+from core.io_utils import (
+    atomic_write_json,
+    atomic_write_text,
+    atomic_write_text_pinned,
+    ensure_directory_no_follow,
+    publish_text_no_replace,
+    read_text_no_follow,
+)
+from core.meeting_mutation import MeetingMutationCoordinator
 from core.model_manager import ModelLoadManager, get_model_manager
 from core.retry_policy import should_retry
 from steps.transcriber import (
@@ -422,25 +430,24 @@ class PipelineState:
     def save(self, output_path: Path, *, indent: int | None = 2) -> None:
         """파이프라인 상태를 JSON 파일로 원자적으로 저장한다.
 
-        임시 파일에 먼저 기록한 뒤 os.replace()로 원자적 교체를 수행한다.
-        프로세스 크래시 시에도 기존 체크포인트가 손상되지 않는다.
+        no-follow로 고정한 부모 디렉터리 FD 안에서 최초 상태를 직접 만들거나 기존
+        상태와 새 상태를 원자 교환한다. lexical parent/source-name 경쟁이 발생해도
+        외부 경로 또는 이전 상태 entry를 제거하지 않는다.
 
         Args:
             output_path: 저장할 JSON 파일 경로
             indent: JSON 들여쓰기. None 이면 compact JSON 으로 저장한다.
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         self.updated_at = datetime.now().isoformat()
         dump_kwargs: dict[str, Any] = {"ensure_ascii": False, "indent": indent}
         if indent is None:
             dump_kwargs["separators"] = (",", ":")
 
-        # 같은 디렉터리의 예측 불가능한 exclusive temp를 사용하는 공용 helper로
-        # 원자 교체한다. 고정 `.tmp` symlink를 통한 외부 파일 overwrite를 막는다.
-        atomic_write_text(
+        # 부모 디렉터리 생성부터 no-follow FD chain을 사용하고 같은 FD 안에서
+        # 상태를 교환한다. 검사 뒤 외부 symlink로 바뀐 lexical 경로는 따르지 않는다.
+        atomic_write_text_pinned(
             output_path,
             json.dumps(self.to_dict(), **dump_kwargs),
-            backup=False,
         )
         logger.debug(f"파이프라인 상태 저장 (원자적 쓰기): {output_path}")
 
@@ -458,8 +465,7 @@ class PipelineState:
             FileNotFoundError: 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(state_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(state_path))
         return cls(**data)
 
 
@@ -468,6 +474,10 @@ class PipelineState:
 
 class PipelineError(Exception):
     """파이프라인 실행 중 발생하는 에러의 기본 클래스."""
+
+
+class PipelineStateWriteError(PipelineError):
+    """파이프라인 상태 저장의 경로·원자성 검증이 실패했음을 나타낸다."""
 
 
 class PipelineStepError(PipelineError):
@@ -538,6 +548,7 @@ class PipelineManager:
         config: AppConfig | None = None,
         model_manager: ModelLoadManager | None = None,
         on_resource_warning: ResourceWarningCallback | None = None,
+        meeting_mutation_coordinator: MeetingMutationCoordinator | None = None,
     ) -> None:
         """PipelineManager를 초기화한다.
 
@@ -545,9 +556,13 @@ class PipelineManager:
             config: 애플리케이션 설정 (None이면 get_config() 사용)
             model_manager: 모델 매니저 (None이면 get_model_manager() 사용)
             on_resource_warning: 리소스 경고 발생 시 호출할 콜백
+            meeting_mutation_coordinator: API·scheduler와 공유할 회의별 mutation coordinator
         """
         self._config = config or get_config()
         self._model_manager = model_manager or get_model_manager()
+        self._meeting_mutation_coordinator = (
+            meeting_mutation_coordinator or MeetingMutationCoordinator()
+        )
 
         # 파이프라인 설정 캐시
         self._checkpoint_enabled = self._config.pipeline.checkpoint_enabled
@@ -593,6 +608,11 @@ class PipelineManager:
     def update_stt_config(self, stt_config: Any) -> None:
         """다음 전사부터 사용할 STT 설정을 원자적인 모델 복사로 교체한다."""
         self._config = self._config.model_copy(update={"stt": stt_config})
+
+    @property
+    def meeting_mutation_coordinator(self) -> MeetingMutationCoordinator:
+        """API·scheduler가 공유하는 회의별 mutation coordinator를 반환한다."""
+        return self._meeting_mutation_coordinator
 
     def _generate_meeting_id(self, audio_path: Path) -> str:
         """회의 고유 식별자를 생성한다.
@@ -871,6 +891,101 @@ class PipelineManager:
             label="파이프라인 상태",
         )
 
+    def _get_llm_deferred_marker_path(self, meeting_id: str) -> Path:
+        """correct 의존 산출물의 지연 생성을 나타내는 영속 marker 경로를 반환한다."""
+        checkpoint_dir = self._get_storage_child(
+            self._checkpoints_dir,
+            meeting_id,
+            label="체크포인트",
+        )
+        return self._validate_storage_artifact(
+            checkpoint_dir / "llm_deferred.json",
+            label="지연 LLM marker",
+        )
+
+    @staticmethod
+    def _llm_deferred_marker_payload(meeting_id: str) -> dict[str, Any]:
+        """회의에 결합된 지연 LLM marker의 고정 payload를 반환한다."""
+        return {
+            "schema_version": 1,
+            "meeting_id": meeting_id,
+            "deferred_steps": [
+                PipelineStep.CORRECT.value,
+                PipelineStep.SUMMARIZE.value,
+                PipelineStep.CHUNK.value,
+                PipelineStep.EMBED.value,
+            ],
+        }
+
+    def _validate_llm_deferred_marker(self, marker_path: Path, meeting_id: str) -> None:
+        """marker가 해당 회의의 정확한 지연 의도인지 fail-closed로 검증한다."""
+        try:
+            payload = json.loads(read_text_no_follow(marker_path))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PipelineError(
+                "SECURITY_BLOCKED: 지연 LLM marker를 안전하게 검증할 수 없습니다"
+            ) from exc
+        if payload != self._llm_deferred_marker_payload(meeting_id):
+            raise PipelineError(
+                "SECURITY_BLOCKED: 지연 LLM marker가 현재 회의의 고정 계약과 다릅니다"
+            )
+
+    def _ensure_llm_deferred_marker(self, meeting_id: str) -> None:
+        """state 유실 뒤에도 지연 LLM/index 의도를 알릴 no-replace marker를 만든다."""
+        marker_path = self._get_llm_deferred_marker_path(meeting_id)
+        try:
+            publish_text_no_replace(
+                marker_path,
+                json.dumps(
+                    self._llm_deferred_marker_payload(meeting_id),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        except FileExistsError:
+            # 기존 entry를 교체하지 않고 정확한 고정 marker인지 읽기만 한다.
+            self._validate_llm_deferred_marker(marker_path, meeting_id)
+
+    def _llm_deferred_marker_exists(self, meeting_id: str) -> bool:
+        """현재 회의에 결합된 지연 LLM marker가 존재하는지 반환한다."""
+        marker_path = self._get_llm_deferred_marker_path(meeting_id)
+        try:
+            self._validate_llm_deferred_marker(marker_path, meeting_id)
+        except PipelineError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                return False
+            raise
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _llm_deferred_pending(self, meeting_id: str) -> bool:
+        """marker 기반 지연 의도가 남아 있는지 반환한다.
+
+        writable namespace의 기존 산출물은 provenance로 신뢰하지 않는다. state가
+        유실된 경우 marker가 있으면 skipped 의도를 복원하고, 이미 생긴 산출물은
+        이후 conflict 검사에서 모두 보존한 채 차단한다.
+        """
+        return self._llm_deferred_marker_exists(meeting_id)
+
+    def _llm_refresh_artifact_paths(self, meeting_id: str) -> tuple[Path, ...]:
+        """지연 LLM 실행이 새로 게시할 모든 canonical 산출물 경로를 반환한다."""
+        output_dir = self._get_output_dir(meeting_id)
+        return (
+            self._get_checkpoint_path(meeting_id, PipelineStep.CORRECT),
+            self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE),
+            self._get_checkpoint_path(meeting_id, PipelineStep.CHUNK),
+            self._get_checkpoint_path(meeting_id, PipelineStep.EMBED),
+            self._validate_storage_artifact(
+                output_dir / "summary.md",
+                label="지연 요약 출력",
+            ),
+            self._validate_storage_artifact(
+                output_dir / "meeting_minutes.md",
+                label="지연 요약 출력",
+            ),
+        )
+
     def _save_state(self, state: PipelineState, state_path: Path) -> None:
         """파이프라인 상태를 설정된 JSON 형식으로 저장한다."""
         expected_path = self._get_state_path(state.meeting_id)
@@ -879,16 +994,34 @@ class PipelineManager:
                 f"상태 파일이 설정된 체크포인트 경로 밖을 가리킵니다: {state_path}",
                 failure_kind=AudioFailureKind.SECURITY_BLOCKED,
             )
-        expected_path.parent.mkdir(parents=True, exist_ok=True)
-        # mkdir 도중 경로가 바뀌거나 symlink를 따라간 경우 쓰기 전에 차단한다.
-        expected_path = self._get_state_path(state.meeting_id)
         if self._checkpoint_json_indent == 2:
-            state.save(expected_path)
+            try:
+                state.save(expected_path)
+            except OSError as exc:
+                raise PipelineStateWriteError(
+                    f"파이프라인 상태를 안전하게 저장할 수 없습니다: {expected_path}"
+                ) from exc
             return
-        state.save(expected_path, indent=self._checkpoint_json_indent)
+        try:
+            state.save(expected_path, indent=self._checkpoint_json_indent)
+        except OSError as exc:
+            raise PipelineStateWriteError(
+                f"파이프라인 상태를 안전하게 저장할 수 없습니다: {expected_path}"
+            ) from exc
 
-    def _save_result_checkpoint(self, result: Any, checkpoint_path: Path) -> None:
-        """결과 checkpoint를 final symlink 검증 뒤 unique temp로 원자 저장한다."""
+    def _save_result_checkpoint(
+        self,
+        result: Any,
+        checkpoint_path: Path,
+        *,
+        exclusive_publish: bool = False,
+    ) -> None:
+        """결과 checkpoint를 검증한 저장소에 저장한다.
+
+        ``exclusive_publish``는 지연 LLM처럼 기존 산출물을 절대 교체하면 안 되는
+        경로에서 사용한다. 이 경우 최종 이름을 직접 no-replace로 게시하며 경쟁
+        entry 또는 실패한 부분 산출물이 있으면 그대로 보존하고 실패한다.
+        """
         safe_path = self._validate_storage_artifact(
             checkpoint_path,
             label="저장 대상 체크포인트",
@@ -897,14 +1030,20 @@ class PipelineManager:
         payload = to_dict() if callable(to_dict) else None
         if isinstance(payload, dict):
             if self._checkpoint_json_indent is None:
-                atomic_write_text(
+                content = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if exclusive_publish:
+                    publish_text_no_replace(safe_path, content)
+                else:
+                    atomic_write_text(safe_path, content, backup=False)
+                return
+            if exclusive_publish:
+                publish_text_no_replace(
                     safe_path,
-                    json.dumps(
-                        payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    backup=False,
+                    json.dumps(payload, ensure_ascii=False, indent=self._checkpoint_json_indent),
                 )
                 return
             atomic_write_json(
@@ -916,6 +1055,8 @@ class PipelineManager:
             return
 
         # 테스트 double/legacy 결과 타입 호환. production 결과는 모두 to_dict()를 제공한다.
+        if exclusive_publish:
+            raise PipelineError("exclusive checkpoint 결과를 JSON으로 직렬화할 수 없습니다")
         result.save_checkpoint(safe_path)
 
     async def _acquire_llm_lock_with_timeout(self) -> None:
@@ -1049,7 +1190,13 @@ class PipelineManager:
 
         return TranscriptResult.from_checkpoint(checkpoint_path)
 
-    def _rebuild_state_from_checkpoints(self, meeting_id: str) -> PipelineState:
+    def _rebuild_state_from_checkpoints(
+        self,
+        meeting_id: str,
+        *,
+        trust_llm_checkpoints: bool = True,
+        persist: bool = True,
+    ) -> PipelineState:
         """pipeline_state.json 이 유실되었을 때 기존 체크포인트로 상태를 재구성한다.
 
         이슈 I 대응: 과거 파이프라인 초기 버전에서 생성된 회의 등은 merge 체크포인트는
@@ -1058,9 +1205,13 @@ class PipelineManager:
 
         Args:
             meeting_id: 회의 ID
+            trust_llm_checkpoints: false이면 state 유실 지연 실행에서 기존
+                correct/summarize/chunk/embed를 완료 근거로 사용하지 않음
+            persist: false이면 복구 상태를 메모리에서만 구성하고 파일을
+                생성하지 않음
 
         Returns:
-            재구성된 PipelineState (파일에도 저장됨)
+            재구성된 PipelineState. ``persist=True``이면 파일에도 저장됨.
 
         Raises:
             PipelineError: 회의 디렉토리조차 없어 재구성이 불가능할 때
@@ -1080,9 +1231,30 @@ class PipelineManager:
 
         # 존재하는 체크포인트를 순회하며 completed_steps 복원
         for step in PipelineStep:
+            if not trust_llm_checkpoints and step in {
+                PipelineStep.CORRECT,
+                PipelineStep.SUMMARIZE,
+                PipelineStep.CHUNK,
+                PipelineStep.EMBED,
+            }:
+                continue
             cp = self._get_checkpoint_path(meeting_id, step)
             if cp.exists() and step.value not in state.completed_steps:
                 state.completed_steps.append(step.value)
+
+        # skip 의도는 pipeline_state.json과 독립된 no-replace marker로 복구한다.
+        # 기존 부분 산출물은 provenance로 재사용하지 않고 conflict 검사에서 보존·차단한다.
+        if self._llm_deferred_pending(meeting_id):
+            for step in (
+                PipelineStep.CORRECT,
+                PipelineStep.SUMMARIZE,
+                PipelineStep.CHUNK,
+                PipelineStep.EMBED,
+            ):
+                if step.value not in state.completed_steps:
+                    state.completed_steps.append(step.value)
+                if step.value not in state.skipped_steps:
+                    state.skipped_steps.append(step.value)
 
         if PipelineStep.TRANSCRIBE.value in state.completed_steps:
             restored = self._read_transcript_checkpoint(meeting_id)
@@ -1091,11 +1263,14 @@ class PipelineManager:
                     restored
                 )
 
-        # merge 체크포인트가 있으면 최소한 전사까지는 완료된 것으로 간주
-        self._save_state(state, state_path)
-        logger.info(
-            f"상태 파일 재구성 완료: meeting_id={meeting_id}, 완료 단계={state.completed_steps}"
-        )
+        # 지연 실행은 충돌 검사가 끝나기 전에 state를 생성하지 않도록
+        # persist=False로 구성한 뒤 실행 직전에 처음 저장한다.
+        if persist:
+            self._save_state(state, state_path)
+            logger.info(
+                f"상태 파일 재구성 완료: meeting_id={meeting_id}, "
+                f"완료 단계={state.completed_steps}"
+            )
         return state
 
     def _get_output_dir(self, meeting_id: str) -> Path:
@@ -1822,12 +1997,17 @@ class PipelineManager:
         self,
         merged_result: Any,
         checkpoint_path: Path,
+        *,
+        restore_checkpoint: bool = True,
+        exclusive_publish: bool = False,
     ) -> Any:
         """보정 단계: EXAONE LLM으로 전사문을 보정한다.
 
         Args:
             merged_result: 병합 결과
             checkpoint_path: 체크포인트 저장 경로
+            restore_checkpoint: 기존 체크포인트 복원 여부
+            exclusive_publish: 기존 entry를 교체하지 않는 새 파일 게시 여부
 
         Returns:
             CorrectedResult 인스턴스
@@ -1835,8 +2015,13 @@ class PipelineManager:
         from steps.corrector import CorrectedResult, Corrector
 
         # 체크포인트 복원 시도
-        if self._checkpoint_enabled and checkpoint_path.exists():
+        if self._checkpoint_enabled and restore_checkpoint and checkpoint_path.exists():
             logger.info(f"보정 체크포인트 복원: {checkpoint_path}")
+            if exclusive_publish:
+                raise PipelineError(
+                    "SECURITY_BLOCKED: 기존 지연 보정 산출물의 provenance를 확인할 수 없어 "
+                    "자동 복구하지 않습니다"
+                )
             return CorrectedResult.from_checkpoint(checkpoint_path)
 
         corrector = Corrector(self._config, self._model_manager)
@@ -1844,7 +2029,11 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            self._save_result_checkpoint(result, checkpoint_path)
+            self._save_result_checkpoint(
+                result,
+                checkpoint_path,
+                exclusive_publish=exclusive_publish,
+            )
 
         return result
 
@@ -1853,6 +2042,9 @@ class PipelineManager:
         corrected_result: Any,
         checkpoint_path: Path,
         output_dir: Path,
+        *,
+        restore_checkpoint: bool = True,
+        exclusive_publish: bool = False,
     ) -> Any:
         """요약 단계: EXAONE LLM으로 마크다운 회의록을 생성한다.
 
@@ -1860,6 +2052,8 @@ class PipelineManager:
             corrected_result: 보정 결과
             checkpoint_path: 체크포인트 저장 경로
             output_dir: 회의록 마크다운 저장 디렉토리
+            restore_checkpoint: 기존 체크포인트 복원 여부
+            exclusive_publish: 기존 entry를 교체하지 않는 새 파일 게시 여부
 
         Returns:
             SummaryResult 인스턴스
@@ -1867,8 +2061,13 @@ class PipelineManager:
         from steps.summarizer import Summarizer, SummaryResult
 
         # 체크포인트 복원 시도
-        if self._checkpoint_enabled and checkpoint_path.exists():
+        if self._checkpoint_enabled and restore_checkpoint and checkpoint_path.exists():
             logger.info(f"요약 체크포인트 복원: {checkpoint_path}")
+            if exclusive_publish:
+                raise PipelineError(
+                    "SECURITY_BLOCKED: 기존 지연 요약 산출물의 provenance를 확인할 수 없어 "
+                    "자동 복구하지 않습니다"
+                )
             return SummaryResult.from_checkpoint(checkpoint_path)
 
         summarizer = Summarizer(self._config, self._model_manager)
@@ -1876,11 +2075,24 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            self._save_result_checkpoint(result, checkpoint_path)
+            self._save_result_checkpoint(
+                result,
+                checkpoint_path,
+                exclusive_publish=exclusive_publish,
+            )
 
         # 마크다운 회의록 파일 저장
-        markdown_path = output_dir / "meeting_minutes.md"
-        result.save_markdown(markdown_path)
+        markdown_path = self._validate_storage_artifact(
+            output_dir / "meeting_minutes.md",
+            label="요약 출력",
+        )
+        if exclusive_publish:
+            markdown = getattr(result, "markdown", None)
+            if not isinstance(markdown, str):
+                raise PipelineError("exclusive 요약 결과에 markdown 문자열이 없습니다")
+            publish_text_no_replace(markdown_path, markdown)
+        else:
+            result.save_markdown(markdown_path)
 
         return result
 
@@ -1926,6 +2138,9 @@ class PipelineManager:
         checkpoint_path: Path,
         meeting_id: str,
         date: str,
+        *,
+        restore_checkpoint: bool = True,
+        exclusive_publish: bool = False,
     ) -> Any:
         """청크 분할 단계: 보정된 전사문을 RAG 검색용 청크로 분할한다.
 
@@ -1937,6 +2152,8 @@ class PipelineManager:
             checkpoint_path: 체크포인트 저장 경로
             meeting_id: 회의 식별자
             date: 회의 날짜 (YYYY-MM-DD)
+            restore_checkpoint: 기존 체크포인트 복원 여부
+            exclusive_publish: 기존 entry를 교체하지 않는 새 파일 게시 여부
 
         Returns:
             ChunkedResult 인스턴스
@@ -1944,8 +2161,13 @@ class PipelineManager:
         from steps.chunker import ChunkedResult, Chunker
 
         # 체크포인트 복원 시도
-        if self._checkpoint_enabled and checkpoint_path.exists():
+        if self._checkpoint_enabled and restore_checkpoint and checkpoint_path.exists():
             logger.info(f"청크 체크포인트 복원: {checkpoint_path}")
+            if exclusive_publish:
+                raise PipelineError(
+                    "SECURITY_BLOCKED: 기존 지연 청크 산출물의 provenance를 확인할 수 없어 "
+                    "자동 복구하지 않습니다"
+                )
             return ChunkedResult.from_checkpoint(checkpoint_path)
 
         chunker = Chunker(self._config)
@@ -1953,7 +2175,11 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            self._save_result_checkpoint(result, checkpoint_path)
+            self._save_result_checkpoint(
+                result,
+                checkpoint_path,
+                exclusive_publish=exclusive_publish,
+            )
 
         return result
 
@@ -1961,6 +2187,9 @@ class PipelineManager:
         self,
         chunked_result: Any,
         checkpoint_path: Path,
+        *,
+        restore_checkpoint: bool = True,
+        exclusive_publish: bool = False,
     ) -> Any:
         """임베딩 단계: 청크를 벡터화하고 ChromaDB + SQLite FTS5 에 저장한다.
 
@@ -1971,6 +2200,8 @@ class PipelineManager:
         Args:
             chunked_result: 청크 분할 결과
             checkpoint_path: 체크포인트 저장 경로
+            restore_checkpoint: 기존 체크포인트 복원 여부
+            exclusive_publish: 기존 entry를 교체하지 않는 새 파일 게시 여부
 
         Returns:
             EmbeddedResult 인스턴스
@@ -1978,8 +2209,13 @@ class PipelineManager:
         from steps.embedder import EmbeddedResult, Embedder
 
         # 체크포인트 복원 시도
-        if self._checkpoint_enabled and checkpoint_path.exists():
+        if self._checkpoint_enabled and restore_checkpoint and checkpoint_path.exists():
             logger.info(f"임베딩 체크포인트 복원: {checkpoint_path}")
+            if exclusive_publish:
+                raise PipelineError(
+                    "SECURITY_BLOCKED: 기존 지연 임베딩 산출물의 provenance를 확인할 수 없어 "
+                    "자동 복구하지 않습니다"
+                )
             return EmbeddedResult.from_checkpoint(checkpoint_path)
 
         embedder = Embedder(self._config, self._model_manager)
@@ -1987,22 +2223,139 @@ class PipelineManager:
 
         # 체크포인트 저장
         if self._checkpoint_enabled:
-            self._save_result_checkpoint(result, checkpoint_path)
+            self._save_result_checkpoint(
+                result,
+                checkpoint_path,
+                exclusive_publish=exclusive_publish,
+            )
 
         return result
 
-    def _delete_checkpoint_if_exists(self, checkpoint_path: Path) -> None:
-        """체크포인트가 있으면 삭제해 다음 단계가 실제 재실행되도록 한다."""
-        try:
-            safe_path = self._validate_storage_artifact(
-                checkpoint_path,
-                label="삭제 대상 체크포인트",
+    def _llm_refresh_conflicts(self, state: PipelineState, meeting_id: str) -> list[Path]:
+        """지연 LLM 실행이 기존 산출물을 교체해야 하는 경로를 반환한다."""
+        deferred_origin = self._llm_deferred_marker_exists(meeting_id)
+        correct_requires_creation = (
+            deferred_origin
+            or PipelineStep.CORRECT.value in state.skipped_steps
+            or PipelineStep.CORRECT.value not in state.completed_steps
+        )
+        summarize_requires_creation = (
+            correct_requires_creation
+            or PipelineStep.SUMMARIZE.value in state.skipped_steps
+            or PipelineStep.SUMMARIZE.value not in state.completed_steps
+        )
+        candidates: list[Path] = []
+
+        if correct_requires_creation:
+            candidates.extend(
+                self._get_checkpoint_path(meeting_id, step)
+                for step in (
+                    PipelineStep.CORRECT,
+                    PipelineStep.SUMMARIZE,
+                    PipelineStep.CHUNK,
+                    PipelineStep.EMBED,
+                )
             )
-            safe_path.unlink(missing_ok=True)
-        except InvalidInputError:
-            raise
-        except OSError as e:
-            raise PipelineError(f"체크포인트 삭제 실패: {checkpoint_path}: {e}") from e
+        elif summarize_requires_creation:
+            candidates.append(self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE))
+
+        if summarize_requires_creation:
+            output_dir = self._get_output_dir(meeting_id)
+            candidates.extend(
+                self._validate_storage_artifact(
+                    output_dir / filename,
+                    label="지연 요약 출력",
+                )
+                for filename in ("summary.md", "meeting_minutes.md")
+            )
+
+        conflicts: list[Path] = []
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            conflicts.append(candidate)
+        return conflicts
+
+    def validate_llm_steps_non_destructive(self, meeting_id: str) -> None:
+        """지연 LLM 실행이 기존 파일을 교체하지 않는지 read-only로 검증한다.
+
+        동일 UID namespace에서는 compare-and-delete/replace를 원자적으로 보장할 수
+        없다. 과거 버전이 만든 pass-through 또는 stale 산출물이 있으면 모두 보존하고
+        명시적인 보안 충돌로 중단한다.
+        """
+        self._validate_meeting_id(meeting_id)
+        state_path = self._get_state_path(meeting_id)
+        if not state_path.exists():
+            conflicts = [
+                path for path in self._llm_refresh_artifact_paths(meeting_id) if path.exists()
+            ]
+            if conflicts:
+                names = ", ".join(path.name for path in conflicts)
+                raise PipelineError(
+                    "SECURITY_BLOCKED: 상태가 유실된 회의의 기존 지연 LLM 산출물은 "
+                    "provenance를 확인할 수 없어 재구성하지 않습니다. 기존 파일은 "
+                    f"보존됩니다: {names}"
+                )
+            return
+        state = PipelineState.from_file(state_path)
+        deferred_origin = self._llm_deferred_marker_exists(meeting_id)
+
+        # 완료로 기록된 실제 산출물이 사라졌다면 임의 재생성으로 상태를 덮지 않는다.
+        # 이름이 검사 직후 바뀌는 경우도 실행 단계의 no-replace/restore가 다시
+        # 실패하므로 여기서는 read-only 일관성만 확인한다.
+        missing_completed: list[str] = []
+        completed_artifact_steps = (
+            (
+                PipelineStep.CORRECT,
+                PipelineStep.SUMMARIZE,
+                PipelineStep.CHUNK,
+                PipelineStep.EMBED,
+            )
+            if deferred_origin
+            else (PipelineStep.CORRECT, PipelineStep.SUMMARIZE)
+        )
+        for step in completed_artifact_steps:
+            if (
+                step.value in state.completed_steps
+                and step.value not in state.skipped_steps
+                and not self._get_checkpoint_path(meeting_id, step).exists()
+            ):
+                missing_completed.append(f"{step.value}.json")
+
+        correct_requires_creation = (
+            deferred_origin
+            or PipelineStep.CORRECT.value in state.skipped_steps
+            or PipelineStep.CORRECT.value not in state.completed_steps
+        )
+        stale_markers: list[str] = []
+        if correct_requires_creation:
+            for step in (
+                PipelineStep.SUMMARIZE,
+                PipelineStep.CHUNK,
+                PipelineStep.EMBED,
+            ):
+                if step.value in state.completed_steps and step.value not in state.skipped_steps:
+                    stale_markers.append(step.value)
+
+        if missing_completed or stale_markers:
+            details = ", ".join(
+                [
+                    *(f"missing:{name}" for name in missing_completed),
+                    *(f"stale-marker:{name}" for name in stale_markers),
+                ]
+            )
+            raise PipelineError(
+                "SECURITY_BLOCKED: 지연 LLM 상태와 산출물이 일치하지 않아 "
+                f"비파괴 재실행을 중단했습니다. 기존 데이터는 보존됩니다: {details}"
+            )
+
+        conflicts = self._llm_refresh_conflicts(state, meeting_id)
+        if conflicts:
+            names = ", ".join(path.name for path in conflicts)
+            raise PipelineError(
+                "SECURITY_BLOCKED: 지연 LLM 처리가 기존 산출물을 안전하게 교체할 수 없어 "
+                f"중단했습니다. 기존 파일은 보존됩니다: {names}"
+            )
 
     @staticmethod
     def _remove_step_marker(state: PipelineState, step: PipelineStep) -> None:
@@ -2019,6 +2372,8 @@ class PipelineManager:
         meeting_id: str,
     ) -> bool:
         """온디맨드 LLM 후처리 후 검색 인덱스를 재생성해야 하는지 판단한다."""
+        if self._llm_deferred_marker_exists(meeting_id):
+            return True
         if PipelineStep.CHUNK.value in state.completed_steps:
             return True
         if PipelineStep.EMBED.value in state.completed_steps:
@@ -2038,7 +2393,7 @@ class PipelineManager:
         state_path: Path,
         on_step_start: Callable[[str], Awaitable[None]] | None,
     ) -> None:
-        """온디맨드 LLM 후처리 뒤 chunk/embed를 재실행해 RAG 인덱스를 최신화한다."""
+        """온디맨드 LLM 보정 뒤 새 chunk/embed를 no-replace로 생성한다."""
         if not self._should_rebuild_search_index_after_llm(state, meeting_id):
             return
 
@@ -2048,8 +2403,6 @@ class PipelineManager:
         try:
             chunk_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CHUNK)
             embed_cp = self._get_checkpoint_path(meeting_id, PipelineStep.EMBED)
-            self._delete_checkpoint_if_exists(chunk_cp)
-            self._delete_checkpoint_if_exists(embed_cp)
 
             meeting_date = self._derive_meeting_date(meeting_id, audio_path)
 
@@ -2066,6 +2419,8 @@ class PipelineManager:
                 chunk_cp,
                 meeting_id,
                 meeting_date,
+                restore_checkpoint=chunk_cp.exists(),
+                exclusive_publish=True,
             )
             if PipelineStep.CHUNK.value not in state.completed_steps:
                 state.completed_steps.append(PipelineStep.CHUNK.value)
@@ -2079,7 +2434,12 @@ class PipelineManager:
 
             state.current_step = PipelineStep.EMBED.value
             self._save_state(state, state_path)
-            await self._run_step_embed(chunked_result, embed_cp)
+            await self._run_step_embed(
+                chunked_result,
+                embed_cp,
+                restore_checkpoint=embed_cp.exists(),
+                exclusive_publish=True,
+            )
             if PipelineStep.EMBED.value not in state.completed_steps:
                 state.completed_steps.append(PipelineStep.EMBED.value)
             self._save_state(state, state_path)
@@ -2189,7 +2549,40 @@ class PipelineManager:
         stt_provider: str | None = None,
         stt_model: str | None = None,
     ) -> PipelineState:
-        """파이프라인 전체를 실행한다.
+        """회의 전체 파이프라인을 같은 회의의 다른 mutation과 직렬화해 실행한다.
+
+        편집·삭제·재전사·지연 LLM이 체크포인트를 동시에 바꾸지 못하도록 회의 ID를
+        확정하고 검증한 뒤 전체 실행 구간 동안 공유 lease를 유지한다.
+        """
+        # ID 자동 생성도 실제 본문과 동일한 lexical 입력 경로를 사용한다.
+        normalized_audio_path = audio_path.expanduser().absolute()
+        effective_meeting_id = meeting_id or self._generate_meeting_id(normalized_audio_path)
+        self._validate_meeting_id(effective_meeting_id)
+
+        async with self._meeting_mutation_coordinator.lease(effective_meeting_id):
+            return await self._run_with_meeting_lease_held(
+                normalized_audio_path,
+                meeting_id=effective_meeting_id,
+                on_step_start=on_step_start,
+                on_step_progress=on_step_progress,
+                skip_llm_steps=skip_llm_steps,
+                should_cancel=should_cancel,
+                stt_provider=stt_provider,
+                stt_model=stt_model,
+            )
+
+    async def _run_with_meeting_lease_held(
+        self,
+        audio_path: Path,
+        meeting_id: str | None = None,
+        on_step_start: Callable[[str], Awaitable[None]] | None = None,
+        on_step_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        skip_llm_steps: bool | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        stt_provider: str | None = None,
+        stt_model: str | None = None,
+    ) -> PipelineState:
+        """공유 회의 mutation lease를 보유한 상태에서 파이프라인 본문을 실행한다.
 
         오디오 파일을 입력받아 6단계 순차 처리를 수행한다.
         기존 체크포인트가 있으면 마지막 성공 단계부터 재개한다.
@@ -2365,8 +2758,8 @@ class PipelineManager:
             admission_identity = self._validate_input(admission_path)
             await self._validate_audio_duration(admission_path, admission_identity)
 
-        # admission 통과 후에만 새 출력 디렉터리를 만든다.
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # admission 통과 후에만 새 출력 디렉터리를 no-follow로 만든다.
+        ensure_directory_no_follow(output_dir)
         output_dir = self._get_output_dir(meeting_id)
 
         # === Graceful Degradation: 시작 전 리소스 점검 ===
@@ -2467,6 +2860,41 @@ class PipelineManager:
             if step == PipelineStep.CORRECT and merged_result is not None:
                 self._apply_number_normalization(merged_result)
 
+            # CORRECT가 실행되지 않은 결과로 요약/검색 산출물을 만들면 이후의
+            # 지연 LLM 처리가 기존 파일을 교체해야 한다. 동일 UID namespace에서
+            # 안전한 교체를 보장할 수 없으므로 의존 단계도 함께 건너뛰고, 나중에
+            # merge.json에서 모든 산출물을 처음 한 번만 생성하도록 남겨 둔다.
+            if PipelineStep.CORRECT.value in state.skipped_steps and step in (
+                PipelineStep.SUMMARIZE,
+                PipelineStep.CHUNK,
+                PipelineStep.EMBED,
+            ):
+                skip_msg = (
+                    f"{PipelineStep.CORRECT.value} 단계가 건너뛰어져 "
+                    f"{step.value} 단계도 함께 건너뜀"
+                )
+                logger.warning(skip_msg)
+                if step.value not in state.skipped_steps:
+                    state.skipped_steps.append(step.value)
+                state.degraded = True
+                if skip_msg not in state.warnings:
+                    state.warnings.append(skip_msg)
+                if step == PipelineStep.SUMMARIZE:
+                    await self._unload_llm_model_if_current()
+                state.step_results.append(
+                    StepResult(
+                        step=step.value,
+                        success=True,
+                        elapsed_seconds=0.0,
+                        error_message=f"건너뜀: {skip_msg}",
+                        checkpoint_path="",
+                    ).to_dict()
+                )
+                if step.value not in state.completed_steps:
+                    state.completed_steps.append(step.value)
+                self._save_state(state, state_path)
+                continue
+
             # === Graceful Degradation / LLM 스킵: 단계별 리소스 재점검 ===
             if self._resource_guard.is_llm_step(step.value):
                 # 단계 직전 실시간 메모리 재확인 — state.degraded(초기 진단값)와 무관하게 독립 판단.
@@ -2486,19 +2914,29 @@ class PipelineManager:
                             f"메모리 부족으로 {step.value} 단계 건너뜀 (가용: {mem_free:.1f}GB)"
                         )
                     logger.warning(skip_msg)
-                    state.skipped_steps.append(step.value)
+                    if step.value not in state.skipped_steps:
+                        state.skipped_steps.append(step.value)
                     state.degraded = True
                     if skip_msg not in state.warnings:
                         state.warnings.append(skip_msg)
 
                     skipped_checkpoint_path = ""
 
-                    # correct 스킵 시 merged_result를 CorrectedResult 체크포인트로 패스스루
+                    # correct 스킵 시 현재 실행 안에서만 pass-through 결과를 사용한다.
+                    # refresh 대상 checkpoint를 저장하지 않아 지연 LLM이 기존 파일을
+                    # 삭제하거나 교체하지 않고 새 산출물을 게시할 수 있게 한다.
                     if step == PipelineStep.CORRECT:
                         assert merged_result is not None
+                        if self._checkpoint_enabled:
+                            try:
+                                self._ensure_llm_deferred_marker(meeting_id)
+                            except Exception as e:
+                                state.status = "failed"
+                                state.current_step = PipelineStep.CORRECT.value
+                                state.error_message = f"지연 LLM marker 저장 실패: {e}"
+                                self._save_state(state, state_path)
+                                raise PipelineError(state.error_message) from e
                         corrected_result = self._build_passthrough_corrected_result(merged_result)
-                        self._save_result_checkpoint(corrected_result, checkpoint_path)
-                        skipped_checkpoint_path = str(checkpoint_path)
                     elif step == PipelineStep.SUMMARIZE:
                         await self._unload_llm_model_if_current()
 
@@ -2510,7 +2948,8 @@ class PipelineManager:
                         checkpoint_path=skipped_checkpoint_path,
                     )
                     state.step_results.append(step_result.to_dict())
-                    state.completed_steps.append(step.value)
+                    if step.value not in state.completed_steps:
+                        state.completed_steps.append(step.value)
                     self._save_state(state, state_path)
                     continue
 
@@ -2885,6 +3324,12 @@ class PipelineManager:
 
                 corrected_result = CorrectedResult.from_checkpoint(cp)
                 logger.info("보정 결과 체크포인트에서 복원")
+            elif PipelineStep.CORRECT.value in state.skipped_steps and merged_result is not None:
+                # 새 skip 계약은 refresh 대상 correct.json을 남기지 않는다.
+                # 같은 파이프라인의 text-only 재개에는 merge 결과로 만든
+                # in-memory pass-through만 사용한다.
+                corrected_result = self._build_passthrough_corrected_result(merged_result)
+                logger.info("스킵된 보정 결과를 merge 체크포인트에서 재구성")
 
         # chunk 완료 시 복원 (EMBED 단계 재개에 필요)
         chunked_result: Any = None
@@ -2938,6 +3383,27 @@ class PipelineManager:
 
         return await self.run(audio_path, meeting_id=meeting_id)
 
+    def _record_llm_steps_failure(
+        self,
+        meeting_id: str,
+        error: BaseException,
+    ) -> None:
+        """실행 중 실패한 온디맨드 LLM 상태를 best-effort로 failed에 수렴시킨다."""
+        try:
+            state_path = self._get_state_path(meeting_id)
+            if not state_path.exists():
+                return
+            state = PipelineState.from_file(state_path)
+            if state.status != "running":
+                return
+            message = str(error).strip() or "온디맨드 LLM 작업이 취소되었습니다"
+            state.status = "failed"
+            state.error_message = message
+            self._save_state(state, state_path)
+        except Exception:
+            # 상태 기록 실패가 원래 모델/게시 오류를 가리면 안 된다.
+            logger.exception(f"온디맨드 LLM 실패 상태 저장 실패: meeting_id={meeting_id}")
+
     async def run_llm_steps(
         self,
         meeting_id: str,
@@ -2965,12 +3431,27 @@ class PipelineManager:
             PipelineError: 상태 파일/merge 체크포인트 미존재, 락 획득 타임아웃,
                           단계 실행 타임아웃 시
         """
-        await self._acquire_llm_lock_with_timeout()
-        try:
-            return await self._run_llm_steps_inner(meeting_id, on_step_start)
-        finally:
-            await self._unload_llm_model_if_current()
-            self._llm_lock.release()
+        async with self._meeting_mutation_coordinator.lease(meeting_id):
+            await self._acquire_llm_lock_with_timeout()
+            try:
+                try:
+                    return await self._run_llm_steps_inner(meeting_id, on_step_start)
+                except asyncio.CancelledError as e:
+                    self._record_llm_steps_failure(meeting_id, e)
+                    raise
+                except PipelineStateWriteError:
+                    # 경로/교환 검증이 실패한 canonical state를 다시 읽거나 쓰지 않는다.
+                    raise
+                except Exception as e:
+                    self._record_llm_steps_failure(meeting_id, e)
+                    raise
+            finally:
+                try:
+                    await self._unload_llm_model_if_current()
+                finally:
+                    # 모델 cleanup이 실패하거나 deferred native lease가 소유권을
+                    # 유지하더라도 프로세스 전역 LLM 직렬화 lock은 반드시 반납한다.
+                    self._llm_lock.release()
 
     async def _run_llm_steps_inner(
         self,
@@ -2989,11 +3470,21 @@ class PipelineManager:
         # 이슈 I: pipeline_state.json 이 유실되었어도 merge 체크포인트가 있으면
         # 기존 체크포인트 조합으로 state 를 재구성하여 요약을 계속 진행한다.
         state_path = self._get_state_path(meeting_id)
-        if not state_path.exists():
+        state_was_missing = not state_path.exists()
+        if state_was_missing:
             logger.warning(f"상태 파일 유실 — 체크포인트에서 재구성: meeting_id={meeting_id}")
-            self._rebuild_state_from_checkpoints(meeting_id)
-
-        state = PipelineState.from_file(state_path)
+            self.validate_llm_steps_non_destructive(meeting_id)
+            state = self._rebuild_state_from_checkpoints(
+                meeting_id,
+                trust_llm_checkpoints=False,
+                persist=False,
+            )
+        else:
+            state = PipelineState.from_file(state_path)
+        # 과거 skip 구현 또는 실패한 지연 실행이 남긴 산출물은 provenance를
+        # 인증할 수 없다. 상태 변경이나 모델 실행 전에 모두 보존한 채 중단한다.
+        # 검사 뒤 생기는 경쟁 entry는 아래 no-replace 게시가 EEXIST로 다시 차단한다.
+        self.validate_llm_steps_non_destructive(meeting_id)
 
         from steps.merger import MergedResult
 
@@ -3005,23 +3496,32 @@ class PipelineManager:
 
         # 3. 출력 디렉토리 확인
         output_dir = self._get_output_dir(meeting_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        ensure_directory_no_follow(output_dir)
+        output_dir = self._get_output_dir(meeting_id)
 
+        if state_was_missing:
+            # prevalidation과 메모리 복구 사이에 부분 산출물이 생겨도
+            # canonical state를 생성하기 전에 다시 차단한다.
+            self.validate_llm_steps_non_destructive(meeting_id)
         state.status = "running"
         self._save_state(state, state_path)
 
         # 4. correct 단계 실행
         correct_cp = self._get_checkpoint_path(meeting_id, PipelineStep.CORRECT)
+        deferred_origin = self._llm_deferred_marker_exists(meeting_id)
         correct_was_skipped = PipelineStep.CORRECT.value in state.skipped_steps
-        if correct_cp.exists() and not correct_was_skipped:
+        correct_requires_creation = (
+            deferred_origin
+            or correct_was_skipped
+            or PipelineStep.CORRECT.value not in state.completed_steps
+        )
+        if not correct_requires_creation:
             # 이미 correct 체크포인트가 있으면 복원
             from steps.corrector import CorrectedResult
 
             corrected_result = CorrectedResult.from_checkpoint(correct_cp)
             logger.info(f"correct 체크포인트 복원: {correct_cp}")
         else:
-            if correct_was_skipped:
-                self._delete_checkpoint_if_exists(correct_cp)
             if on_step_start is not None:
                 try:
                     await on_step_start(PipelineStep.CORRECT.value)
@@ -3035,7 +3535,12 @@ class PipelineManager:
             # 락은 상위에서 이미 보유 중이므로 재획득하지 않는다.
             try:
                 corrected_result = await asyncio.wait_for(
-                    self._run_step_correct(merged_result, correct_cp),
+                    self._run_step_correct(
+                        merged_result,
+                        correct_cp,
+                        restore_checkpoint=correct_cp.exists(),
+                        exclusive_publish=True,
+                    ),
                     timeout=self._config.pipeline.correct_timeout_seconds,
                 )
             except TimeoutError as e:
@@ -3046,10 +3551,14 @@ class PipelineManager:
         # 5. summarize 단계 실행
         summarize_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
         summarize_was_skipped = PipelineStep.SUMMARIZE.value in state.skipped_steps
-        if correct_was_skipped or summarize_was_skipped:
-            self._delete_checkpoint_if_exists(summarize_cp)
+        summarize_requires_creation = (
+            deferred_origin
+            or correct_requires_creation
+            or summarize_was_skipped
+            or PipelineStep.SUMMARIZE.value not in state.completed_steps
+        )
 
-        if not summarize_cp.exists():
+        if summarize_requires_creation:
             if on_step_start is not None:
                 try:
                     await on_step_start(PipelineStep.SUMMARIZE.value)
@@ -3065,6 +3574,8 @@ class PipelineManager:
                         corrected_result,
                         summarize_cp,
                         output_dir,
+                        restore_checkpoint=summarize_cp.exists(),
+                        exclusive_publish=True,
                     ),
                     timeout=self._config.pipeline.summarize_timeout_seconds,
                 )
@@ -3083,7 +3594,12 @@ class PipelineManager:
                 state.completed_steps.append(step_name)
 
         # 7. 기존 검색 인덱스가 있던 회의는 LLM 보정 결과 기준으로 chunk/embed 재생성
-        if self._should_rebuild_search_index_after_llm(state, meeting_id):
+        if (
+            deferred_origin or correct_was_skipped
+        ) and self._should_rebuild_search_index_after_llm(
+            state,
+            meeting_id,
+        ):
             await self._unload_llm_model_if_current()
             await self._rebuild_search_index_after_llm(
                 meeting_id=meeting_id,

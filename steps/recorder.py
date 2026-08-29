@@ -174,6 +174,13 @@ class AudioRecorder:
 
         # 상태 (싱글트랙)
         self._state = RecordingState.IDLE
+        # start/stop 전이 전체를 보호한다. 장치 선택과 ffmpeg spawn 사이에도
+        # await가 있으므로 상태 검사만으로는 동시 start를 막을 수 없다.
+        self._state_lock = asyncio.Lock()
+        # 서버 종료 정리 중에는 완료 콜백이나 늦게 도착한 API 요청이 새 ffmpeg를
+        # 시작하지 못하게 한다. 그렇지 않으면 cleanup()이 정리해야 할 세대와
+        # 새 녹음 세대가 섞여 새 프로세스를 종료하거나 고아로 남길 수 있다.
+        self._cleanup_in_progress = False
         self._process: asyncio.subprocess.Process | None = None
         self._current_file: Path | None = None
         self._start_time: float | None = None
@@ -523,61 +530,70 @@ class AudioRecorder:
             AudioDeviceError: 오디오 장치를 사용할 수 없을 때
             FFmpegRecordError: ffmpeg 프로세스 시작 실패 시
         """
-        if self._state != RecordingState.IDLE:
-            raise AlreadyRecordingError(f"이미 녹음 중입니다. 현재 상태: {self._state.value}")
+        async with self._state_lock:
+            if self._cleanup_in_progress:
+                raise AlreadyRecordingError("녹음기를 정리 중입니다.")
+            if self._state != RecordingState.IDLE:
+                raise AlreadyRecordingError(f"이미 녹음 중입니다. 현재 상태: {self._state.value}")
 
-        if not self._recording_config.enabled:
-            logger.warning("녹음 기능이 비활성화되어 있습니다 (recording.enabled=false)")
-            return
+            if not self._recording_config.enabled:
+                logger.warning("녹음 기능이 비활성화되어 있습니다 (recording.enabled=false)")
+                return
 
-        # 녹음 파일 경로 설정
-        if meeting_id is None:
-            meeting_id = datetime.now().strftime("meeting_%Y%m%d_%H%M%S")
-        self._meeting_id = meeting_id
-        self._temp_dir.mkdir(parents=True, exist_ok=True)
+            # 녹음 파일 경로 설정
+            if meeting_id is None:
+                meeting_id = datetime.now().strftime("meeting_%Y%m%d_%H%M%S")
+            self._meeting_id = meeting_id
+            self._temp_dir.mkdir(parents=True, exist_ok=True)
 
-        # 멀티트랙 vs 싱글트랙 분기
-        if self._multi_track:
-            await self._start_multitrack_recording(meeting_id)
-        else:
-            await self._start_singletrack_recording(meeting_id)
+            try:
+                # 멀티트랙 vs 싱글트랙 분기
+                if self._multi_track:
+                    await self._start_multitrack_recording(meeting_id)
+                else:
+                    await self._start_singletrack_recording(meeting_id)
 
-        self._state = RecordingState.RECORDING
-        self._start_time = time.time()
+                self._state = RecordingState.RECORDING
+                self._start_time = time.time()
 
-        # 최대 녹음 시간 가드 시작
-        self._max_duration_task = asyncio.create_task(
-            self._max_duration_guard(),
-            name="recording-max-duration",
-        )
+                # 최대 녹음 시간 가드 시작
+                self._max_duration_task = asyncio.create_task(
+                    self._max_duration_guard(),
+                    name="recording-max-duration",
+                )
 
-        # 녹음 시간 브로드캐스트 시작
-        self._duration_broadcast_task = asyncio.create_task(
-            self._duration_broadcast_loop(),
-            name="recording-duration-broadcast",
-        )
+                # 녹음 시간 브로드캐스트 시작
+                self._duration_broadcast_task = asyncio.create_task(
+                    self._duration_broadcast_loop(),
+                    name="recording-duration-broadcast",
+                )
 
-        # WebSocket 이벤트 브로드캐스트
-        device_name = (
-            self._current_device.name
-            if self._current_device
-            else ", ".join(d.name for d in self._current_devices.values())
-        )
-        await self._broadcast_event(
-            "recording_started",
-            {
-                "meeting_id": meeting_id,
-                "device": device_name,
-                "is_multitrack": bool(self._processes),
-            },
-        )
+                # WebSocket 이벤트 브로드캐스트
+                device_name = (
+                    self._current_device.name
+                    if self._current_device
+                    else ", ".join(d.name for d in self._current_devices.values())
+                )
+                await self._broadcast_event(
+                    "recording_started",
+                    {
+                        "meeting_id": meeting_id,
+                        "device": device_name,
+                        "is_multitrack": bool(self._processes),
+                    },
+                )
 
-        pids = (
-            {k: p.pid for k, p in self._processes.items()}
-            if self._processes
-            else {"single": self._process.pid if self._process else None}
-        )
-        logger.info(f"녹음 시작 완료: PIDs={pids}")
+                pids = (
+                    {k: p.pid for k, p in self._processes.items()}
+                    if self._processes
+                    else {"single": self._process.pid if self._process else None}
+                )
+                logger.info(f"녹음 시작 완료: PIDs={pids}")
+            except BaseException:
+                # start 도중 취소/예외가 발생하면 다음 요청이 IDLE 상태와 고아 없는
+                # 프로세스를 보도록 원자적으로 되돌린다.
+                await self._cleanup_failed_start()
+                raise
 
     async def _start_singletrack_recording(self, meeting_id: str) -> None:
         """싱글트랙 녹음을 시작한다 (기존 로직).
@@ -810,12 +826,83 @@ class AudioRecorder:
         Raises:
             FFmpegRecordError: ffmpeg 종료 처리 실패 시
         """
+        async with self._state_lock:
+            stopped, result, meeting_id = await self._stop_recording_locked(
+                _from_guard=_from_guard
+            )
+
+        # 콜백은 외부 코드이므로 상태 lock 밖에서 호출한다. 콜백이 다음 녹음을
+        # 시작해도 re-entrant lock 대기로 멈추지 않아야 한다.
+        if stopped:
+            await self._notify_recording_stopped(result, meeting_id)
+        return result
+
+    async def _stop_recording_locked(
+        self,
+        *,
+        _from_guard: bool,
+    ) -> tuple[bool, RecordingResult | None, str | None]:
+        """상태 lock을 보유한 채 녹음을 정지한다."""
         if self._state != RecordingState.RECORDING:
             logger.warning(f"녹음 중이 아닙니다. 현재 상태: {self._state.value}")
-            return None
+            return False, None, None
 
         self._state = RecordingState.STOPPING
+        meeting_id = self._meeting_id
+        terminated_cleanly = False
+        try:
+            await self._cancel_background_tasks(_from_guard=_from_guard)
 
+            # 멀티트랙 vs 싱글트랙 종료 분기
+            if self._processes:
+                result = await self._terminate_multitrack()
+            else:
+                result = await self._terminate_ffmpeg()
+            terminated_cleanly = True
+
+            return True, result, meeting_id
+        finally:
+            # 종료 중 예외/취소가 나도 STOPPING 상태와 ffmpeg 참조를 남기지 않는다.
+            try:
+                if not terminated_cleanly:
+                    await self._await_critical_cleanup(self._cleanup_recording_processes())
+            finally:
+                self._reset_recording_state()
+
+    async def _notify_recording_stopped(
+        self,
+        result: RecordingResult | None,
+        meeting_id: str | None,
+    ) -> None:
+        """상태 전이가 끝난 뒤 완료 콜백과 WebSocket 이벤트를 전달한다."""
+        if result is not None:
+            await self._broadcast_event(
+                "recording_stopped",
+                {
+                    "meeting_id": meeting_id,
+                    "duration_seconds": result.duration_seconds,
+                    "file_path": str(result.file_path),
+                    "audio_device": result.audio_device,
+                    "is_multitrack": result.is_multitrack,
+                },
+            )
+            # 완료 콜백은 다음 녹음을 시작할 수 있다. stopped 이벤트를 먼저
+            # 전달해야 새 recording_started 뒤에 이전 회의의 stopped 이벤트가
+            # 도착해 UI가 새 녹음을 숨기는 역전이 생기지 않는다.
+            await self._fire_callbacks(result)
+            return
+
+        await self._broadcast_event(
+            "recording_stopped",
+            {
+                "meeting_id": meeting_id,
+                "discarded": True,
+                "reason": "최소 녹음 시간 미달",
+            },
+        )
+
+    async def _cancel_background_tasks(self, *, _from_guard: bool) -> None:
+        """녹음 가드와 경과시간 브로드캐스트 태스크를 종료한다."""
         # 가드 태스크 취소 (_from_guard=True이면 자기 자신이므로 건너뜀)
         if not _from_guard and self._max_duration_task is not None:
             self._max_duration_task.cancel()
@@ -828,52 +915,66 @@ class AudioRecorder:
             self._duration_broadcast_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._duration_broadcast_task
-            self._duration_broadcast_task = None
+        self._duration_broadcast_task = None
 
-        # 멀티트랙 vs 싱글트랙 종료 분기
+    async def _await_critical_cleanup(self, cleanup: Coroutine[Any, Any, None]) -> None:
+        """취소가 중첩돼도 subprocess 정리가 끝날 때까지 기다린다.
+
+        녹음 시작/정지 요청은 HTTP 연결 종료와 앱 종료에서 연속 취소될 수 있다.
+        첫 취소 뒤 cleanup을 다시 취소하면 ffmpeg 참조와 STOPPING 상태만 남고
+        실제 프로세스가 고아가 될 수 있으므로, 내부 task는 shield로 보호한다.
+        cleanup 완료 뒤에는 원래 취소를 다시 전파한다.
+        """
+        cleanup_task = asyncio.create_task(cleanup)
+        cancellation_requested = False
+
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+
+        try:
+            cleanup_task.result()
+        except BaseException:
+            if cancellation_requested:
+                raise asyncio.CancelledError from None
+            raise
+
+        if cancellation_requested:
+            raise asyncio.CancelledError
+
+    async def _cleanup_failed_start(self) -> None:
+        """시작 중단 뒤 ffmpeg와 상태 참조를 정리한다."""
+
+        async def cleanup() -> None:
+            try:
+                await self._cancel_background_tasks(_from_guard=False)
+                await self._cleanup_recording_processes()
+            finally:
+                self._reset_recording_state()
+
+        await self._await_critical_cleanup(cleanup())
+
+    async def _cleanup_recording_processes(self) -> None:
+        """싱글/멀티트랙 ffmpeg 프로세스가 남지 않도록 정리한다."""
         if self._processes:
-            result = await self._terminate_multitrack()
-        else:
-            result = await self._terminate_ffmpeg()
+            await self._cleanup_multitrack_processes()
+        await self._kill_orphan_process()
 
+    def _reset_recording_state(self) -> None:
+        """다음 녹음 요청을 위한 상태 참조를 IDLE로 초기화한다."""
         self._state = RecordingState.IDLE
-
-        if result is not None:
-            # 콜백 호출
-            await self._fire_callbacks(result)
-
-            # WebSocket 이벤트 브로드캐스트
-            await self._broadcast_event(
-                "recording_stopped",
-                {
-                    "meeting_id": self._meeting_id,
-                    "duration_seconds": result.duration_seconds,
-                    "file_path": str(result.file_path),
-                    "audio_device": result.audio_device,
-                    "is_multitrack": result.is_multitrack,
-                },
-            )
-        else:
-            await self._broadcast_event(
-                "recording_stopped",
-                {
-                    "meeting_id": self._meeting_id,
-                    "discarded": True,
-                    "reason": "최소 녹음 시간 미달",
-                },
-            )
-
-        # 상태 초기화
         self._process = None
         self._current_file = None
         self._start_time = None
         self._current_device = None
         self._meeting_id = None
+        self._max_duration_task = None
+        self._duration_broadcast_task = None
         self._processes.clear()
         self._current_files.clear()
         self._current_devices.clear()
-
-        return result
 
     async def _terminate_ffmpeg(self) -> RecordingResult | None:
         """ffmpeg 프로세스를 종료하고 녹음 결과를 반환한다.
@@ -1162,15 +1263,33 @@ class AudioRecorder:
         ffmpeg 프로세스가 고아로 남는 것을 방지하기 위해
         모든 상태에서 프로세스 종료를 확인한다 (STAB: 고아 프로세스 방지).
         """
-        if self._state == RecordingState.RECORDING:
-            logger.info("AudioRecorder 정리: 녹음 정지 중...")
-            try:
-                await self.stop_recording()
-            except Exception as e:
-                logger.error(f"녹음 정지 중 에러 발생: {e}")
+        async with self._state_lock:
+            if self._cleanup_in_progress:
+                return
+            self._cleanup_in_progress = True
 
-        # 어떤 상태든 ffmpeg 프로세스가 남아있으면 강제 종료
-        await self._kill_orphan_process()
+        async def cleanup_lifecycle() -> None:
+            try:
+                async with self._state_lock:
+                    should_stop = self._state == RecordingState.RECORDING
+
+                if should_stop:
+                    logger.info("AudioRecorder 정리: 녹음 정지 중...")
+                    try:
+                        await self.stop_recording()
+                    except Exception as e:
+                        logger.error(f"녹음 정지 중 에러 발생: {e}")
+
+                async with self._state_lock:
+                    # STOPPING에서 취소된 경우와 IDLE인데 프로세스 참조만 남은 경우 모두
+                    # 같은 lock 아래에서 정리해 다음 start가 고아 프로세스를 덮어쓰지 않게 한다.
+                    await self._cleanup_recording_processes()
+                    self._reset_recording_state()
+            finally:
+                async with self._state_lock:
+                    self._cleanup_in_progress = False
+
+        await self._await_critical_cleanup(cleanup_lifecycle())
 
     async def _kill_orphan_process(self) -> None:
         """고아 ffmpeg 프로세스가 남아있으면 강제 종료한다.

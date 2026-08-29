@@ -18,7 +18,9 @@ Phase 1 의 WikiCompiler 가 wiki.dry_run=False 일 때 본 클래스를 위임 
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -38,10 +40,30 @@ from core.wiki.extractors.topic import TopicExtractor
 from core.wiki.guard import GuardVerdict, WikiGuard
 from core.wiki.lint import WikiLinter
 from core.wiki.llm_client import WikiLLMClient, WikiLLMError
+from core.wiki.models import Citation
 from core.wiki.search_index import WikiSearchIndex
 from core.wiki.store import WikiStore, WikiStoreError
 
 logger = logging.getLogger(__name__)
+
+_ACTION_CITATION_RE = re.compile(
+    r"^\[meeting:(?P<meeting_id>[A-Za-z0-9_]+)@"
+    r"(?P<hours>\d{2}):(?P<minutes>\d{2}):(?P<seconds>\d{2})\]$"
+)
+_ACTION_ITEMS_TITLE_RE = re.compile(r"^#\s+Action Items\s*$")
+_ACTION_SECTION_HEADER_RE = re.compile(r"^##\s+(?P<section>Open|Closed)\s+\((?P<count>\d+)\)\s*$")
+_OPEN_ACTION_RE = re.compile(r"^-\s*\[\s*\]\s*(?P<rest>.+?)\s*$")
+_TASK_PREFIX_RE = re.compile(r"^-\s*\[(?:\s*|[xX])\]")
+_EMPTY_ACTION_SECTION_RE = re.compile(r"^_\(없음\)_$")
+_CONFIDENCE_MARKER_RE = re.compile(r"^<!--\s*confidence\s*:\s*\d{1,2}\s*-->$")
+_CLOSED_ACTION_RE = re.compile(
+    r"^-\s*\[[xX]\]\s*~~(?P<description>.+?)~~\s*"
+    r"(?P<citation>\[meeting:[A-Za-z0-9_]+@\d{2}:\d{2}:\d{2}\])\s*$"
+)
+_CLOSED_BY_RE = re.compile(
+    r"^\s*-\s*Closed by:\s*(?P<speaker>.*?)\s+"
+    r"(?P<citation>\[meeting:[A-Za-z0-9_]+@\d{2}:\d{2}:\d{2}\])\s*$"
+)
 
 
 def _first_utterance_timestamp(utterances: list[Any]) -> str | None:
@@ -86,6 +108,143 @@ def _normalize_zero_timestamp_citations(
         return content
     new_marker = f"[meeting:{meeting_id}@{replacement_ts}]"
     return content.replace(old_marker, new_marker)
+
+
+def _parse_action_citation(marker: str) -> Citation:
+    """액션아이템 인용 마커를 검증해 ``Citation``으로 변환한다."""
+    match = _ACTION_CITATION_RE.fullmatch(marker.strip())
+    if match is None:
+        raise ValueError(f"잘못된 액션아이템 인용 마커입니다: {marker!r}")
+    hours = int(match.group("hours"))
+    minutes = int(match.group("minutes"))
+    seconds = int(match.group("seconds"))
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError(f"범위를 벗어난 액션아이템 인용 시각입니다: {marker!r}")
+    timestamp_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return Citation(
+        meeting_id=match.group("meeting_id"),
+        timestamp_str=timestamp_str,
+        timestamp_seconds=hours * 3600 + minutes * 60 + seconds,
+    )
+
+
+def _action_item_id(owner: str, description: str, meeting_id: str) -> str:
+    """기존 액션아이템과 동일한 안정 ID를 계산한다."""
+    raw = f"{owner}{description}{meeting_id}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+
+
+def _validate_action_items_layout(content: str) -> tuple[int, int, int, int]:
+    """기존 action_items.md를 lossless 재직렬화 가능한 canonical 구조로 제한한다.
+
+    이 컴파일러는 기존 항목을 데이터 모델로 되돌린 뒤 다시 렌더링하므로, 모델로
+    표현할 수 없는 본문을 조용히 버리면 안 된다. 헤더·섹션 밖 체크박스·닫힌 항목의
+    종료 정보 등을 보수적으로 검사하고, 불확실하면 호출자가 action_items 쓰기를
+    건너뛰도록 ``ValueError``를 던진다.
+
+    Returns:
+        (open_header_index, closed_header_index, open_count, closed_count).
+    """
+    lines = content.splitlines()
+    title_indexes = [
+        index
+        for index, raw_line in enumerate(lines)
+        if _ACTION_ITEMS_TITLE_RE.fullmatch(raw_line.strip())
+    ]
+    section_headers: list[tuple[int, str, int]] = []
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        section_match = _ACTION_SECTION_HEADER_RE.fullmatch(stripped)
+        if section_match is not None:
+            section_headers.append(
+                (index, section_match.group("section"), int(section_match.group("count")))
+            )
+        elif _ACTION_ITEMS_TITLE_RE.fullmatch(stripped) is not None:
+            continue
+        elif stripped.startswith("#"):
+            raise ValueError("action_items.md에 지원되지 않는 제목이 있습니다.")
+
+    open_headers = [header for header in section_headers if header[1] == "Open"]
+    closed_headers = [header for header in section_headers if header[1] == "Closed"]
+    if len(title_indexes) != 1 or len(open_headers) != 1 or len(closed_headers) != 1:
+        raise ValueError("action_items.md의 Action Items/Open/Closed 헤더가 정확하지 않습니다.")
+
+    title_index = title_indexes[0]
+    open_index, _, declared_open_count = open_headers[0]
+    closed_index, _, declared_closed_count = closed_headers[0]
+    if not title_index < open_index < closed_index:
+        raise ValueError("action_items.md의 Open/Closed 섹션 순서가 올바르지 않습니다.")
+
+    for raw_line in lines[:open_index]:
+        stripped = raw_line.strip()
+        if not stripped or _ACTION_ITEMS_TITLE_RE.fullmatch(stripped):
+            continue
+        raise ValueError("action_items.md Open 섹션 앞에 보존할 수 없는 본문이 있습니다.")
+
+    open_count = 0
+    open_item_active = False
+    open_placeholder_seen = False
+    for raw_line in lines[open_index + 1 : closed_index]:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            open_item_active = False
+            continue
+        if _OPEN_ACTION_RE.fullmatch(line) is not None:
+            if open_placeholder_seen:
+                raise ValueError("Open 섹션에 빈 placeholder와 항목이 함께 있습니다.")
+            open_count += 1
+            open_item_active = True
+            continue
+        if _TASK_PREFIX_RE.match(stripped):
+            raise ValueError("Open 섹션의 체크박스 항목 형식이 올바르지 않습니다.")
+        if _EMPTY_ACTION_SECTION_RE.fullmatch(stripped):
+            if open_count or open_placeholder_seen:
+                raise ValueError("Open 섹션의 빈 placeholder 형식이 올바르지 않습니다.")
+            open_placeholder_seen = True
+            continue
+        if open_item_active:
+            # digest parser가 보존하는 기존 multiline description이다.
+            continue
+        raise ValueError("Open 섹션에 보존할 수 없는 본문이 있습니다.")
+
+    closed_count = 0
+    closed_item_pending = False
+    closed_placeholder_seen = False
+    for raw_line in lines[closed_index + 1 :]:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        closed_match = _CLOSED_ACTION_RE.fullmatch(stripped)
+        if closed_match is not None:
+            if closed_item_pending or closed_placeholder_seen:
+                raise ValueError("Closed 섹션의 항목 형식이 올바르지 않습니다.")
+            closed_count += 1
+            closed_item_pending = True
+            continue
+        closed_by_match = _CLOSED_BY_RE.fullmatch(line)
+        if closed_by_match is not None:
+            if not closed_item_pending or not closed_by_match.group("speaker").strip():
+                raise ValueError("Closed 액션아이템의 종료 정보가 올바르지 않습니다.")
+            closed_item_pending = False
+            continue
+        if _TASK_PREFIX_RE.match(stripped):
+            raise ValueError("Closed 섹션의 체크박스 항목 형식이 올바르지 않습니다.")
+        if _EMPTY_ACTION_SECTION_RE.fullmatch(stripped):
+            if closed_count or closed_item_pending or closed_placeholder_seen:
+                raise ValueError("Closed 섹션의 빈 placeholder 형식이 올바르지 않습니다.")
+            closed_placeholder_seen = True
+            continue
+        if _CONFIDENCE_MARKER_RE.fullmatch(stripped) and not closed_item_pending:
+            continue
+        raise ValueError("Closed 섹션에 보존할 수 없는 본문이 있습니다.")
+
+    if closed_item_pending:
+        raise ValueError("Closed 액션아이템의 종료 정보가 없습니다.")
+    if open_count != declared_open_count or closed_count != declared_closed_count:
+        raise ValueError("action_items.md 섹션의 항목 수가 헤더와 일치하지 않습니다.")
+    return (open_index, closed_index, open_count, closed_count)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -364,27 +523,34 @@ class WikiCompilerV2:
         )
 
         # ── 3. 기존 action_items.md 파싱 ──────────────────────────────
+        action_items_parse_ok = True
         try:
             existing_open, existing_closed = await self._parse_existing_action_items()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("기존 action_items.md 파싱 실패 — 빈 목록으로 진행: %r", exc)
+            logger.error(
+                "기존 action_items.md 파싱 실패 — 기존 데이터를 보존하기 위해 "
+                "액션아이템 갱신을 건너뜀: %r",
+                exc,
+            )
             existing_open, existing_closed = [], []
+            action_items_parse_ok = False
 
         # ── 4. detect_closed ─────────────────────────────────────────
         newly_closed: list = []
         extractor_start = time.perf_counter()
-        try:
-            newly_closed = await self._action_item_extractor.detect_closed(
-                existing_open=existing_open,
-                meeting_id=meeting_id,
-                utterances=utterances,
-            )
-        except WikiLLMError as exc:
-            logger.warning("detect_closed 실패: %r", exc)
-            newly_closed = []
-        except Exception as exc:  # noqa: BLE001
-            logger.error("detect_closed 오류: %r", exc, exc_info=True)
-            newly_closed = []
+        if action_items_parse_ok:
+            try:
+                newly_closed = await self._action_item_extractor.detect_closed(
+                    existing_open=existing_open,
+                    meeting_id=meeting_id,
+                    utterances=utterances,
+                )
+            except WikiLLMError as exc:
+                logger.warning("detect_closed 실패: %r", exc)
+                newly_closed = []
+            except Exception as exc:  # noqa: BLE001
+                logger.error("detect_closed 오류: %r", exc, exc_info=True)
+                newly_closed = []
         logger.info(
             "Wiki extractor timing: meeting_id=%s extractor=action_item.detect_closed "
             "elapsed_seconds=%.3f items=%d",
@@ -412,18 +578,19 @@ class WikiCompilerV2:
 
         # ── 6. action_items.md 렌더링 ────────────────────────────────
         action_pages: list[tuple[str, str]] = []
-        try:
-            action_content = await self._action_item_extractor.render_unified_page(
-                new_open=new_actions,
-                newly_closed=newly_closed,
-                existing_open=existing_open,
-                existing_closed=existing_closed,
-                last_compiled_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            )
-            action_pages.append(("action_items.md", action_content))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("render_unified_page 실패: %r", exc)
-            action_pages = []
+        if action_items_parse_ok:
+            try:
+                action_content = await self._action_item_extractor.render_unified_page(
+                    new_open=new_actions,
+                    newly_closed=newly_closed,
+                    existing_open=existing_open,
+                    existing_closed=existing_closed,
+                    last_compiled_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                )
+                action_pages.append(("action_items.md", action_content))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("render_unified_page 실패: %r", exc)
+                action_pages = []
 
         # ── 6b. PersonExtractor (Phase 3) — graceful degradation ─────
         person_pages: list[tuple[str, str, int]] = []
@@ -664,24 +831,97 @@ class WikiCompilerV2:
     ) -> tuple[list[OpenActionItem], list[ClosedActionItem]]:
         """기존 action_items.md 의 Open / Closed 섹션을 파싱한다.
 
-        Phase 2.C 단계의 단순 구현: 파일이 없거나 파싱이 실패하면 빈 리스트 반환.
-        실제 파싱 로직은 Phase 2.E 에서 강화.
+        파일이 없으면 빈 목록을 반환한다. 파일이 존재하지만 canonical 항목을
+        손실 없이 파싱할 수 없으면 예외를 전파해 호출자가 기존 페이지 쓰기를
+        건너뛰게 한다.
 
         Returns:
             (existing_open, existing_closed). 비어있으면 ([], []).
         """
         try:
             page = self._store.read_page(Path("action_items.md"))
-        except WikiStoreError:
-            return ([], [])
+        except WikiStoreError as exc:
+            if exc.reason == "page_not_found":
+                return ([], [])
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.debug("action_items.md 읽기 실패: %r", exc)
-            return ([], [])
+            raise
 
-        # Phase 2.C 골격 — 기존 항목 파싱은 Phase 2.E 에서 정밀화.
-        # 현재는 빈 리스트 반환하여 후속 호출이 정상 동작하도록 한다.
-        _ = page
-        return ([], [])
+        from core.wiki.digest import parse_open_actions
+
+        _open_index, closed_index, expected_open, expected_closed = _validate_action_items_layout(
+            page.content
+        )
+        open_actions = parse_open_actions(page.content)
+        if len(open_actions) != expected_open:
+            raise ValueError("action_items.md Open 섹션의 모든 항목을 파싱하지 못했습니다.")
+
+        existing_open: list[OpenActionItem] = []
+        for action in open_actions:
+            if not action.description or len(action.citations) != 1:
+                raise ValueError("Open 액션아이템은 설명과 정확히 한 개의 인용이 필요합니다.")
+            citation = _parse_action_citation(action.citations[0])
+            owner = action.owner or "미지정"
+            existing_open.append(
+                OpenActionItem(
+                    item_id=_action_item_id(owner, action.description, citation.meeting_id),
+                    owner=owner,
+                    description=action.description,
+                    from_meeting_id=citation.meeting_id,
+                    from_date="",
+                    citation=citation,
+                    due_date=action.due_date,
+                )
+            )
+
+        existing_closed: list[ClosedActionItem] = []
+        lines = page.content.splitlines()
+        index = closed_index + 1
+        while index < len(lines):
+            closed_match = _CLOSED_ACTION_RE.fullmatch(lines[index].strip())
+            if closed_match is None:
+                index += 1
+                continue
+
+            detail_index = index + 1
+            while detail_index < len(lines) and not lines[detail_index].strip():
+                detail_index += 1
+            if detail_index >= len(lines):
+                raise ValueError("Closed 액션아이템의 종료 정보가 없습니다.")
+            closed_by_match = _CLOSED_BY_RE.fullmatch(lines[detail_index])
+            if closed_by_match is None:
+                raise ValueError("Closed 액션아이템의 종료 정보를 파싱하지 못했습니다.")
+
+            original_citation = _parse_action_citation(closed_match.group("citation"))
+            closed_citation = _parse_action_citation(closed_by_match.group("citation"))
+            description = closed_match.group("description").strip()
+            if not description:
+                raise ValueError("Closed 액션아이템 설명이 비어 있습니다.")
+            owner = "미지정"
+            original = OpenActionItem(
+                item_id=_action_item_id(owner, description, original_citation.meeting_id),
+                owner=owner,
+                description=description,
+                from_meeting_id=original_citation.meeting_id,
+                from_date="",
+                citation=original_citation,
+            )
+            existing_closed.append(
+                ClosedActionItem(
+                    original=original,
+                    closed_by_speaker=closed_by_match.group("speaker").strip(),
+                    closed_at_meeting_id=closed_citation.meeting_id,
+                    closed_citation=closed_citation,
+                    closed_reason="completed",
+                )
+            )
+            index = detail_index + 1
+
+        if len(existing_closed) != expected_closed:
+            raise ValueError("action_items.md Closed 섹션의 모든 항목을 파싱하지 못했습니다.")
+
+        return (existing_open, existing_closed)
 
     @staticmethod
     def _dispatch_page_by_verdict(

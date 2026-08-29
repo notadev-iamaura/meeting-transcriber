@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_config as _get_config
 from api.dependencies import get_job_queue as _get_job_queue
+from api.dependencies import (
+    get_meeting_mutation_coordinator as _get_meeting_mutation_coordinator,
+)
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
+from core.meeting_mutation import MeetingMutationCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,17 @@ def _validate_meeting_id(meeting_id: str) -> None:
             status_code=400,
             detail=f"유효하지 않은 회의 ID 형식입니다: {meeting_id}",
         )
+
+
+async def _meeting_mutation_lease(
+    request: Request,
+    meeting_id: str,
+) -> AsyncIterator[None]:
+    """단일 회의 재색인의 검사부터 게시까지 다른 mutation과 직렬화한다."""
+    _validate_meeting_id(meeting_id)
+    coordinator = _get_meeting_mutation_coordinator(request)
+    async with coordinator.lease(meeting_id):
+        yield
 
 
 async def _get_reconciled_jobs(queue: Any, config: Any) -> list[Any]:
@@ -221,14 +237,24 @@ async def _reindex_meeting(
     config: Any,
     model_manager: Any,
     meeting_id: str,
+    meeting_mutation_coordinator: MeetingMutationCoordinator,
 ) -> dict[str, Any]:
     """core의 재색인 구현을 API 호환 이름으로 호출한다."""
     from core.reindex_recovery import reindex_meeting_artifacts
 
-    return await reindex_meeting_artifacts(config, model_manager, meeting_id)
+    return await reindex_meeting_artifacts(
+        config,
+        model_manager,
+        meeting_id,
+        meeting_mutation_coordinator=meeting_mutation_coordinator,
+    )
 
 
-@router.post("/meetings/{meeting_id}/reindex", response_model=ReindexResponse)
+@router.post(
+    "/meetings/{meeting_id}/reindex",
+    response_model=ReindexResponse,
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
 async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
     """단일 회의의 RAG 인덱스를 재생성한다 (백필).
 
@@ -251,22 +277,30 @@ async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
     )
     if job is None:
         raise HTTPException(status_code=404, detail=f"회의를 찾을 수 없습니다: {meeting_id}")
+    if getattr(job, "status", "") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="완료된 회의만 재색인할 수 있습니다.",
+        )
 
-    # 체크포인트 존재 여부 사전 점검
-    checkpoints_dir = config.paths.resolved_checkpoints_dir
-    correct_cp = checkpoints_dir / meeting_id / "correct.json"
-    merge_cp = checkpoints_dir / meeting_id / "merge.json"
-    if not correct_cp.exists() and not merge_cp.exists():
+    from core.reindex_recovery import has_reindex_source_artifact
+
+    try:
+        has_source = await asyncio.to_thread(has_reindex_source_artifact, config, meeting_id)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="SECURITY_BLOCKED: 재색인 source 경로가 안전하지 않습니다.",
+        ) from exc
+    if not has_source:
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"체크포인트가 없어 재색인할 수 없습니다: {meeting_id} "
-                "(correct.json/merge.json 모두 부재)"
-            ),
+            detail=f"체크포인트가 없어 재색인할 수 없습니다: {meeting_id}",
         )
 
     pipeline = _get_pipeline_manager(request)
     model_manager = pipeline._model_manager
+    meeting_mutation_coordinator = _get_meeting_mutation_coordinator(request)
 
     ws_manager = getattr(request.app.state, "ws_manager", None)
 
@@ -285,7 +319,12 @@ async def reindex_meeting(request: Request, meeting_id: str) -> ReindexResponse:
             logger.debug(f"reindex 시작 이벤트 broadcast 실패 (무시): {e}")
 
     try:
-        result = await _reindex_meeting(config, model_manager, meeting_id)
+        result = await _reindex_meeting(
+            config,
+            model_manager,
+            meeting_id,
+            meeting_mutation_coordinator,
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
@@ -351,6 +390,11 @@ async def _start_reindex_all(app: Any, missing_ids: list[str]) -> None:
         app.state.reindex_lock_busy = False
         return
     model_manager = pipeline._model_manager
+    meeting_mutation_coordinator = getattr(pipeline, "meeting_mutation_coordinator", None)
+    if not isinstance(meeting_mutation_coordinator, MeetingMutationCoordinator):
+        logger.error("reindex-all: 회의 mutation coordinator 미초기화 — 작업 중단")
+        app.state.reindex_lock_busy = False
+        return
     ws_manager = getattr(app.state, "ws_manager", None)
 
     async def _broadcast(data: dict) -> None:
@@ -376,7 +420,12 @@ async def _start_reindex_all(app: Any, missing_ids: list[str]) -> None:
                 await _broadcast(
                     {"phase": "start", "meeting_id": mid, "processed": processed, "total": total}
                 )
-                result = await _reindex_meeting(config, model_manager, mid)
+                result = await _reindex_meeting(
+                    config,
+                    model_manager,
+                    mid,
+                    meeting_mutation_coordinator,
+                )
                 processed += 1
                 await _broadcast(
                     {
@@ -453,9 +502,9 @@ async def reindex_all(request: Request) -> ReindexAllResponse:
         missing_ids: list[str] = []
         for job in completed_jobs:
             mid = job.meeting_id
-            # correct/merge 체크포인트가 있어야 백필 가능
-            cp_dir = config.paths.resolved_checkpoints_dir / mid
-            if not (cp_dir / "correct.json").exists() and not (cp_dir / "merge.json").exists():
+            from core.reindex_recovery import has_reindex_source_artifact
+
+            if not await asyncio.to_thread(has_reindex_source_artifact, config, mid):
                 continue
             if _count_chunks_for_meeting(collection, mid) == 0:
                 missing_ids.append(mid)

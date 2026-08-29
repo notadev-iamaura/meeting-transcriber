@@ -19,16 +19,19 @@ import json
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.io_utils import _rename_exchange
 from core.pipeline import (
     PIPELINE_STEPS,
     InvalidInputError,
     PipelineError,
     PipelineManager,
     PipelineState,
+    PipelineStateWriteError,
     PipelineStep,
     PipelineStepError,
     StepResult,
@@ -410,7 +413,10 @@ class TestPipelineState:
 
         # unique temp atomic write가 실패하도록 모킹
         with (
-            patch("core.pipeline.atomic_write_text", side_effect=OSError("쓰기 실패")),
+            patch(
+                "core.pipeline.atomic_write_text_pinned",
+                side_effect=OSError("쓰기 실패"),
+            ),
             pytest.raises(IOError, match="쓰기 실패"),
         ):
             state.save(state_path)
@@ -437,22 +443,25 @@ class TestPipelineState:
             # fsync가 최소 1회 호출되어야 함
             assert mock_fsync.called, "os.fsync가 호출되지 않았습니다"
 
-    def test_atomic_save_uses_os_replace(self, tmp_path: Path) -> None:
-        """저장 시 os.replace로 원자적 교체가 수행되는지 확인한다."""
+    def test_atomic_save_uses_exchange_and_preserves_previous(self, tmp_path: Path) -> None:
+        """상태 갱신은 원자 교환하고 이전 inode를 숨김 entry로 보존한다."""
         state = PipelineState(
             meeting_id="replace_test",
             audio_path="/tmp/test.m4a",
         )
         state_path = tmp_path / "state.json"
+        state.save(state_path)
+        previous_payload = state_path.read_text(encoding="utf-8")
+        state.status = "running"
 
-        with patch("core.pipeline.os.replace", wraps=os.replace) as mock_replace:
+        with patch("core.io_utils._rename_exchange", wraps=_rename_exchange) as exchange:
             state.save(state_path)
-            # os.replace가 호출되어야 함
-            assert mock_replace.called, "os.replace가 호출되지 않았습니다"
-            # 인자 확인: (임시 파일 경로, 최종 파일 경로)
-            call_args = mock_replace.call_args[0]
-            assert call_args[0].endswith(".tmp"), "os.replace의 소스가 .tmp 파일이 아닙니다"
-            assert Path(call_args[1]) == state_path, "os.replace의 대상이 올바르지 않습니다"
+            exchange.assert_called_once()
+
+        previous = list(tmp_path.glob(".state.json.*.state-previous"))
+        assert len(previous) == 1
+        assert previous[0].read_text(encoding="utf-8") == previous_payload
+        assert PipelineState.from_file(state_path).status == "running"
 
 
 # === PipelineManager 입력 검증 테스트 ===
@@ -744,21 +753,26 @@ class TestPipelineManagerValidation:
 
         assert external_merge.read_text(encoding="utf-8") == '{"utterances": []}'
 
-    def test_checkpoint_delete는_symlink_target을_보존한다(
+    def test_llm_refresh_validation은_symlink_target을_보존한다(
         self,
         pipeline: PipelineManager,
         tmp_path: Path,
     ) -> None:
-        """재실행용 checkpoint 삭제도 final symlink를 입력 오류로 거부한다."""
+        """지연 LLM 사전 검증은 final symlink를 입력 오류로 거부한다."""
         checkpoint_dir = tmp_path.resolve() / "checkpoints" / "delete_link"
         checkpoint_dir.mkdir(parents=True)
+        PipelineState(
+            meeting_id="delete_link",
+            audio_path="/tmp/test.m4a",
+            skipped_steps=["correct"],
+        ).save(checkpoint_dir / "pipeline_state.json")
         external = tmp_path.resolve() / "external-delete.json"
         external.write_text("KEEP", encoding="utf-8")
         linked = checkpoint_dir / "correct.json"
         linked.symlink_to(external)
 
         with pytest.raises(InvalidInputError, match="심볼릭 링크"):
-            pipeline._delete_checkpoint_if_exists(linked)
+            pipeline.validate_llm_steps_non_destructive("delete_link")
 
         assert external.read_text(encoding="utf-8") == "KEEP"
 
@@ -2159,6 +2173,38 @@ class TestIndividualSteps:
         # save_checkpoint과 save_markdown 모두 호출되어야 함
         mock_summary.save_checkpoint.assert_called_once()
         mock_summary.save_markdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_step_summarize는_기존_markdown_symlink를_따르지_않는다(
+        self,
+        pipeline: PipelineManager,
+        tmp_path: Path,
+    ) -> None:
+        """정상 요약 경로도 정적 링크의 외부 대상을 덮어쓰지 않는다."""
+        mock_summary = _make_mock_summary()
+        mock_summarizer = MagicMock()
+        mock_summarizer.summarize = AsyncMock(return_value=mock_summary)
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        external = tmp_path / "external-minutes.md"
+        sentinel = "외부 회의록"
+        external.write_text(sentinel, encoding="utf-8")
+        markdown_path = output_dir / "meeting_minutes.md"
+        markdown_path.symlink_to(external)
+
+        with (
+            patch("steps.summarizer.Summarizer", return_value=mock_summarizer),
+            pytest.raises(InvalidInputError, match="심볼릭 링크"),
+        ):
+            await pipeline._run_step_summarize(
+                _make_mock_corrected(),
+                tmp_path / "summarize.json",
+                output_dir,
+            )
+
+        assert external.read_text(encoding="utf-8") == sentinel
+        assert markdown_path.is_symlink()
+        mock_summary.save_markdown.assert_not_called()
 
 
 # === 상태 전이 테스트 ===
@@ -4136,11 +4182,8 @@ class TestSkipLlmSteps:
             mock_correct.assert_not_called()
             mock_summarize.assert_not_called()
 
-            # 스킵된 단계 확인 — chunk/embed 는 LLM 단계가 아니므로 skip 되지 않음
-            assert "correct" in state.skipped_steps
-            assert "summarize" in state.skipped_steps
-            assert "chunk" not in state.skipped_steps
-            assert "embed" not in state.skipped_steps
+            # correct 의존 산출물은 지연 LLM에서 처음 게시하도록 함께 스킵한다.
+            assert {"correct", "summarize", "chunk", "embed"} <= set(state.skipped_steps)
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_merged_result_패스스루(
@@ -4149,7 +4192,7 @@ class TestSkipLlmSteps:
         mock_model_manager: MagicMock,
         audio_file: Path,
     ) -> None:
-        """skip_llm_steps=True일 때 merged_result가 corrected_result로 패스스루되는지 확인한다."""
+        """skip 시 refresh 대상 pass-through checkpoint를 남기지 않는지 확인한다."""
         mock_config.pipeline.skip_llm_steps = True
 
         merged_mock = _make_mock_merged()
@@ -4213,14 +4256,11 @@ class TestSkipLlmSteps:
             correct_cp = (
                 mock_config.paths.resolved_checkpoints_dir / "passthrough_skip" / "correct.json"
             )
-            assert correct_cp.exists()
-
-            from steps.corrector import CorrectedResult
-
-            restored = CorrectedResult.from_checkpoint(correct_cp)
-            assert restored.utterances[0].text == "안녕하세요"
-            assert restored.utterances[0].original_text == "안녕하세요"
-            assert restored.utterances[0].was_corrected is False
+            assert not correct_cp.exists()
+            assert not (correct_cp.parent / "summarize.json").exists()
+            assert not (correct_cp.parent / "chunk.json").exists()
+            assert not (correct_cp.parent / "embed.json").exists()
+            assert {"correct", "summarize", "chunk", "embed"} <= set(state.skipped_steps)
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps시_정상_완료(
@@ -4285,8 +4325,8 @@ class TestSkipLlmSteps:
 
             assert state.status == "completed"
             # 모든 8단계가 completed_steps 에 포함 (스킵된 단계도 포함)
-            # CHUNK / EMBED 는 LLM 단계 아니라 skip 되지 않고 정상 실행
             assert len(state.completed_steps) == 8
+            assert {"correct", "summarize", "chunk", "embed"} <= set(state.skipped_steps)
 
     @pytest.mark.asyncio
     async def test_run_skip_llm_steps_false시_기존_동작(
@@ -4553,13 +4593,13 @@ class TestRunLlmSteps:
             mock_model_manager.unload_if_current.assert_awaited_once_with("exaone")
 
     @pytest.mark.asyncio
-    async def test_run_llm_steps_스킵_체크포인트를_실제_LLM과_인덱스로_갱신(
+    async def test_run_llm_steps_새_스킵_산출물을_no_replace로_최초_생성(
         self,
         mock_config: MagicMock,
         mock_model_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """skip_llm pass-through 산출물이 있으면 LLM 실행 후 chunk/embed도 재생성한다."""
+        """새 skip 계약은 기존 파일 없이 LLM과 인덱스를 최초 생성한다."""
         meeting_id = "llm_refresh_index_after_skip"
         state_dir = tmp_path / "checkpoints" / meeting_id
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -4577,36 +4617,29 @@ class TestRunLlmSteps:
                 "chunk",
                 "embed",
             ],
-            skipped_steps=["correct", "summarize"],
+            skipped_steps=["correct", "summarize", "chunk", "embed"],
             output_dir=str(tmp_path / "outputs" / meeting_id),
         ).save(state_dir / "pipeline_state.json")
         (state_dir / "merge.json").write_text(
             '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
         )
-        (state_dir / "correct.json").write_text(
-            '{"utterances": [], "num_speakers": 1, "audio_path": "/tmp/test.m4a"}',
-            encoding="utf-8",
-        )
-        (state_dir / "summarize.json").write_text(
-            '{"markdown": "stale", "audio_path": "/tmp/test.m4a"}',
-            encoding="utf-8",
-        )
-        (state_dir / "chunk.json").write_text("{}", encoding="utf-8")
-        (state_dir / "embed.json").write_text("{}", encoding="utf-8")
 
         mock_model_manager.unload_if_current = AsyncMock(return_value=True)
         pipeline = PipelineManager(mock_config, mock_model_manager)
+        merged_result = _make_mock_merged()
+        corrected_result = _make_mock_corrected()
+        chunked_result = _make_mock_chunked()
 
         with (
             patch(
                 "steps.merger.MergedResult.from_checkpoint",
-                return_value=_make_mock_merged(),
+                return_value=merged_result,
             ),
             patch.object(
                 pipeline,
                 "_run_step_correct",
                 new_callable=AsyncMock,
-                return_value=_make_mock_corrected(),
+                return_value=corrected_result,
             ) as mock_correct,
             patch.object(
                 pipeline,
@@ -4618,7 +4651,7 @@ class TestRunLlmSteps:
                 pipeline,
                 "_run_step_chunk",
                 new_callable=AsyncMock,
-                return_value=_make_mock_chunked(),
+                return_value=chunked_result,
             ) as mock_chunk,
             patch.object(
                 pipeline,
@@ -4626,19 +4659,491 @@ class TestRunLlmSteps:
                 new_callable=AsyncMock,
                 return_value=_make_mock_embedded(),
             ) as mock_embed,
+            patch.object(
+                pipeline,
+                "_derive_meeting_date",
+                return_value="2026-01-02",
+            ),
         ):
             result = await pipeline.run_llm_steps(meeting_id)
 
-        mock_correct.assert_called_once()
-        mock_summarize.assert_called_once()
-        mock_chunk.assert_called_once()
-        mock_embed.assert_called_once()
+        mock_correct.assert_awaited_once_with(
+            merged_result,
+            state_dir / "correct.json",
+            restore_checkpoint=False,
+            exclusive_publish=True,
+        )
+        mock_summarize.assert_awaited_once_with(
+            corrected_result,
+            state_dir / "summarize.json",
+            tmp_path / "outputs" / meeting_id,
+            restore_checkpoint=False,
+            exclusive_publish=True,
+        )
+        mock_chunk.assert_awaited_once_with(
+            corrected_result,
+            state_dir / "chunk.json",
+            meeting_id,
+            "2026-01-02",
+            restore_checkpoint=False,
+            exclusive_publish=True,
+        )
+        mock_embed.assert_awaited_once_with(
+            chunked_result,
+            state_dir / "embed.json",
+            restore_checkpoint=False,
+            exclusive_publish=True,
+        )
         assert result.status == "completed"
         assert result.current_step == ""
-        assert "correct" not in result.skipped_steps
-        assert "summarize" not in result.skipped_steps
+        assert not {"correct", "summarize", "chunk", "embed"} & set(result.skipped_steps)
         assert "chunk" in result.completed_steps
         assert "embed" in result.completed_steps
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_레거시_충돌_산출물은_보존하고_실행_차단(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """과거 pass-through/stale 산출물은 삭제·교체하지 않고 fail-closed한다."""
+        meeting_id = "llm_legacy_conflict"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        output_dir = tmp_path / "outputs" / meeting_id
+        state_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="completed",
+            completed_steps=[
+                "convert",
+                "transcribe",
+                "diarize",
+                "merge",
+                "correct",
+                "summarize",
+                "chunk",
+                "embed",
+            ],
+            skipped_steps=["correct", "summarize"],
+            output_dir=str(output_dir),
+        ).save(state_dir / "pipeline_state.json")
+        artifacts = {
+            state_dir / "merge.json": '{"utterances": [], "num_speakers": 1}',
+            state_dir / "correct.json": "legacy-correct",
+            state_dir / "summarize.json": "legacy-summary",
+            state_dir / "chunk.json": "legacy-chunk",
+            state_dir / "embed.json": "legacy-embed",
+            output_dir / "meeting_minutes.md": "legacy-minutes",
+        }
+        for path, content in artifacts.items():
+            path.write_text(content, encoding="utf-8")
+
+        mock_model_manager.unload_if_current = AsyncMock(return_value=False)
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        with (
+            patch.object(pipeline, "_run_step_correct", new_callable=AsyncMock) as correct,
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as summarize,
+            patch.object(pipeline, "_run_step_chunk", new_callable=AsyncMock) as chunk,
+            patch.object(pipeline, "_run_step_embed", new_callable=AsyncMock) as embed,
+            pytest.raises(PipelineError, match="SECURITY_BLOCKED"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_not_called()
+        summarize.assert_not_called()
+        chunk.assert_not_called()
+        embed.assert_not_called()
+        for path, content in artifacts.items():
+            assert path.read_text(encoding="utf-8") == content
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_no_replace_경쟁실패를_failed로_기록(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """게시 경쟁 오류 뒤 running 상태가 남지 않는다."""
+        meeting_id = "llm_publish_collision"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="completed",
+            completed_steps=["merge", "correct", "summarize", "chunk", "embed"],
+            skipped_steps=["correct", "summarize", "chunk", "embed"],
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+        mock_model_manager.unload_if_current = AsyncMock(return_value=False)
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                side_effect=FileExistsError("collision"),
+            ),
+            pytest.raises(FileExistsError, match="collision"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        state = pipeline.get_status(meeting_id)
+        assert state is not None
+        assert state.status == "failed"
+        assert state.current_step == "correct"
+        assert "collision" in state.error_message
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_state_유실시_deferred_marker로_index까지_복구(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """state가 사라져도 no-replace marker가 네 지연 단계를 복원한다."""
+        meeting_id = "llm_state_loss_deferred"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+        mock_model_manager.unload_if_current = AsyncMock(return_value=True)
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        pipeline._ensure_llm_deferred_marker(meeting_id)
+
+        with (
+            patch(
+                "steps.merger.MergedResult.from_checkpoint",
+                return_value=_make_mock_merged(),
+            ),
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+                return_value=_make_mock_corrected(),
+            ) as correct,
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+                return_value=_make_mock_summary(),
+            ) as summarize,
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+                return_value=_make_mock_chunked(),
+            ) as chunk,
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+                return_value=_make_mock_embedded(),
+            ) as embed,
+        ):
+            result = await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_awaited_once()
+        summarize.assert_awaited_once()
+        chunk.assert_awaited_once()
+        embed.assert_awaited_once()
+        assert result.status == "completed"
+        assert {"correct", "summarize", "chunk", "embed"} <= set(result.completed_steps)
+
+    def test_deferred_marker는_meeting_id에_결합된다(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """다른 회의에서 복사한 marker는 지연 실행 의도로 인정하지 않는다."""
+        first_id = "marker_first"
+        second_id = "marker_second"
+        first_dir = tmp_path / "checkpoints" / first_id
+        second_dir = tmp_path / "checkpoints" / second_id
+        first_dir.mkdir(parents=True)
+        second_dir.mkdir(parents=True)
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        pipeline._ensure_llm_deferred_marker(first_id)
+        (second_dir / "llm_deferred.json").write_bytes(
+            (first_dir / "llm_deferred.json").read_bytes()
+        )
+
+        with pytest.raises(PipelineError, match="고정 계약"):
+            pipeline._llm_deferred_marker_exists(second_id)
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_state_유실과_부분산출물은_state도_쓰지_않고_차단(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """state가 없을 때 기존 부분 산출물을 재개 근거로 신뢰하지 않는다."""
+        meeting_id = "llm_state_loss_partial"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        merge_path = state_dir / "merge.json"
+        merge_path.write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        pipeline._ensure_llm_deferred_marker(meeting_id)
+        correct_path = state_dir / "correct.json"
+        correct_path.write_text("partial-or-forged", encoding="utf-8")
+        preserved = {
+            merge_path: merge_path.read_bytes(),
+            correct_path: correct_path.read_bytes(),
+            state_dir / "llm_deferred.json": (state_dir / "llm_deferred.json").read_bytes(),
+        }
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as correct,
+            pytest.raises(PipelineError, match="SECURITY_BLOCKED"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_not_called()
+        assert not (state_dir / "pipeline_state.json").exists()
+        for path, content in preserved.items():
+            assert path.read_bytes() == content
+
+    @pytest.mark.asyncio
+    async def test_state_유실_사전검증과_복구_사이_부분산출물도_state_없이_차단(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """메모리 복구 중 생긴 지연 산출물을 state 생성 전에 다시 검사한다."""
+        meeting_id = "llm_state_loss_race"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        real_rebuild = pipeline._rebuild_state_from_checkpoints
+
+        def _inject_partial(*args: Any, **kwargs: Any) -> PipelineState:
+            state = real_rebuild(*args, **kwargs)
+            (state_dir / "correct.json").write_text("late-partial", encoding="utf-8")
+            return state
+
+        with (
+            patch.object(
+                pipeline,
+                "_rebuild_state_from_checkpoints",
+                side_effect=_inject_partial,
+            ),
+            patch.object(pipeline, "_run_step_correct", new_callable=AsyncMock) as correct,
+            pytest.raises(PipelineError, match="SECURITY_BLOCKED"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_not_called()
+        assert not (state_dir / "pipeline_state.json").exists()
+        assert (state_dir / "correct.json").read_text(encoding="utf-8") == "late-partial"
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_correct_partial과_위조_generation은_보존하고_차단(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """부분 산출물과 matching hard-link 이름을 provenance로 신뢰하지 않는다."""
+        meeting_id = "llm_partial_correct"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="failed",
+            completed_steps=["merge", "correct", "summarize", "chunk", "embed"],
+            skipped_steps=["correct", "summarize", "chunk", "embed"],
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        pipeline._ensure_llm_deferred_marker(meeting_id)
+        corrected = _make_real_corrected_result()
+        pipeline._save_result_checkpoint(
+            corrected,
+            state_dir / "correct.json",
+            exclusive_publish=True,
+        )
+        os.link(
+            state_dir / "correct.json",
+            state_dir / ".correct.json.forged.generation",
+        )
+        preserved = {
+            path: path.read_bytes()
+            for path in (
+                state_dir / "pipeline_state.json",
+                state_dir / "correct.json",
+                state_dir / ".correct.json.forged.generation",
+            )
+        }
+        mock_model_manager.unload_if_current = AsyncMock(return_value=True)
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as correct,
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as summarize,
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+            ) as chunk,
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+            ) as embed,
+            pytest.raises(PipelineError, match="SECURITY_BLOCKED"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_not_called()
+        summarize.assert_not_called()
+        chunk.assert_not_called()
+        embed.assert_not_called()
+        for path, content in preserved.items():
+            assert path.read_bytes() == content
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_chunk_partial은_보존하고_embed를_차단(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """부분 chunk를 자동 신뢰하지 않고 어떤 단계도 재실행하지 않는다."""
+        from core.io_utils import publish_text_no_replace
+        from steps.chunker import ChunkedResult
+
+        meeting_id = "llm_partial_chunk"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        output_dir = tmp_path / "outputs" / meeting_id
+        state_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+        PipelineState(
+            meeting_id=meeting_id,
+            audio_path="/tmp/test.m4a",
+            status="failed",
+            completed_steps=["merge", "correct", "summarize", "chunk"],
+            output_dir=str(output_dir),
+        ).save(state_dir / "pipeline_state.json")
+        (state_dir / "merge.json").write_text(
+            '{"utterances": [], "num_speakers": 1}',
+            encoding="utf-8",
+        )
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        pipeline._ensure_llm_deferred_marker(meeting_id)
+        corrected = _make_real_corrected_result()
+        summary = _make_real_summary_result()
+        chunked = ChunkedResult(
+            chunks=[],
+            meeting_id=meeting_id,
+            date="2026-01-02",
+            total_utterances=3,
+            num_speakers=2,
+            audio_path="/tmp/test.m4a",
+        )
+        pipeline._save_result_checkpoint(
+            corrected,
+            state_dir / "correct.json",
+            exclusive_publish=True,
+        )
+        pipeline._save_result_checkpoint(
+            summary,
+            state_dir / "summarize.json",
+            exclusive_publish=True,
+        )
+        publish_text_no_replace(output_dir / "meeting_minutes.md", summary.markdown)
+        pipeline._save_result_checkpoint(
+            chunked,
+            state_dir / "chunk.json",
+            exclusive_publish=True,
+        )
+        preserved = {
+            path: path.read_bytes()
+            for path in (
+                state_dir / "pipeline_state.json",
+                state_dir / "correct.json",
+                state_dir / "summarize.json",
+                state_dir / "chunk.json",
+                output_dir / "meeting_minutes.md",
+            )
+        }
+
+        mock_model_manager.unload_if_current = AsyncMock(return_value=True)
+        with (
+            patch.object(
+                pipeline,
+                "_run_step_correct",
+                new_callable=AsyncMock,
+            ) as correct,
+            patch.object(
+                pipeline,
+                "_run_step_summarize",
+                new_callable=AsyncMock,
+            ) as summarize,
+            patch.object(
+                pipeline,
+                "_run_step_chunk",
+                new_callable=AsyncMock,
+            ) as chunk,
+            patch.object(
+                pipeline,
+                "_run_step_embed",
+                new_callable=AsyncMock,
+            ) as embed,
+            pytest.raises(PipelineError, match="SECURITY_BLOCKED"),
+        ):
+            await pipeline.run_llm_steps(meeting_id)
+
+        correct.assert_not_called()
+        summarize.assert_not_called()
+        chunk.assert_not_called()
+        embed.assert_not_called()
+        assert not (state_dir / "embed.json").exists()
+        for path, content in preserved.items():
+            assert path.read_bytes() == content
 
     @pytest.mark.asyncio
     async def test_run_llm_steps_index_재생성_실패시_stale_completed를_제거한다(
@@ -4665,22 +5170,12 @@ class TestRunLlmSteps:
                 "chunk",
                 "embed",
             ],
-            skipped_steps=["correct", "summarize"],
+            skipped_steps=["correct", "summarize", "chunk", "embed"],
             output_dir=str(tmp_path / "outputs" / meeting_id),
         ).save(state_dir / "pipeline_state.json")
         (state_dir / "merge.json").write_text(
             '{"utterances": [], "num_speakers": 1}', encoding="utf-8"
         )
-        (state_dir / "correct.json").write_text(
-            '{"utterances": [], "num_speakers": 1, "audio_path": "/tmp/test.m4a"}',
-            encoding="utf-8",
-        )
-        (state_dir / "summarize.json").write_text(
-            '{"markdown": "stale", "audio_path": "/tmp/test.m4a"}',
-            encoding="utf-8",
-        )
-        (state_dir / "chunk.json").write_text("{}", encoding="utf-8")
-        (state_dir / "embed.json").write_text("{}", encoding="utf-8")
 
         mock_model_manager.unload_if_current = AsyncMock(return_value=True)
         pipeline = PipelineManager(mock_config, mock_model_manager)
@@ -5188,6 +5683,64 @@ class TestLlmLockSerialization:
     """이슈 H: run_llm_steps 가 _llm_lock 으로 직렬화되는지 검증."""
 
     @pytest.mark.asyncio
+    async def test_state_write_error는_canonical을_다시_읽어_failure로_쓰지_않는다(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+    ) -> None:
+        """state 경로 검증 실패 뒤 failure recorder가 의심 파일을 재신뢰하지 않는다."""
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_llm_steps_inner",
+                new_callable=AsyncMock,
+                side_effect=PipelineStateWriteError("state race"),
+            ),
+            patch.object(pipeline, "_record_llm_steps_failure") as record_failure,
+            patch.object(
+                pipeline,
+                "_unload_llm_model_if_current",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            pytest.raises(PipelineStateWriteError, match="state race"),
+        ):
+            await pipeline.run_llm_steps("state_race")
+
+        record_failure.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_llm_steps_모델_cleanup_실패에도_llm_lock_해제(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+    ) -> None:
+        """finally의 모델 cleanup 오류가 전역 LLM lock을 누수하지 않는다."""
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        expected = PipelineState(meeting_id="cleanup_error", audio_path="/tmp/test.wav")
+
+        with (
+            patch.object(
+                pipeline,
+                "_run_llm_steps_inner",
+                new_callable=AsyncMock,
+                return_value=expected,
+            ),
+            patch.object(
+                pipeline,
+                "_unload_llm_model_if_current",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("cleanup failed"),
+            ),
+            pytest.raises(RuntimeError, match="cleanup failed"),
+        ):
+            await pipeline.run_llm_steps("cleanup_error")
+
+        assert pipeline._llm_lock.locked() is False
+
+    @pytest.mark.asyncio
     async def test_run_llm_steps_동시_호출_순차_실행(
         self,
         mock_config: MagicMock,
@@ -5376,6 +5929,28 @@ class TestRebuildStateFromCheckpoints:
         pipeline = PipelineManager(mock_config, mock_model_manager)
         with pytest.raises(PipelineError, match="체크포인트 디렉토리"):
             pipeline._rebuild_state_from_checkpoints("never_existed")
+
+    def test_지연실행용_재구성은_LLM_체크포인트를_완료로_신뢰하지_않는다(
+        self,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """state 유실 지연 실행은 race로 생긴 LLM 산출물을 재개 입력에서 제외한다."""
+        meeting_id = "legacy_untrusted_llm"
+        state_dir = tmp_path / "checkpoints" / meeting_id
+        state_dir.mkdir(parents=True)
+        (state_dir / "merge.json").write_text("{}", encoding="utf-8")
+        (state_dir / "correct.json").write_text("forged", encoding="utf-8")
+
+        pipeline = PipelineManager(mock_config, mock_model_manager)
+        state = pipeline._rebuild_state_from_checkpoints(
+            meeting_id,
+            trust_llm_checkpoints=False,
+        )
+
+        assert "merge" in state.completed_steps
+        assert "correct" not in state.completed_steps
 
     @pytest.mark.asyncio
     async def test_run_llm_steps_state_유실_자동_복구(

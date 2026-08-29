@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import unicodedata
@@ -25,13 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
+from core.io_utils import atomic_write_json_pinned, atomic_write_text_pinned, read_text_no_follow
 from core.llm_backend import (
     LLMBackend,
     LLMConnectionError,
     LLMGenerationError,
     create_backend,
 )
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.user_settings import build_summarizer_system_prompt
 from steps.corrector import CorrectedResult, CorrectedUtterance
 
@@ -150,9 +150,7 @@ class SummaryResult:
         Args:
             output_path: 저장할 JSON 파일 경로
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False)
+        atomic_write_json_pinned(output_path, self.to_dict(), indent=None)
         logger.info(f"요약 체크포인트 저장: {output_path}")
 
     def save_markdown(self, output_path: Path) -> None:
@@ -161,9 +159,7 @@ class SummaryResult:
         Args:
             output_path: 저장할 마크다운 파일 경로
         """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(self.markdown)
+        atomic_write_text_pinned(output_path, self.markdown)
         logger.info(f"마크다운 회의록 저장: {output_path}")
 
     @classmethod
@@ -180,8 +176,7 @@ class SummaryResult:
             FileNotFoundError: 체크포인트 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(checkpoint_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(checkpoint_path))
 
         return cls(
             markdown=data.get("markdown", ""),
@@ -567,7 +562,7 @@ class Summarizer:
 
                     logger.info(f"분할 요약 모드: {chunk_count}개 청크로 분할")
 
-                    markdown = await asyncio.to_thread(
+                    markdown = await await_native_inference(
                         self._summarize_chunked,
                         backend,
                         chunks,
@@ -577,7 +572,7 @@ class Summarizer:
                     # 단일 요약
                     logger.info("단일 요약 모드")
 
-                    markdown = await asyncio.to_thread(
+                    markdown = await await_native_inference(
                         self._summarize_single,
                         backend,
                         full_transcript,

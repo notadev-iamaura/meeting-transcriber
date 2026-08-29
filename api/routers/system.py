@@ -28,6 +28,10 @@ class SystemResourcesResponse(BaseModel):
         ram_percent: RAM 사용률 (%)
         cpu_percent: CPU 사용률 (%)
         loaded_model: 현재 로드된 모델명 (없으면 None)
+        native_cleanup_pending: timeout/cancel된 native worker 정리 대기 여부
+        native_cleanup_model_name: 정리 대기 중인 모델명
+        native_cleanup_pending_workers: 아직 종료되지 않은 native worker 수
+        native_cleanup_started_at: deferred cleanup 시작 Unix 시각
     """
 
     ram_used_gb: float
@@ -35,6 +39,10 @@ class SystemResourcesResponse(BaseModel):
     ram_percent: float
     cpu_percent: float
     loaded_model: str | None = None
+    native_cleanup_pending: bool = False
+    native_cleanup_model_name: str | None = None
+    native_cleanup_pending_workers: int = 0
+    native_cleanup_started_at: float | None = None
 
 
 class AudioInputScanStatusResponse(BaseModel):
@@ -262,8 +270,23 @@ async def get_system_resources(request: Request) -> SystemResourcesResponse:
     # model_manager에서 현재 로드된 모델명 조회
     model_manager = getattr(request.app.state, "model_manager", None)
     loaded_model = None
+    native_cleanup_pending = False
+    native_cleanup_model_name = None
+    native_cleanup_pending_workers = 0
+    native_cleanup_started_at = None
     if model_manager is not None:
-        loaded_model = getattr(model_manager, "current_model_name", None)
+        get_status = getattr(model_manager, "get_status", None)
+        model_status = get_status() if callable(get_status) else None
+        if isinstance(model_status, dict):
+            loaded_model = model_status.get("current_model_name")
+            native_cleanup_pending = bool(model_status.get("native_cleanup_pending", False))
+            native_cleanup_model_name = model_status.get("native_cleanup_model_name")
+            native_cleanup_pending_workers = int(
+                model_status.get("native_cleanup_pending_workers", 0)
+            )
+            native_cleanup_started_at = model_status.get("native_cleanup_started_at")
+        else:
+            loaded_model = getattr(model_manager, "current_model_name", None)
 
     return SystemResourcesResponse(
         ram_used_gb=round(mem.used / (1024**3), 2),
@@ -271,6 +294,10 @@ async def get_system_resources(request: Request) -> SystemResourcesResponse:
         ram_percent=round(mem.percent, 1),
         cpu_percent=round(cpu, 1),
         loaded_model=loaded_model,
+        native_cleanup_pending=native_cleanup_pending,
+        native_cleanup_model_name=native_cleanup_model_name,
+        native_cleanup_pending_workers=native_cleanup_pending_workers,
+        native_cleanup_started_at=native_cleanup_started_at,
     )
 
 

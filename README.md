@@ -196,17 +196,17 @@ llm:
    - [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
    - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
 3. [토큰 발급 페이지](https://huggingface.co/settings/tokens)에서 **Access Token** 생성 (Read 권한)
-4. 환경변수로 설정:
+4. HuggingFace CLI에 로그인하여 사용자 전용 캐시에 저장:
 
 ```bash
-# 터미널에서 일회성 설정
-export HUGGINGFACE_TOKEN=hf_xxxxx
-
-# 영구 설정 (~/.zshrc 또는 ~/.bashrc에 추가)
-echo 'export HUGGINGFACE_TOKEN=hf_xxxxx' >> ~/.zshrc
+hf auth login
+chmod 600 ~/.cache/huggingface/token
 ```
 
-> **참고**: 토큰 설정 후 최초 실행 시 모델이 자동 다운로드되며 (`~/.cache/huggingface/`에 캐시),
+> **참고**: `.zshrc`의 `export HUGGINGFACE_TOKEN=...`은 현재 터미널 실행에는 사용할 수 있지만
+> macOS LaunchAgent에는 전달되지 않습니다. 로그인 자동 시작과 새벽 자동 처리를 사용하려면
+> 위 CLI 캐시가 필요합니다. 토큰 값은 plist, YAML, 로그에 저장하지 않습니다.
+> 토큰 설정 후 최초 실행 시 모델이 자동 다운로드되며 (`~/.cache/huggingface/`에 캐시),
 > 기본 로컬 전사 모드는 이후 인터넷 없이 동작합니다. 선택적 OpenAI 전사를 실행할 때는
 > 해당 음성 업로드를 위한 인터넷 연결이 필요합니다.
 
@@ -377,11 +377,11 @@ pyannote 모델은 HuggingFace **게이트 모델**이라 약관 동의 + 토큰
 1. <https://huggingface.co/pyannote/speaker-diarization-community-1> 방문 → **"Agree and access repository"** 클릭
 2. <https://huggingface.co/pyannote/segmentation-3.0> 방문 → 동일하게 동의
 3. <https://huggingface.co/settings/tokens> 에서 **Read 권한** 토큰 발급
-4. 환경변수 설정:
+4. 사용자 전용 CLI 캐시에 저장:
 
 ```bash
-export HUGGINGFACE_TOKEN=hf_xxxxx
-export HF_TOKEN=hf_xxxxx
+hf auth login
+chmod 600 ~/.cache/huggingface/token
 ```
 
 5. SSL 인증서 자체가 깨진 환경이라면 위 1~3 은 일반 브라우저에서 진행하되, 모델 파일은 동일한 게이트 페이지 → **"Files and versions"** → 각 파일 다운로드 → `~/.cache/huggingface/hub/models--pyannote--speaker-diarization-community-1/` 에 위와 동일한 캐시 구조로 배치
@@ -434,7 +434,9 @@ python main.py --no-menubar
 
 **전사문 뷰어**: 회의 선택 시 참석자별 번호 배지 + 타임스탬프로 발화 표시. 전사문 내 검색 지원.
 
-**회의록 (AI 요약)**: 탭 전환으로 AI가 생성한 회의록 확인. "요약 생성" / "재생성" 버튼.
+**회의록 (AI 요약)**: 탭 전환으로 AI가 생성한 회의록을 확인하고 직접 편집할 수 있습니다.
+기존 산출물을 지우는 강제 재생성은 파일 경쟁 시 데이터 손실을 막기 위해 산출물 존재 여부와
+무관하게 서버가 `409 SECURITY_BLOCKED`로 거부합니다.
 
 **검색**: 전체 회의 내용에서 키워드 검색. 날짜/화자 필터. 결과 클릭 시 해당 발화로 이동.
 
@@ -585,6 +587,16 @@ curl http://127.0.0.1:8765/api/recording/devices
 `recorded` 회의로 등록됩니다. `auto_processing.enabled: false`이면 UI의 **전사 시작**을
 눌러야 하며, 이는 파일이 DB에 등록되지 않은 상태와 구분됩니다.
 
+자동 처리는 명시적으로 활성화한 뒤 앱이 실행 중일 때 동작합니다. 앱 시작과
+startup 감사가 예약 시각을 넘겨 끝나면 당일 누락분을 한 번 바로 처리하는 것이
+기본입니다. 설정 화면에서 최근 시간 범위와 `1회 처리 상한`을 조정할 수 있으며,
+기본 `0`은 누락분 전체를 순차 큐에 등록한다는 뜻입니다. 전사 항목의 실행 결과는 실제
+완료가 아니라 **큐 등록(대기 중)**으로 표시되고, 요약처럼 동기 완료된 항목만 완료로 표시됩니다.
+
+같은 회의의 전체 전사, 지연 요약, 검색 재색인, 재전사, 삭제, 회의록·전사문 편집은 한 번에 하나씩
+실행됩니다. 지연 요약과 수동 편집은 DB 상태가 `completed`인 회의에서만 시작되므로,
+처리 중이거나 재전사 대기 중인 회의는 완료 후 다시 시도해야 합니다.
+
 ### STT 모델 API (CLI)
 
 ```bash
@@ -655,7 +667,7 @@ bash scripts/setup_launchagent.sh
 | `llm.backend` | LLM 백엔드 | `"mlx"` (기본) 또는 `"ollama"` |
 | `llm.mlx_model_name` | MLX 모델명 | `mlx-community/gemma-4-e4b-it-4bit` |
 | `llm.mlx_max_tokens` | MLX 최대 생성 토큰 | `2000` |
-| `pipeline.skip_llm_steps` | LLM 보정/요약 스킵 | `false` (기본: 전체 8단계 실행) |
+| `pipeline.skip_llm_steps` | LLM 보정과 의존 요약/검색 산출물 생성을 보류 | `false` (기본: 전체 8단계 실행) |
 | `server.port` | 웹 서버 포트 | `8765` |
 | `server.startup_timeout_seconds` | 메뉴바 실행 전 FastAPI HTTP readiness 최대 대기 | `10.0`초 |
 | `thermal.batch_size` | 연속 처리 건수 | `2` |
@@ -674,6 +686,18 @@ bash scripts/setup_launchagent.sh
 | `watcher.writer_probe_timeout_seconds` | macOS system `lsof` 단일 writable-open 검사 제한 | `2.0`초 |
 | `watcher.startup_probe_concurrency` | 재시작 시 기존 파일 writable-open(`lsof`) 확인 최대 동시성 | `8` |
 | `watcher.startup_writer_attestation_max_age_seconds` | 기존 DB 작업이 없는 startup 신규 ACCEPT의 final writer 확인 재사용 상한 | `0.25`초 |
+
+`pipeline.skip_llm_steps=true`이면 `correct`뿐 아니라 이에 의존하는
+`summarize/chunk/embed`도 보류합니다. `merge.json`과 회의 ID에 결합된 no-replace
+`llm_deferred.json` marker가 후속 의도를 보존합니다. 나중의 LLM 실행은 canonical
+산출물이 모두 비어 있을 때만 최종 이름을 `O_EXCL`로 직접 생성합니다. 이전 실행의
+부분 산출물이나 임의의 generation hard-link는 자동 복구 근거로 사용하지 않으며,
+기존 파일을 그대로 보존하고 `SECURITY_BLOCKED`로 중단합니다.
+
+로컬 저장소는 현재 macOS 사용자 계정이 소유하는 신뢰 경계입니다. no-follow/pinned-FD
+검사는 symlink 탈출과 관측된 namespace 경쟁에서 외부 파일을 덮어쓰거나 지우지 않기 위한
+것이며, 같은 사용자 권한의 악성 프로세스가 파일·DB·코드를 변조하는 상황의
+authenticity를 보장하지는 않습니다.
 
 화자분리의 실제 실행 제한은 `diarization.*`에서 관리합니다. 기본 공식은
 `max(timeout_seconds, min(dynamic_timeout_max_seconds, ceil(오디오 길이 × dynamic_timeout_multiplier)))`입니다.
@@ -722,7 +746,7 @@ DB/quarantine 변경은 순차 처리합니다. 감사 중에도 `/api/health`�
 | `MT_LLM_BACKEND` | LLM 백엔드 (`mlx` 또는 `ollama`) |
 | `MT_LLM_MODEL` | MLX 모델명 오버라이드 |
 | `MT_LLM_HOST` | Ollama 호스트 (Ollama 사용 시) |
-| `HUGGINGFACE_TOKEN` | HuggingFace 토큰 |
+| `HUGGINGFACE_TOKEN` | 현재 프로세스용 HuggingFace 토큰 폴백. LaunchAgent는 CLI 캐시 사용 |
 | `OPENAI_API_KEY` | 개발/CI용 OpenAI 키 폴백. 일반 사용은 macOS Keychain 권장 |
 
 ## 프로젝트 구조
@@ -823,7 +847,7 @@ meeting-transcriber/
 - **데이터 보안**: chmod 700, Spotlight 제외, localhost only
 - **파일 스테이징**: 녹음 중 파일은 `recordings_temp/`에 격리, 완료 후 `audio_input/`으로 이동
 - **STT 품질 강화**: VAD 전처리 + 4중 환각 필터링 + 텍스트 정규화
-- **데이터 라이프사이클**: Hot(30일) → Warm(90일, FLAC 압축) → Cold(삭제/아카이브)
+- **데이터 라이프사이클**: Hot/Warm/Cold 분류와 보존 상태 점검(자동 압축·삭제 없음)
 - **Graceful Degradation**: 개별 단계 실패 시 다음 단계로 폴백, 부분 결과 유지
 
 ## 프로젝트 현황

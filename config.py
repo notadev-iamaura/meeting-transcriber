@@ -16,10 +16,25 @@ from typing import Any, Literal
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from core.huggingface_credentials import read_huggingface_cli_token
+
 logger = logging.getLogger(__name__)
 
 # 설정 파일 기본 경로 (프로젝트 루트의 config.yaml)
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+
+def resolve_config_path(config_path: Path | None = None) -> Path:
+    """실제 설정 파일 경로를 한 곳에서 결정한다.
+
+    명시적인 CLI 경로가 환경변수보다 우선하며, 상대 경로도 이후 API 쓰기와
+    일치하도록 절대 경로로 정규화한다.
+    """
+    if config_path is not None:
+        return config_path.expanduser().resolve()
+    if env_config := os.environ.get("MT_CONFIG_PATH"):
+        return Path(env_config).expanduser().resolve()
+    return _DEFAULT_CONFIG_PATH.resolve()
 
 
 class PathsConfig(BaseModel):
@@ -806,15 +821,18 @@ class RecordingConfig(BaseModel):
 
 
 class LifecycleConfig(BaseModel):
-    """데이터 라이프사이클 관리 설정"""
+    """데이터 라이프사이클 분류·보존 점검 설정."""
 
     enabled: bool = Field(
         default=False,
-        description="자동 라이프사이클 실행 여부. 기존 오디오 자동 삭제를 피하기 위해 기본값은 false.",
+        description="자동 라이프사이클 분류·보존 점검 실행 여부.",
     )
     hot_days: int = Field(default=30, ge=1)
     warm_days: int = Field(default=90, ge=1)
-    cold_action: str = "delete_audio"
+    cold_action: str = Field(
+        default="delete_audio",
+        description="레거시 수동 유지보수 정책. 자동 lifecycle 실행에서는 사용하지 않음.",
+    )
     interval_hours: int = Field(
         default=24,
         ge=1,
@@ -823,7 +841,7 @@ class LifecycleConfig(BaseModel):
     )
     run_on_startup: bool = Field(
         default=False,
-        description="서버 시작 직후 1회 실행 여부. 삭제 작업이므로 기본값은 false.",
+        description="서버 시작 직후 분류·보존 점검 1회 실행 여부.",
     )
 
     @field_validator("cold_action")
@@ -876,7 +894,7 @@ class AutoProcessingConfig(BaseModel):
         description="자동 처리 동작: 전사만, 요약만, 또는 누락분 전체.",
     )
     run_on_startup_if_missed: bool = Field(
-        default=False,
+        default=True,
         description="앱 시작 시 오늘 실행 시각이 이미 지났으면 한 번 실행할지 여부.",
     )
     safety_checks_enabled: bool = Field(
@@ -884,10 +902,10 @@ class AutoProcessingConfig(BaseModel):
         description="자동 처리 실행 전 HF offline/cache/thermal 위험 조합을 차단할지 여부.",
     )
     max_items_per_run: int = Field(
-        default=1,
+        default=0,
         ge=0,
         le=100,
-        description="자동 처리 1회 실행에서 처리할 최대 회의 수. 0이면 제한 없음.",
+        description=("자동 처리 1회 실행에서 큐에 등록할 최대 회의 수. 0이면 제한 없음."),
     )
     block_hf_offline_cache_miss: bool = Field(
         default=True,
@@ -1194,12 +1212,12 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("wiki", {})["router_llm_fallback"] = _parse_bool(env_router_fb)
 
     # HuggingFace 토큰 (민감 정보이므로 환경변수 권장)
-    # 우선순위: 환경변수 → huggingface-cli 저장 토큰
+    # 우선순위: 환경변수 → hf CLI 저장 토큰
     env_hf = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
     if not env_hf:
-        hf_token_path = Path.home() / ".cache" / "huggingface" / "token"
-        if hf_token_path.exists():
-            env_hf = hf_token_path.read_text().strip()
+        # LaunchAgent도 읽을 수 있는 HuggingFace CLI 캐시만 허용한다. symlink,
+        # 그룹/기타 읽기 권한 파일은 토큰 유출 경로가 될 수 있어 사용하지 않는다.
+        env_hf = read_huggingface_cli_token()
     if env_hf:
         data.setdefault("diarization", {})["huggingface_token"] = env_hf
 
@@ -1223,11 +1241,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         yaml.YAMLError: YAML 파싱 실패 시
         pydantic.ValidationError: 설정값 검증 실패 시
     """
-    path = config_path or (
-        Path(env_config).expanduser().resolve()
-        if (env_config := os.environ.get("MT_CONFIG_PATH"))
-        else _DEFAULT_CONFIG_PATH
-    )
+    path = resolve_config_path(config_path)
 
     if path.exists():
         logger.info(f"설정 파일 로드: {path}")

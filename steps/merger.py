@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from core.io_utils import read_text_no_follow
 from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
@@ -128,8 +129,7 @@ class MergedResult:
             FileNotFoundError: 체크포인트 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(checkpoint_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(checkpoint_path))
 
         utterances = [MergedUtterance(**u) for u in data.get("utterances", [])]
 

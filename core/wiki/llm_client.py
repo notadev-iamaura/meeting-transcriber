@@ -28,6 +28,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from core.model_manager import await_native_inference
+
 logger = logging.getLogger(__name__)
 
 
@@ -398,7 +400,7 @@ class MlxWikiClient:
             ) as backend:
                 # backend.chat 은 동기 메서드 — to_thread 로 이벤트 루프 보호
                 try:
-                    raw = await asyncio.to_thread(
+                    raw = await await_native_inference(
                         backend.chat,
                         messages=[
                             {"role": "system", "content": system_prompt},

@@ -1,9 +1,9 @@
 # 프로젝트 상태
 
-- 기준일: 2026-08-25
+- 기준일: 2026-08-30
 - 기준 브랜치: `main`
-- 시작 기준 커밋: `42c53f3658ac6fa609dd06f89375dd6db89a846e`
-- 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 모두 main 반영
+- 시작 기준 커밋: `705d642414b27d106a63977c5571512ea5ca375f`
+- 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 → #65 모두 main 반영
 
 ## 현재 판단
 
@@ -24,6 +24,72 @@
 - `.venv` 밖의 Python 캐시 산출물은 Git 추적 대상이 아닙니다.
 
 ## 완료된 주요 작업
+
+### 자동 처리·데이터 보존·동시성 확정 결함 수정 (2026-08-30)
+
+- 전사가 JobProcessor 큐 등록 구조로 바뀐 뒤에도 남아 있던 기본 1건 상한을
+  제거했습니다. 최신 순 대상과 48시간 window 조합으로 backlog가 영구 누락되지 않도록
+  `max_items_per_run=0`(전체 큐 등록)을 기본으로 하고, 앱/startup 감사가 예약 시각을
+  넘긴 경우의 당일 catch-up도 기본 활성화했습니다. 설정 화면에 상한을 노출하고,
+  전사 결과는 실제 완료가 아닌 `큐 등록(대기 중)`으로 요약과 분리해 표시합니다.
+- `main.py --config`가 실제로 읽은 경로를 FastAPI app state에 고정하여 설정 API와 STT 모델
+  활성화 API가 같은 YAML에 저장합니다.
+- LaunchAgent는 셸 초기화 파일의 토큰을 기대하지 않고 소유자 전용 HuggingFace CLI 캐시를
+  사전 검증합니다. 캐시는 일반 파일·현재 사용자 소유·비공개 권한·no-follow 읽기 계약을
+  통과해야 하며 토큰 값은 plist/YAML/로그/readiness 응답에 노출하지 않습니다.
+- lifecycle 자동 실행은 오래된 회의를 Hot/Warm/Cold로 분류·보고하되 오디오를 압축하거나
+  삭제하지 않는 preserve-only 계약입니다. 동일 UID 프로세스가 namespace를 바꾸는 경쟁에서
+  검증한 inode와 제거할 entry를 원자적으로 결합할 수 없으므로 Warm/Cold는 명시적 사유와 함께
+  보존합니다. 파괴적 수동 메서드는 별도 capability 없이는 거부합니다.
+- 기존 요약 산출물의 `force=true` 재생성도 같은 compare-and-unlink 한계 때문에 어떤 파일도
+  삭제하지 않고 산출물 존재 여부와 무관하게 `409 SECURITY_BLOCKED`로 거부합니다.
+  웹 UI는 기존 요약에 편집 동작만 노출합니다.
+- 전체 파이프라인, 지연 LLM, 재색인, 재전사, 삭제, 회의록·전사문 편집은 앱과
+  `PipelineManager`가 공유하는 회의별 mutation coordinator로 직렬화합니다. 지연 요약은
+  DB 작업이 `completed`인 회의만 허용하고, API 성공 응답 전에 background task를 같은
+  회의의 FIFO 대기열에 등록합니다. 따라서 재전사 staging 뒤 늦은 편집·LLM 산출물이
+  canonical 경로에 다시 생기는 경쟁을 차단합니다.
+- 재색인 핵심 함수는 source 읽기부터 chunk/embed 인덱싱과 체크포인트 게시까지 같은
+  회의 lease를 보유합니다. lexical output/checkpoint 경로를 no-follow로 검사하고
+  `chunk.json`·`embed.json`은 pinned atomic writer로 저장하므로 정적 회의 디렉터리
+  symlink를 따라 외부 파일을 읽거나 쓰지 않습니다. 단건·일괄 백필과 startup 삭제
+  rollback 복구가 모두 이 계약을 사용합니다.
+- `correct`가 설정 또는 메모리 부족으로 스킵된 신규 회의는 pass-through
+  `correct.json`이나 이에 의존하는 summarize/chunk/embed 산출물을 저장하지 않습니다.
+  대신 회의 ID에 결합된 no-replace `llm_deferred.json` marker로 state 유실 뒤에도
+  후속 의도를 복구합니다. 지연 LLM 실행은 canonical 산출물이 모두 비어 있을 때만 최종
+  이름을 `O_EXCL`로 직접 생성합니다. 기존 산출물과 임의 generation hard-link는
+  provenance로 신뢰하지 않으며, state 유실과 함께 하나라도 발견되면 모든 파일을 보존한 채
+  `409 SECURITY_BLOCKED`로 중단합니다. 검사 뒤 경쟁으로 생긴 LLM 체크포인트도 state
+  재구성의 완료 근거에서 제외합니다. `pipeline_state.json` 부모는
+  no-follow `mkdirat` chain으로 만들고, 상태 갱신은 원자 exchange로 이전 inode를 숨김
+  previous entry에 남깁니다. 검출된 source-name/parent 경쟁에서 writer는 외부 파일을
+  덮거나 이전 inode를 unlink하지 않습니다. 로컬 저장소의 authenticity 신뢰 경계는
+  현재 macOS 사용자 계정이며, 같은 사용자 권한의 악성 프로세스가
+  파일·DB·코드를 변조하는 상황은 보장 범위 밖입니다.
+- native 추론 thread가 timeout/cancel 뒤 살아 있는 동안 모델 cleanup/unlock을 유예합니다.
+  호출자에는 timeout을 즉시 전파하고, 정리 대기 중 새 모델 요청은 typed 오류로 즉시
+  실패시켜 다음 queued job이 admission lock에서 무기한 대기하지 않게 합니다.
+  `/api/system/resources`는 pending 여부·모델·worker 수·시작 시각을 반환합니다. 모델 loader와
+  녹음 start/stop/cleanup도 취소 안전하게 직렬화하여 잠금 누수와 ffmpeg 고아를 방지합니다.
+- Wiki 통합 액션아이템은 기존 Open/Closed 항목을 lossless로 파싱하고, 과거 회의 citation은
+  no-follow로 읽은 `correct.json` 또는 `merge.json` 원장으로 D2 검증합니다. 파싱 또는 원장
+  검증이 불가능하면 기존 `action_items.md`를 보존하고 갱신을 건너뜁니다.
+
+집중 검증:
+
+```bash
+pytest tests/test_lifecycle.py tests/test_routes.py tests/test_model_manager.py \
+  tests/test_recorder.py tests/test_auto_processing.py tests/test_config_write_path.py \
+  tests/test_huggingface_credentials.py tests/test_setup_launchagent.py \
+  tests/wiki/test_action_item_persistence.py tests/wiki/test_citation_verifier.py -q
+pytest -m ui \
+  tests/ui/integration/test_spa_overhaul_integration.py::test_settings_auto_processing_gui_save_and_run_now -q
+```
+
+최종 게이트 결과: `ruff check`/format check/mypy/shell·JS syntax 통과,
+기본 테스트 `3915 passed, 234 deselected`, harness `152 passed`, Playwright E2E
+`17 passed`, 프론트엔드 typecheck/Vitest/production build 통과.
 
 ### 녹음 완료 파일 등록 복구 및 lsof 경고 판정 (2026-08-25)
 
@@ -162,13 +228,16 @@ pytest tests/test_audio_quality.py tests/test_audio_quality_real_media.py tests/
 - `DELETE /api/meetings/{meeting_id}`와 `POST /api/meetings/{meeting_id}/re-transcribe`는
   DB 삭제, 체크포인트 삭제, job 리셋 전에 ChromaDB/SQLite FTS5 검색 인덱스를 먼저 purge합니다.
   purge 실패 시 기존 회의 레코드와 산출물을 보존하고 500으로 중단합니다.
-- `pipeline.skip_llm_steps=True` 또는 메모리 부족으로 correct 단계가 스킵되어도
-  `merge.json` 기반 pass-through `correct.json`을 저장합니다. 이후 resume, chunk, reindex는
-  항상 `CorrectedResult` 계약을 사용할 수 있습니다.
-- 온디맨드 LLM 후처리(`run_llm_steps`)는 skip으로 생성된 pass-through `correct.json`을
-  실제 LLM 보정으로 갱신하고, 기존 chunk/embed 인덱스가 있던 회의는 LLM 결과 기준으로
-  chunk/embed를 자동 재생성합니다. 재생성 중 실패하면 `chunk`/`embed` 완료 마커를 제거하고
-  상태를 `failed`로 저장해 stale 완료 표시를 방지합니다.
+- `pipeline.skip_llm_steps=True` 또는 메모리 부족으로 correct 단계가 스킵되면
+  `merge.json`과 `llm_deferred.json`을 영속 기준으로 남기고
+  summarize/chunk/embed도 의존 단계로 함께 스킵합니다.
+  같은 실행 안에서 필요한 pass-through 결과는 메모리에서만 사용하며 resume 시에는
+  `merge.json`으로 재구성합니다.
+- 온디맨드 LLM 후처리(`run_llm_steps`)는 신규 skip 회의의 correct/summarize/chunk/embed
+  산출물을 canonical 이름의 direct no-replace write로 처음 생성합니다. 기존 entry와
+  충돌하면 교체·삭제하지 않고 실패하며, 부분 실패 산출물과 matching generation 이름도
+  자동 재사용하지 않습니다. fresh 실행 중 오류·취소는 `pipeline_state.json`을 `failed`로
+  수렴시켜 running 고착을 막습니다.
 - ChromaDB 또는 SQLite FTS5 저장 중 하나라도 실패하면 회의별 양쪽 검색 인덱스를 purge해
   stale/partial index 대신 명시 실패 상태로 수렴합니다.
 - ChromaDB/FTS5 purge는 삭제 전 양쪽 저장소 접근성을 먼저 점검합니다. 삭제 도중 한쪽만
@@ -196,7 +265,8 @@ pytest tests/test_audio_quality.py tests/test_audio_quality_real_media.py tests/
   전체 5% 이상 절약입니다.
 - LLM 교정 기본값은 `changed_only`로 전환했습니다. 줄 밀림/병합/파괴적 축약 guard를
   통과한 수정만 반영하고, guard 폐기가 많은 배치는 full 모드로 1회 fallback합니다.
-- 자동 전사/요약은 안전 점검을 통과한 경우에만 실행합니다. 기본값은 1회 1건 처리이며,
+- 자동 전사/요약은 안전 점검을 통과한 경우에만 실행합니다. 기본은 대상 전체를
+  JobProcessor의 순차 큐에 등록하며,
   HF offline + pyannote 캐시 누락 또는 `thermal.batch_size > 2` / `cooldown_seconds < 180`
   조합에서는 실행을 보류하고 API 결과의 `errors`에 이유를 남깁니다.
 - `stt.word_timestamps=false` 기본값 전환은 보류했습니다. 단어 timestamp가 저장 산출물에

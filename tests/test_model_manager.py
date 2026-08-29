@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import threading
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -273,6 +274,284 @@ async def test_context_manager_serializes_inference_block(manager: Any) -> None:
     assert execution_order == ["a_start", "a_end", "b_start", "b_end"]
 
 
+async def test_native_inference_timeout_returns_immediately_and_defers_context_cleanup(
+    manager: Any,
+) -> None:
+    """timeout은 즉시 반환하고 worker 종료 전에는 모델 lease를 유지한다."""
+    from core.model_manager import await_native_inference
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    worker_finished = threading.Event()
+    events: list[str] = []
+
+    class CleanupAwareModel(FakeModel):
+        """worker 종료 순서를 검증하는 테스트용 모델."""
+
+        def cleanup(self) -> None:
+            assert worker_finished.is_set()
+            events.append("cleanup")
+
+    def blocking_inference() -> str:
+        worker_started.set()
+        assert worker_release.wait(timeout=1.0)
+        worker_finished.set()
+        events.append("worker_finished")
+        return "done"
+
+    async def run_with_timeout() -> str:
+        async with manager.acquire("whisper", lambda: CleanupAwareModel("whisper")):
+            return await asyncio.wait_for(
+                await_native_inference(blocking_inference),
+                timeout=0.01,
+            )
+
+    task = asyncio.create_task(run_with_timeout())
+    assert await asyncio.wait_for(asyncio.to_thread(worker_started.wait, 1.0), timeout=1.0)
+
+    # 호출자는 timeout을 즉시 받지만, worker가 실제 native thread에서 아직 실행 중이면
+    # context lock/model은 deferred finalizer가 보유한다.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, timeout=0.2)
+
+    status = manager.get_status()
+    assert status["native_cleanup_pending"] is True
+    assert status["native_cleanup_model_name"] == "whisper"
+    assert status["native_cleanup_pending_workers"] == 1
+    assert manager.current_model_name == "whisper"
+    assert events == []
+
+    from core.model_manager import NativeCleanupPendingError
+
+    with pytest.raises(NativeCleanupPendingError, match="pending_workers=1"):
+        async with manager.acquire("replacement", lambda: FakeModel("replacement")):
+            pytest.fail("deferred cleanup 중 replacement 모델을 시작하면 안 됩니다.")
+
+    worker_release.set()
+    for _ in range(100):
+        if manager.get_status()["native_cleanup_pending"] is False:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("worker 종료 뒤 deferred cleanup이 완료되지 않았습니다.")
+
+    replacement_entered = False
+    async with manager.acquire("replacement", lambda: FakeModel("replacement")):
+        replacement_entered = True
+
+    assert events == ["worker_finished", "cleanup"]
+    assert replacement_entered is True
+    assert manager.is_model_loaded is False
+    assert manager.get_status()["native_cleanup_pending"] is False
+
+
+async def test_cancelled_loader_releases_context_lock(manager: Any) -> None:
+    """비동기 loader 취소 후에도 다음 acquire가 context lock을 얻는다."""
+    loader_started = asyncio.Event()
+
+    async def blocked_loader() -> FakeModel:
+        loader_started.set()
+        await asyncio.Event().wait()
+        return FakeModel("never-returned")
+
+    async def acquire_with_blocked_loader() -> None:
+        async with manager.acquire("blocked", blocked_loader):
+            pass
+
+    blocked_task = asyncio.create_task(acquire_with_blocked_loader())
+    await loader_started.wait()
+    blocked_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked_task
+
+    replacement = FakeModel("replacement")
+    async with manager.acquire("replacement", lambda: replacement) as loaded:
+        assert loaded is replacement
+
+
+async def test_cancelled_finalizer_keeps_native_context_lease_until_worker_finishes(
+    manager: Any,
+) -> None:
+    """finalizer 취소 요청도 worker 종료 전 모델 cleanup/lock 반납을 막지 못한다."""
+    from core.model_manager import await_native_inference
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    worker_finished = threading.Event()
+    events: list[str] = []
+
+    class CleanupAwareModel(FakeModel):
+        """worker 종료 순서를 검증하는 테스트용 모델."""
+
+        def cleanup(self) -> None:
+            assert worker_finished.is_set()
+            events.append("cleanup")
+
+    def blocking_inference() -> None:
+        worker_started.set()
+        assert worker_release.wait(timeout=1.0)
+        worker_finished.set()
+        events.append("worker_finished")
+
+    async def use_model() -> None:
+        async with manager.acquire("whisper", lambda: CleanupAwareModel("whisper")):
+            await await_native_inference(blocking_inference)
+
+    task = asyncio.create_task(use_model())
+    assert await asyncio.wait_for(asyncio.to_thread(worker_started.wait, 1.0), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+
+    cleanup = manager._deferred_context_cleanup
+    assert cleanup is not None
+    assert cleanup.task is not None
+    cleanup.task.cancel()
+    cleanup.task.cancel()
+    await asyncio.sleep(0)
+
+    status = manager.get_status()
+    assert status["native_cleanup_pending"] is True
+    assert status["native_cleanup_pending_workers"] == 1
+    assert manager.current_model_name == "whisper"
+    assert events == []
+
+    worker_release.set()
+    for _ in range(100):
+        if manager.get_status()["native_cleanup_pending"] is False:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("deferred native cleanup finalizer가 worker 종료 뒤에도 완료되지 않았습니다.")
+
+    assert events == ["worker_finished", "cleanup"]
+    assert manager.is_model_loaded is False
+
+
+async def test_waiter_started_before_timeout_fails_when_native_cleanup_becomes_pending(
+    manager: Any,
+) -> None:
+    """기존 lock waiter도 deferred cleanup 시작 후 무기한 대기하지 않는다."""
+    from core.model_manager import NativeCleanupPendingError, await_native_inference
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def blocking_inference() -> None:
+        worker_started.set()
+        assert worker_release.wait(timeout=1.0)
+
+    async def use_model() -> None:
+        async with manager.acquire("whisper", lambda: FakeModel("whisper")):
+            await await_native_inference(blocking_inference)
+
+    holder_task = asyncio.create_task(use_model())
+    assert await asyncio.wait_for(asyncio.to_thread(worker_started.wait, 1.0), timeout=1.0)
+
+    async def acquire_replacement() -> None:
+        async with manager.acquire("replacement", lambda: FakeModel("replacement")):
+            pytest.fail("pending native cleanup 중 replacement가 진입하면 안 됩니다.")
+
+    waiter_task = asyncio.create_task(acquire_replacement())
+    await asyncio.sleep(0)
+    assert waiter_task.done() is False
+
+    holder_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holder_task
+    with pytest.raises(NativeCleanupPendingError):
+        await asyncio.wait_for(waiter_task, timeout=0.2)
+
+    assert manager.get_status()["native_cleanup_pending"] is True
+    worker_release.set()
+    for _ in range(100):
+        if manager.get_status()["native_cleanup_pending"] is False:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("worker 종료 뒤 deferred cleanup이 완료되지 않았습니다.")
+
+
+async def test_public_unload_is_noop_while_deferred_cleanup_owns_model(
+    manager: Any,
+) -> None:
+    """pipeline finally의 unload가 pending 오류로 상위 lock release를 건너뛰지 않는다."""
+    from core.model_manager import await_native_inference
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def blocking_inference() -> None:
+        worker_started.set()
+        assert worker_release.wait(timeout=1.0)
+
+    async def use_model() -> None:
+        async with manager.acquire("exaone", lambda: FakeModel("exaone")):
+            await await_native_inference(blocking_inference)
+
+    holder_task = asyncio.create_task(use_model())
+    assert await asyncio.wait_for(asyncio.to_thread(worker_started.wait, 1.0), timeout=1.0)
+    holder_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holder_task
+
+    assert await manager.unload_if_current("exaone") is False
+    await manager.unload_model()
+    assert manager.get_status()["native_cleanup_pending"] is True
+
+    worker_release.set()
+    for _ in range(100):
+        if manager.get_status()["native_cleanup_pending"] is False:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("worker 종료 뒤 deferred cleanup이 완료되지 않았습니다.")
+
+
+async def test_public_unload_waiters_become_noop_when_cleanup_turns_deferred(
+    manager: Any,
+) -> None:
+    """active context 뒤 대기하던 unload도 pending 전환 시 오류를 내지 않는다."""
+    from core.model_manager import await_native_inference
+
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def blocking_inference() -> None:
+        worker_started.set()
+        assert worker_release.wait(timeout=1.0)
+
+    async def use_model() -> None:
+        async with manager.acquire("exaone", lambda: FakeModel("exaone")):
+            await await_native_inference(blocking_inference)
+
+    holder_task = asyncio.create_task(use_model())
+    assert await asyncio.wait_for(asyncio.to_thread(worker_started.wait, 1.0), timeout=1.0)
+
+    unload_task = asyncio.create_task(manager.unload_model())
+    conditional_task = asyncio.create_task(manager.unload_if_current("exaone"))
+    await asyncio.sleep(0)
+    assert unload_task.done() is False
+    assert conditional_task.done() is False
+
+    holder_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holder_task
+
+    await asyncio.wait_for(unload_task, timeout=0.2)
+    assert await asyncio.wait_for(conditional_task, timeout=0.2) is False
+    assert manager.get_status()["native_cleanup_pending"] is True
+
+    worker_release.set()
+    for _ in range(100):
+        if manager.get_status()["native_cleanup_pending"] is False:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("worker 종료 뒤 deferred cleanup이 완료되지 않았습니다.")
+
+
 async def test_direct_unload_waits_for_active_context(manager: Any) -> None:
     """직접 unload_model 호출은 active acquire 컨텍스트 종료를 기다린다."""
     events: list[str] = []
@@ -397,6 +676,7 @@ async def test_memory_monitoring(manager: Any) -> None:
     assert "model_memory_delta_mb" in status
     assert "model_loaded_at" in status
     assert status["memory_usage_mb"] > 0
+    assert status["native_cleanup_pending"] is False
 
 
 async def test_status_when_no_model(manager: Any) -> None:
@@ -407,6 +687,7 @@ async def test_status_when_no_model(manager: Any) -> None:
     assert status["current_model_name"] is None
     assert "model_memory_delta_mb" not in status
     assert "model_loaded_at" not in status
+    assert status["native_cleanup_pending"] is False
 
 
 # === gc.collect 호출 확인 ===

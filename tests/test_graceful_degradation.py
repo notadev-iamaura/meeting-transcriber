@@ -667,9 +667,9 @@ class TestPipelineManagerMemoryInsufficient:
             assert state.degraded is True
             assert "correct" in state.skipped_steps
             assert "summarize" in state.skipped_steps
-            # chunk/embed 는 LLM 단계가 아니라 메모리 부족과 무관하게 실행
-            assert "chunk" not in state.skipped_steps
-            assert "embed" not in state.skipped_steps
+            # 보정되지 않은 검색 산출물의 영속화를 피하려고 의존 단계도 보류
+            assert "chunk" in state.skipped_steps
+            assert "embed" in state.skipped_steps
             assert len(state.warnings) > 0
 
     @patch("core.pipeline.psutil.virtual_memory")

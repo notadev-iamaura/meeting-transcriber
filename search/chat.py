@@ -32,7 +32,7 @@ from core.llm_backend import (
     LLMGenerationError,
     create_backend,
 )
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.user_settings import build_chat_system_prompt
 from search.hybrid_search import (
     HybridSearchEngine,
@@ -721,7 +721,7 @@ class ChatEngine:
         # 3. LLM 호출
         try:
             async with self._model_manager.acquire("exaone", self._create_backend) as backend:
-                answer = await asyncio.to_thread(self._call_llm_chat, backend, messages)
+                answer = await await_native_inference(self._call_llm_chat, backend, messages)
 
             # NFC 정규화 적용
             answer = unicodedata.normalize("NFC", answer.strip())

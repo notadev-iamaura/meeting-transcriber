@@ -35,7 +35,7 @@ from core.audio_quality import (
     validate_audio_quality,
 )
 from core.io_utils import atomic_write_json
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.preflight import run_preflight
 from core.retry_policy import NonRetryableError, TranscriptionTimeoutError
 
@@ -644,7 +644,7 @@ class Transcriber:
 
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(
+                await_native_inference(
                     whisper_module.transcribe,
                     str(audio_path),
                     beam_size=self._beam_size,
@@ -657,7 +657,7 @@ class Transcriber:
                 f"beam search(beam_size={self._beam_size}) 미지원 → greedy decoding으로 폴백"
             )
             return await asyncio.wait_for(
-                asyncio.to_thread(
+                await_native_inference(
                     whisper_module.transcribe,
                     str(audio_path),
                     **kwargs,

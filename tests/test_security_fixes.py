@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,7 +19,13 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from api.routes import router
-from core.io_utils import atomic_write_json, atomic_write_text
+from core.io_utils import (
+    atomic_write_json,
+    atomic_write_text,
+    atomic_write_text_pinned,
+    publish_text_no_replace,
+    read_text_no_follow,
+)
 
 # === core/io_utils 단위 테스트 ===
 
@@ -89,6 +96,319 @@ class TestAtomicWriteJson:
         atomic_write_json(target, {"a": 1}, indent=4)
         content = target.read_text()
         assert '    "a": 1' in content
+
+
+class TestPublishTextNoReplace:
+    """지연 LLM의 direct no-replace 게시 계약을 검증한다."""
+
+    def test_완성본을_최종이름에_직접_게시한다(self, tmp_path: Path) -> None:
+        target = tmp_path / "correct.json"
+
+        publish_text_no_replace(target, '{"text":"완료"}')
+
+        assert target.read_text(encoding="utf-8") == '{"text":"완료"}'
+        assert list(tmp_path.glob(".correct.json.*.generation")) == []
+        assert target.stat().st_nlink == 1
+
+    def test_기존_entry는_byte그대로_보존한다(self, tmp_path: Path) -> None:
+        target = tmp_path / "correct.json"
+        target.write_text("existing", encoding="utf-8")
+
+        with pytest.raises(FileExistsError):
+            publish_text_no_replace(target, "replacement")
+
+        assert target.read_text(encoding="utf-8") == "existing"
+
+    def test_기존_broken_symlink도_교체하지_않는다(self, tmp_path: Path) -> None:
+        target = tmp_path / "correct.json"
+        missing = tmp_path / "missing.json"
+        target.symlink_to(missing)
+
+        with pytest.raises(FileExistsError):
+            publish_text_no_replace(target, "replacement")
+
+        assert target.is_symlink()
+        assert target.readlink() == missing
+        assert not missing.exists()
+
+    def test_검사뒤_경쟁_entry가_생겨도_교체하지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "summarize.json"
+        real_open = os.open
+        raced = False
+
+        def _racing_open(
+            path: str | bytes,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal raced
+            if path == target.name and flags & os.O_EXCL and not raced:
+                raced = True
+                racer_fd = real_open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+                try:
+                    os.write(racer_fd, b"racer")
+                    os.fsync(racer_fd)
+                finally:
+                    os.close(racer_fd)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with (
+            patch("core.io_utils.os.open", side_effect=_racing_open),
+            pytest.raises(FileExistsError),
+        ):
+            publish_text_no_replace(target, "generated")
+
+        assert target.read_text(encoding="utf-8") == "racer"
+
+    def test_상위_symlink는_외부에_게시하지_않는다(self, tmp_path: Path) -> None:
+        external = tmp_path / "external"
+        external.mkdir()
+        linked_parent = tmp_path / "linked"
+        linked_parent.symlink_to(external, target_is_directory=True)
+
+        with pytest.raises(OSError):
+            publish_text_no_replace(linked_parent / "correct.json", "blocked")
+
+        assert list(external.iterdir()) == []
+
+    def test_쓰기중_target_swap은_공격자_entry를_건드리지_않고_실패한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from core.io_utils import _write_all
+
+        target = tmp_path / "correct.json"
+        real_write_all = _write_all
+
+        def _swap_target_then_write(
+            file_fd: int,
+            content: str,
+            *,
+            target: Path,
+        ) -> os.stat_result:
+            target.unlink()
+            target.write_text("attacker", encoding="utf-8")
+            return real_write_all(file_fd, content, target=target)
+
+        with (
+            patch("core.io_utils._write_all", side_effect=_swap_target_then_write),
+            pytest.raises(OSError, match="identity"),
+        ):
+            publish_text_no_replace(target, "generated")
+
+        assert target.read_text(encoding="utf-8") == "attacker"
+        assert list(tmp_path.iterdir()) == [target]
+
+    def test_위조_generation_hardlink도_기존_entry로_보존한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "correct.json"
+        target.write_text("attacker", encoding="utf-8")
+        forged = tmp_path / ".correct.json.forged.generation"
+        os.link(target, forged)
+
+        with pytest.raises(FileExistsError):
+            publish_text_no_replace(target, "replacement")
+
+        assert read_text_no_follow(target) == "attacker"
+        assert read_text_no_follow(forged) == "attacker"
+
+
+class TestAtomicWriteTextPinned:
+    """상태 writer의 고정 부모 FD 계약을 검증한다."""
+
+    def test_부모_swap이_외부_state를_덮어쓰지_않는다(self, tmp_path: Path) -> None:
+        parent = tmp_path / "checkpoints" / "meeting"
+        parent.mkdir(parents=True)
+        target = parent / "pipeline_state.json"
+        target.write_text("old-state", encoding="utf-8")
+        external = tmp_path / "external"
+        external.mkdir()
+        external_target = external / target.name
+        external_target.write_text("external-sentinel", encoding="utf-8")
+        detached = tmp_path / "detached"
+        from core.io_utils import _rename_exchange
+
+        real_exchange = _rename_exchange
+        swapped = False
+
+        def _swap_then_exchange(
+            parent_fd: int,
+            source: str,
+            destination: str,
+        ) -> None:
+            nonlocal swapped
+            if not swapped:
+                parent.rename(detached)
+                parent.symlink_to(external, target_is_directory=True)
+                swapped = True
+            real_exchange(parent_fd, source, destination)
+
+        with (
+            patch("core.io_utils._rename_exchange", side_effect=_swap_then_exchange),
+            pytest.raises(OSError),
+        ):
+            atomic_write_text_pinned(target, "new-state")
+
+        assert external_target.read_text(encoding="utf-8") == "external-sentinel"
+        assert (detached / target.name).read_text(encoding="utf-8") == "new-state"
+        previous = list(detached.glob(".pipeline_state.json.*.state-previous"))
+        assert len(previous) == 1
+        assert previous[0].read_text(encoding="utf-8") == "old-state"
+
+    def test_source_name_swap은_이전_state를_보존하고_실패한다(self, tmp_path: Path) -> None:
+        from core.io_utils import _rename_exchange
+
+        target = tmp_path / "pipeline_state.json"
+        target.write_text("old-state", encoding="utf-8")
+        real_exchange = _rename_exchange
+        swapped = False
+
+        def _swap_source_then_exchange(
+            parent_fd: int,
+            source: str,
+            destination: str,
+        ) -> None:
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                os.unlink(source, dir_fd=parent_fd)
+                attacker_fd = os.open(
+                    source,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    os.write(attacker_fd, b"attacker-state")
+                    os.fsync(attacker_fd)
+                finally:
+                    os.close(attacker_fd)
+            real_exchange(parent_fd, source, destination)
+
+        with (
+            patch("core.io_utils._rename_exchange", side_effect=_swap_source_then_exchange),
+            pytest.raises(OSError, match="identity"),
+        ):
+            atomic_write_text_pinned(target, "new-state")
+
+        # 의심 entry를 과거 state로 rollback하지 않는다. 동일 UID가
+        # 저장 namespace를 조작하는 것은 명시된 신뢰 경계 밖이며,
+        # 이 호출은 identity 불일치를 보고하고 모든 entry를 보존한다.
+        assert target.read_text(encoding="utf-8") == "attacker-state"
+        previous = list(tmp_path.glob(".pipeline_state.json.*.state-previous"))
+        assert len(previous) == 1
+        assert previous[0].read_text(encoding="utf-8") == "old-state"
+
+    def test_동시_writer의_최신_state를_rollback하지_않는다(self, tmp_path: Path) -> None:
+        """정상 writer가 나중에 성공하면 먼저 writer의 사후 검증이 이를 되돌리지 않는다."""
+        from core.io_utils import _rename_exchange
+
+        target = tmp_path / "pipeline_state.json"
+        target.write_text("old-state", encoding="utf-8")
+        real_exchange = _rename_exchange
+        exchange_calls = 0
+
+        def _interleave_successful_writer(
+            parent_fd: int,
+            source: str,
+            destination: str,
+        ) -> None:
+            nonlocal exchange_calls
+            exchange_calls += 1
+            real_exchange(parent_fd, source, destination)
+            if exchange_calls == 1:
+                atomic_write_text_pinned(target, "inner-success")
+
+        with (
+            patch(
+                "core.io_utils._rename_exchange",
+                side_effect=_interleave_successful_writer,
+            ),
+            pytest.raises(OSError, match="identity"),
+        ):
+            atomic_write_text_pinned(target, "outer-success")
+
+        assert exchange_calls == 2
+        assert target.read_text(encoding="utf-8") == "inner-success"
+        preserved = {
+            path.read_text(encoding="utf-8")
+            for path in tmp_path.glob(".pipeline_state.json.*.state-previous")
+        }
+        assert preserved == {"old-state", "outer-success"}
+
+    def test_mkdir뒤_regular_parent_swap도_외부_state를_건드리지_않는다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from core.io_utils import _ensure_directory_no_follow_fd
+
+        parent = tmp_path / "checkpoints" / "meeting"
+        parent.mkdir(parents=True)
+        target = parent / "pipeline_state.json"
+        target.write_text("old-state", encoding="utf-8")
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        foreign_target = foreign / target.name
+        foreign_target.write_text("foreign-sentinel", encoding="utf-8")
+        detached = tmp_path / "detached"
+        real_ensure = _ensure_directory_no_follow_fd
+        swapped = False
+
+        def _pin_then_swap(path: Path, *, mode: int = 0o700) -> int:
+            nonlocal swapped
+            directory_fd = real_ensure(path, mode=mode)
+            if not swapped and path == parent:
+                parent.rename(detached)
+                foreign.rename(parent)
+                swapped = True
+            return directory_fd
+
+        with (
+            patch(
+                "core.io_utils._ensure_directory_no_follow_fd",
+                side_effect=_pin_then_swap,
+            ),
+            pytest.raises(OSError, match="상위 디렉터리"),
+        ):
+            atomic_write_text_pinned(target, "new-state")
+
+        assert (parent / target.name).read_text(encoding="utf-8") == "foreign-sentinel"
+        assert (detached / target.name).read_text(encoding="utf-8") == "new-state"
+        previous = list(detached.glob(".pipeline_state.json.*.state-previous"))
+        assert len(previous) == 1
+        assert previous[0].read_text(encoding="utf-8") == "old-state"
+
+    def test_symlink_부모_아래_디렉터리를_생성하지_않는다(self, tmp_path: Path) -> None:
+        external = tmp_path / "external"
+        external.mkdir()
+        linked = tmp_path / "checkpoints"
+        linked.symlink_to(external, target_is_directory=True)
+
+        with pytest.raises(OSError):
+            atomic_write_text_pinned(linked / "nested" / "pipeline_state.json", "blocked")
+
+        assert not (external / "nested").exists()
+
+    def test_fifo_state는_block하지_않고_거부한다(self, tmp_path: Path) -> None:
+        target = tmp_path / "pipeline_state.json"
+        os.mkfifo(target)
+
+        with pytest.raises(OSError):
+            read_text_no_follow(target)
+        with pytest.raises(OSError):
+            atomic_write_text_pinned(target, "blocked")
 
 
 # === stt_language YAML 인젝션 차단 ===
@@ -420,6 +740,7 @@ class TestAutoProcessingSettings:
         assert data["auto_processing_run_at"] == "02:00"
         assert data["auto_processing_recent_hours"] == 48
         assert data["auto_processing_action"] == "full"
+        assert data["auto_processing_max_items_per_run"] == 0
         assert data["auto_processing_run_on_startup_if_missed"] is False
 
     def test_put_settings_가_auto_processing_필드를_저장(self, client: TestClient) -> None:
@@ -430,6 +751,7 @@ class TestAutoProcessingSettings:
                 "auto_processing_run_at": "03:30",
                 "auto_processing_recent_hours": 72,
                 "auto_processing_action": "summarize",
+                "auto_processing_max_items_per_run": 3,
                 "auto_processing_run_on_startup_if_missed": True,
             },
         )
@@ -442,6 +764,7 @@ class TestAutoProcessingSettings:
             "auto_processing_run_at",
             "auto_processing_recent_hours",
             "auto_processing_action",
+            "auto_processing_max_items_per_run",
             "auto_processing_run_on_startup_if_missed",
         }.issubset(changed)
         settings = body["settings"]
@@ -449,6 +772,7 @@ class TestAutoProcessingSettings:
         assert settings["auto_processing_run_at"] == "03:30"
         assert settings["auto_processing_recent_hours"] == 72
         assert settings["auto_processing_action"] == "summarize"
+        assert settings["auto_processing_max_items_per_run"] == 3
         assert settings["auto_processing_run_on_startup_if_missed"] is True
 
     def test_auto_processing_설정_변경시_scheduler_갱신(
@@ -479,6 +803,8 @@ class TestAutoProcessingSettings:
             ({"auto_processing_run_at": "2:00"}, "auto_processing_run_at"),
             ({"auto_processing_recent_hours": 0}, "auto_processing_recent_hours"),
             ({"auto_processing_recent_hours": 721}, "auto_processing_recent_hours"),
+            ({"auto_processing_max_items_per_run": -1}, "auto_processing_max_items_per_run"),
+            ({"auto_processing_max_items_per_run": 101}, "auto_processing_max_items_per_run"),
             ({"auto_processing_action": "delete"}, "auto_processing_action"),
         ],
     )

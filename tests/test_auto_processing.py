@@ -91,7 +91,6 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     tmp_path: Path,
 ) -> None:
     config = _make_config(tmp_path)
-    config = _with_auto_processing_overrides(config, max_items_per_run=0)
     audio = config.paths.resolved_audio_input_dir / "m1.wav"
     audio.parent.mkdir(parents=True, exist_ok=True)
     audio.write_bytes(b"audio")
@@ -121,7 +120,7 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
     runner = AutoProcessingRunner(config=config, job_queue=queue, pipeline=pipeline)
     result = await runner.run(action="full", recent_hours=48)
 
-    assert result.queued == 2
+    assert result.queued == 1
     assert result.transcribed == 0
     assert result.summarized == 1
     assert result.failed == 0
@@ -131,7 +130,7 @@ async def test_auto_processing_runner_full은_최근_누락분을_순차_처리�
 
 
 @pytest.mark.asyncio
-async def test_auto_processing_runner는_기본적으로_1회_1건만_처리한다(
+async def test_auto_processing_runner는_기본적으로_누락분_전체를_큐에_등록한다(
     tmp_path: Path,
 ) -> None:
     config = _make_config(tmp_path)
@@ -152,11 +151,67 @@ async def test_auto_processing_runner는_기본적으로_1회_1건만_처리한�
     result = await runner.run(action="transcribe", recent_hours=48)
 
     assert result.matched == 2
-    assert result.queued == 1
-    assert result.skipped == 1
-    assert result.meeting_ids == ["m1"]
+    assert result.queued == 2
+    assert result.skipped == 0
+    assert result.skipped_by_limit == 0
+    assert result.meeting_ids == ["m1", "m2"]
     pipeline.run.assert_not_awaited()
     assert queue._jobs[0].status == "queued"
+    assert queue._jobs[1].status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_auto_processing_runner는_명시한_1회_상한을_적용한다(
+    tmp_path: Path,
+) -> None:
+    """운영자가 설정한 양수 상한은 보존하되 기본값은 아니다."""
+    config = _with_auto_processing_overrides(_make_config(tmp_path), max_items_per_run=1)
+    audio = config.paths.resolved_audio_input_dir / "m1.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+    now = datetime.now().isoformat()
+    queue = _Queue(
+        [
+            _Job("m1", str(audio), now, status="recorded", id=1),
+            _Job("m2", str(audio), now, status="recorded", id=2),
+        ]
+    )
+
+    result = await AutoProcessingRunner(
+        config=config,
+        job_queue=queue,
+        pipeline=AsyncMock(),
+    ).run(action="transcribe", recent_hours=48)
+
+    assert result.queued == 1
+    assert result.skipped_by_limit == 1
+    assert result.meeting_ids == ["m1"]
+    assert queue._jobs[1].status == "recorded"
+
+
+@pytest.mark.asyncio
+async def test_auto_processing_runner는_큐_등록_성공건만_queued로_반환한다(
+    tmp_path: Path,
+) -> None:
+    """대기열 등록 실패를 전사 완료나 큐 등록 성공으로 표시하지 않는다."""
+    config = _make_config(tmp_path)
+    audio = config.paths.resolved_audio_input_dir / "m1.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+    queue = _Queue([_Job("m1", str(audio), datetime.now().isoformat(), status="recorded")])
+    queue.queue_job = AsyncMock(side_effect=RuntimeError("queue unavailable"))  # type: ignore[method-assign]
+
+    result = await AutoProcessingRunner(
+        config=config,
+        job_queue=queue,
+        pipeline=AsyncMock(),
+    ).run(action="transcribe", recent_hours=48)
+
+    assert result.matched == 1
+    assert result.queued == 0
+    assert result.transcribed == 0
+    assert result.failed == 1
+    assert result.meeting_ids == []
 
 
 @pytest.mark.asyncio
@@ -311,6 +366,8 @@ def test_auto_processing_status_api는_스케줄러_상태를_반환한다(tmp_p
     data = resp.json()
     assert data["run_at"] == "02:00"
     assert data["recent_hours"] == 48
+    assert data["max_items_per_run"] == 0
+    assert data["run_on_startup_if_missed"] is True
     assert data["processing"] is False
 
 
@@ -330,6 +387,45 @@ def test_auto_processing_run_now_api는_중복_실행을_거부한다(tmp_path: 
         resp = client.post("/api/auto-processing/run-now")
 
     assert resp.status_code == 409
+
+
+def test_auto_processing_run_now_api는_큐등록과_상한보류를_분리해_반환한다(
+    tmp_path: Path,
+) -> None:
+    """즉시 실행 응답은 전사 완료 대신 큐 등록 및 상한 보류를 명시한다."""
+
+    class _Scheduler:
+        is_processing = False
+
+        async def reserve_run_once(self) -> asyncio.Task[AutoProcessingResult]:
+            async def _result() -> AutoProcessingResult:
+                return AutoProcessingResult(
+                    action="transcribe",
+                    recent_hours=48,
+                    matched=3,
+                    queued=1,
+                    skipped=2,
+                    skipped_by_limit=2,
+                )
+
+            return asyncio.create_task(_result())
+
+    app = FastAPI()
+    app.include_router(auto_processing_router, prefix="/api")
+    config = _make_config(tmp_path)
+    config.auto_processing.action = "summarize"
+    app.state.config = config
+    app.state.auto_processing_scheduler = _Scheduler()
+
+    with TestClient(app) as client:
+        response = client.post("/api/auto-processing/run-now")
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["queued"] == 1
+    assert result["transcribed"] == 0
+    assert result["skipped"] == 2
+    assert result["skipped_by_limit"] == 2
 
 
 def test_auto_processing_run_now_transcribe는_악성_Host에서_실행하지_않는다(

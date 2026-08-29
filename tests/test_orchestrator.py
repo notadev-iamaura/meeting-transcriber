@@ -51,8 +51,11 @@ def mock_job_queue() -> AsyncMock:
 @pytest.fixture
 def mock_pipeline() -> AsyncMock:
     """파이프라인 매니저 목(Mock)을 생성한다."""
+    from core.meeting_mutation import MeetingMutationCoordinator
+
     pipeline = AsyncMock()
     pipeline.run = AsyncMock(return_value=MagicMock(status="completed"))
+    pipeline.meeting_mutation_coordinator = MeetingMutationCoordinator()
     return pipeline
 
 
@@ -403,7 +406,7 @@ class TestRecoverDeleteClaim:
             ),
             patch(
                 "core.reindex_recovery.reindex_meeting_artifacts",
-                new=AsyncMock(side_effect=lambda *_args: order.append("reindex")),
+                new=AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("reindex")),
             ),
             patch(
                 "core.reindex_recovery.consume_reindex_required_marker",

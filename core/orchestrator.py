@@ -34,6 +34,7 @@ from core.job_queue import (
     parse_stt_ab_source_claim,
     rollback_retranscribe_staging,
 )
+from core.meeting_mutation import MeetingMutationCoordinator
 from core.perf_stats import PerfStats
 from core.pipeline import InvalidInputError, PipelineManager
 from core.quarantine import restore_from_quarantine
@@ -289,10 +290,21 @@ class JobProcessor:
                         model_manager = getattr(self._pipeline, "_model_manager", None)
                         if model_manager is None:
                             raise RuntimeError("재색인용 모델 관리자를 찾을 수 없습니다")
+                        meeting_mutation_coordinator = getattr(
+                            self._pipeline,
+                            "meeting_mutation_coordinator",
+                            None,
+                        )
+                        if not isinstance(
+                            meeting_mutation_coordinator,
+                            MeetingMutationCoordinator,
+                        ):
+                            raise RuntimeError("회의 mutation coordinator를 찾을 수 없습니다")
                         await reindex_meeting_artifacts(
                             config,
                             model_manager,
                             job.meeting_id,
+                            meeting_mutation_coordinator=meeting_mutation_coordinator,
                         )
                         await asyncio.to_thread(
                             consume_reindex_required_marker,

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from config import AppConfig, get_config
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.preflight import run_preflight
 from steps.embedder import _CHROMA_COLLECTION_NAME, _FTS_TABLE_NAME
 
@@ -833,7 +833,7 @@ class HybridSearchEngine:
 
         # 1. 쿼리 임베딩 생성 (ModelLoadManager로 모델 수명주기 일원화)
         async with self._model_manager.acquire("e5_search", self._load_model) as model:
-            query_embedding = await asyncio.to_thread(self._embed_query, model, query)
+            query_embedding = await await_native_inference(self._embed_query, model, query)
 
         # 2-3. 벡터 검색과 FTS5 검색을 병렬 실행 (PERF-010)
         # 두 검색은 독립적인 I/O 작업이므로 동시에 수행할 수 있다.

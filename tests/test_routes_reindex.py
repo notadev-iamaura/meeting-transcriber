@@ -280,6 +280,16 @@ class TestReindexSingleEndpoint:
             response = client.post("/api/meetings/no_such/reindex")
         assert response.status_code == 404
 
+    def test_reindex_처리중인_회의는_409(self, tmp_path: Path) -> None:
+        """진행 중 파이프라인의 산출물에는 재색인이 합류하지 않는다."""
+        app = _make_test_app(tmp_path)
+        with TestClient(app) as client:
+            app.state.job_queue.queue.get_job_by_meeting_id = MagicMock(
+                return_value=_MockJob(id=1, meeting_id="m_processing", status="embedding"),
+            )
+            response = client.post("/api/meetings/m_processing/reindex")
+        assert response.status_code == 409
+
     def test_reindex_정상_경로(self, tmp_path: Path) -> None:
         """correct.json 이 있으면 chunker → embedder 실행 후 200."""
         app = _make_test_app(tmp_path)
@@ -393,3 +403,46 @@ class TestReindexAllEndpoint:
         ]
         assert len(started) == 1
         assert len(conflicts) == 1
+
+    @pytest.mark.asyncio
+    async def test_reindex_all_각_회의는_shared_mutation_lease_안에서_실행한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """일괄 백필도 PipelineManager와 같은 회의별 coordinator를 사용한다."""
+        from api.routers.reindex import _start_reindex_all
+        from core.meeting_mutation import MeetingMutationCoordinator
+
+        config = _make_test_config(tmp_path)
+        meeting_id = "meeting_reindex_all_lease"
+        coordinator = MeetingMutationCoordinator()
+        pipeline = SimpleNamespace(
+            _model_manager=object(),
+            meeting_mutation_coordinator=coordinator,
+        )
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                config=config,
+                pipeline_manager=pipeline,
+                ws_manager=None,
+                reindex_lock_busy=True,
+            )
+        )
+
+        async def _locked_inner(
+            _config: Any,
+            _model_manager: Any,
+            inner_meeting_id: str,
+        ) -> dict[str, Any]:
+            assert inner_meeting_id == meeting_id
+            assert coordinator.locked(meeting_id) is True
+            return {"chunks": 1, "chroma_stored": True, "fts_stored": True}
+
+        with patch(
+            "core.reindex_recovery._reindex_meeting_artifacts_locked",
+            new=AsyncMock(side_effect=_locked_inner),
+        ) as inner:
+            await _start_reindex_all(app, [meeting_id])
+
+        inner.assert_awaited_once()
+        assert app.state.reindex_lock_busy is False

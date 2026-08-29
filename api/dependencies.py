@@ -13,6 +13,8 @@ from typing import Any, cast
 
 from fastapi import HTTPException, Request
 
+from core.meeting_mutation import MeetingMutationCoordinator
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +122,26 @@ def get_chat_engine(request: Request) -> Any:
 def get_pipeline_manager(request: Request) -> Any:
     """PipelineManager 를 반환한다."""
     return require_state(request, "pipeline_manager", "파이프라인이 초기화되지 않았습니다.")
+
+
+def get_meeting_mutation_coordinator(request: Request) -> MeetingMutationCoordinator:
+    """앱과 PipelineManager가 공유하는 회의별 mutation coordinator를 반환한다."""
+    coordinator = getattr(request.app.state, "meeting_mutation_coordinator", None)
+    if coordinator is None:
+        pipeline = getattr(request.app.state, "pipeline_manager", None)
+        pipeline_coordinator = getattr(pipeline, "meeting_mutation_coordinator", None)
+        if isinstance(pipeline_coordinator, MeetingMutationCoordinator):
+            coordinator = pipeline_coordinator
+    if coordinator is None:
+        # bare FastAPI 단위 테스트도 production과 같은 dependency 계약을 사용한다.
+        coordinator = MeetingMutationCoordinator()
+        request.app.state.meeting_mutation_coordinator = coordinator
+    if not isinstance(coordinator, MeetingMutationCoordinator):
+        raise HTTPException(
+            status_code=503,
+            detail="회의 mutation coordinator가 초기화되지 않았습니다.",
+        )
+    return coordinator
 
 
 def get_recorder(request: Request) -> Any:

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,12 +50,22 @@ def _create_mock_env(tmp_path: Path, *, create_venv: bool = True) -> dict[str, s
     python_bin = venv_dir / "bin" / "python"
     if create_venv:
         python_bin.parent.mkdir(parents=True)
-        python_bin.touch()
+        python_bin.write_text(
+            f'#!/bin/bash\nexec {shlex.quote(sys.executable)} "$@"\n',
+            encoding="utf-8",
+        )
         python_bin.chmod(0o755)
 
     # 가짜 LaunchAgents 디렉토리
     launch_agents = fake_home / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True)
+
+    # LaunchAgent가 셸 export 대신 사용할 HuggingFace CLI 캐시. 테스트용 값은
+    # 실제 credential이 아니며, 스크립트가 내용을 읽지 않는지 검증한다.
+    hf_token_cache = fake_home / ".cache" / "huggingface" / "token"
+    hf_token_cache.parent.mkdir(parents=True)
+    hf_token_cache.write_text("test-cli-cache-token\n", encoding="utf-8")
+    hf_token_cache.chmod(0o600)
 
     # 가짜 프로젝트 디렉토리 (스크립트를 scripts/ 하위에 복사)
     project_dir = tmp_path / "project"
@@ -75,6 +87,7 @@ def _create_mock_env(tmp_path: Path, *, create_venv: bool = True) -> dict[str, s
         "project_dir": str(project_dir),
         "script": str(test_script),
         "plist_path": str(launch_agents / "com.meeting-transcriber.plist"),
+        "hf_token_cache": str(hf_token_cache),
     }
 
 
@@ -124,6 +137,7 @@ def _run_with_mock_launchctl(
         **filtered_env,
         "HOME": mock_env["home"],
         "PATH": f"{mock_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONPATH": str(_SCRIPT_PATH.parent.parent),
     }
 
     cmd = ["bash", mock_env["script"]]
@@ -347,6 +361,18 @@ class TestPlistGeneration:
         env_vars = data["EnvironmentVariables"]
         assert env_vars.get("PYTHONUNBUFFERED") == "1"
 
+    def test_plist에_HuggingFace_토큰_환경변수를_저장하지_않는다(
+        self,
+        mock_env: dict[str, str],
+    ) -> None:
+        """지속 credential은 CLI cache만 쓰며 plist에는 토큰을 넣지 않는다."""
+        plist_path = _generate_plist(mock_env)
+        content = plist_path.read_text(encoding="utf-8")
+
+        assert "HUGGINGFACE_TOKEN" not in content
+        assert "HF_TOKEN" not in content
+        assert "test-cli-cache-token" not in content
+
     def test_plist_파일_권한_644(self, mock_env: dict[str, str]) -> None:
         """plist 파일 권한이 644인지 확인한다."""
         plist_path = _generate_plist(mock_env)
@@ -372,6 +398,76 @@ class TestVenvValidation:
         result = _run_with_mock_launchctl(mock_env)
         assert result.returncode != 0
         assert "가상환경" in result.stderr
+
+
+class TestHuggingFaceCliCacheValidation:
+    """LaunchAgent용 지속 HuggingFace credential 검증 테스트."""
+
+    def test_cli_cache_없으면_등록을_거부한다(self, tmp_path: Path) -> None:
+        """현재 셸의 export가 있어도 cache가 없으면 plist를 만들지 않는다."""
+        mock_env = _create_mock_env(tmp_path)
+        Path(mock_env["hf_token_cache"]).unlink()
+
+        result = _run_with_mock_launchctl(mock_env)
+
+        assert result.returncode != 0
+        assert "셸 export" in result.stderr
+        assert not Path(mock_env["plist_path"]).exists()
+
+    def test_cli_cache_권한이_느슨하면_등록을_거부한다(self, tmp_path: Path) -> None:
+        """그룹/기타 읽기 가능 토큰 cache를 auto-start에 사용하지 않는다."""
+        mock_env = _create_mock_env(tmp_path)
+        Path(mock_env["hf_token_cache"]).chmod(0o644)
+
+        result = _run_with_mock_launchctl(mock_env)
+
+        assert result.returncode != 0
+        assert "소유자 전용" in result.stderr
+
+    def test_cli_cache_소유자가_다르면_등록을_거부한다(self, tmp_path: Path) -> None:
+        """런타임이 거부할 다른 UID 소유 cache를 setup도 준비됨으로 보지 않는다."""
+        mock_env = _create_mock_env(tmp_path)
+        mock_bin = Path(mock_env["project_dir"]) / "_mock_bin"
+        mock_bin.mkdir(exist_ok=True)
+        mock_stat = mock_bin / "stat"
+        mock_stat.write_text(
+            "#!/bin/bash\n"
+            'if [[ "$1" == "-f" && "$2" == "%u" ]]; then\n'
+            "  echo 999999\n"
+            "  exit 0\n"
+            "fi\n"
+            'exec /usr/bin/stat "$@"\n',
+            encoding="utf-8",
+        )
+        mock_stat.chmod(0o755)
+
+        result = _run_with_mock_launchctl(mock_env)
+
+        assert result.returncode != 0
+        assert "현재 사용자 소유" in result.stderr
+        assert not Path(mock_env["plist_path"]).exists()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [b"x" * 4097, b" \n\t", b"\xff\xfe"],
+        ids=["too-large", "blank", "invalid-utf8"],
+    )
+    def test_runtime이_읽지_못하는_cli_cache는_등록을_거부한다(
+        self,
+        tmp_path: Path,
+        payload: bytes,
+    ) -> None:
+        """setup 검증과 실제 런타임 token reader의 허용 범위를 일치시킨다."""
+        mock_env = _create_mock_env(tmp_path)
+        token_path = Path(mock_env["hf_token_cache"])
+        token_path.write_bytes(payload)
+        token_path.chmod(0o600)
+
+        result = _run_with_mock_launchctl(mock_env)
+
+        assert result.returncode != 0
+        assert "런타임에서 읽을 수 없습니다" in result.stderr
+        assert not Path(mock_env["plist_path"]).exists()
 
 
 class TestUnloadOption:

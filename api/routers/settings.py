@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -52,6 +53,14 @@ _AVAILABLE_MODELS = [
 ]
 
 
+def _request_config_path(request: Request) -> Path:
+    """앱 시작 시 고정한 설정 경로를 우선해 저장 대상 경로를 반환한다."""
+    configured_path = getattr(request.app.state, "config_path", None)
+    if configured_path is not None:
+        return Path(configured_path).expanduser().resolve()
+    return _get_config_path()
+
+
 class SettingsResponse(BaseModel):
     """설정 응답 스키마.
 
@@ -92,7 +101,8 @@ class SettingsResponse(BaseModel):
     auto_processing_run_at: str = "02:00"
     auto_processing_recent_hours: int = 48
     auto_processing_action: str = "full"
-    auto_processing_run_on_startup_if_missed: bool = False
+    auto_processing_max_items_per_run: int = 0
+    auto_processing_run_on_startup_if_missed: bool = True
     available_models: list[dict] = Field(default_factory=lambda: _AVAILABLE_MODELS)
 
 
@@ -136,6 +146,7 @@ class SettingsUpdateRequest(BaseModel):
     auto_processing_run_at: str | None = None
     auto_processing_recent_hours: int | None = None
     auto_processing_action: str | None = None
+    auto_processing_max_items_per_run: int | None = None
     auto_processing_run_on_startup_if_missed: bool | None = None
 
 
@@ -182,6 +193,7 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         auto_processing_run_at=config.auto_processing.run_at,
         auto_processing_recent_hours=config.auto_processing.recent_hours,
         auto_processing_action=config.auto_processing.action,
+        auto_processing_max_items_per_run=getattr(config.auto_processing, "max_items_per_run", 0),
         auto_processing_run_on_startup_if_missed=(config.auto_processing.run_on_startup_if_missed),
         available_models=_AVAILABLE_MODELS,
     )
@@ -403,6 +415,13 @@ async def _update_settings_locked(
                 status_code=400,
                 detail="auto_processing_recent_hours 는 1~720 범위의 정수여야 합니다.",
             )
+    if "auto_processing_max_items_per_run" in updates:
+        v = updates["auto_processing_max_items_per_run"]
+        if not (isinstance(v, int) and 0 <= v <= 100):
+            raise HTTPException(
+                status_code=400,
+                detail="auto_processing_max_items_per_run 는 0~100 범위의 정수여야 합니다.",
+            )
     if "auto_processing_action" in updates and updates["auto_processing_action"] not in (
         "transcribe",
         "summarize",
@@ -414,7 +433,7 @@ async def _update_settings_locked(
         )
 
     # === config.yaml 파일 업데이트 ===
-    config_path = _get_config_path()
+    config_path = _request_config_path(request)
     # YAML 필드 매핑 (API 필드명 → YAML 경로)
     changed_fields: list[str] = []
     model_changed = False
@@ -470,6 +489,8 @@ async def _update_settings_locked(
         changed_fields.append("auto_processing_recent_hours")
     if "auto_processing_action" in updates:
         changed_fields.append("auto_processing_action")
+    if "auto_processing_max_items_per_run" in updates:
+        changed_fields.append("auto_processing_max_items_per_run")
     if "auto_processing_run_on_startup_if_missed" in updates:
         changed_fields.append("auto_processing_run_on_startup_if_missed")
 
@@ -588,6 +609,13 @@ async def _update_settings_locked(
                 "action",
                 f'"{updates["auto_processing_action"]}"',
             )
+        if "auto_processing_max_items_per_run" in updates:
+            content = _replace_yaml_value(
+                content,
+                "auto_processing",
+                "max_items_per_run",
+                str(updates["auto_processing_max_items_per_run"]),
+            )
         if "auto_processing_run_on_startup_if_missed" in updates:
             val = "true" if updates["auto_processing_run_on_startup_if_missed"] else "false"
             content = _replace_yaml_value(
@@ -681,6 +709,8 @@ async def _update_settings_locked(
         auto_processing_updates["recent_hours"] = updates["auto_processing_recent_hours"]
     if "auto_processing_action" in updates:
         auto_processing_updates["action"] = updates["auto_processing_action"]
+    if "auto_processing_max_items_per_run" in updates:
+        auto_processing_updates["max_items_per_run"] = updates["auto_processing_max_items_per_run"]
     if "auto_processing_run_on_startup_if_missed" in updates:
         auto_processing_updates["run_on_startup_if_missed"] = updates[
             "auto_processing_run_on_startup_if_missed"

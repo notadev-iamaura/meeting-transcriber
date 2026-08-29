@@ -659,7 +659,7 @@
                 '  </section>',
                 '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">자동 전사/요약</h3>',
-                '    <p class="settings-section-desc">앱이 실행 중일 때 지정된 시각에 최근 회의 중 아직 전사나 요약이 없는 항목을 순차 처리합니다.</p>',
+                '    <p class="settings-section-desc">앱이 실행 중일 때 지정된 시각에 최근 회의 중 아직 전사나 요약이 없는 항목을 처리합니다. 처리 방식은 작업 종류를, 1회 처리 상한은 이번 실행의 건수를 정합니다.</p>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsAutoProcessingEnabled">자동 처리</label>',
@@ -680,9 +680,16 @@
                 '        </div>',
                 '      </div>',
                 '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingMaxItems">1회 처리 상한</label>',
+                '        <div class="setting-number-group">',
+                '          <input type="number" class="setting-input" id="settingsAutoProcessingMaxItems" min="0" max="100" step="1" value="0">',
+                '          <span class="setting-unit">건 (0: 제한 없음)</span>',
+                '        </div>',
+                '      </div>',
+                '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsAutoProcessingAction">처리 방식</label>',
                 '        <select class="setting-select" id="settingsAutoProcessingAction">',
-                '          <option value="full">누락분 전체</option>',
+                '          <option value="full">전사·요약 모두</option>',
                 '          <option value="transcribe">전사만</option>',
                 '          <option value="summarize">요약만</option>',
                 '        </select>',
@@ -791,10 +798,10 @@
                 '  </section>',
                 '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">저장소 관리</h3>',
-                '    <p class="settings-section-desc">오래된 회의 오디오는 주기적으로 압축하거나 삭제하고 회의록 텍스트는 유지합니다.</p>',
+                '    <p class="settings-section-desc">오디오를 변경하지 않고 오래된 회의를 Hot/Warm/Cold로 분류해 보존 상태만 점검합니다.</p>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleEnabled">자동 정리</label>',
+                '        <label class="setting-label" for="settingsLifecycleEnabled">자동 보존 점검</label>',
                 '        <label class="setting-toggle">',
                 '          <input type="checkbox" id="settingsLifecycleEnabled">',
                 '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
@@ -808,14 +815,14 @@
                 '        </div>',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleHotDays">원본 유지</label>',
+                '        <label class="setting-label" for="settingsLifecycleHotDays">Warm 분류</label>',
                 '        <div class="setting-number-group">',
                 '          <input type="number" class="setting-input" id="settingsLifecycleHotDays" min="1" max="3650" step="1">',
                 '          <span class="setting-unit">일</span>',
                 '        </div>',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleWarmDays">오디오 삭제</label>',
+                '        <label class="setting-label" for="settingsLifecycleWarmDays">Cold 분류</label>',
                 '        <div class="setting-number-group">',
                 '          <input type="number" class="setting-input" id="settingsLifecycleWarmDays" min="1" max="3650" step="1">',
                 '          <span class="setting-unit">일 이후</span>',
@@ -892,6 +899,7 @@
                 autoProcessingEnabled: document.getElementById("settingsAutoProcessingEnabled"),
                 autoProcessingRunAt: document.getElementById("settingsAutoProcessingRunAt"),
                 autoProcessingRecentHours: document.getElementById("settingsAutoProcessingRecentHours"),
+                autoProcessingMaxItems: document.getElementById("settingsAutoProcessingMaxItems"),
                 autoProcessingAction: document.getElementById("settingsAutoProcessingAction"),
                 autoProcessingRunOnStartup: document.getElementById("settingsAutoProcessingRunOnStartup"),
                 autoProcessingStatus: document.getElementById("settingsAutoProcessingStatus"),
@@ -1001,7 +1009,8 @@
                 els.lifecycleEnabled, els.lifecycleInterval, els.lifecycleHotDays,
                 els.lifecycleWarmDays, els.lifecycleRunOnStartup,
                 els.autoProcessingEnabled, els.autoProcessingRunAt,
-                els.autoProcessingRecentHours, els.autoProcessingAction,
+                els.autoProcessingRecentHours, els.autoProcessingMaxItems,
+                els.autoProcessingAction,
                 els.autoProcessingRunOnStartup,
             ].forEach(function (el) {
                 if (!el) return;
@@ -1115,6 +1124,9 @@
                 }
                 if (data.auto_processing_recent_hours !== undefined && data.auto_processing_recent_hours !== null) {
                     els.autoProcessingRecentHours.value = data.auto_processing_recent_hours;
+                }
+                if (data.auto_processing_max_items_per_run !== undefined && data.auto_processing_max_items_per_run !== null) {
+                    els.autoProcessingMaxItems.value = data.auto_processing_max_items_per_run;
                 }
                 if (data.auto_processing_action) {
                     els.autoProcessingAction.value = data.auto_processing_action;
@@ -1491,6 +1503,7 @@
                 auto_processing_enabled: els.autoProcessingEnabled.checked,
                 auto_processing_run_at: els.autoProcessingRunAt.value || "02:00",
                 auto_processing_recent_hours: parseInt(els.autoProcessingRecentHours.value, 10),
+                auto_processing_max_items_per_run: parseInt(els.autoProcessingMaxItems.value, 10),
                 auto_processing_action: els.autoProcessingAction.value,
                 auto_processing_run_on_startup_if_missed: els.autoProcessingRunOnStartup.checked,
             };
@@ -1551,14 +1564,36 @@
                 }
             }
 
+            if (data.max_items_per_run !== undefined && data.max_items_per_run !== null) {
+                if (data.max_items_per_run === 0) {
+                    parts.push("1회 제한 없음");
+                } else {
+                    parts.push("1회 상한 " + data.max_items_per_run + "건");
+                }
+            }
+
             if (data.last_result) {
-                parts.push(
-                    "최근 " +
-                    data.last_result.queued +
-                    "건, 실패 " +
-                    data.last_result.failed +
-                    "건"
-                );
+                var result = data.last_result;
+                var matched = result.matched || 0;
+                var queued = result.queued || 0;
+                var summarized = result.summarized || 0;
+                var skipped = result.skipped || 0;
+                var skippedByLimit = result.skipped_by_limit || 0;
+                var otherSkipped = Math.max(0, skipped - skippedByLimit);
+                parts.push("최근 대상 " + matched + "건");
+                parts.push("큐 등록 " + queued + "건");
+                if (summarized > 0) {
+                    parts.push("요약 완료 " + summarized + "건");
+                }
+                if (skippedByLimit > 0) {
+                    parts.push("상한 보류 " + skippedByLimit + "건");
+                }
+                if (otherSkipped > 0) {
+                    parts.push("기타 보류 " + otherSkipped + "건");
+                }
+                if ((result.failed || 0) > 0) {
+                    parts.push("등록/처리 실패 " + result.failed + "건");
+                }
             } else if (data.last_error) {
                 parts.push("최근 실패");
             }
@@ -1584,16 +1619,28 @@
                 });
                 var result = data.result || {};
                 if (els.autoProcessingStatus) {
-                    els.autoProcessingStatus.textContent =
-                        "완료 · 대상 " +
-                        (result.queued || 0) +
-                        "건 · 전사 " +
-                        (result.transcribed || 0) +
-                        "건 · 요약 " +
-                        (result.summarized || 0) +
-                        "건 · 실패 " +
-                        (result.failed || 0) +
-                        "건";
+                    var parts = [
+                        "요청 처리 결과",
+                        "대상 " + (result.matched || 0) + "건",
+                        "전사 큐 등록 " + (result.queued || 0) + "건 (대기 중)",
+                    ];
+                    if ((result.summarized || 0) > 0) {
+                        parts.push("요약 완료 " + result.summarized + "건");
+                    }
+                    if ((result.skipped_by_limit || 0) > 0) {
+                        parts.push("상한 보류 " + result.skipped_by_limit + "건");
+                    }
+                    var otherSkipped = Math.max(
+                        0,
+                        (result.skipped || 0) - (result.skipped_by_limit || 0)
+                    );
+                    if (otherSkipped > 0) {
+                        parts.push("기타 보류 " + otherSkipped + "건");
+                    }
+                    if ((result.failed || 0) > 0) {
+                        parts.push("등록/처리 실패 " + result.failed + "건");
+                    }
+                    els.autoProcessingStatus.textContent = parts.join(" · ");
                 }
                 await this._loadAutoProcessingStatus();
             } catch (err) {

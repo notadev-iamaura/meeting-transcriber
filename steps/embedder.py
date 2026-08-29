@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from config import AppConfig, get_config
-from core.io_utils import atomic_write_json
-from core.model_manager import ModelLoadManager, get_model_manager
+from core.io_utils import atomic_write_json, read_text_no_follow
+from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.preflight import run_preflight
 from steps.chunker import ChunkedResult
 
@@ -179,8 +179,7 @@ class EmbeddedResult:
             FileNotFoundError: 체크포인트 파일이 없을 때
             json.JSONDecodeError: JSON 파싱 실패 시
         """
-        with open(checkpoint_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(read_text_no_follow(checkpoint_path))
 
         chunks = [
             EmbeddedChunk(
@@ -938,7 +937,11 @@ class Embedder:
         # 1. 모델 로드 및 임베딩 생성
         async with self._model_manager.acquire("e5", self._load_model) as model:
             # 별도 스레드에서 임베딩 실행 (이벤트 루프 블로킹 방지)
-            embedded_chunks = await asyncio.to_thread(self._process_chunks, model, chunked_result)
+            embedded_chunks = await await_native_inference(
+                self._process_chunks,
+                model,
+                chunked_result,
+            )
 
         # 2. 결과 객체 생성
         result = EmbeddedResult(

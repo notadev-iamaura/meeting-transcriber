@@ -174,8 +174,18 @@ class TestConfigYamlParsing:
             (default.hallucination_filter.enabled, loaded.hallucination_filter.enabled),
             (default.text_postprocessing.enabled, loaded.text_postprocessing.enabled),
             (default.number_normalization.enabled, loaded.number_normalization.enabled),
+            (
+                default.auto_processing.run_on_startup_if_missed,
+                loaded.auto_processing.run_on_startup_if_missed,
+            ),
+            (
+                default.auto_processing.max_items_per_run,
+                loaded.auto_processing.max_items_per_run,
+            ),
         ]
         assert all(left == right for left, right in pairs)
+        assert default.auto_processing.run_on_startup_if_missed is True
+        assert default.auto_processing.max_items_per_run == 0
 
     def test_커스텀_yaml_파싱(self, tmp_path: Path) -> None:
         """사용자 지정 YAML 파일을 올바르게 파싱하는지 확인한다."""
@@ -591,6 +601,48 @@ class TestEnvOverrideFunction:
         result = _apply_env_overrides({})
 
         assert result["diarization"]["huggingface_token"] == "hf_from_hf_token"
+
+    def test_private_HF_CLI_cache를_환경변수_없이_사용한다(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LaunchAgent 경로는 안전한 HuggingFace CLI 캐시를 사용할 수 있다."""
+        token_path = tmp_path / "huggingface" / "token"
+        token_path.parent.mkdir(parents=True)
+        token_path.write_text("test-cli-token\n", encoding="utf-8")
+        token_path.chmod(0o600)
+        monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "core.huggingface_credentials.get_huggingface_cli_token_path",
+            lambda: token_path,
+        )
+
+        result = _apply_env_overrides({})
+
+        assert result["diarization"]["huggingface_token"] == "test-cli-token"
+
+    def test_insecure_HF_CLI_cache는_사용하지_않는다(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """다른 사용자가 읽을 수 있는 캐시를 configuration에 흡수하지 않는다."""
+        token_path = tmp_path / "huggingface" / "token"
+        token_path.parent.mkdir(parents=True)
+        token_path.write_text("test-cli-token\n", encoding="utf-8")
+        token_path.chmod(0o644)
+        monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "core.huggingface_credentials.get_huggingface_cli_token_path",
+            lambda: token_path,
+        )
+
+        result = _apply_env_overrides({})
+
+        assert "diarization" not in result
 
 
 class TestRecordingConfig:

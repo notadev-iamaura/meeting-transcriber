@@ -54,6 +54,7 @@ class AutoProcessingResult:
     transcribed: int = 0
     summarized: int = 0
     skipped: int = 0
+    skipped_by_limit: int = 0
     failed: int = 0
     meeting_ids: list[str] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
@@ -172,7 +173,7 @@ class AutoProcessingRunner:
             )
 
         prepared_items = await self.prepare(action=action, recent_hours=recent_hours)
-        max_items = int(getattr(self._config.auto_processing, "max_items_per_run", 1))
+        max_items = int(getattr(self._config.auto_processing, "max_items_per_run", 0))
         items = prepared_items if max_items == 0 else prepared_items[:max_items]
         skipped_by_limit = max(0, len(prepared_items) - len(items))
 
@@ -187,9 +188,8 @@ class AutoProcessingRunner:
             action=action,
             recent_hours=recent_hours,
             matched=len(prepared_items),
-            queued=len(items),
-            meeting_ids=[item.meeting_id for item in items],
             skipped=skipped_by_limit,
+            skipped_by_limit=skipped_by_limit,
         )
 
         for item in items:
@@ -221,11 +221,16 @@ class AutoProcessingRunner:
                         stt_provider=stt_selection.provider,
                         stt_model=stt_selection.model,
                     )
+                    # queue_job 성공은 파이프라인 완료가 아니라 전사 작업을
+                    # 수락해 대기열에 등록했다는 뜻이다.
+                    result.queued += 1
+                    result.meeting_ids.append(item.meeting_id)
                     logger.info("자동 처리[%s] 전사 큐 등록 완료: %s", action, item.meeting_id)
                 elif item.classification == "summarize":
                     logger.info("자동 처리[%s] 요약 시작: %s", action, item.meeting_id)
                     await self._pipeline.run_llm_steps(item.meeting_id)
                     result.summarized += 1
+                    result.meeting_ids.append(item.meeting_id)
                     logger.info("자동 처리[%s] 요약 완료: %s", action, item.meeting_id)
                 else:
                     result.skipped += 1

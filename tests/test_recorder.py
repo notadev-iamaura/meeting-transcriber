@@ -440,6 +440,112 @@ class TestStartRecording:
             await recorder.start_recording()
 
     @pytest.mark.asyncio
+    async def test_동시_시작은_ffmpeg를_한번만_실행한다(self, tmp_path: Path) -> None:
+        """두 start가 장치 선택 await 경합을 해도 한 번만 녹음을 시작한다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        start_entered = asyncio.Event()
+        allow_start = asyncio.Event()
+        start_calls: list[str] = []
+
+        async def slow_start(meeting_id: str) -> None:
+            start_calls.append(meeting_id)
+            start_entered.set()
+            await allow_start.wait()
+            recorder._current_device = AudioDevice(index=0, name="Test Mic")
+            recorder._process = MagicMock(pid=12345)
+
+        with patch.object(recorder, "_start_singletrack_recording", side_effect=slow_start):
+            first_start = asyncio.create_task(recorder.start_recording("first"))
+            await start_entered.wait()
+
+            second_start = asyncio.create_task(recorder.start_recording("second"))
+            await asyncio.sleep(0)
+            assert start_calls == ["first"]
+            assert second_start.done() is False
+
+            allow_start.set()
+            await first_start
+            with pytest.raises(AlreadyRecordingError, match="이미 녹음"):
+                await second_start
+
+        assert start_calls == ["first"]
+        assert recorder.state == RecordingState.RECORDING
+        await recorder._cancel_background_tasks(_from_guard=False)
+        recorder._reset_recording_state()
+
+    @pytest.mark.asyncio
+    async def test_시작중인_녹음과_정지는_같은_상태전이를_공유한다(self, tmp_path: Path) -> None:
+        """start 중 도착한 stop은 시작 완료 뒤에만 종료·상태 초기화를 수행한다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        start_entered = asyncio.Event()
+        allow_start = asyncio.Event()
+        termination_called = asyncio.Event()
+
+        async def slow_start(_: str) -> None:
+            start_entered.set()
+            await allow_start.wait()
+            recorder._current_device = AudioDevice(index=0, name="Test Mic")
+            recorder._process = MagicMock(pid=12345)
+
+        async def terminate() -> None:
+            termination_called.set()
+            return None
+
+        with (
+            patch.object(recorder, "_start_singletrack_recording", side_effect=slow_start),
+            patch.object(recorder, "_terminate_ffmpeg", side_effect=terminate),
+        ):
+            start_task = asyncio.create_task(recorder.start_recording("meeting"))
+            await start_entered.wait()
+            stop_task = asyncio.create_task(recorder.stop_recording())
+
+            await asyncio.sleep(0)
+            assert stop_task.done() is False
+            assert termination_called.is_set() is False
+
+            allow_start.set()
+            await start_task
+            assert await stop_task is None
+
+        assert termination_called.is_set() is True
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+        assert recorder._process is None
+
+    @pytest.mark.asyncio
+    async def test_시작_이벤트_대기_중_취소되면_spawn된_프로세스를_정리한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """ffmpeg spawn 뒤 start가 취소돼도 다음 요청에 고아를 남기지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        broadcast_started = asyncio.Event()
+
+        async def started_process(_: str) -> None:
+            recorder._current_device = AudioDevice(index=0, name="Test Mic")
+            recorder._process = MagicMock(pid=12345)
+
+        async def blocked_broadcast(_: str, __: object) -> None:
+            broadcast_started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(recorder, "_start_singletrack_recording", side_effect=started_process),
+            patch.object(recorder, "_broadcast_event", side_effect=blocked_broadcast),
+            patch.object(recorder, "_kill_orphan_process", new=AsyncMock()) as kill_orphan,
+        ):
+            start_task = asyncio.create_task(recorder.start_recording("meeting"))
+            await broadcast_started.wait()
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+
+        kill_orphan.assert_awaited_once()
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+        assert recorder._process is None
+
+    @pytest.mark.asyncio
     async def test_비활성화시_무시(self, tmp_path: Path) -> None:
         """recording.enabled=False이면 녹음 시작이 무시된다."""
         config = AppConfig(
@@ -705,6 +811,178 @@ class TestStopRecording:
         assert result.audio_device == "Mic"
         assert result.file_size_bytes == 1000
         assert recorder.state == RecordingState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_정지_실패후에도_상태와_프로세스_참조를_초기화한다(self, tmp_path: Path) -> None:
+        """종료 중 예외가 나도 STOPPING 상태가 남아 이후 start를 막지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._meeting_id = "test"
+        recorder._process = MagicMock(pid=12345)
+
+        with (
+            patch.object(
+                recorder,
+                "_terminate_ffmpeg",
+                side_effect=FFmpegRecordError("종료 실패"),
+            ),
+            patch.object(recorder, "_kill_orphan_process", new=AsyncMock()) as kill_orphan,
+        ):
+            with pytest.raises(FFmpegRecordError, match="종료 실패"):
+                await recorder.stop_recording()
+
+        kill_orphan.assert_awaited_once()
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+        assert recorder._process is None
+
+    @pytest.mark.asyncio
+    async def test_정지_중_연속_취소돼도_정리가_끝난_뒤_상태를_초기화한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """두 번째 취소가 ffmpeg cleanup을 끊어 STOPPING을 남기지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._meeting_id = "test"
+        terminate_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+
+        async def blocked_terminate() -> None:
+            terminate_started.set()
+            await asyncio.Event().wait()
+
+        async def blocked_cleanup() -> None:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+
+        with (
+            patch.object(recorder, "_terminate_ffmpeg", side_effect=blocked_terminate),
+            patch.object(recorder, "_cleanup_recording_processes", side_effect=blocked_cleanup),
+        ):
+            stop_task = asyncio.create_task(recorder.stop_recording())
+            await terminate_started.wait()
+            stop_task.cancel()
+            await cleanup_started.wait()
+
+            stop_task.cancel()
+            await asyncio.sleep(0)
+            assert stop_task.done() is False
+
+            allow_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await stop_task
+
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+
+    @pytest.mark.asyncio
+    async def test_완료_콜백에서_다음_녹음을_시작할_수_있다(self, tmp_path: Path) -> None:
+        """완료 콜백은 상태 lock 밖에서 실행되어 재시작을 교착시키지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._meeting_id = "first"
+
+        result = RecordingResult(
+            file_path=tmp_path / "audio_input" / "first.wav",
+            duration_seconds=10.0,
+            audio_device="Test Mic",
+            started_at="2026-01-01T00:00:00",
+            ended_at="2026-01-01T00:00:10",
+            file_size_bytes=1,
+        )
+
+        async def start_next(_: str) -> None:
+            recorder._current_device = AudioDevice(index=0, name="Test Mic")
+            recorder._process = MagicMock(pid=54321)
+
+        async def on_complete(_: RecordingResult) -> None:
+            await recorder.start_recording("second")
+
+        event_types: list[str] = []
+
+        async def capture_event(event_type: str, _: object) -> None:
+            event_types.append(event_type)
+
+        recorder.on_recording_complete(on_complete)
+        with (
+            patch.object(recorder, "_terminate_ffmpeg", new=AsyncMock(return_value=result)),
+            patch.object(recorder, "_start_singletrack_recording", side_effect=start_next),
+            patch.object(recorder, "_broadcast_event", side_effect=capture_event),
+        ):
+            stopped = await asyncio.wait_for(recorder.stop_recording(), timeout=0.5)
+
+        assert stopped is result
+        assert recorder.state == RecordingState.RECORDING
+        assert recorder._meeting_id == "second"
+        assert event_types == ["recording_stopped", "recording_started"]
+        await recorder._cancel_background_tasks(_from_guard=False)
+        recorder._reset_recording_state()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_중에는_완료_콜백이_새_녹음을_시작하지_못한다(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """종료 cleanup이 완료 콜백의 재시작과 새 ffmpeg 세대를 섞지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._meeting_id = "first"
+
+        result = RecordingResult(
+            file_path=tmp_path / "audio_input" / "first.wav",
+            duration_seconds=10.0,
+            audio_device="Test Mic",
+            started_at="2026-01-01T00:00:00",
+            ended_at="2026-01-01T00:00:10",
+            file_size_bytes=1,
+        )
+        start_next = AsyncMock()
+
+        async def on_complete(_: RecordingResult) -> None:
+            await recorder.start_recording("second")
+
+        recorder.on_recording_complete(on_complete)
+        with (
+            patch.object(recorder, "_terminate_ffmpeg", new=AsyncMock(return_value=result)),
+            patch.object(recorder, "_start_singletrack_recording", new=start_next),
+            patch.object(recorder, "_broadcast_event", new=AsyncMock()),
+        ):
+            await recorder.cleanup()
+
+        start_next.assert_not_awaited()
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+        assert recorder._cleanup_in_progress is False
+
+    @pytest.mark.asyncio
+    async def test_cleanup_취소도_종료_처리가_끝날_때까지_기다린다(self, tmp_path: Path) -> None:
+        """서버 shutdown 취소가 ffmpeg 정리 task를 중간에 끊지 않는다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._meeting_id = "test"
+        terminate_started = asyncio.Event()
+        allow_terminate = asyncio.Event()
+
+        async def blocked_terminate() -> None:
+            terminate_started.set()
+            await allow_terminate.wait()
+
+        with patch.object(recorder, "_terminate_ffmpeg", side_effect=blocked_terminate):
+            cleanup_task = asyncio.create_task(recorder.cleanup())
+            await terminate_started.wait()
+            cleanup_task.cancel()
+            await asyncio.sleep(0)
+            assert cleanup_task.done() is False
+
+            allow_terminate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup_task
+
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._meeting_id is None
+        assert recorder._cleanup_in_progress is False
 
 
 # === TestRecordingCallbacks ===
