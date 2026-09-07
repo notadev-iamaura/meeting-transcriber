@@ -592,6 +592,8 @@ def test_build_launcher_app_bundle_source_excludes_local_state_and_secret_files(
     scripts_extra = project_dir / "scripts" / "benchmark_stt.py"
     scripts_extra.parent.mkdir()
     scripts_extra.write_text("# benchmark should not be bundled\n", encoding="utf-8")
+    zoom_helper = scripts_extra.parent / "zoom_audio_activity.swift"
+    zoom_helper.write_text("// runtime CoreAudio helper\n", encoding="utf-8")
     model_artifact = project_dir / "core" / "weights.safetensors"
     model_artifact.write_text("not a real model\n", encoding="utf-8")
 
@@ -621,6 +623,7 @@ def test_build_launcher_app_bundle_source_excludes_local_state_and_secret_files(
     assert "dist/Recap.app" not in "\n".join(bundled_files)
     assert "scripts/install.sh" not in bundled_files
     assert "scripts/benchmark_stt.py" not in bundled_files
+    assert (bundled / "scripts/zoom_audio_activity.swift").read_bytes() == zoom_helper.read_bytes()
     assert "core/weights.safetensors" not in bundled_files
     assert "hf_secret" not in combined
 
