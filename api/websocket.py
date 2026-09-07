@@ -21,8 +21,11 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from core.transcription_models import is_loopback_host
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +381,40 @@ class ConnectionManager:
 # === WebSocket 엔드포인트 ===
 
 
+def _trusted_websocket_origin(websocket: WebSocket) -> bool:
+    """현재 로컬 앱과 동일한 출처의 브라우저 연결만 허용한다."""
+    origin = websocket.headers.get("origin", "")
+    host = websocket.headers.get("host", "")
+    if not origin or not host or any(c in origin + host for c in ("\\", "\r", "\n", "\x00")):
+        return False
+    try:
+        source = urlsplit(origin)
+        target = urlsplit(f"//{host}")
+        scheme = "https" if websocket.url.scheme == "wss" else "http"
+        port = target.port or (443 if scheme == "https" else 80)
+        if (
+            source.scheme != scheme
+            or source.username is not None
+            or target.username is not None
+            or source.path
+            or source.query
+            or source.fragment
+            or target.path
+            or target.query
+            or target.fragment
+            or not is_loopback_host(target.hostname or "")
+            or source.hostname != target.hostname
+            or (source.port or (443 if scheme == "https" else 80)) != port
+        ):
+            return False
+        config = getattr(websocket.app.state, "config", None)
+        return config is None or (
+            is_loopback_host(config.server.host) and config.server.port == port
+        )
+    except ValueError:
+        return False
+
+
 @ws_router.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket) -> None:
     """파이프라인 이벤트를 실시간으로 스트리밍하는 WebSocket 엔드포인트.
@@ -389,6 +426,11 @@ async def websocket_events(websocket: WebSocket) -> None:
     Args:
         websocket: FastAPI WebSocket 인스턴스
     """
+    # 브라우저의 HTTP CORS는 WebSocket에 적용되지 않는다.
+    if not _trusted_websocket_origin(websocket):
+        await websocket.close(code=1008, reason="허용되지 않은 연결 출처입니다.")
+        return
+
     # app.state에서 ConnectionManager 가져오기
     manager: ConnectionManager | None = getattr(
         websocket.app.state,

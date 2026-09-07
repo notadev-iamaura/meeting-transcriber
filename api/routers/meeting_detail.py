@@ -1351,6 +1351,8 @@ class TranscriptResponse(BaseModel):
     total_utterances: int = 0
     source_stage: str = "corrected"
     readonly: bool = False
+    search_status: str = "legacy"
+    summary_needs_review: bool = False
 
 
 class SummaryResponse(BaseModel):
@@ -2786,6 +2788,8 @@ async def get_transcript(
                 seen.add(u.speaker)
                 speakers.append(u.speaker)
 
+        from core.search_revision import revision_status
+
         return TranscriptResponse(
             utterances=utterances,
             meeting_id=meeting_id,
@@ -2796,6 +2800,8 @@ async def get_transcript(
             total_utterances=len(utterances),
             source_stage=source_stage,
             readonly=readonly,
+            search_status=revision_status(config, meeting_id),
+            summary_needs_review=bool(data.get("search_revision")),
         )
     except HTTPException:
         raise
@@ -3073,6 +3079,7 @@ class TranscriptReplaceResponse(BaseModel):
     updated_utterances: int = 0
     vocabulary_action: str | None = None
     vocabulary_term_id: str | None = None
+    search_status: str = "legacy"
 
 
 def _find_transcript_file(config: Any, meeting_id: str) -> tuple[Path | None, str]:
@@ -3194,6 +3201,11 @@ async def update_transcript(
         speakers = sorted({u["speaker"] for u in new_utterances if u["speaker"] != "UNKNOWN"})
         existing["num_speakers"] = len(speakers)
 
+        from core.search_revision import meeting_date
+
+        existing["meeting_date"] = meeting_date(config, meeting_id, existing)
+        existing["search_revision"] = uuid.uuid4().hex
+
         await asyncio.to_thread(
             _atomic_write_json_pinned,
             target,
@@ -3211,6 +3223,9 @@ async def update_transcript(
             detail=f"전사문 저장 중 오류가 발생했습니다: {exc}",
         ) from exc
 
+    from api.routers.reindex import schedule_edited_reindex
+
+    await schedule_edited_reindex(request.app, meeting_id)
     logger.info(
         "전사문 수동 편집 저장: meeting_id=%s, utterances=%d",
         meeting_id,
@@ -3235,6 +3250,8 @@ async def update_transcript(
         total_utterances=len(new_utterances),
         source_stage="corrected" if target.name == "corrected.json" else "correct",
         readonly=False,
+        search_status="pending",
+        summary_needs_review=True,
     )
 
 
@@ -3323,6 +3340,10 @@ async def replace_transcript_pattern(
             )
 
         existing["utterances"] = utterances
+        from core.search_revision import meeting_date
+
+        existing["meeting_date"] = meeting_date(config, meeting_id, existing)
+        existing["search_revision"] = uuid.uuid4().hex
         await asyncio.to_thread(
             _atomic_write_json_pinned,
             target,
@@ -3383,6 +3404,9 @@ async def replace_transcript_pattern(
             detail=f"전사문 치환 중 오류가 발생했습니다: {exc}",
         ) from exc
 
+    from api.routers.reindex import schedule_edited_reindex
+
+    await schedule_edited_reindex(request.app, meeting_id)
     logger.info(
         "전사문 패턴 치환: meeting_id=%s, find=%r, replace=%r, changes=%d",
         meeting_id,
@@ -3396,6 +3420,7 @@ async def replace_transcript_pattern(
         updated_utterances=updated_count,
         vocabulary_action=vocab_action,
         vocabulary_term_id=vocab_term_id,
+        search_status="pending",
     )
 
 

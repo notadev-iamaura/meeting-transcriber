@@ -56,6 +56,7 @@ def _build_config(
 
     config.paths.resolved_outputs_dir = tmp_path / "outputs"
     config.paths.resolved_checkpoints_dir = tmp_path / "checkpoints"
+    config.paths.base_dir = str(tmp_path)
 
     config.audio.sample_rate = 16000
     config.audio.channels = 1

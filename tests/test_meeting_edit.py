@@ -29,6 +29,30 @@ from steps.embedder import IndexPurgeResult
 # === 공용 fixture ===
 
 
+def test_transcript_edit_publishes_search_revision(
+    client: TestClient, seeded_meeting: str, isolated_base: Path
+) -> None:
+    """실제 API 저장과 모두 바꾸기가 최신성 버전을 원문과 함께 보존한다."""
+    url = f"/api/meetings/{seeded_meeting}/transcript"
+    original = client.get(url).json()
+    utterances = original["utterances"]
+    utterances[0]["text"] = "예산 100만원"
+    response = client.put(url, json={"utterances": utterances})
+    assert response.status_code == 200
+    assert response.json()["search_status"] == "pending"
+    cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
+    before = json.loads(cp.read_text())
+    response = client.post(url + "/replace", json={"find": "100만원", "replace": "200만원"})
+    assert response.status_code == 200
+    after = json.loads(cp.read_text())
+    assert before["search_revision"] != after["search_revision"]
+    assert after["utterances"][0]["text"] == "예산 200만원"
+    assert after["meeting_date"] == "2026-01-01"
+    current = client.get(url).json()
+    assert current["search_status"] == "pending"
+    assert current["summary_needs_review"] is True
+
+
 @pytest.fixture
 def isolated_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """임시 base dir + user_data 격리."""

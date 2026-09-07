@@ -357,6 +357,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 else:
                     logger.warning("PipelineManager 미초기화로 AutoProcessingScheduler 비활성화")
                 app.state.background_runtime_ready = True
+                if pipeline_manager is not None:
+                    from api.routers.reindex import recover_edited_indexes
+
+                    await recover_edited_indexes(app)
             except asyncio.CancelledError:
                 if app.state.startup_scan_status in {"pending", "running"}:
                     app.state.startup_scan_status = "cancelled"

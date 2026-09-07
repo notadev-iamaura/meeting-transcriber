@@ -34,6 +34,7 @@ _BUNDLED_SOURCE_FILES = (
     "requirements.txt",
     "requirements-dev.txt",
     "LICENSE",
+    "scripts/zoom_audio_activity.swift",
 )
 _EXCLUDED_SOURCE_NAMES = frozenset(
     {

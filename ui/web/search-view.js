@@ -390,6 +390,15 @@
             var data = await App.apiPost("/search", body);
             if (self._destroyed || seq !== self._searchSeq) return;
             self._renderSearchResults(data);
+            var sourceErrors = data.source_errors || {};
+            if (Object.keys(sourceErrors).length) {
+                errorBanner.show(Object.values(sourceErrors).join(" "));
+                App.safeText(els.searchStats, "검색 일부 실패 · 확인된 결과 " + (data.results || []).length + "건");
+                if (!(data.results || []).length) {
+                    App.safeText(document.getElementById("searchEmptyText"), "검색을 완료하지 못했습니다");
+                    App.safeText(document.getElementById("searchEmptySub"), "설정의 검색 인덱스에서 상태를 확인하고 복구해 주세요.");
+                }
+            }
         } catch (e) {
             if (self._destroyed || seq !== self._searchSeq) return;
             if (e.status === 503) {

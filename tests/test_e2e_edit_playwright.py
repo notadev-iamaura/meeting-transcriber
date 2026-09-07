@@ -212,17 +212,23 @@ def server(test_base_dir: Path, seeded_meeting_id: str):
     env["MT_CONFIG_PATH"] = str(test_config)
     env["MT_SERVER_PORT"] = str(TEST_PORT)
     env["MT_LOG_LEVEL"] = "warning"  # 테스트 로그 노이즈 감소
-    # pyannote 모델 다운로드를 피하기 위해 파이프라인 매니저 초기화 건너뛰도록
-    # 해야 하는데, 현재 구조상 --no-menubar 기동 시 PipelineManager가 만들어진다.
-    # 그러나 우리는 API 만 쓰므로 PipelineManager 가 실패해도 /api/meetings
-    # /transcript /summary /PATCH 엔드포인트는 동작한다 (앞서 구현된 에러 핸들링 덕분).
-    # 따라서 HUGGINGFACE_TOKEN 설정은 선택 사항. 기존 token 이 env 에 있으면 그대로 사용.
+    # 편집 UI/API 테스트는 실제 모델 추론·오디오 감시를 실행하지 않는다.
+    # desktop 프로필은 편집 후 자동 재색인이 회의 lease를 보유하므로 다음
+    # fixture 초기화가 모델 로드에 종속된다. 전용 api-test 프로필로 격리한다.
 
     log_file = test_base_dir / "server.log"
     log_fd = open(log_file, "w", encoding="utf-8")
 
     proc = subprocess.Popen(
-        [sys.executable, "main.py", "--no-menubar"],
+        [
+            sys.executable,
+            "-c",
+            "from config import load_config; "
+            "from api.server import create_app; import uvicorn; "
+            "config = load_config(); "
+            "uvicorn.run(create_app(config, runtime_profile='api-test'), "
+            "host='127.0.0.1', port=config.server.port)",
+        ],
         cwd=str(REPO_ROOT),
         env=env,
         stdout=log_fd,
