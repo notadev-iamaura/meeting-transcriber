@@ -109,7 +109,8 @@ def _seed_meeting(base_dir: Path, meeting_id: str) -> None:
     )
     # 이미 있으면 상태·title 초기화
     conn.execute(
-        "UPDATE jobs SET status='completed', title='' WHERE meeting_id=?",
+        "UPDATE jobs SET status='completed', title='', error_message='', "
+        "stt_provider='', stt_model='' WHERE meeting_id=?",
         (meeting_id,),
     )
     conn.commit()
@@ -300,6 +301,66 @@ def page(server, browser, test_base_dir: Path, seeded_meeting_id: str):
 # =============================================================================
 # E2E 테스트
 # =============================================================================
+
+
+def test_openai_failure_visible_with_partial_transcript(
+    page: Page, test_base_dir: Path, seeded_meeting_id: str
+) -> None:
+    """부분 전사가 있어도 HTTP 400과 로컬 대안을 표시하고 자동 재요청하지 않는다."""
+    import sqlite3
+
+    with sqlite3.connect(str(test_base_dir / "pipeline.db")) as db:
+        db.execute(
+            "UPDATE jobs SET status='failed', stt_provider='openai', "
+            "stt_model='gpt-4o-transcribe-diarize', error_message=? WHERE meeting_id=?",
+            (
+                "OpenAI 전사 요청이 실패했습니다 (HTTP 400). <script>unsafe</script>",
+                seeded_meeting_id,
+            ),
+        )
+    mutations: list[str] = []
+    page.on(
+        "request",
+        lambda request: mutations.append(request.url) if request.method == "POST" else None,
+    )
+    page.goto(f"{BASE_URL}/app/viewer/{seeded_meeting_id}")
+    notice = page.locator(".viewer-failure-notice")
+    expect(notice).to_be_visible()
+    expect(notice).to_contain_text("HTTP 400")
+    expect(notice).to_contain_text("이 Mac에서 로컬로 다시 전사할까요?")
+    expect(notice).to_contain_text("기존 전사·요약은 교체됩니다")
+    expect(notice.locator("script")).to_have_count(0)
+    expect(page.locator(".utterance-text").first).to_be_visible()
+    page.screenshot(path=str(test_base_dir / "openai-failure.png"), full_page=True)
+    local_button = page.get_by_role("button", name="네, 이 회의만 로컬로 전사")
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    local_button.click()
+    assert mutations == []
+    import math
+    import wave
+    from array import array
+
+    audio = test_base_dir / "audio_input" / f"{seeded_meeting_id}.wav"
+    with wave.open(str(audio), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        tone = array(
+            "h", (int(8000 * math.sin(2 * math.pi * 440 * i / 16000)) for i in range(16000))
+        )
+        output.writeframes(tone.tobytes() * 35)
+    config_before = (test_base_dir / "config.yaml").read_bytes()
+    page.once("dialog", lambda dialog: dialog.accept())
+    with page.expect_response(lambda response: "/re-transcribe" in response.url) as result:
+        local_button.click()
+    assert result.value.status == 200, result.value.text()
+    with sqlite3.connect(str(test_base_dir / "pipeline.db")) as db:
+        state = db.execute(
+            "SELECT status, stt_provider FROM jobs WHERE meeting_id=?", (seeded_meeting_id,)
+        ).fetchone()
+    assert state == ("queued", "local")
+    assert (test_base_dir / "config.yaml").read_bytes() == config_before
+    assert audio.is_file()
 
 
 def _open_viewer(page: Page, meeting_id: str) -> None:

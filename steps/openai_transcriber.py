@@ -296,12 +296,37 @@ def _default_transport(
     if len(payload) > _MAX_RESPONSE_BYTES:
         raise OpenAITranscriptionError("OpenAI 전사 응답이 허용 크기를 초과했습니다.")
     if response.status != 200:
-        if response.status in {401, 403}:
-            message = "OpenAI API 키를 확인해 주세요."
+        if response.status == 400:
+            message = (
+                "OpenAI가 전사 요청을 거부했습니다 (HTTP 400). "
+                "요청 형식이나 오디오가 지원 조건에 맞지 않을 수 있습니다. "
+                "자동 재시도하지 않습니다. 로컬 전사를 대안으로 사용할 수 있습니다."
+            )
+        elif response.status == 401:
+            message = "OpenAI 인증에 실패했습니다 (HTTP 401). API 키를 확인해 주세요."
+        elif response.status == 403:
+            message = (
+                "OpenAI 접근 권한이 없습니다 (HTTP 403). 프로젝트·모델 사용 권한을 확인해 주세요."
+            )
+        elif response.status == 404:
+            message = "OpenAI 전사 모델 또는 요청 경로를 찾을 수 없습니다 (HTTP 404)."
         elif response.status == 413:
-            message = "OpenAI 업로드 허용 크기를 초과했습니다."
+            message = "OpenAI 업로드 허용 크기를 초과했습니다 (HTTP 413)."
         elif response.status == 429:
-            message = "OpenAI 요청 한도에 도달했습니다. 잠시 후 사용자가 다시 시도해 주세요."
+            # 공급자 본문은 출력하지 않고 알려진 quota 코드만 분류에 사용한다.
+            try:
+                error_body = json.loads(payload)
+                error = error_body.get("error", {}) if isinstance(error_body, dict) else {}
+                quota = isinstance(error, dict) and error.get("code") == "insufficient_quota"
+            except (ValueError, UnicodeDecodeError):
+                quota = False
+            message = (
+                "OpenAI 사용 가능 한도가 부족합니다 (HTTP 429). 결제·사용 한도를 확인해 주세요."
+                if quota
+                else "OpenAI 요청 한도에 도달했습니다 (HTTP 429). 사용 한도를 확인하거나 잠시 후 다시 시도해 주세요."
+            )
+        elif response.status >= 500:
+            message = f"OpenAI 서버 오류입니다 (HTTP {response.status}). 잠시 후 다시 시도하거나 로컬 전사를 선택해 주세요."
         else:
             message = f"OpenAI 전사 요청이 실패했습니다 (HTTP {response.status})."
         raise OpenAITranscriptionError(message)

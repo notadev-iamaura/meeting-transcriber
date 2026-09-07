@@ -1406,6 +1406,48 @@
             actionsEl.setAttribute("role", "toolbar");
             actionsEl.setAttribute("aria-label", "회의 작업");
 
+            // 부분 전사문이 있어도 실패 원인과 복구 안내를 숨기지 않는다.
+            if (data.status === "failed") {
+                var failure = document.createElement("div");
+                failure.className = "viewer-failure-notice";
+                failure.setAttribute("role", "alert");
+                var failureTitle = document.createElement("strong");
+                failureTitle.textContent = "처리를 완료하지 못했습니다";
+                failure.appendChild(failureTitle);
+                var failureReason = document.createElement("p");
+                failureReason.textContent = data.error_message || "오류 내용을 불러오지 못했습니다.";
+                failure.appendChild(failureReason);
+                var recovery = document.createElement("p");
+                var openaiFailure = /OpenAI/i.test(data.error_message || "");
+                recovery.textContent = openaiFailure
+                    ? "이 Mac에서 로컬로 다시 전사할까요? 이 회의만 로컬 모델로 처리하며 " +
+                      "음성을 외부로 다시 보내지 않습니다. 기본 모델 설정은 바뀌지 않습니다. " +
+                      "기존 전사·요약은 교체됩니다. 로컬 모델 준비가 필요하고 처리 시간이 길어질 수 있습니다. " +
+                      "‘실패한 단계부터 다시 시도’는 기존 OpenAI 모델을 사용합니다."
+                    : "기존 결과를 유지하려면 ‘실패한 단계부터 다시 시도’를 선택하세요. " +
+                      "계속 실패하면 준비 상태에서 모델과 실행 환경을 확인하세요.";
+                failure.appendChild(recovery);
+                if (openaiFailure) {
+                    var localBtn = document.createElement("button");
+                    localBtn.className = "viewer-action-btn local-fallback";
+                    localBtn.textContent = "네, 이 회의만 로컬로 전사";
+                    localBtn.addEventListener("click", function () {
+                        self._reTranscribeMeeting(data.meeting_id, localBtn, "local");
+                    });
+                    failure.appendChild(localBtn);
+                }
+                var recoveryLink = document.createElement("a");
+                recoveryLink.className = "viewer-action-btn";
+                recoveryLink.href = openaiFailure ? "/app/settings" : "/app/setup";
+                recoveryLink.textContent = openaiFailure ? "전사 모델 설정 열기" : "준비 상태 확인";
+                recoveryLink.addEventListener("click", function (event) {
+                    event.preventDefault();
+                    Router.navigate(openaiFailure ? "/app/settings" : "/app/setup");
+                });
+                failure.appendChild(recoveryLink);
+                actionsEl.appendChild(failure);
+            }
+
             function makeGroup(className, label) {
                 var group = document.createElement("div");
                 group.className = "viewer-action-group " + className;
@@ -2113,13 +2155,17 @@
          * @param {string} meetingId
          * @param {HTMLElement} btn
          */
-        ViewerView.prototype._reTranscribeMeeting = async function (meetingId, btn) {
-            if (!confirm(
+        ViewerView.prototype._reTranscribeMeeting = async function (meetingId, btn, modelId) {
+            var confirmation = modelId === "local"
+                ? "이 회의를 이 Mac의 로컬 모델로 처음부터 전사할까요?\n" +
+                  "기존 전사문·요약·진행 기록은 교체되며 원본 오디오는 유지됩니다.\n" +
+                  "음성을 외부로 다시 보내지 않고, 전역 기본 모델 설정도 바꾸지 않습니다."
+                :
                 "기존 전사문, 요약, 진행 기록을 삭제하고\n" +
                 "오디오부터 처음부터 다시 처리합니다.\n\n" +
                 "일시적인 오류라면 '실패한 단계부터 다시 시도'를 먼저 선택하세요.\n" +
-                "계속하시겠습니까?"
-            )) {
+                "계속하시겠습니까?";
+            if (!confirm(confirmation)) {
                 return;
             }
             var originalText = btn.innerHTML;
@@ -2128,7 +2174,7 @@
             try {
                 await App.apiPost(
                     "/meetings/" + encodeURIComponent(meetingId) + "/re-transcribe",
-                    {}
+                    modelId === "local" ? { model_id: "local" } : {}
                 );
                 this._loadMeetingInfo();
                 ListPanel.loadMeetings();

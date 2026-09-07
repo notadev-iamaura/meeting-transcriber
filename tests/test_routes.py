@@ -3805,6 +3805,42 @@ class TestCancelMeetingEndpoint:
 class TestReTranscribeMeetingEndpoint:
     """POST /api/meetings/{meeting_id}/re-transcribe 엔드포인트 테스트."""
 
+    def test_local_override_preserves_openai_default(self, tmp_path: Path) -> None:
+        """명시적 로컬 대체는 실패 회의만 전환하고 OpenAI 기본값은 보존한다."""
+        app = _make_test_app(tmp_path)
+        mid = "openai_failed_local"
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"audio")
+        with (
+            TestClient(app) as client,
+            patch(
+                "api.routers.meeting_detail.purge_meeting_index",
+                return_value=IndexPurgeResult(meeting_id=mid),
+            ),
+        ):
+            app.state.config.stt.provider = "openai"
+            queue = app.state.job_queue._queue
+            job_id = queue.add_job(
+                mid,
+                str(audio),
+                initial_status="failed",
+                stt_provider="openai",
+                stt_model="gpt-4o-transcribe-diarize",
+            )
+            rejected = client.post(
+                f"/api/meetings/{mid}/re-transcribe", json={"model_id": "unknown"}
+            )
+            assert rejected.status_code == 400
+            assert queue.get_job(job_id).status == "failed"
+            response = client.post(
+                f"/api/meetings/{mid}/re-transcribe", json={"model_id": "local"}
+            )
+            assert response.status_code == 200, response.text
+            assert queue.get_job(job_id).status == "queued"
+            assert queue.get_job(job_id).stt_provider == "local"
+            assert app.state.config.stt.provider == "openai"
+            assert audio.read_bytes() == b"audio"
+
     def test_재전사_real_queue_claim부터_queued_finalize까지_완료한다(
         self,
         tmp_path: Path,

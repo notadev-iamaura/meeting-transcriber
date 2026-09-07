@@ -1914,8 +1914,15 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
     "/meetings/{meeting_id}/re-transcribe",
     dependencies=[Depends(_meeting_mutation_lease)],
 )
-async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingItem:
+async def re_transcribe_meeting(
+    request: Request,
+    meeting_id: str,
+    body: Annotated[Any | None, Body()] = None,
+) -> MeetingItem:
     """기존 전사 결과를 폐기하고 처음부터 다시 전사한다.
+
+    body의 model_id="local"은 이 회의만 로컬 모델로 전환한다.
+    생략하면 기존 전역 기본값을 사용하며 전역 설정 자체는 변경하지 않는다.
 
     completed/failed 상태의 작업을 대상으로:
         1. ChromaDB/FTS5 의 stale 청크 삭제
@@ -1940,10 +1947,20 @@ async def re_transcribe_meeting(request: Request, meeting_id: str) -> MeetingIte
     config = getattr(request.app.state, "config", None)
     if config is None:
         raise HTTPException(status_code=503, detail="설정이 초기화되지 않았습니다.")
-    from core.transcription_models import selection_from_config
+    from core.transcription_models import selection_from_config, selection_from_id
+
+    parsed_body = _parse_transcribe_meeting_request(body)
+    if parsed_body.model_id not in {None, "local"}:
+        raise HTTPException(
+            status_code=400, detail="재전사의 개별 모델 선택은 local만 지원합니다."
+        )
 
     try:
-        stt_selection = selection_from_config(config)
+        stt_selection = (
+            selection_from_id("local", local_model=str(config.stt.model_name))
+            if parsed_body.model_id == "local"
+            else selection_from_config(config)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if stt_selection.external_upload:
