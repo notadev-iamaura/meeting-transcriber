@@ -257,7 +257,7 @@
                 var data = await App.apiRequest("/reindex/status");
                 self._status = data;
                 self._renderSummary(data);
-                self._renderMissingList(data.missing_meeting_ids || []);
+                self._renderMissingList(data.missing_meeting_ids || [], data.details || {});
                 var btn = document.getElementById("reindexAllBtn");
                 if (btn) {
                     btn.disabled = self._isRunning || data.missing === 0;
@@ -285,14 +285,14 @@
                 '    <div class="reindex-stat-value">' + data.indexed + '</div>',
                 '  </div>',
                 '  <div class="reindex-stat' + missingClass + '">',
-                '    <div class="reindex-stat-label">누락</div>',
+                '    <div class="reindex-stat-label">복구 필요</div>',
                 '    <div class="reindex-stat-value">' + data.missing + '</div>',
                 '  </div>',
                 '</div>',
             ].join("\n");
         };
 
-        ReindexSettingsPanel.prototype._renderMissingList = function (ids) {
+        ReindexSettingsPanel.prototype._renderMissingList = function (ids, details) {
             var list = document.getElementById("reindexMissingList");
             if (!list) return;
             if (!ids || ids.length === 0) {
@@ -300,10 +300,11 @@
                 return;
             }
             var self = this;
+            var labels = { pending: "수정본 반영 대기", running: "수정본 반영 작업 중", failed: "반영 실패", incomplete: "일부 인덱스 누락", missing: "인덱스 없음", unverified: "검증 정보 없음", unavailable: "상태 확인 필요" };
             var rows = ids.map(function (mid) {
                 return [
                     '<div class="reindex-missing-row" data-meeting-id="' + App.escapeHtml(mid) + '">',
-                    '  <div class="reindex-missing-id">' + App.escapeHtml(mid) + '</div>',
+                    '  <div class="reindex-missing-id">' + App.escapeHtml(mid) + ' · ' + App.escapeHtml(labels[(details || {})[mid]] || "복구 필요") + '</div>',
                     '  <button type="button" class="btn btn-secondary reindex-single-btn" data-meeting-id="' + App.escapeHtml(mid) + '">재색인</button>',
                     '</div>',
                 ].join("\n");

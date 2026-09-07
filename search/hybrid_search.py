@@ -120,6 +120,7 @@ class SearchResponse:
     vector_count: int = 0
     fts_count: int = 0
     filters_applied: dict[str, Any] = field(default_factory=dict)
+    source_errors: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -134,6 +135,7 @@ class SearchResponse:
             "vector_count": self.vector_count,
             "fts_count": self.fts_count,
             "filters_applied": self.filters_applied,
+            "source_errors": self.source_errors,
         }
 
 
@@ -318,6 +320,7 @@ def _search_vector(
     date_filter: str | None = None,
     speaker_filter: str | None = None,
     meeting_id_filter: str | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     """ChromaDB에서 벡터 유사도 검색을 수행한다.
 
@@ -338,6 +341,10 @@ def _search_vector(
     try:
         # 컬렉션이 없으면 빈 결과 반환 (graceful degradation)
         if collection is None:
+            if strict:
+                raise SearchError(
+                    "벡터 검색 저장소를 사용할 수 없습니다. 검색 인덱스를 확인해 주세요."
+                )
             logger.debug("ChromaDB 컬렉션 미초기화 — 빈 결과 반환")
             return []
 
@@ -350,8 +357,6 @@ def _search_vector(
         where_conditions: list[dict[str, Any]] = []
         if date_filter:
             where_conditions.append({"date": {"$eq": date_filter}})
-        if speaker_filter:
-            where_conditions.append({"speakers": {"$contains": speaker_filter}})
         if meeting_id_filter:
             where_conditions.append({"meeting_id": {"$eq": meeting_id_filter}})
 
@@ -361,6 +366,24 @@ def _search_vector(
             where = where_conditions[0]
         elif len(where_conditions) > 1:
             where = {"$and": where_conditions}
+
+        if speaker_filter:
+            # 기존 CSV metadata를 그대로 지원한다. 배열 $contains는 문자열에
+            # 사용할 수 없으므로 정확한 화자를 포함하는 CSV 값만 선별한다.
+            candidates = collection.get(where=where, include=["metadatas"])
+            values = sorted(
+                {
+                    meta["speakers"]
+                    for meta in candidates.get("metadatas", [])
+                    if isinstance(meta, dict)
+                    and isinstance(meta.get("speakers"), str)
+                    and speaker_filter in meta["speakers"].split(",")
+                }
+            )
+            if not values:
+                return []
+            speaker_where = {"speakers": {"$in": values}}
+            where = {"$and": [where, speaker_where]} if where else speaker_where
 
         # 쿼리 실행
         query_params: dict[str, Any] = {
@@ -400,6 +423,8 @@ def _search_vector(
 
     except Exception as e:
         logger.exception(f"벡터 검색 실패: {e}")
+        if strict:
+            raise SearchError("벡터 검색에 실패했습니다. 검색 인덱스를 확인해 주세요.") from e
         return []
 
 
@@ -414,6 +439,7 @@ def _search_fts(
     speaker_filter: str | None = None,
     meeting_id_filter: str | None = None,
     cached_conn: sqlite3.Connection | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     """SQLite FTS5에서 키워드 검색을 수행한다.
 
@@ -439,6 +465,8 @@ def _search_fts(
 
         if conn is None:
             if not db_path.exists():
+                if strict:
+                    raise SearchError("키워드 검색 저장소가 없습니다.")
                 logger.warning(f"FTS5 데이터베이스 없음: {db_path}")
                 return []
             conn = sqlite3.connect(str(db_path))
@@ -453,6 +481,8 @@ def _search_fts(
                 (_FTS_TABLE_NAME,),
             )
             if not cursor.fetchone():
+                if strict:
+                    raise SearchError("키워드 검색 인덱스가 없습니다.")
                 logger.warning(f"FTS5 테이블 미존재: {_FTS_TABLE_NAME}")
                 return []
 
@@ -477,8 +507,8 @@ def _search_fts(
                 sql += " AND date = ?"
                 params.append(date_filter)
             if speaker_filter:
-                sql += " AND speakers LIKE ?"
-                params.append(f"%{speaker_filter}%")
+                sql += " AND instr(',' || speakers || ',', ?) > 0"
+                params.append(f",{speaker_filter},")
             if meeting_id_filter:
                 sql += " AND meeting_id = ?"
                 params.append(meeting_id_filter)
@@ -516,6 +546,8 @@ def _search_fts(
 
     except Exception as e:
         logger.exception(f"FTS5 검색 실패: {e}")
+        if strict:
+            raise SearchError("키워드 검색에 실패했습니다. 검색 인덱스를 확인해 주세요.") from e
         return []
 
 
@@ -848,6 +880,7 @@ class HybridSearchEngine:
             date_filter,
             speaker_filter,
             meeting_id_filter,
+            strict=True,
         )
         # PERF: 캐시된 FTS SQLite 연결 사용 (매 검색마다 connect/close 제거)
         fts_conn = self._get_fts_connection()
@@ -860,8 +893,27 @@ class HybridSearchEngine:
             speaker_filter,
             meeting_id_filter,
             fts_conn,
+            strict=True,
         )
-        vector_results, fts_results = await asyncio.gather(vector_task, fts_task)
+        outcomes = await asyncio.gather(vector_task, fts_task, return_exceptions=True)
+        source_errors: dict[str, str] = {}
+        results_by_source: list[list[dict[str, Any]]] = []
+        for name, outcome in zip(("vector", "fts"), outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, Exception):
+                    raise outcome
+                source_errors[name] = str(outcome)
+                results_by_source.append([])
+            else:
+                results_by_source.append(outcome)
+        vector_results, fts_results = results_by_source
+
+        from core.search_revision import filter_current_results
+
+        vector_results = await asyncio.to_thread(
+            filter_current_results, self._config, vector_results
+        )
+        fts_results = await asyncio.to_thread(filter_current_results, self._config, fts_results)
 
         # 4. RRF 결합
         combined = _combine_rrf(
@@ -880,6 +932,7 @@ class HybridSearchEngine:
             vector_count=len(vector_results),
             fts_count=len(fts_results),
             filters_applied=filters_applied,
+            source_errors=source_errors,
         )
 
         logger.info(

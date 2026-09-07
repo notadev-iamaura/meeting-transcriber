@@ -416,6 +416,8 @@
             };
             document.addEventListener("ws:pipeline_status", onPipelineStatus);
             self._listeners.push({ el: document, type: "ws:pipeline_status", fn: onPipelineStatus });
+            document.addEventListener("ws:reindex_progress", onPipelineStatus);
+            self._listeners.push({ el: document, type: "ws:reindex_progress", fn: onPipelineStatus });
 
             // 단계별 실시간 진행/ETA/이상 탐지 이벤트
             var onStepProgress = function (e) {
@@ -2814,6 +2816,14 @@
                 corrected: "",
             };
             var parts = [];
+            var searchLabels = {
+                pending: "수정본 검색 반영 대기 중",
+                running: "수정본 검색 반영 작업 중",
+                failed: "검색 반영 실패 · 설정에서 재색인해 주세요",
+                unavailable: "검색 상태 확인 필요",
+            };
+            if (searchLabels[self._searchStatus]) parts.push(searchLabels[self._searchStatus]);
+            if (self._summaryNeedsReview) parts.push("전사문 수정 후 요약 확인 필요");
             if (stageLabels[stage]) {
                 parts.push(stageLabels[stage]);
             }
@@ -2857,6 +2867,9 @@
             }
 
             var signature = self._buildTranscriptSignature(stage, readonly, utterances);
+            self._searchStatus = data.search_status || "legacy";
+            self._summaryNeedsReview = Boolean(data.summary_needs_review);
+            self._renderTranscriptSourceStatus();
             if (options.silent && signature === self._transcriptSignature) {
                 return true;
             }

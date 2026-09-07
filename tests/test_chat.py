@@ -408,6 +408,20 @@ class TestChatEngine:
         engine._model_manager.acquire.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_부분_검색_장애는_단정적인_LLM_답변을_차단한다(self) -> None:
+        """한쪽 검색 결과가 있어도 저장소 오류를 검색 성공으로 숨기지 않는다."""
+        engine = self._make_engine()
+        response = _make_search_response()
+        response.source_errors = {"vector": "벡터 검색에 실패했습니다"}
+        engine._search_engine.search = AsyncMock(return_value=response)
+        answer = await engine.chat("예산은?")
+        assert answer.grounding_status == "search_error"
+        assert answer.llm_called is False
+        events = [event async for event in engine.stream_chat("예산은?")]
+        assert not any(event["type"] == "token" for event in events)
+        engine._model_manager.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_ollama_연결_실패_graceful_degradation(self) -> None:
         """LLM 연결 실패 시 검색 결과만 반환하는지 확인한다."""
         engine = self._make_engine()
@@ -440,6 +454,26 @@ class TestChatEngine:
         assert session.pair_count == 1
         assert session.history[0].content == "질문1"
         assert session.history[1].content == "답변1"
+
+    @pytest.mark.asyncio
+    async def test_생성_중_전사문_수정은_옛_답변과_이력을_폐기한다(self) -> None:
+        """진행 중인 생성도 수정 이전 근거를 새 답변으로 게시하지 않는다."""
+        engine = self._make_engine()
+        session = engine.get_session()
+        session.add_exchange("예산", "100만원")
+
+        def generate(*args: object, **kwargs: object) -> str:
+            """모델 응답 도중 사용자가 원문을 수정한 상황을 재현한다."""
+            engine.invalidate_transcript_history()
+            return "100만원"
+
+        backend = engine._model_manager.acquire.return_value.__aenter__.return_value
+        backend.chat.side_effect = generate
+        response = await engine.chat("예산은?")
+        assert "100만원" not in response.answer
+        assert response.references == []
+        assert response.grounding_status == "search_error"
+        assert engine.get_session().pair_count == 0
 
     @pytest.mark.asyncio
     async def test_세션_분리(self) -> None:
@@ -1326,7 +1360,12 @@ class TestPhase3WebSocketIntegration:
 
         app = _make_integration_test_app(tmp_path)
 
-        with TestClient(app) as client, client.websocket_connect("/ws/events") as ws:
+        with (
+            TestClient(app) as client,
+            client.websocket_connect(
+                "ws://127.0.0.1:8765/ws/events", headers={"origin": "http://127.0.0.1:8765"}
+            ) as ws,
+        ):
             data = ws.receive_json()
 
             assert data["event_type"] == "system_status"

@@ -53,6 +53,97 @@ def _track_background_task(app: Any, task: asyncio.Task[Any]) -> None:
     task.add_done_callback(running_tasks.discard)
 
 
+async def schedule_edited_reindex(app: Any, meeting_id: str) -> None:
+    """편집본의 재색인을 응답 전에 회의 FIFO 대기열에 등록한다."""
+    chat = getattr(app.state, "chat_engine", None)
+    if chat is not None:
+        chat.invalidate_transcript_history()
+    pipeline = getattr(app.state, "pipeline_manager", None)
+    if pipeline is None:
+        return
+    coordinator = app.state.meeting_mutation_coordinator
+    admitted = asyncio.Event()
+
+    async def run() -> None:
+        """같은 회의의 최신 편집본을 반영하고 실패 상태를 보존한다."""
+        from core.io_utils import atomic_write_json_pinned
+        from core.search_revision import checkpoint_dir, read_source, revision_status
+
+        admitted.set()
+        async with coordinator.lease(meeting_id):
+            queue = app.state.job_queue
+            job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
+            if job is None or job.status != "completed":
+                return
+            if revision_status(app.state.config, meeting_id) not in {
+                "pending",
+                "failed",
+                "running",
+            }:
+                return
+            try:
+                _, source = read_source(app.state.config, meeting_id)
+                atomic_write_json_pinned(
+                    checkpoint_dir(app.state.config, meeting_id) / "search_receipt.json",
+                    {"revision": source["search_revision"], "state": "running"},
+                )
+                manager = getattr(app.state, "ws_manager", None)
+                if manager is not None:
+                    from api.websocket import EventType, WebSocketEvent
+
+                    try:
+                        await manager.broadcast_event(
+                            WebSocketEvent(
+                                event_type=EventType.REINDEX_PROGRESS.value,
+                                data={"meeting_id": meeting_id, "phase": "started"},
+                            )
+                        )
+                    except Exception:
+                        logger.warning("재색인 시작 상태 전송 실패", exc_info=True)
+                await _reindex_meeting(
+                    app.state.config, pipeline._model_manager, meeting_id, coordinator
+                )
+                phase = "complete"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("편집본 검색 반영 실패: %s", meeting_id)
+                _, source = read_source(app.state.config, meeting_id)
+                atomic_write_json_pinned(
+                    checkpoint_dir(app.state.config, meeting_id) / "search_receipt.json",
+                    {"revision": source.get("search_revision"), "state": "failed"},
+                )
+                phase = "error"
+            manager = getattr(app.state, "ws_manager", None)
+            if manager is not None:
+                from api.websocket import EventType, WebSocketEvent
+
+                await manager.broadcast_event(
+                    WebSocketEvent(
+                        event_type=EventType.REINDEX_PROGRESS.value,
+                        data={"meeting_id": meeting_id, "phase": phase},
+                    )
+                )
+
+    task = asyncio.create_task(run(), name=f"edited-reindex-{meeting_id}")
+    _track_background_task(app, task)
+    task.add_done_callback(_log_task_exception)
+    await admitted.wait()
+
+
+async def recover_edited_indexes(app: Any) -> None:
+    """재시작 시 저장됐지만 검색 반영이 끝나지 않은 편집본을 복구한다."""
+    from core.search_revision import revision_status
+
+    for job in await app.state.job_queue.get_all_jobs():
+        if job.status == "completed" and revision_status(app.state.config, job.meeting_id) in {
+            "pending",
+            "failed",
+            "running",
+        }:
+            await schedule_edited_reindex(app, job.meeting_id)
+
+
 def _validate_meeting_id(meeting_id: str) -> None:
     """watcher와 동일한 안전한 단일 segment ID를 검증한다."""
     if (
@@ -116,7 +207,8 @@ class ReindexStatusResponse(BaseModel):
     """인덱싱 상태 조회 응답."""
 
     total: int = Field(description="completed 상태 회의 총 개수")
-    indexed: int = Field(description="ChromaDB 에 청크가 1개 이상 있는 회의 수")
+    indexed: int = Field(description="두 인덱스와 기대 청크 집합이 일치하는 회의 수")
+    details: dict[str, str] = Field(default_factory=dict)
     missing: int = Field(description="청크가 없는 (백필 필요) 회의 수")
     missing_meeting_ids: list[str] = Field(
         default_factory=list,
@@ -217,10 +309,14 @@ async def get_index_status(request: Request) -> ReindexStatusResponse:
 
     indexed = 0
     missing_ids: list[str] = []
+    details: dict[str, str] = {}
+    from core.search_revision import index_health
+
     for job in completed_jobs:
         mid = job.meeting_id
-        chunk_count = _count_chunks_for_meeting(collection, mid)
-        if chunk_count > 0:
+        health = await asyncio.to_thread(index_health, config, collection, mid)
+        details[mid] = health
+        if health == "current":
             indexed += 1
         else:
             missing_ids.append(mid)
@@ -230,6 +326,7 @@ async def get_index_status(request: Request) -> ReindexStatusResponse:
         indexed=indexed,
         missing=len(missing_ids),
         missing_meeting_ids=missing_ids,
+        details=details,
     )
 
 
@@ -506,7 +603,9 @@ async def reindex_all(request: Request) -> ReindexAllResponse:
 
             if not await asyncio.to_thread(has_reindex_source_artifact, config, mid):
                 continue
-            if _count_chunks_for_meeting(collection, mid) == 0:
+            from core.search_revision import index_health
+
+            if await asyncio.to_thread(index_health, config, collection, mid) != "current":
                 missing_ids.append(mid)
     except Exception:
         async with lock:

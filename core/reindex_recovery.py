@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import re
 import stat
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -151,12 +149,14 @@ async def _reindex_meeting_artifacts_locked(
                 total_corrected=0,
             )
 
-    match = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", meeting_id)
-    date_str = (
-        f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-        if match
-        else datetime.now().strftime("%Y-%m-%d")
-    )
+    from core.search_revision import preserve_meeting_date, read_source
+
+    source_path, source_data = read_source(config, meeting_id)
+    date_str = preserve_meeting_date(config, meeting_id, source_data)
+    if "meeting_date" not in source_data:
+        source_data["meeting_date"] = date_str
+        source_data["meeting_date_source"] = "input" if date_str else "unknown"
+        atomic_write_json_pinned(source_path, source_data, backup=False)
     chunked = await Chunker(config).chunk(corrected, meeting_id, date_str)
     atomic_write_json_pinned(
         meeting_dir / "chunk.json",
@@ -164,11 +164,19 @@ async def _reindex_meeting_artifacts_locked(
         backup=False,
     )
     embedded = await Embedder(config, model_manager).embed(chunked)
+    if not embedded.chroma_stored or not embedded.fts_stored:
+        raise RuntimeError("검색 인덱스 양쪽 저장이 완료되지 않았습니다")
     atomic_write_json_pinned(
         meeting_dir / "embed.json",
         embedded.to_dict(),
         backup=False,
     )
+    if source_data.get("search_revision"):
+        atomic_write_json_pinned(
+            meeting_dir / "search_receipt.json",
+            {"revision": source_data["search_revision"]},
+            backup=False,
+        )
     return {
         "chunks": embedded.total_chunks,
         "chroma_stored": embedded.chroma_stored,

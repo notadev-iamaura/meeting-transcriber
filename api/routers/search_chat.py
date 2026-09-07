@@ -80,6 +80,7 @@ class SearchResponse(BaseModel):
     vector_count: int = 0
     fts_count: int = 0
     filters_applied: dict[str, Any] = Field(default_factory=dict)
+    source_errors: dict[str, str] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
@@ -218,6 +219,9 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
             vector_count=result.vector_count,
             fts_count=result.fts_count,
             filters_applied=result.filters_applied,
+            source_errors=result.source_errors
+            if isinstance(getattr(result, "source_errors", None), dict)
+            else {},
         )
 
     except EmptyQueryError as e:
