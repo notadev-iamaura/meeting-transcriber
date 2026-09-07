@@ -2100,10 +2100,11 @@ class PipelineManager:
         """meeting_id 또는 오디오 파일에서 회의 날짜를 도출한다.
 
         우선순위:
-          1) meeting_id 가 "meeting_YYYYMMDD_HHMMSS" 또는 "YYYYMMDD_HHMMSS_*" 패턴이면
+          1) 이미 보존한 날짜를 우선 사용한다.
+          2) meeting_id 가 "meeting_YYYYMMDD_HHMMSS" 또는 "YYYYMMDD_HHMMSS_*" 패턴이면
              해당 날짜 사용
-          2) 오디오 파일 mtime 사용
-          3) 현재 시각
+          3) 검증된 오디오 파일 mtime 사용
+          4) 불명은 빈 값으로 보존한다. 재색인과 같은 계약을 사용한다.
 
         Args:
             meeting_id: 회의 식별자
@@ -2112,25 +2113,9 @@ class PipelineManager:
         Returns:
             "YYYY-MM-DD" 형식의 날짜 문자열
         """
-        import re
-        from datetime import datetime
+        from core.search_revision import preserve_meeting_date
 
-        # 1) meeting_id 패턴 — meeting_YYYYMMDD_... 또는 YYYYMMDD_HHMMSS_...
-        match = re.search(r"(\d{4})(\d{2})(\d{2})_\d{6}", meeting_id)
-        if match:
-            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-
-        # 2) 오디오 파일 mtime
-        try:
-            entry_stat = audio_path.lstat()
-            if stat.S_ISREG(entry_stat.st_mode):
-                mtime = datetime.fromtimestamp(entry_stat.st_mtime)
-                return mtime.strftime("%Y-%m-%d")
-        except OSError:
-            pass
-
-        # 3) 현재 날짜 폴백
-        return datetime.now().strftime("%Y-%m-%d")
+        return preserve_meeting_date(self._config, meeting_id, {"audio_path": str(audio_path)})
 
     async def _run_step_chunk(
         self,
@@ -2495,6 +2480,8 @@ class PipelineManager:
             utterances = []
             if corrected_result is not None:
                 utterances = list(getattr(corrected_result, "utterances", []) or [])
+            if not meeting_date:
+                raise ValueError("회의 날짜가 미확정이므로 Wiki 생성을 보류합니다.")
             parsed_meeting_date = date_cls.fromisoformat(meeting_date)
             wiki_result = await wiki.run(
                 meeting_id=meeting_id,

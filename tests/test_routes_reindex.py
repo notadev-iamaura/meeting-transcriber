@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,6 +144,21 @@ def _create_completed_pipeline_state(tmp_path: Path, meeting_id: str) -> None:
 # === GET /api/reindex/status ===
 
 
+def _seed_index_evidence(tmp_path: Path, meeting_id: str, ids: list[str]) -> None:
+    """정상 판정에 필요한 FTS와 체크포인트 증거를 준비한다."""
+    config = _make_test_config(tmp_path)
+    with sqlite3.connect(config.paths.resolved_meetings_db) as conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(chunk_id, meeting_id)"
+        )
+        conn.executemany(
+            "INSERT INTO chunks_fts VALUES (?, ?)", [(cid, meeting_id) for cid in ids]
+        )
+    cp = config.paths.resolved_checkpoints_dir / meeting_id
+    cp.mkdir(parents=True, exist_ok=True)
+    (cp / "embed.json").write_text(json.dumps({"chunks": [{"chunk_id": cid} for cid in ids]}))
+
+
 class TestIndexStatusEndpoint:
     """회의별 인덱싱 상태 조회 엔드포인트."""
 
@@ -162,6 +178,8 @@ class TestIndexStatusEndpoint:
     def test_index_status_모든_회의_인덱싱됨(self, tmp_path: Path) -> None:
         """ChromaDB 에 모든 회의의 청크가 있으면 missing=0."""
         app = _make_test_app(tmp_path)
+        for mid in ("m1", "m2"):
+            _seed_index_evidence(tmp_path, mid, ["c1", "c2", "c3"])
         jobs = [
             _MockJob(id=1, meeting_id="m1", status="completed"),
             _MockJob(id=2, meeting_id="m2", status="completed"),
@@ -191,6 +209,8 @@ class TestIndexStatusEndpoint:
     def test_index_status_일부_누락(self, tmp_path: Path) -> None:
         """일부 회의가 ChromaDB 에 청크 0개면 missing 에 포함."""
         app = _make_test_app(tmp_path)
+        for mid in ("m1", "m3"):
+            _seed_index_evidence(tmp_path, mid, ["c1", "c2"])
         jobs = [
             _MockJob(id=1, meeting_id="m1", status="completed"),
             _MockJob(id=2, meeting_id="m2_missing", status="completed"),

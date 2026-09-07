@@ -424,6 +424,7 @@ class ChatEngine:
 
         # 세션 관리 (세션 ID → ChatSession)
         self._sessions: dict[str, ChatSession] = {}
+        self._transcript_epoch = 0
         self._default_session = ChatSession(
             max_pairs=self._max_history_pairs,
         )
@@ -464,6 +465,12 @@ class ChatEngine:
         session = self.get_session(session_id)
         session.clear()
         logger.info(f"대화 세션 초기화: session_id={session_id or 'default'}")
+
+    def invalidate_transcript_history(self) -> None:
+        """편집 이전 답변이 이후 질문의 근거로 재사용되지 않도록 세션을 교체한다."""
+        self._sessions = {}
+        self._default_session = ChatSession(max_pairs=self._max_history_pairs)
+        self._transcript_epoch += 1
 
     def _create_backend(self) -> LLMBackend:
         """LLM 백엔드를 생성하여 반환한다.
@@ -646,6 +653,7 @@ class ChatEngine:
         query = unicodedata.normalize("NFC", query)
 
         logger.info(f"Chat 시작: query='{query}', session={session_id or 'default'}")
+        transcript_epoch = self._transcript_epoch
 
         # 1. 하이브리드 검색
         search_results: list[SearchResult] = []
@@ -659,6 +667,9 @@ class ChatEngine:
                 top_k=self._top_k,
             )
             search_results = search_response.results
+            errors = getattr(search_response, "source_errors", {})
+            if isinstance(errors, dict) and errors:
+                search_error_message = " / ".join(errors.values())
             logger.info(f"검색 완료: {len(search_results)}개 결과")
         except Exception as e:
             search_error_message = str(e)
@@ -667,6 +678,11 @@ class ChatEngine:
         # 참조 출처 구성
         references = _build_references(search_results)
 
+        if transcript_epoch != self._transcript_epoch:
+            search_error_message = (
+                "질문 처리 중 전사문이 수정되었습니다. 검색 반영 후 다시 질문해 주세요."
+            )
+            references = []
         if search_error_message is not None:
             return ChatResponse(
                 answer=_build_no_grounding_answer("search_error", search_error_message),
@@ -698,7 +714,11 @@ class ChatEngine:
 
         # 대화 세션 가져오기
         session = self.get_session(session_id)
-        history_messages = session.to_ollama_messages()
+        history_messages = (
+            []
+            if any((meeting_id_filter, date_filter, speaker_filter))
+            else session.to_ollama_messages()
+        )
 
         # 사용자 편집본 프롬프트 로드 (요청 단위 캐싱)
         system_prompt = self._get_system_prompt()
@@ -722,6 +742,9 @@ class ChatEngine:
         try:
             async with self._model_manager.acquire("exaone", self._create_backend) as backend:
                 answer = await await_native_inference(self._call_llm_chat, backend, messages)
+
+            if transcript_epoch != self._transcript_epoch:
+                raise ChatError("질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요.")
 
             # NFC 정규화 적용
             answer = unicodedata.normalize("NFC", answer.strip())
@@ -763,6 +786,9 @@ class ChatEngine:
             )
         except ChatError as e:
             logger.warning(f"Chat 처리 실패: {e}")
+            if transcript_epoch != self._transcript_epoch:
+                references = []
+                search_results = []
             return ChatResponse(
                 answer=f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {e}",
                 references=references,
@@ -770,7 +796,7 @@ class ChatEngine:
                 has_context=bool(search_results),
                 llm_used=False,
                 llm_called=True,
-                grounding_status="grounded",
+                grounding_status="grounded" if search_results else "search_error",
                 error_message=str(e),
             )
 
@@ -812,6 +838,7 @@ class ChatEngine:
         query = unicodedata.normalize("NFC", query)
 
         logger.info(f"스트리밍 Chat 시작: query='{query}'")
+        transcript_epoch = self._transcript_epoch
 
         # 1. 하이브리드 검색
         search_results: list[SearchResult] = []
@@ -825,10 +852,16 @@ class ChatEngine:
                 top_k=self._top_k,
             )
             search_results = search_response.results
+            errors = getattr(search_response, "source_errors", {})
+            if isinstance(errors, dict) and errors:
+                search_error_message = " / ".join(errors.values())
         except Exception as e:
             search_error_message = str(e)
             logger.warning(f"검색 실패, 스트리밍 LLM 호출 중단: {e}")
 
+        if transcript_epoch != self._transcript_epoch:
+            search_error_message = "질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요."
+            search_results = []
         # 참조 출처 먼저 전송
         references = _build_references(search_results)
         yield {
@@ -891,7 +924,11 @@ class ChatEngine:
         user_prompt = _build_user_prompt(query, context_text)
 
         session = self.get_session(session_id)
-        history_messages = session.to_ollama_messages()
+        history_messages = (
+            []
+            if any((meeting_id_filter, date_filter, speaker_filter))
+            else session.to_ollama_messages()
+        )
 
         # 사용자 편집본 프롬프트 로드 (요청 단위 캐싱)
         system_prompt = self._get_system_prompt()
@@ -983,6 +1020,10 @@ class ChatEngine:
                             # 스트리밍 스레드에서 발생한 에러 전파
                             raise item
 
+                        if transcript_epoch != self._transcript_epoch:
+                            raise ChatError(
+                                "질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요."
+                            )
                         full_answer_parts.append(item)
                         yield {"type": "token", "data": item}
                 finally:
@@ -1000,6 +1041,8 @@ class ChatEngine:
                     if cancel_requested:
                         raise asyncio.CancelledError
 
+            if transcript_epoch != self._transcript_epoch:
+                raise ChatError("질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요.")
             full_answer = "".join(full_answer_parts)
             full_answer = unicodedata.normalize("NFC", full_answer.strip())
 

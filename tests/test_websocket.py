@@ -375,9 +375,11 @@ class TestWebSocketEndpoint:
         from starlette.testclient import TestClient
 
         app = self._create_test_app()
-        client = TestClient(app)
+        client = TestClient(
+            app, base_url="http://127.0.0.1:8765", headers={"origin": "http://127.0.0.1:8765"}
+        )
 
-        with client.websocket_connect("/ws/events") as ws:
+        with client.websocket_connect("ws://127.0.0.1:8765/ws/events") as ws:
             # 환영 메시지 수신
             data = ws.receive_json()
             assert data["event_type"] == "system_status"
@@ -393,9 +395,11 @@ class TestWebSocketEndpoint:
         app.include_router(ws_router)
         # ws_manager를 설정하지 않음
 
-        client = TestClient(app)
+        client = TestClient(
+            app, base_url="http://127.0.0.1:8765", headers={"origin": "http://127.0.0.1:8765"}
+        )
 
-        with client.websocket_connect("/ws/events") as ws:
+        with client.websocket_connect("ws://127.0.0.1:8765/ws/events") as ws:
             data = ws.receive_json()
             assert data["event_type"] == "connection_rejected"
             assert "초기화" in data["data"]["reason"]
@@ -409,15 +413,17 @@ class TestWebSocketEndpoint:
         app.include_router(ws_router)
         app.state.ws_manager = ConnectionManager(max_connections=1)
 
-        client = TestClient(app)
+        client = TestClient(
+            app, base_url="http://127.0.0.1:8765", headers={"origin": "http://127.0.0.1:8765"}
+        )
 
         # 첫 번째 연결 성공
-        with client.websocket_connect("/ws/events") as ws1:
+        with client.websocket_connect("ws://127.0.0.1:8765/ws/events") as ws1:
             data1 = ws1.receive_json()
             assert data1["event_type"] == "system_status"
 
             # 두 번째 연결 — 거부
-            with client.websocket_connect("/ws/events") as ws2:
+            with client.websocket_connect("ws://127.0.0.1:8765/ws/events") as ws2:
                 data2 = ws2.receive_json()
                 assert data2["event_type"] == "connection_rejected"
 
@@ -442,7 +448,9 @@ class TestWebSocketServerIntegration:
 
             app = create_app(runtime_profile="api-test")
 
-            with TestClient(app) as _client:
+            with TestClient(
+                app, base_url="http://127.0.0.1:8765", headers={"origin": "http://127.0.0.1:8765"}
+            ) as _client:
                 # ws_manager가 app.state에 존재하는지 확인
                 assert hasattr(app.state, "ws_manager")
                 assert isinstance(
@@ -468,8 +476,12 @@ class TestWebSocketServerIntegration:
             app = create_app(runtime_profile="api-test")
 
             with (
-                TestClient(app) as client,
-                client.websocket_connect("/ws/events") as ws,
+                TestClient(
+                    app,
+                    base_url="http://127.0.0.1:8765",
+                    headers={"origin": "http://127.0.0.1:8765"},
+                ) as client,
+                client.websocket_connect("ws://127.0.0.1:8765/ws/events") as ws,
             ):
                 data = ws.receive_json()
                 assert data["event_type"] == "system_status"

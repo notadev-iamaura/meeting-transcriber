@@ -103,7 +103,9 @@
 
                     var modelText = doc.getElementById("grb-model-text");
                     if (modelText) {
-                        modelText.textContent = data.loaded_model || "";
+                        modelText.textContent = data.native_cleanup_pending
+                            ? "이전 작업 정리 중 · 완료 후 다시 시도해 주세요"
+                            : data.loaded_model || "";
                     }
                 })
                 .catch(function () {

@@ -211,7 +211,9 @@ class HybridChatService:
             HybridChatResponse.
         """
         # 1. 라우터 비활성 → 100% chat_service 위임 (PRD §10.3)
-        if self._router is None:
+        if self._router is None or any(
+            kwargs.get(key) for key in ("meeting_id_filter", "date_filter", "speaker_filter")
+        ):
             rag_response = await self._chat_service.respond(query, **kwargs)
             return HybridChatResponse(
                 source_type="rag",
@@ -390,6 +392,12 @@ class HybridChatService:
                 continue
 
             title = self._extract_title(page, rel_path)
+            if self._config is not None:
+                from core.search_revision import source_was_edited
+
+                if any(source_was_edited(self._config, c.meeting_id) for c in page.citations):
+                    # 편집 전 원문에서 합성한 페이지를 최신 결정으로 답하지 않는다.
+                    continue
             snippet = result.snippet or self._make_snippet(page.content, max_chars=200)
             citation_strs = result.citations or [
                 f"[meeting:{c.meeting_id}@{c.timestamp_str}]" for c in page.citations
