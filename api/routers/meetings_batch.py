@@ -578,7 +578,7 @@ def _collect_candidate_ids_sync(
     수집 정책:
         - selected: 입력 meeting_ids 를 dedupe 만 적용해 그대로 사용
         - recent:   all_jobs 의 created_at 을 파싱하여 cutoff 기준 윈도우 필터
-        - all:      checkpoints_dir.iterdir() 로 디스크 스캔
+        - all:      DB Job ID와 checkpoints_dir의 폴더 ID를 합쳐 수집
 
     중복 제거 (Phase 3 Major #1): 같은 회의가 두 번 처리되어 LLM 토큰을 낭비하거나
     summary.md 가 덮어써지는 사고를 방지하기 위해 list(dict.fromkeys(...)) 로
@@ -587,7 +587,7 @@ def _collect_candidate_ids_sync(
     Args:
         scope: "all" | "recent" | "selected"
         meeting_ids: scope="selected" 일 때 사용할 ID 목록
-        all_jobs: scope="recent" 일 때 사용할 Job 목록 (created_at 보유)
+        all_jobs: scope="recent" 또는 "all" 일 때 사용할 Job 목록
         hours: scope="recent" 의 시간 윈도우
         checkpoints_dir: scope="all" 일 때 스캔할 디렉토리
 
@@ -616,6 +616,7 @@ def _collect_candidate_ids_sync(
             if created_dt >= cutoff:
                 candidate_ids.append(mid)
     elif scope == "all":
+        candidate_ids.extend(job.meeting_id for job in all_jobs if job.meeting_id)
         if checkpoints_dir.is_dir():
             for cp_dir in sorted(checkpoints_dir.iterdir()):
                 try:
@@ -704,10 +705,8 @@ async def _prepare_batch(
         for mid in body.meeting_ids:
             _validate_meeting_id(mid)
         all_jobs: list[Any] = []
-    elif body.scope == "recent":
+    else:  # "recent" 또는 "all": 체크포인트가 없는 DB 녹음도 후보에 포함
         all_jobs = await queue.get_all_jobs()
-    else:  # "all"
-        all_jobs = []
 
     candidate_ids = await asyncio.to_thread(
         _collect_candidate_ids_sync,
@@ -840,7 +839,7 @@ async def batch_action(
         1. config / pipeline / queue 로딩 (없으면 503)
         2. base_dir 절대 경로를 1회 resolve (Phase 6 perf M-1)
         3. scope=selected 면 _validate_meeting_id 로 사전 검증
-           scope=recent 면 queue.get_all_jobs() 로 Job 목록 미리 조회
+           scope=recent/all 면 queue.get_all_jobs() 로 Job 목록 미리 조회
         4. 후보 ID 수집 — asyncio.to_thread (Phase 6 perf C-1)
         5. matched = len(candidate_ids)
         6. 분류·eligibility 검사 — asyncio.to_thread

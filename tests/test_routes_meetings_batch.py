@@ -570,6 +570,62 @@ class TestBatchPreview:
 class TestBatchScope:
     """scope 별 후보 회의 수집 정책 검증."""
 
+    @pytest.mark.parametrize("action", ["transcribe", "full"])
+    def test_all_includes_recorded_without_checkpoint(self, tmp_path: Path, action: str) -> None:
+        """DB만 있는 녹음도 미리보기와 실제 큐잉에 포함하고 중복·부적합은 제외한다."""
+        app = _make_test_app(tmp_path)
+        with TestClient(app) as client:
+            pipeline = _setup_pipeline_mock(app)
+            queue = app.state.job_queue._queue
+            for mid, status in [
+                ("db_only", "recorded"),
+                ("both", "recorded"),
+                ("busy", "processing"),
+            ]:
+                audio = tmp_path / f"{mid}.wav"
+                audio.write_bytes(b"\x00" * 16)
+                queue.add_job(mid, str(audio), initial_status=status)
+            _make_meeting_dirs(tmp_path, "both", has_merge=False)
+            assert not (tmp_path / "checkpoints" / "db_only").exists()
+
+            body = {"action": action, "scope": "all"}
+            preview = client.post("/api/meetings/batch/preview", json=body)
+            assert preview.status_code == 200, preview.text
+            data = preview.json()
+            assert (data["matched"], data["queued"], data["skipped"]) == (3, 2, 1)
+            assert set(data["meeting_ids"]) == {"db_only", "both"}
+            assert queue.get_job_by_meeting_id("db_only").status == "recorded"
+
+            response = client.post("/api/meetings/batch", json=body)
+            assert response.status_code == 200
+            assert set(response.json()["meeting_ids"]) == {"db_only", "both"}
+            assert response.json()["queued"] == 2
+            assert queue.get_job_by_meeting_id("db_only").status == "queued"
+            assert queue.get_job_by_meeting_id("both").status == "queued"
+            assert queue.get_job_by_meeting_id("busy").status == "processing"
+            pipeline.run.assert_not_called()
+
+            queue.add_job("missing", str(tmp_path / "missing.wav"), initial_status="recorded")
+            rejected = client.post("/api/meetings/batch/preview", json=body)
+            assert rejected.status_code == 409
+            assert "SOURCE_BUSY" in rejected.json()["detail"]
+            assert queue.get_job_by_meeting_id("missing").status == "recorded"
+
+    def test_all_candidates_union_preserves_checkpoint_only(self, tmp_path: Path) -> None:
+        """DB와 디스크 후보의 합집합을 유지하고 체크포인트가 없어도 DB를 수집한다."""
+        from api.routers.meetings_batch import _collect_candidate_ids_sync
+
+        checkpoints = tmp_path / "checkpoints"
+        jobs = [MockJob(1, "db_only", ""), MockJob(2, "both", "")]
+        assert _collect_candidate_ids_sync("all", [], jobs, 24, checkpoints) == ["db_only", "both"]
+        (checkpoints / "both").mkdir(parents=True)
+        (checkpoints / "disk_only").mkdir()
+        assert _collect_candidate_ids_sync("all", [], jobs, 24, checkpoints) == [
+            "db_only",
+            "both",
+            "disk_only",
+        ]
+
     def test_batch_scope_recent_filters_by_hours(self, tmp_path: Path) -> None:
         """scope=recent + hours=24: 25시간 전 회의는 제외된다."""
         app = _make_test_app(tmp_path)

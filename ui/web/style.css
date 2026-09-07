@@ -2798,6 +2798,22 @@ button {
   background: rgba(255, 149, 0, 0.1);
 }
 
+.viewer-failure-notice {
+  flex: 0 0 100%;
+  min-width: 0;
+  padding: 12px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.viewer-failure-notice p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
 .viewer-actions {
   display: flex;
   align-items: center;

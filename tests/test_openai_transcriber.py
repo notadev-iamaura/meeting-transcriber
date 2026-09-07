@@ -575,7 +575,7 @@ def test_응답_크기_제한을_초과하면_JSON을_파싱하지_않는다(
         )
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 500])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 413, 429, 500, 503])
 def test_HTTP_오류는_upstream_body와_API_키를_노출하지_않는다(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -606,8 +606,34 @@ def test_HTTP_오류는_upstream_body와_API_키를_노출하지_않는다(
     message = str(captured.value)
     assert secret not in message
     assert upstream_marker not in message
+    if status == 400:
+        assert "HTTP 400" in message
+        assert "로컬 전사" in message
     assert isinstance(captured.value, NonRetryableError)
     assert should_retry(captured.value, attempt=1, max_attempts=3) is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (b'{"error":{"code":"insufficient_quota","message":"private"}}', "결제·사용 한도"),
+        (b'{"error":{"code":"rate_limit_exceeded","message":"private"}}', "잠시 후"),
+        (b'{"error":[]}', "잠시 후"),
+    ],
+)
+def test_quota_response_guidance(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes, expected: str
+) -> None:
+    """429의 알려진 코드만 안내에 반영하고 응답 원문은 노출하지 않는다."""
+    connection = MagicMock()
+    connection.getresponse.return_value = FakeHTTPResponse(429, payload)
+    monkeypatch.setattr(
+        openai_transcriber.http.client, "HTTPSConnection", lambda *a, **kw: connection
+    )
+    with pytest.raises(OpenAITranscriptionError) as captured:
+        _default_transport(b"audio", "sk-mock-placeholder-123456", "gpt-4o-transcribe-diarize", 60)
+    assert expected in str(captured.value)
+    assert "private" not in str(captured.value)
 
 
 def test_transport_예외의_민감_메시지를_외부_오류에_반사하지_않는다(
