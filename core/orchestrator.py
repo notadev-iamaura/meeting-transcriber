@@ -620,6 +620,13 @@ class JobProcessor:
                 job_status,
                 error_message=error_message,
             )
+        except InvalidTransitionError as e:
+            # convert/transcribe와 correct/summarize는 같은 DB 상태를 공유한다.
+            # 이미 목표 상태인 정상 콜백을 처리 실패로 기록하지 않는다.
+            if e.current_status != e.target_status:
+                logger.error(
+                    f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}"
+                )
         except Exception as e:
             logger.error(f"작업 상태 업데이트 실패: job_id={job_id}, status={status}, error={e}")
 
@@ -763,6 +770,47 @@ class JobProcessor:
             event_type: 이벤트 타입 문자열
             data: 이벤트 데이터 딕셔너리
         """
+        if event_type in {
+            "pipeline_status",
+            "job_completed",
+            "job_failed",
+            "job_cancelled",
+            "job_interrupted",
+            "job_blocked",
+        }:
+            from dataclasses import asdict
+
+            from core.job_queue import JobQueue
+            from core.meeting_progress import meeting_progress
+            from core.pipeline import PipelineState
+
+            raw_queue = getattr(self._job_queue, "queue", None)
+            mid = data.get("meeting_id", "")
+            if isinstance(raw_queue, JobQueue) and mid:
+                try:
+                    state = await asyncio.to_thread(self._pipeline.get_status, mid)
+                    state_dict = asdict(state) if isinstance(state, PipelineState) else {}
+                    if data.get("step"):
+                        state_dict["current_step"] = data["step"]
+                    status = {
+                        "job_completed": "completed",
+                        "job_failed": "failed",
+                        "job_cancelled": "cancelled",
+                        "job_interrupted": "queued",
+                        "job_blocked": "blocked",
+                    }.get(event_type, "running")
+                    await asyncio.to_thread(
+                        raw_queue.record_batch_event,
+                        mid,
+                        dict(
+                            status=status,
+                            step=data.get("step", ""),
+                            error_message=data.get("error", ""),
+                            **meeting_progress(status, state_dict),
+                        ),
+                    )
+                except Exception:
+                    logger.exception("일괄 실행 이벤트 기록 실패")
         if self._ws_manager is None:
             return
 
@@ -864,7 +912,12 @@ class JobProcessor:
                     raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
                 await self._broadcast_event(
                     "pipeline_status",
-                    {"job_id": job_id, "step": step_name, "status": mapped_status},
+                    {
+                        "job_id": job_id,
+                        "meeting_id": meeting_id,
+                        "step": step_name,
+                        "status": mapped_status,
+                    },
                 )
 
         async def on_step_progress(evt: dict[str, Any]) -> None:
@@ -1013,6 +1066,10 @@ class JobProcessor:
             logger.info(
                 f"입력 품질 검증 비수락으로 작업 보류: "
                 f"job_id={job_id}, meeting_id={meeting_id}, reason={e}"
+            )
+            await self._broadcast_event(
+                "job_blocked",
+                {"job_id": job_id, "meeting_id": meeting_id, "error": str(e)},
             )
 
         except Exception as e:

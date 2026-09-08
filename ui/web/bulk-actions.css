@@ -19,6 +19,56 @@
 /* 콘텐츠 wrapper — sticky 스크롤 컨테이너.
    bulk-action-bar 가 wrapper 의 top:0 에 붙고 그 아래에 #content 가 배치된다.
    기존 layout (3-column flex) 에서 wrapper 는 nav+sidebar 우측의 flex:1 영역을 차지. */
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-active);
+  border-bottom: 0.5px solid var(--border);
+}
+.selection-actions[hidden] { display: none; }
+.selection-actions > span { flex-basis: 100%; }
+.batch-review-dialog {
+  width: min(720px, calc(100vw - 32px));
+  margin: auto;
+  max-height: calc(100vh - 48px);
+  box-sizing: border-box;
+  padding: 24px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: auto;
+}
+.batch-review-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.batch-review-dialog h2 { font-size: 18px; }
+.batch-review-dialog p { line-height: 1.5; overflow-wrap: anywhere; }
+.batch-review-dialog button { margin: 4px 8px 4px 0; }
+.batch-review-rows { max-height: 46vh; overflow-y: auto; margin: 12px 0; }
+.batch-review-row { padding: 12px 0; border-bottom: 0.5px solid var(--border); }
+.batch-review-row label { display: flex; gap: 8px; align-items: baseline; }
+.batch-review-row p { margin: 4px 0; font-size: 12px; }
+.batch-review-row a { color: var(--accent-text); }
+.batch-receipt { margin: 16px 0; }
+.batch-review-dialog .btn-primary,
+.selection-actions .btn-primary {
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  background: var(--accent-text);
+  color: var(--bg-card);
+  font-weight: var(--fw-semibold);
+}
+.batch-review-dialog .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-review-dialog button:focus-visible,
+.selection-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .content-wrapper {
   flex: 1;
   display: flex;

@@ -51,7 +51,8 @@ dependencies = [
     #   - mlx-vlm  : Gemma 4 등 멀티모달(Vision-Language) 모델 추론
     # 사용자가 config.yaml 에서 선택한 모델에 따라 core/mlx_client.py 가 자동 분기한다.
     "mlx-lm>=0.19.0,<1.0",
-    "mlx-vlm>=0.1.0,<1.0",
+    # Gemma 4 양자화 projection 로딩을 검증한 최소 버전.
+    "mlx-vlm>=0.6.17,<1.0",
     # AI/ML — VAD (무음 구간 감지 → 환각 방지)
     # 무음 구간을 STT 에 보내지 않아 환각을 원천 차단. torch 는 pyannote 의존성으로 이미 설치됨.
     "silero-vad>=5.1",

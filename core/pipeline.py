@@ -3535,6 +3535,13 @@ class PipelineManager:
                     f"correct 단계 타임아웃 ({self._config.pipeline.correct_timeout_seconds}s)"
                 ) from e
 
+        # 요약이 실패하더라도 이미 저장한 교정의 성공 범위를 남긴다.
+        if PipelineStep.CORRECT.value in state.skipped_steps:
+            state.skipped_steps.remove(PipelineStep.CORRECT.value)
+        if PipelineStep.CORRECT.value not in state.completed_steps:
+            state.completed_steps.append(PipelineStep.CORRECT.value)
+        self._save_state(state, state_path)
+
         # 5. summarize 단계 실행
         summarize_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
         summarize_was_skipped = PipelineStep.SUMMARIZE.value in state.skipped_steps

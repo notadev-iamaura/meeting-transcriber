@@ -593,7 +593,7 @@ def test_viewer_missing_transcript_uses_meeting_status_not_unconditional_polling
     assert 'status === "recorded"' in missing_handler
     assert "전사 시작 대기 중" in missing_handler
     assert 'status === "failed"' in missing_handler
-    assert "전사 처리 실패" in missing_handler
+    assert "App.getStatusLabel(meeting)" in missing_handler
     assert 'status === "completed"' in missing_handler
     assert "전사문을 찾을 수 없습니다" in missing_handler
 

@@ -22,6 +22,61 @@ from core.mlx_client import (
 # === 에러 계층 테스트 ===
 
 
+def test_gemma_projection_mismatch_has_recovery_guidance() -> None:
+    """알려진 양자화 호환 오류에는 전사 보존과 교정 재시도를 안내한다."""
+    vlm = MagicMock()
+    vlm.load.side_effect = ValueError(
+        "Received 2 parameters not in model: language_model.model.per_layer_model_projection.biases language_model.model.per_layer_model_projection.scales"
+    )
+    with patch.dict("sys.modules", {"mlx_vlm": vlm}):
+        with pytest.raises(MLXLoadError, match="0.6.17") as captured:
+            from config import LLMConfig
+
+            MLXBackend(LLMConfig(mlx_model_name="mlx-community/gemma-4-e4b-it-4bit"))
+    assert "저장된 전사문은 유지" in str(captured.value)
+
+
+@pytest.mark.native
+def test_gemma_quantized_projection_strict_load_and_forward() -> None:
+    """모델 다운로드 없이 실제 MLX Gemma projection의 packed weight 로딩을 검증한다."""
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_vlm.models.gemma4.config import TextConfig
+    from mlx_vlm.models.gemma4.language import Gemma4TextModel
+
+    model = Gemma4TextModel(
+        TextConfig(
+            hidden_size=128,
+            num_hidden_layers=2,
+            intermediate_size=256,
+            num_attention_heads=2,
+            head_dim=64,
+            global_head_dim=64,
+            vocab_size=128,
+            vocab_size_per_layer_input=128,
+            num_key_value_heads=1,
+            num_kv_shared_layers=0,
+            hidden_size_per_layer_input=64,
+        )
+    )
+    projection = model.per_layer_model_projection
+    packed = nn.QuantizedLinear.from_linear(projection, group_size=64, bits=4)
+    weights = list(packed.parameters().items())
+    with pytest.raises(ValueError, match="2 parameters not in model"):
+        projection.load_weights(weights, strict=True)
+    nn.quantize(
+        model,
+        group_size=64,
+        bits=4,
+        class_predicate=lambda path, module: path == "per_layer_model_projection",
+    )
+    model.per_layer_model_projection.load_weights(weights, strict=True)
+    output = model.per_layer_model_projection(mx.ones((1, 128)))
+    mx.eval(output)
+    assert output.shape == (1, 128)
+    assert bool(mx.all(mx.isfinite(output)))
+
+
 class TestMLXErrorHierarchy:
     """MLX 에러 클래스 상속 구조를 검증한다."""
 

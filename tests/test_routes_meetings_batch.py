@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -111,6 +111,7 @@ def _assert_local_stt_batch_snapshot(
         stt_selections={
             job_id: ("local", "mlx-community/whisper-large-v3-turbo") for job_id in job_ids
         },
+        receipt=ANY,
     )
 
 
@@ -427,7 +428,7 @@ class TestBatchActionFilter:
         assert data["queued"] == 1
         assert data["meeting_ids"] == ["m_pending"]
         # summarize 액션은 run_llm_steps 호출
-        mock_pipeline.run_llm_steps.assert_called_once_with("m_pending")
+        mock_pipeline.run_llm_steps.assert_called_once_with("m_pending", on_step_start=ANY)
 
     def test_batch_summarize_recognizes_meeting_minutes_md(self, tmp_path: Path) -> None:
         """summary.md 가 아닌 meeting_minutes.md 도 요약 완료로 인정한다."""
@@ -909,7 +910,7 @@ class TestBatchBackgroundExecution:
 
         assert response.status_code == 200
         # run_llm_steps 가 정확히 한 번 호출됨
-        mock_pipeline.run_llm_steps.assert_called_once_with("m1")
+        mock_pipeline.run_llm_steps.assert_called_once_with("m1", on_step_start=ANY)
         # pipeline.run 은 호출되지 않아야 함 (transcribe 분기 아님)
         assert not mock_pipeline.run.called
 
@@ -951,7 +952,7 @@ class TestBatchBackgroundExecution:
         mock_pipeline.run.assert_not_called()
 
         # m_no_summary → run_llm_steps 호출
-        mock_pipeline.run_llm_steps.assert_called_once_with("m_no_summary")
+        mock_pipeline.run_llm_steps.assert_called_once_with("m_no_summary", on_step_start=ANY)
 
     def test_batch_pipeline_not_initialized_returns_503(self, tmp_path: Path) -> None:
         """pipeline_manager 가 None 이면 503 을 반환한다."""
@@ -1038,7 +1039,7 @@ class TestBatchIntegration:
         assert data["meeting_ids"] == ["m_dup"]
         # pipeline.run_llm_steps 도 정확히 1회 호출
         assert mock_pipeline.run_llm_steps.call_count == 1
-        mock_pipeline.run_llm_steps.assert_called_once_with("m_dup")
+        mock_pipeline.run_llm_steps.assert_called_once_with("m_dup", on_step_start=ANY)
 
     def test_batch_full_action_audio_missing_counted_as_skipped(self, tmp_path: Path) -> None:
         """full 액션: audio 없는 transcribe 후보는 skipped 로 카운트된다.

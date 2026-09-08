@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from core.quarantine import (
     QuarantineError,
@@ -1448,6 +1449,9 @@ class JobQueue:
                 conn.execute(self._CREATE_TABLE_SQL)
                 conn.execute(self._CREATE_INDEX_SQL)
                 self._ensure_schema_migrations(conn=conn)
+                from core.batch_history import initialize_history
+
+                initialize_history(conn)
                 conn.commit()
 
             self._initialized = True
@@ -2208,6 +2212,7 @@ class JobQueue:
         stt_provider: str = "",
         stt_model: str = "",
         stt_selections: dict[int, tuple[str, str]] | None = None,
+        receipt: dict[str, Any] | None = None,
     ) -> list[Job]:
         """recorded 작업 묶음을 단일 SQL transaction으로 queued 전환한다.
 
@@ -2219,7 +2224,7 @@ class JobQueue:
         unique_ids = list(dict.fromkeys(job_ids))
         if len(unique_ids) != len(job_ids):
             raise JobQueueError("일괄 큐잉 job_id가 중복되었습니다")
-        if not unique_ids:
+        if not unique_ids and receipt is None:
             return []
         if stt_selections is None:
             _validate_stt_snapshot(stt_provider, stt_model)
@@ -2271,6 +2276,10 @@ class JobQueue:
                     if cursor.rowcount != 1:
                         conn.rollback()
                         raise JobQueueError("일괄 큐잉 CAS가 경합으로 실패했습니다")
+                if receipt is not None:
+                    from core.batch_history import insert_receipt
+
+                    insert_receipt(conn, receipt, now)
                 conn.commit()
             except sqlite3.Error as exc:
                 conn.rollback()
@@ -2282,6 +2291,63 @@ class JobQueue:
             requested_action,
         )
         return [self.get_job(job_id) for job_id in unique_ids]
+
+    def get_batch_receipts(self, request_id: str | None = None) -> list[dict[str, Any]]:
+        """재시작 후에도 접수·실행 기록을 반환한다."""
+        from core.batch_history import read_receipts
+
+        return read_receipts(self._ensure_connection(), request_id)
+
+    def save_batch_receipt(self, receipt: dict[str, Any]) -> None:
+        """큐 변경이 없는 접수 거절·후처리 예약 내역만 기록한다."""
+        from core.batch_history import insert_receipt
+
+        conn = self._ensure_connection()
+        with self._write_lock, conn:
+            insert_receipt(conn, receipt, self._now_iso())
+
+    def record_batch_event(
+        self, meeting_id: str, event: dict[str, Any], request_id: str | None = None
+    ) -> None:
+        """현재 접수된 작업의 단계·완료·실패를 해당 요청에만 누적한다."""
+        conn = self._ensure_connection()
+        with self._write_lock:
+            request_ids = (
+                [request_id]
+                if request_id
+                else [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT request_id FROM batch_requests WHERE EXISTS (SELECT 1 FROM json_each(payload, '$.meeting_ids') WHERE value=?) ORDER BY created_at DESC",
+                        (meeting_id,),
+                    )
+                ]
+            )
+            receipts = [receipt for rid in request_ids for receipt in self.get_batch_receipts(rid)]
+            for receipt in receipts:
+                if meeting_id not in receipt.get("meeting_ids", []):
+                    continue
+                previous = [e for e in receipt["events"] if e["meeting_id"] == meeting_id]
+                if previous and previous[-1].get("status") in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                    "blocked",
+                }:
+                    continue
+                conn.execute(
+                    "INSERT INTO batch_events(request_id, meeting_id, created_at, payload) VALUES (?, ?, ?, ?)",
+                    (
+                        receipt["request_id"],
+                        meeting_id,
+                        self._now_iso(),
+                        json.dumps(event, ensure_ascii=False),
+                    ),
+                )
+                # 일반 worker 이벤트는 가장 최근의 활성 접수에만 귀속한다.
+                break
+            conn.commit()
 
     def hold_job_for_audio_admission(self, job_id: int, token: str) -> Job:
         """queued/failed 작업을 원래 실행 의도와 함께 recorded에 보류한다.

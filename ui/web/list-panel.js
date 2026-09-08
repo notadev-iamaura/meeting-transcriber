@@ -1033,7 +1033,7 @@
                     item.setAttribute("tabindex", "0");
                     item.setAttribute("aria-label",
                         _extractTitle(meeting.meeting_id, meeting.created_at) +
-                        " — " + App.getStatusLabel(meeting.status));
+                        " — " + App.getStatusLabel(meeting));
                     // 다중 선택 상태 (bulk-actions §A) — multi-select listbox 표준
                     // aria-checked: 'true' | 'false' (체크박스 의미) — SR 단일 진실
                     var isSelectedInit = _selectedIds.has(meeting.meeting_id);
@@ -1092,11 +1092,11 @@
                     // 전체 요약을 native tooltip 으로 노출해 한 줄 잘림 보완.
                     var previewEl = document.createElement("div");
                     previewEl.className = "meeting-item-preview";
-                    if (meeting.summary_preview) {
+                    if (meeting.summary_preview && meeting.status !== "failed") {
                         previewEl.textContent = meeting.summary_preview;
                         item.setAttribute("title", meeting.summary_preview);
                     } else {
-                        previewEl.textContent = App.getStatusLabel(meeting.status);
+                        previewEl.textContent = App.getStatusLabel(meeting);
                     }
 
                     textContainer.appendChild(titleEl);
