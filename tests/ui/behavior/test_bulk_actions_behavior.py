@@ -61,7 +61,7 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
     Returns:
         captured["calls"] — 각 호출의 {action, scope, meeting_ids?, hours?} 페이로드.
     """
-    captured: dict[str, list[dict]] = {"calls": [], "preview_calls": []}
+    captured: dict[str, list[dict]] = {"calls": [], "preview_calls": [], "receipts": []}
 
     def _handle(route, request):
         try:
@@ -69,10 +69,17 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
         except Exception:
             body = {}
         captured["calls"].append({"method": request.method, "url": request.url, "body": body})
+        receipt = dict(
+            _BATCH_OK_RESPONSE,
+            request_id=body.get("request_id", "test-request"),
+            candidates=[],
+            events=[],
+        )
+        captured["receipts"].append(receipt)
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps(_BATCH_OK_RESPONSE),
+            body=json.dumps(receipt),
         )
 
     def _handle_preview(route, request):
@@ -86,14 +93,34 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
         preview = dict(_BATCH_OK_RESPONSE)
         preview["action"] = body.get("action", preview["action"])
         preview["scope"] = body.get("scope", preview["scope"])
+        ids = body.get("meeting_ids") or ["m1", "m2", "m3", "m4"]
+        preview["candidates"] = [
+            dict(
+                meeting_id=mid,
+                title=mid,
+                eligible=True,
+                blocked=False,
+                reason="",
+                status_label="녹음 완료",
+            )
+            for mid in ids
+        ]
         route.fulfill(
             status=200,
             content_type="application/json",
             body=json.dumps(preview),
         )
 
-    page.route("**/api/meetings/batch/preview", _handle_preview)
+    page.route("**/api/meetings/batch/review", _handle_preview)
     page.route("**/api/meetings/batch", _handle)
+    page.route(
+        "**/api/batch-requests",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"requests": captured["receipts"]}),
+        ),
+    )
     return captured
 
 
@@ -564,6 +591,7 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(200)
 
         ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
 
         assert len(captured["calls"]) == 1, f"batch API 1회 호출 기대 (got {captured['calls']})"
@@ -587,6 +615,7 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(200)
 
         ui_page.locator(".bulk-action-btn[data-action='summarize']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
         body = captured["calls"][0]["body"]
@@ -609,6 +638,7 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(200)
 
         ui_page.locator(".bulk-action-btn[data-action='both']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
         body = captured["calls"][0]["body"]
@@ -655,6 +685,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
         ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
         # toast 는 .toast / .home-status / role="status" 중 하나에 출력 — 라벨 검색
         toast_locator = ui_page.locator(
@@ -665,9 +696,7 @@ class TestBulkActionBar:
         combined = " ".join(
             (toast_locator.nth(i).text_content() or "") for i in range(toast_locator.count())
         )
-        assert "처리" in combined or "건너뜀" in combined or "queued" in combined.lower(), (
-            f"toast 에 처리/건너뜀 키워드 필요 (text={combined!r})"
-        )
+        assert "대기열 등록" in combined, f"toast 에 처리/건너뜀 키워드 필요 (text={combined!r})"
 
     def test_A9_액션_실행_후_selection_mode_자동_종료(self, ui_page: Page) -> None:
         """Given: 2 개 선택 + route mock
@@ -682,6 +711,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
         ui_page.locator(".bulk-action-btn[data-action='summarize']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
         for i in range(5):
             cls = items.nth(i).get_attribute("class") or ""
@@ -701,6 +731,7 @@ class TestBulkActionBar:
               UX 정책: 다중 동시 호출은 큐 폭주 + 사용자 혼란 → 첫 요청 응답
               까지 액션 버튼은 disabled 또는 클릭 무시.
         """
+        _install_batch_route_mock(ui_page)
         captured: dict[str, list[dict]] = {"calls": []}
 
         def _delayed_handle(route, request):
@@ -728,6 +759,7 @@ class TestBulkActionBar:
 
         # 첫 클릭 (in-flight 진입)
         ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         # 응답 도착 전 재클릭 (200ms 후)
         ui_page.wait_for_timeout(200)
         # 두 번째/세 번째 클릭은 dispatch_event 로 actionability 검사 우회.
@@ -755,6 +787,7 @@ class TestBulkActionBar:
               UX 정책: 5xx 시 사용자가 재시도 여부를 결정할 수 있도록 명시적
               알림 + selection 상태는 보존 (사용자가 다시 시도 가능).
         """
+        _install_batch_route_mock(ui_page)
         captured: list[dict] = []
 
         def _err_handle(route, request):
@@ -772,6 +805,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
         ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
 
         # 500 응답이 한 번 도달했는지 확인 (mock 호출 발생)
@@ -864,7 +898,8 @@ class TestHomeBulkDropdowns:
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, f"batch API 1회 호출 기대 (got {captured['calls']})"
         body = captured["calls"][0]["body"]
-        assert body.get("scope") == "all", f"scope='all' 기대: {body!r}"
+        assert captured["preview_calls"][0]["body"]["scope"] == "all"
+        assert body.get("scope") == "selected"
         assert body.get("action") == "full", f"action='full' 기대: {body!r}"
 
     def test_H4_최근_24시간_드롭다운은_scope_recent_hours_24_로_호출(self, ui_page: Page) -> None:
@@ -888,8 +923,9 @@ class TestHomeBulkDropdowns:
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
         body = captured["calls"][0]["body"]
-        assert body.get("scope") == "recent", f"scope='recent' 기대: {body!r}"
-        assert body.get("hours") == 24, f"hours=24 기대: {body!r}"
+        assert captured["preview_calls"][0]["body"]["scope"] == "recent"
+        assert captured["preview_calls"][0]["body"]["hours"] == 24
+        assert body.get("scope") == "selected"
         assert body.get("action") == "transcribe"
 
     def test_H5_드롭다운_외부_클릭_시_메뉴_닫힘(self, ui_page: Page) -> None:

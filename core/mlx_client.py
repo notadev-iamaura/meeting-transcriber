@@ -133,6 +133,13 @@ class MLXBackend:
                 "'pip install mlx-vlm' 으로 설치하세요."
             ) from e
         except Exception as e:
+            if "per_layer_model_projection" in str(e) and "not in model" in str(e):
+                raise MLXLoadError(
+                    "Gemma 양자화 모델과 mlx-vlm의 호환 오류입니다. "
+                    "앱 의존성을 업데이트해 mlx-vlm 0.6.17 이상을 사용하거나 "
+                    "설정에서 다른 교정·요약 모델을 선택한 뒤 교정을 재시도하세요. "
+                    "저장된 전사문은 유지됩니다."
+                ) from e
             raise MLXLoadError(f"MLX-VLM 모델 로드 실패: {self._model_name} — {e}") from e
 
     def _load_lm_model(self) -> None:

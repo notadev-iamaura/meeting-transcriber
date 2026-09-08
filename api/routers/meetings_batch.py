@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -305,6 +306,7 @@ class BatchActionRequest(BaseModel):
     # 보안 Medium-01 (Phase 6): 비정상적으로 큰 배열로 fs I/O / 정규식 매칭이
     # 폭주하는 것을 차단한다. 500 은 운영 환경의 단일 일괄 처리 상한선.
     meeting_ids: list[str] = Field(default_factory=list, max_length=500)
+    request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9-]{1,64}$")
 
 
 class BatchActionResponse(BaseModel):
@@ -329,6 +331,8 @@ class BatchActionResponse(BaseModel):
     queued: int
     skipped: int
     meeting_ids: list[str]
+    request_id: str = ""
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BatchPreviewResponse(BaseModel):
@@ -346,6 +350,8 @@ class BatchPreviewResponse(BaseModel):
     queued: int
     skipped: int
     meeting_ids: list[str]
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    time_basis: str = "앱 등록 시각 (created_at)"
 
 
 @dataclass(frozen=True)
@@ -355,6 +361,7 @@ class PreparedBatch:
     matched: int
     skipped: int
     items: list[tuple[str, str, Path | None]]
+    candidates: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def queued(self) -> int:
@@ -680,6 +687,8 @@ def _classify_eligibility_sync(
 async def _prepare_batch(
     request: Request,
     body: BatchActionRequest,
+    *,
+    review: bool = False,
 ) -> PreparedBatch:
     """일괄 처리 대상 목록을 실행 없이 산정한다.
 
@@ -718,42 +727,85 @@ async def _prepare_batch(
     )
     matched = len(candidate_ids)
 
-    eligible_pairs = await asyncio.to_thread(
-        _classify_eligibility_sync,
-        candidate_ids,
-        body.action,
-        body.scope,
-        checkpoints_dir,
-        outputs_dir,
-    )
+    from api.routers.meeting_detail import _read_pipeline_state_for_response
+    from core.meeting_progress import effective_meeting_status, meeting_progress
 
+    candidates: list[dict[str, Any]] = []
     final_items: list[tuple[str, str, Path | None]] = []
-    for mid, classification in eligible_pairs:
-        job = await _get_job_for_batch(queue, mid)
-        if not _is_job_status_safe_for_batch(job, classification):
-            logger.info(
-                "일괄 처리: 현재 작업 상태 때문에 건너뜀 (%s: %s, %s)",
-                mid,
-                getattr(job, "status", None) if job is not None else None,
-                classification,
-            )
-            continue
-        if classification == "transcribe":
-            audio_path = _resolve_audio_path_from_job(job, mid, base_dir_lexical)
-            if audio_path is None:
+    for mid in candidate_ids:
+        if body.scope != "selected":
+            try:
+                _validate_meeting_id(mid)
+            except HTTPException:
+                candidates.append(
+                    dict(
+                        meeting_id=mid,
+                        title=mid,
+                        eligible=False,
+                        blocked=False,
+                        reason="유효하지 않은 회의 ID",
+                    )
+                )
                 continue
-            # 실제 batch 큐 mutation 전에 전체 대상을 먼저 검증한다. 한 항목이
-            # 비수락이면 아직 어떤 job도 queued로 바뀌지 않은 상태에서 종료된다.
-            await _require_audio_quality_accept(config, audio_path)
+        job = await _get_job_for_batch(queue, mid)
+        row: dict[str, Any] = {
+            "meeting_id": mid,
+            "title": getattr(job, "title", "") or mid,
+            "created_at": getattr(job, "created_at", ""),
+            "status": getattr(job, "status", "") or "unknown",
+            "eligible": False,
+            "reason": "",
+            "blocked": False,
+        }
+        candidates.append(row)
+        try:
+            _validate_meeting_id(mid)
+            state = await asyncio.to_thread(_read_pipeline_state_for_response, config, mid)
+            row["status"] = effective_meeting_status(row["status"], state)
+            row.update(meeting_progress(row["status"], state))
+            classification = await asyncio.to_thread(
+                _classify_meeting_for_batch, checkpoints_dir, outputs_dir, mid
+            )
+            if not _is_meeting_eligible(body.action, classification):
+                row["reason"] = {
+                    "done": "전사·요약이 이미 있습니다",
+                    "summarize": "전사 완료 — 교정·요약 작업을 선택하세요",
+                    "transcribe": "전사가 먼저 필요합니다",
+                }[classification]
+                continue
+            if row["status"] in {"failed", "embedding"} or not _is_job_status_safe_for_batch(
+                job, classification
+            ):
+                row["reason"] = (
+                    "실패한 단계 재시도는 회의 상세에서 실행하세요"
+                    if row["status"] == "failed"
+                    else "대기·진행 중이거나 현재 상태에서 실행할 수 없습니다"
+                )
+                continue
+            audio_path = None
+            if classification == "transcribe":
+                audio_path = _resolve_audio_path_from_job(job, mid, base_dir_lexical)
+                if audio_path is None:
+                    row["reason"] = "등록된 원본 오디오가 없습니다"
+                    continue
+                await _require_audio_quality_accept(config, audio_path)
+            row["eligible"] = True
             final_items.append((mid, classification, audio_path))
-        else:
-            final_items.append((mid, classification, None))
+        except HTTPException as exc:
+            row["blocked"] = True
+            row["reason"] = str(exc.detail)
+            if not review:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=f"{mid}: {exc.detail} — 전체 요청이 접수되지 않았습니다.",
+                ) from exc
 
     queued = len(final_items)
     return PreparedBatch(
         matched=matched,
         skipped=matched - queued,
         items=final_items,
+        candidates=candidates,
     )
 
 
@@ -788,7 +840,13 @@ async def _recheck_transcribe_items(
         if current_audio_path is None or current_audio_path != expected_audio_path:
             logger.warning("일괄 처리 큐잉 보류: audio_path 변경/소실 (%s)", meeting_id)
             continue
-        await _require_audio_quality_accept(config, current_audio_path)
+        try:
+            await _require_audio_quality_accept(config, current_audio_path)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=f"{meeting_id}: {exc.detail} — 전체 요청이 접수되지 않았습니다.",
+            ) from exc
         validated.append((meeting_id, int(job.id), job))
     return validated
 
@@ -814,6 +872,7 @@ async def batch_action_preview(
             queued=0,
             skipped=prepared.skipped,
             meeting_ids=[],
+            candidates=prepared.candidates,
         )
 
     return BatchPreviewResponse(
@@ -825,11 +884,79 @@ async def batch_action_preview(
         queued=prepared.queued,
         skipped=prepared.skipped,
         meeting_ids=prepared.meeting_ids,
+        candidates=prepared.candidates,
     )
 
 
-@router.post("/meetings/batch", response_model=BatchActionResponse)
-async def batch_action(
+@router.post("/meetings/batch/review", response_model=BatchPreviewResponse)
+async def review_batch(request: Request, body: BatchActionRequest) -> BatchPreviewResponse:
+    """파일별 검증 오류를 목록에 표시해 실행 전에 선택을 바꿀 수 있게 한다."""
+    prepared = await _prepare_batch(request, body, review=True)
+    return BatchPreviewResponse(
+        status="ok" if prepared.queued else "no_targets",
+        message="대상 확인 완료",
+        action=body.action,
+        scope=body.scope,
+        matched=prepared.matched,
+        queued=prepared.queued,
+        skipped=prepared.skipped,
+        meeting_ids=prepared.meeting_ids,
+        candidates=prepared.candidates,
+    )
+
+
+@router.get("/batch-requests")
+async def batch_history(request: Request) -> dict[str, Any]:
+    """최근 접수 내역과 회의별 실행 이벤트를 다시 조회한다."""
+    queue = _get_sync_job_queue(_get_job_queue(request))
+    if queue is None:
+        raise HTTPException(status_code=503, detail="접수 기록 저장소가 준비되지 않았습니다.")
+    receipts = await asyncio.to_thread(queue.get_batch_receipts)
+    # 후처리는 현재 프로세스의 task다. 재시작 후 이를 계속 실행 중이라고 표시하지 않는다.
+    session = getattr(request.app.state, "batch_session", "")
+    for receipt in receipts:
+        if receipt.get("server_session") and receipt["server_session"] != session:
+            for mid in receipt.get("background_ids", []):
+                events = [e for e in receipt["events"] if e["meeting_id"] == mid]
+                if not events or events[-1].get("status") not in {"completed", "failed"}:
+                    receipt["events"].append(
+                        dict(
+                            meeting_id=mid,
+                            status="interrupted",
+                            status_label="앱 재시작으로 후처리 중단 · 다시 접수 필요",
+                        )
+                    )
+    return {"requests": receipts}
+
+
+def _receipt(
+    body: BatchActionRequest, prepared: PreparedBatch, queued_ids: list[str], message: str = ""
+) -> dict[str, Any]:
+    """실제 접수 ID와 후보별 제외 결과를 고정한다."""
+    rows = []
+    for candidate in prepared.candidates:
+        row = dict(candidate)
+        row["admission"] = "queued" if row["meeting_id"] in queued_ids else "skipped"
+        if row["admission"] == "skipped" and not row["reason"]:
+            row["reason"] = message or "접수 직전 상태가 바뀌어 등록하지 못했습니다"
+        rows.append(row)
+    return dict(
+        request_id=body.request_id,
+        status="ok" if queued_ids else "no_targets",
+        message=message or f"{len(queued_ids)}건 대기열 등록",
+        action=body.action,
+        scope=body.scope,
+        matched=prepared.matched,
+        queued=len(queued_ids),
+        skipped=prepared.matched - len(queued_ids),
+        meeting_ids=queued_ids,
+        candidates=rows,
+        requested_meeting_ids=body.meeting_ids,
+        hours=body.hours,
+    )
+
+
+async def _execute_batch_action(
     request: Request,
     body: BatchActionRequest,
 ) -> BatchActionResponse:
@@ -868,6 +995,9 @@ async def batch_action(
     skipped = prepared.skipped
 
     background_items = [item for item in prepared.items if item[1] != "transcribe"]
+    if not getattr(request.app.state, "batch_session", None):
+        request.app.state.batch_session = str(uuid4())
+    server_session = request.app.state.batch_session
     transcribe_items = [item for item in prepared.items if item[1] == "transcribe"]
 
     # admission 전에 state → DB snapshot → config 순으로 각 회의의 실제
@@ -925,15 +1055,38 @@ async def batch_action(
                     [job_id for _mid, job_id, _job in validated_transcribe],
                     body.action,
                     stt_selections=stt_selections,
+                    receipt=dict(
+                        _receipt(
+                            body,
+                            prepared,
+                            [mid for mid, _jid, _job in validated_transcribe]
+                            + [item[0] for item in background_items],
+                        ),
+                        server_session=server_session,
+                        background_ids=[item[0] for item in background_items],
+                    ),
                 )
                 queued_transcribe_ids = [mid for mid, _job_id, _job in validated_transcribe]
             except (JobQueueError, ValueError) as exc:
                 logger.warning("일괄 처리 원자 큐잉 실패 — 전체 rollback: %s", exc)
-                skipped += len(validated_transcribe)
+                raise HTTPException(
+                    status_code=409,
+                    detail="접수 직전 작업 상태가 변경되어 전체 요청을 등록하지 못했습니다. 대상을 다시 확인하세요.",
+                ) from exc
 
     queued_ids = queued_transcribe_ids + [mid for mid, _classification, _path in background_items]
 
     queued = len(queued_ids)
+    sync_queue = _get_sync_job_queue(queue)
+    receipt = dict(
+        _receipt(body, prepared, queued_ids),
+        server_session=server_session,
+        background_ids=[item[0] for item in background_items],
+    )
+    if sync_queue is None:
+        raise HTTPException(status_code=503, detail="접수 기록 저장소가 준비되지 않았습니다.")
+    if not queued_transcribe_ids:
+        await asyncio.to_thread(sync_queue.save_batch_receipt, receipt)
 
     # === 6. 후보 0 건이면 즉시 종료 ===
     if queued == 0:
@@ -946,6 +1099,8 @@ async def batch_action(
             queued=0,
             skipped=skipped,
             meeting_ids=[],
+            request_id=body.request_id or "",
+            candidates=receipt["candidates"],
         )
 
     # === 7. 백그라운드 task ===
@@ -967,14 +1122,55 @@ async def batch_action(
                     # 전사 항목은 위에서 JobProcessor 큐에 넣었으므로 직접 실행하지 않는다.
                     continue
                 elif classification == "summarize":
+
+                    async def record_step(step: str, meeting_id: str = mid) -> None:
+                        """후처리의 실제 단계 시작을 접수 기록에 남긴다."""
+                        from core.meeting_progress import meeting_progress
+
+                        state = _read_pipeline_state_for_response(config, meeting_id)
+                        state = dict(state or {}, current_step=step)
+                        await asyncio.to_thread(
+                            sync_queue.record_batch_event,
+                            meeting_id,
+                            dict(
+                                status="running", step=step, **meeting_progress("running", state)
+                            ),
+                            body.request_id,
+                        )
+
+                    await asyncio.to_thread(
+                        sync_queue.record_batch_event,
+                        mid,
+                        {"status": "running", "step": "correct"},
+                        body.request_id,
+                    )
                     logger.info(f"일괄 처리[{action}] 요약 시작: {mid}")
-                    await pipeline.run_llm_steps(mid)
+                    await pipeline.run_llm_steps(mid, on_step_start=record_step)
+                    await asyncio.to_thread(
+                        sync_queue.record_batch_event,
+                        mid,
+                        {"status": "completed"},
+                        body.request_id,
+                    )
                     logger.info(f"일괄 처리[{action}] 요약 완료: {mid}")
                 else:
                     logger.warning(f"일괄 처리: 알 수 없는 분류 '{classification}' 건너뜀 ({mid})")
-            except Exception:
+            except Exception as exc:
                 # 한 건 실패가 나머지 회의를 막지 않는다
                 logger.exception(f"일괄 처리[{action}] 회의 실패: {mid}")
+                from core.meeting_progress import meeting_progress
+
+                state = _read_pipeline_state_for_response(config, mid)
+                await asyncio.to_thread(
+                    sync_queue.record_batch_event,
+                    mid,
+                    dict(
+                        status="failed",
+                        error_message=str(exc),
+                        **meeting_progress("failed", state),
+                    ),
+                    body.request_id,
+                )
 
     if background_items:
         task = asyncio.create_task(
@@ -996,11 +1192,56 @@ async def batch_action(
 
     return BatchActionResponse(
         status="ok",
-        message=f"일괄 처리를 시작합니다 ({queued}건).",
+        message=f"{queued}건 대기열 등록",
         action=body.action,
         scope=body.scope,
         matched=matched,
         queued=queued,
         skipped=skipped,
         meeting_ids=queued_ids,
+        request_id=body.request_id or "",
+        candidates=receipt["candidates"],
     )
+
+
+@router.post("/meetings/batch", response_model=BatchActionResponse)
+async def batch_action(request: Request, body: BatchActionRequest) -> BatchActionResponse:
+    """요청 ID로 중복 접수를 막고 성공·거절 내역을 보존한다."""
+    body = body.model_copy(update={"request_id": body.request_id or str(uuid4())})
+    queue = _get_sync_job_queue(_get_job_queue(request))
+    if queue is None:
+        raise HTTPException(status_code=503, detail="접수 기록 저장소가 준비되지 않았습니다.")
+    existing = await asyncio.to_thread(queue.get_batch_receipts, body.request_id)
+    if existing:
+        if (
+            existing[0]["action"],
+            existing[0]["scope"],
+            existing[0].get("requested_meeting_ids", []),
+            existing[0].get("hours", 24),
+        ) != (body.action, body.scope, body.meeting_ids, body.hours):
+            raise HTTPException(
+                status_code=409,
+                detail="이미 사용된 요청 ID입니다. 새 대상 확인 화면에서 접수해 주세요.",
+            )
+        return BatchActionResponse(**existing[0])
+    try:
+        return await _execute_batch_action(request, body)
+    except HTTPException as exc:
+        # 큐 등록 전에 거절된 요청도 추적한다. 이미 커밋된 접수는 덮어쓰지 않는다.
+        existing = await asyncio.to_thread(queue.get_batch_receipts, body.request_id)
+        if not existing:
+            ids = list(dict.fromkeys(body.meeting_ids))
+            prepared = PreparedBatch(
+                matched=len(ids),
+                skipped=len(ids),
+                items=[],
+                candidates=[
+                    dict(meeting_id=mid, title=mid, eligible=False, reason=str(exc.detail))
+                    for mid in ids
+                ],
+            )
+            await asyncio.to_thread(
+                queue.save_batch_receipt,
+                _receipt(body, prepared, [], str(exc.detail)),
+            )
+        raise

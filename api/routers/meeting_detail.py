@@ -1133,6 +1133,7 @@ def _build_meeting_item(
     status_detail: str = "",
 ) -> MeetingItem:
     """Job 과 pipeline_state 를 API 응답 스키마로 변환한다."""
+    from core.meeting_progress import meeting_progress
     from core.transcription_models import (
         OPENAI_PROVIDER,
         OPENAI_TRANSCRIBE_DIARIZE_MODEL,
@@ -1170,13 +1171,18 @@ def _build_meeting_item(
         if job_snapshot is not None:
             stt_provider, stt_model = job_snapshot
 
+    from core.meeting_progress import effective_meeting_status
+
+    response_status = effective_meeting_status(job.status, pipeline_state)
     return MeetingItem(
         id=job.id,
         meeting_id=job.meeting_id,
         audio_path=job.audio_path,
-        status=job.status,
+        status=response_status,
         retry_count=job.retry_count,
-        error_message=job.error_message,
+        error_message=(pipeline_state or {}).get("error_message", "")
+        if response_status == "failed" and job.status == "completed"
+        else job.error_message,
         created_at=job.created_at,
         updated_at=job.updated_at,
         title=getattr(job, "title", "") or "",
@@ -1185,6 +1191,7 @@ def _build_meeting_item(
         status_detail=status_detail,
         stt_provider=stt_provider,
         stt_model=stt_model,
+        **meeting_progress(job.status, pipeline_state),
     )
 
 
@@ -1281,6 +1288,13 @@ class MeetingItem(BaseModel):
     status_detail: str = ""
     stt_provider: str = ""
     stt_model: str = ""
+
+    status_label: str = ""
+    completed_steps: list[str] = Field(default_factory=list)
+    failed_step: str = ""
+    current_step: str = ""
+    transcript_available: bool = False
+    retry_label: str = "실패한 단계부터 다시 시도"
 
 
 class TranscribeMeetingRequest(BaseModel):
@@ -1546,6 +1560,15 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
                     "회의 산출물은 완료 상태로 보이지만 작업 큐 상태 복구에 실패했습니다. "
                     f"{status_detail}"
                 ),
+            )
+
+        # 전사 완료 이후의 별도 LLM 실패는 STT 큐에 다시 넣지 않는다.
+        if job.status == "completed" and (pipeline_state or {}).get("status") == "failed":
+            coordinator = _get_meeting_mutation_coordinator(request)
+            async with coordinator.lease(meeting_id):
+                await summarize_meeting(request, meeting_id)
+            return _build_meeting_item(
+                job, pipeline_state=dict(pipeline_state or {}, status="running")
             )
 
         from core.transcription_models import selection_from_state_or_config
@@ -1882,6 +1905,13 @@ async def cancel_meeting(request: Request, meeting_id: str) -> MeetingItem:
             job_processor.request_cancellation(meeting_id)
 
         logger.info(f"취소 요청 처리: {meeting_id} (이전 status={job.status})")
+
+        if updated_job.status == JobStatus.RECORDED.value:
+            await asyncio.to_thread(
+                queue.queue.record_batch_event,
+                meeting_id,
+                {"status": "cancelled", "status_label": "사용자가 취소함"},
+            )
 
         pipeline_state = _read_pipeline_state_for_response(
             _get_config(request),

@@ -843,6 +843,7 @@
             Router: Router,
             Icons: Icons,
             showBulkToast: BulkActionBar.showBulkToast,
+            openBatchReview: BulkActionBar.openReview,
         })
         : function EmptyViewUnavailable() {
             throw new Error("MeetingEmptyView module is not loaded");

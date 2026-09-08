@@ -123,6 +123,9 @@
      * @returns {string} 한국어 레이블
      */
     function getStatusLabel(status) {
+        if (status && typeof status === "object") {
+            return status.status_label || STATUS_LABELS[status.status] || status.status;
+        }
         return STATUS_LABELS[status] || status;
     }
 

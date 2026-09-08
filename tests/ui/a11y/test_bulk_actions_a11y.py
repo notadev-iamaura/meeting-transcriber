@@ -52,6 +52,42 @@ from harness.a11y import DEFAULT_RULESET
 pytestmark = [pytest.mark.ui]
 
 
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_batch_review_dialog_accessibility_and_focus(ui_page: Page, theme: str) -> None:
+    """새 대상 확인창은 명암 대비·키보드 포커스 격리·닫기 후 복귀를 보장한다."""
+    ui_page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    ui_page.route(
+        "**/api/meetings/batch/review",
+        lambda route: route.fulfill(
+            json={
+                "candidates": [
+                    dict(
+                        meeting_id="m1",
+                        title="확인할 회의",
+                        status_label="녹음 완료",
+                        eligible=True,
+                        blocked=False,
+                        reason="",
+                    )
+                ],
+            }
+        ),
+    )
+    ui_page.locator(".meeting-item").first.locator(".meeting-item-checkbox").click()
+    trigger = ui_page.locator("#selectionActions [data-batch-action='transcribe']")
+    trigger.click()
+    dialog = ui_page.get_by_role("dialog", name="일괄 처리 대상 확인")
+    dialog.get_by_role("button", name="1건 대기열에 등록").wait_for()
+    violations, _ = _run_axe_on(ui_page, [".batch-review-dialog"])
+    assert not violations, _format_violations(violations)
+    for _ in range(10):
+        ui_page.keyboard.press("Tab")
+        assert dialog.evaluate("el => el.contains(document.activeElement)")
+    ui_page.keyboard.press("Escape")
+    dialog.wait_for(state="hidden")
+    assert trigger.evaluate("el => el === document.activeElement")
+
+
 @pytest.fixture
 def ui_page(browser: Browser, ui_bulk_base_url: str) -> Page:
     """ui_bulk_server 가 띄운 SPA 의 홈(`/app`) 으로 이동한 Page (axe 주입 대상)."""

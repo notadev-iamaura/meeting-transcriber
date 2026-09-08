@@ -1183,6 +1183,19 @@
             var els = self._els;
             try {
                 var data = await App.apiRequest("/meetings/" + encodeURIComponent(self._meetingId));
+                if (self._destroyed) return;
+                var previousStatus = self._lastMeetingData && self._lastMeetingData.status;
+                var active = ["queued", "transcribing", "diarizing", "merging", "embedding"].indexOf(data.status) !== -1;
+                if (self._meetingInfoPollTimer) clearTimeout(self._meetingInfoPollTimer);
+                self._meetingInfoPollTimer = null;
+                if (active) {
+                    self._meetingInfoPollTimer = setTimeout(function () { self._loadMeetingInfo(); }, 3000);
+                    self._timers.push(self._meetingInfoPollTimer);
+                }
+                if (previousStatus && previousStatus !== data.status && (data.status === "completed" || data.status === "failed")) {
+                    self._loadTranscript({ silent: true });
+                    if (data.status === "completed") self._loadSummary();
+                }
 
                 els.meetingInfo.style.display = "block";
                 // 사용자 정의 title 우선, 없으면 타임스탬프 폴백
@@ -1190,7 +1203,7 @@
                 self._renderMeetingTitle(data);
 
                 els.meetingStatus.className = "viewer-status " + data.status;
-                App.safeText(els.meetingStatus, App.getStatusLabel(data.status));
+                App.safeText(els.meetingStatus, App.getStatusLabel(data));
 
                 els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(App.getFileName(data.audio_path)) + '</span>';
                 els.metaDate.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(App.formatDate(data.created_at)) + '</span>';
@@ -1412,13 +1425,13 @@
                 failure.className = "viewer-failure-notice";
                 failure.setAttribute("role", "alert");
                 var failureTitle = document.createElement("strong");
-                failureTitle.textContent = "처리를 완료하지 못했습니다";
+                failureTitle.textContent = App.getStatusLabel(data);
                 failure.appendChild(failureTitle);
                 var failureReason = document.createElement("p");
                 failureReason.textContent = data.error_message || "오류 내용을 불러오지 못했습니다.";
                 failure.appendChild(failureReason);
                 var recovery = document.createElement("p");
-                var openaiFailure = /OpenAI/i.test(data.error_message || "");
+                var openaiFailure = (!data.failed_step || data.failed_step === "transcribe") && /OpenAI/i.test(data.error_message || "");
                 recovery.textContent = openaiFailure
                     ? "이 Mac에서 로컬로 다시 전사할까요? 이 회의만 로컬 모델로 처리하며 " +
                       "음성을 외부로 다시 보내지 않습니다. 기본 모델 설정은 바뀌지 않습니다. " +
@@ -1427,6 +1440,21 @@
                     : "기존 결과를 유지하려면 ‘실패한 단계부터 다시 시도’를 선택하세요. " +
                       "계속 실패하면 준비 상태에서 모델과 실행 환경을 확인하세요.";
                 failure.appendChild(recovery);
+                if (data.transcript_available) {
+                    recovery.textContent = "전사문은 저장되어 아래에서 바로 확인할 수 있습니다. ‘" +
+                        (data.retry_label || "실패한 단계부터 다시 시도") +
+                        "’는 저장된 전사 결과를 유지하고 이어서 처리합니다. 모델 로딩 오류가 계속되면 설정에서 교정·요약 모델을 확인하세요.";
+                    var transcriptLink = document.createElement("button");
+                    transcriptLink.className = "viewer-action-btn";
+                    transcriptLink.textContent = "저장된 전사문 보기";
+                    transcriptLink.addEventListener("click", function () {
+                        var tab = document.querySelector('.tab-btn[data-tab="transcript"]');
+                        if (tab) tab.click();
+                        var transcript = document.querySelector(".utterance-text");
+                        if (transcript) transcript.scrollIntoView({ block: "center" });
+                    });
+                    failure.appendChild(transcriptLink);
+                }
                 if (openaiFailure) {
                     var localBtn = document.createElement("button");
                     localBtn.className = "viewer-action-btn local-fallback";
@@ -1438,11 +1466,12 @@
                 }
                 var recoveryLink = document.createElement("a");
                 recoveryLink.className = "viewer-action-btn";
-                recoveryLink.href = openaiFailure ? "/app/settings" : "/app/setup";
-                recoveryLink.textContent = openaiFailure ? "전사 모델 설정 열기" : "준비 상태 확인";
+                var modelSettings = openaiFailure || data.failed_step === "correct" || data.failed_step === "summarize";
+                recoveryLink.href = modelSettings ? "/app/settings" : "/app/setup";
+                recoveryLink.textContent = modelSettings ? "모델 설정 열기" : "준비 상태 확인";
                 recoveryLink.addEventListener("click", function (event) {
                     event.preventDefault();
-                    Router.navigate(openaiFailure ? "/app/settings" : "/app/setup");
+                    Router.navigate(modelSettings ? "/app/settings" : "/app/setup");
                 });
                 failure.appendChild(recoveryLink);
                 actionsEl.appendChild(failure);
@@ -1496,12 +1525,12 @@
             if (data.status === "failed") {
                 var retryBtn = document.createElement("button");
                 retryBtn.className = "viewer-action-btn retry";
-                retryBtn.textContent = "\u21BB 실패한 단계부터 다시 시도";
+                retryBtn.textContent = "\u21BB " + (data.retry_label || "실패한 단계부터 다시 시도");
                 retryBtn.title =
                     "기존 결과와 진행 기록을 유지하고, 실패한 지점부터 다시 처리합니다.";
                 retryBtn.setAttribute(
                     "aria-label",
-                    "기존 결과를 유지하고 실패한 단계부터 다시 시도"
+                    data.retry_label || "기존 결과를 유지하고 실패한 단계부터 다시 시도"
                 );
                 retryBtn.addEventListener("click", function () {
                     self._retryMeeting(data.meeting_id);
@@ -3058,7 +3087,7 @@
 
             if (status === "failed") {
                 setEmpty(
-                    "전사 처리 실패",
+                    App.getStatusLabel(meeting),
                     meeting.error_message || "오류 내용을 불러오지 못했습니다."
                 );
                 return;
@@ -3102,9 +3131,11 @@
                 { key: "convert", label: "오디오 준비" },
                 { key: "transcribe", label: "전사" },
                 { key: "diarize", label: "화자 구분" },
+                { key: "merge", label: "전사 병합" },
+                { key: "correct", label: "AI 교정" },
                 { key: "summarize", label: "요약" },
+                { key: "chunk", label: "검색 준비" },
                 { key: "embed", label: "검색 준비" },
-                { key: "wiki_compile", label: "결정사항 반영" },
             ];
 
             // 진행 중 상태 목록
@@ -3191,15 +3222,8 @@
                     await self._loadTranscript({ silent: true });
 
                     // 처리 중: 단계 업데이트
-                    var currentStep = statusToStep[status] || "";
-                    // completed_steps는 API에 없으므로 현재 단계 이전을 완료로 추정
-                    var completedSteps = [];
-                    if (currentStep) {
-                        for (var i = 0; i < pipelineSteps.length; i++) {
-                            if (pipelineSteps[i].key === currentStep) break;
-                            completedSteps.push(pipelineSteps[i].key);
-                        }
-                    }
+                    var currentStep = meeting.current_step || statusToStep[status] || "";
+                    var completedSteps = meeting.completed_steps || [];
 
                     renderProgress(currentStep, completedSteps);
                     var stepLabel = "";
@@ -3377,6 +3401,7 @@
          * 뷰를 정리한다.
          */
         ViewerView.prototype.destroy = function () {
+            this._destroyed = true;
             if (this._startTranscriptionCleanup) {
                 this._startTranscriptionCleanup(false);
             }

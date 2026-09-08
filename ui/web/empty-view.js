@@ -36,9 +36,9 @@
         // 메뉴 옵션 단일 진실 — 두 드롭다운 동일.
         // data-option 'both' 가 기본 (aria-checked='true').
         var MENU_OPTIONS = [
-            { option: "both", label: "전사+요약 시작", checked: true },
+            { option: "both", label: "전사 + 교정·요약", checked: true },
             { option: "transcribe", label: "전사만 시작", checked: false },
-            { option: "summarize", label: "요약만 시작", checked: false },
+            { option: "summarize", label: "교정·요약", checked: false },
         ];
 
         var ACTION_LABELS = {
@@ -51,7 +51,6 @@
             "all-bulk": "전체 회의",
             "recent-24h": "최근 24시간",
         };
-        var confirmSeq = 0;
 
         function buildPayload(wrapper, option) {
             var trigger = wrapper.querySelector(".home-action-btn--dropdown");
@@ -127,188 +126,10 @@
             if (first) first.focus();
         }
 
-        function ensureConfirmDialog() {
-            var existing = document.getElementById("homeBatchConfirmModal");
-            if (existing) return existing;
-
-            var modal = document.createElement("div");
-            modal.id = "homeBatchConfirmModal";
-            modal.className = "modal-overlay hidden home-batch-confirm-modal";
-            modal.setAttribute("role", "dialog");
-            modal.setAttribute("aria-modal", "true");
-            modal.setAttribute("aria-labelledby", "homeBatchConfirmTitle");
-            modal.innerHTML = [
-                '<div class="modal-content home-batch-confirm-content">',
-                '  <h3 class="modal-title" id="homeBatchConfirmTitle">일괄 처리를 시작할까요?</h3>',
-                '  <div class="home-batch-confirm-body" id="homeBatchConfirmBody" aria-live="polite"></div>',
-                '  <div class="modal-error" id="homeBatchConfirmError"></div>',
-                '  <div class="modal-actions">',
-                '    <button type="button" class="btn-secondary" id="homeBatchConfirmCancel">취소</button>',
-                '    <button type="button" class="settings-save-btn" id="homeBatchConfirmStart">시작</button>',
-                '  </div>',
-                '</div>',
-            ].join("\n");
-            document.body.appendChild(modal);
-
-            modal.addEventListener("click", function (e) {
-                if (e.target === modal) closeConfirmDialog();
-            });
-            document.addEventListener("keydown", function (e) {
-                if (e.key === "Escape" && !modal.classList.contains("hidden")) {
-                    closeConfirmDialog();
-                }
-            });
-            modal.querySelector("#homeBatchConfirmCancel").addEventListener("click", closeConfirmDialog);
-            modal.querySelector("#homeBatchConfirmStart").addEventListener("click", function () {
-                var state = modal._batchConfirmState;
-                if (!state || !state.payload) return;
-                dispatchPayload(state.payload, modal);
-            });
-
-            return modal;
-        }
-
-        function closeConfirmDialog() {
-            var modal = document.getElementById("homeBatchConfirmModal");
-            if (!modal) return;
-            modal.classList.add("hidden");
-            modal._batchConfirmState = null;
-            confirmSeq += 1;
-        }
-
-        function renderConfirmDialog(state) {
-            var modal = ensureConfirmDialog();
-            var body = modal.querySelector("#homeBatchConfirmBody");
-            var error = modal.querySelector("#homeBatchConfirmError");
-            var start = modal.querySelector("#homeBatchConfirmStart");
-            var cancel = modal.querySelector("#homeBatchConfirmCancel");
-            modal._batchConfirmState = state;
-            error.textContent = "";
-            cancel.textContent = state.canStart ? "취소" : "닫기";
-            start.disabled = !state.canStart || state.loading;
-
-            if (state.loading) {
-                body.innerHTML = [
-                    '<p class="modal-message">대상을 확인하는 중입니다.</p>',
-                    '<dl class="home-batch-confirm-list">',
-                    '  <div><dt>범위</dt><dd></dd></div>',
-                    '  <div><dt>작업</dt><dd></dd></div>',
-                    '</dl>',
-                ].join("\n");
-                body.querySelectorAll("dd")[0].textContent = state.scopeLabel;
-                body.querySelectorAll("dd")[1].textContent = state.actionLabel;
-                start.textContent = "확인 중...";
-                modal.classList.remove("hidden");
-                cancel.focus();
-                return;
-            }
-
-            var queued = state.preview && typeof state.preview.queued === "number"
-                ? state.preview.queued
-                : 0;
-            var skipped = state.preview && typeof state.preview.skipped === "number"
-                ? state.preview.skipped
-                : 0;
-            var matched = state.preview && typeof state.preview.matched === "number"
-                ? state.preview.matched
-                : queued + skipped;
-
-            body.innerHTML = [
-                '<dl class="home-batch-confirm-list">',
-                '  <div><dt>범위</dt><dd></dd></div>',
-                '  <div><dt>작업</dt><dd></dd></div>',
-                '  <div><dt>대상</dt><dd></dd></div>',
-                '  <div><dt>건너뜀</dt><dd></dd></div>',
-                '</dl>',
-                '<p class="home-batch-confirm-warning">MacBook 발열과 RAM 사용량이 증가할 수 있습니다.</p>',
-            ].join("\n");
-            var values = body.querySelectorAll("dd");
-            values[0].textContent = state.scopeLabel;
-            values[1].textContent = state.actionLabel;
-            values[2].textContent = queued + "건" + (matched !== queued ? " / 후보 " + matched + "건" : "");
-            values[3].textContent = skipped + "건";
-
-            if (queued === 0) {
-                error.textContent = "처리할 회의가 없습니다.";
-                start.textContent = "시작";
-            } else {
-                start.textContent = "시작";
-            }
-            modal.classList.remove("hidden");
-            if (queued > 0) {
-                start.focus();
-            } else {
-                cancel.focus();
-            }
-        }
-
-        async function confirmOption(wrapper, option) {
+        function confirmOption(wrapper, option) {
             if (owner && owner._destroyed) return;
-            var trigger = wrapper.querySelector(".home-action-btn--dropdown");
-            if (!trigger) return;
             var state = buildPayload(wrapper, option);
-            if (!state) return;
-            var seq = confirmSeq + 1;
-            confirmSeq = seq;
-            renderConfirmDialog(Object.assign({}, state, {
-                loading: true,
-                canStart: false,
-                seq: seq,
-            }));
-
-            trigger.disabled = true;
-            try {
-                var preview = await App.apiPost("/meetings/batch/preview", state.payload);
-                if (owner && owner._destroyed) return;
-                if (seq !== confirmSeq) return;
-                renderConfirmDialog(Object.assign({}, state, {
-                    loading: false,
-                    canStart: !!(preview && preview.queued > 0),
-                    preview: preview,
-                    seq: seq,
-                }));
-            } catch (err) {
-                if (owner && owner._destroyed) return;
-                if (seq !== confirmSeq) return;
-                renderConfirmDialog(Object.assign({}, state, {
-                    loading: false,
-                    canStart: false,
-                    preview: null,
-                    seq: seq,
-                }));
-                var modal = ensureConfirmDialog();
-                var error = modal.querySelector("#homeBatchConfirmError");
-                error.textContent = "대상 확인 실패: " + (err && err.message ? err.message : "서버 오류");
-            } finally {
-                if (owner && owner._destroyed) return;
-                trigger.disabled = false;
-            }
-        }
-
-        async function dispatchPayload(payload, modal) {
-            if (owner && owner._destroyed) return;
-            var start = modal.querySelector("#homeBatchConfirmStart");
-            var cancel = modal.querySelector("#homeBatchConfirmCancel");
-            start.disabled = true;
-            cancel.disabled = true;
-            start.textContent = "시작 중...";
-            try {
-                var resp = await App.apiPost("/meetings/batch", payload);
-                if (owner && owner._destroyed) return;
-                closeConfirmDialog();
-                var queued = (resp && resp.queued != null) ? resp.queued : 0;
-                var skipped = (resp && resp.skipped != null) ? resp.skipped : 0;
-                var msg = queued + "건 처리"
-                    + (skipped > 0 ? ", " + skipped + "건 건너뜀" : "");
-                showBulkToast(msg, "info");
-            } catch (err) {
-                if (owner && owner._destroyed) return;
-                var error = modal.querySelector("#homeBatchConfirmError");
-                error.textContent = "처리 실패: " + (err && err.message ? err.message : "서버 오류");
-                start.disabled = false;
-                cancel.disabled = false;
-                start.textContent = "시작";
-            }
+            if (state) deps.openBatchReview(state.payload);
         }
 
         wrappers.forEach(function (wrapper) {
@@ -401,7 +222,7 @@
 
     function _removeHomeBatchConfirmDialog() {
         var modal = document.getElementById("homeBatchConfirmModal");
-        if (modal) modal.remove();
+        if (modal && modal.open) modal.close();
     }
 
 
@@ -528,7 +349,7 @@
             '              data-dropdown="recent-24h"',
             '              aria-haspopup="menu"',
             '              aria-expanded="false">',
-            '        <span>최근 24시간</span>',
+            '        <span>최근 등록 24시간</span>',
             '        <svg class="home-action-btn__chevron" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
             '          <polyline points="3,5 6,8 9,5"/>',
             '        </svg>',

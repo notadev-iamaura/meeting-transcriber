@@ -129,6 +129,13 @@
           <option value="oldest">오래된순</option>
           <option value="status">상태별</option>
         </select>
+        <button id="batchHistoryButton" class="btn-secondary" type="button">접수 내역</button>
+      </div>
+      <div id="selectionActions" class="selection-actions" data-component="bulk-actions" hidden>
+        <span role="status">0건 선택</span>
+        <button type="button" class="btn-primary" data-batch-action="transcribe">전사만</button>
+        <button type="button" class="btn-secondary" data-batch-action="full">전사 + 교정·요약</button>
+        <button type="button" class="btn-secondary" data-batch-action="summarize">교정·요약</button>
       </div>
       <div
         class="list-content"
@@ -162,14 +169,14 @@
           <span class="bulk-action-bar__count-num">0</span><span class="label-text"> 개 선택됨</span>
         </span>
         <div class="bulk-action-bar__actions">
-          <button class="bulk-action-btn" data-action="transcribe" type="button" aria-label="전사">
-            <span class="label-text">전사</span>
+          <button class="bulk-action-btn" data-action="transcribe" type="button" aria-label="전사만">
+            <span class="label-text">전사만</span>
           </button>
-          <button class="bulk-action-btn" data-action="summarize" type="button" aria-label="요약">
-            <span class="label-text">요약</span>
+          <button class="bulk-action-btn" data-action="summarize" type="button" aria-label="교정·요약">
+            <span class="label-text">교정·요약</span>
           </button>
-          <button class="bulk-action-btn" data-action="both" type="button" aria-label="전사+요약">
-            <span class="label-text">전사+요약</span>
+          <button class="bulk-action-btn" data-action="both" type="button" aria-label="전사 + 교정·요약">
+            <span class="label-text">전사 + 교정·요약</span>
           </button>
         </div>
         <button class="bulk-action-bar__dismiss" data-action="dismiss" type="button" aria-label="선택 해제">
