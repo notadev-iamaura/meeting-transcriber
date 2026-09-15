@@ -225,6 +225,156 @@ def _make_mock_embedded() -> MagicMock:
 # === PipelineStep 열거형 테스트 ===
 
 
+class TestBulkPhaseBoundaries:
+    """단계별 일괄 처리가 완료를 앞당기거나 이미 저장한 단계를 반복하지 않는다."""
+
+    @pytest.mark.asyncio
+    async def test_phases_resume_prefix_without_skipping_or_repeating(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        from contextlib import ExitStack
+
+        values = (
+            audio_file,
+            _make_mock_transcript(),
+            _make_mock_diarization(),
+            _make_mock_merged(),
+            _make_mock_corrected(),
+            _make_mock_summary(),
+            _make_mock_chunked(),
+            _make_mock_embedded(),
+        )
+        calls: list[str] = []
+        original_audio = audio_file.read_bytes()
+        # WAVは本来converterがoutput dir内に作る。ここでもその契約を守る。
+        output = pipeline._get_output_dir("bulk_phases")
+        output.mkdir(parents=True)
+        wav = output / "audio_16k.wav"
+        wav.write_bytes(original_audio)
+        values = (wav, *values[1:])
+
+        with ExitStack() as stack:
+            for step, value in zip(PIPELINE_STEPS, values, strict=True):
+
+                async def execute(
+                    *args: Any, name: str = step.value, result: Any = value, **kwargs: Any
+                ) -> Any:
+                    calls.append(name)
+                    return result
+
+                stack.enter_context(
+                    patch.object(pipeline, f"_run_step_{step.value}", side_effect=execute)
+                )
+            stack.enter_context(
+                patch.object(
+                    pipeline,
+                    "_restore_intermediate_results",
+                    new_callable=AsyncMock,
+                    return_value=(wav, values[1], values[2], values[3], values[4], values[6]),
+                )
+            )
+
+            for boundary, expected_count in (
+                (PipelineStep.TRANSCRIBE, 2),
+                (PipelineStep.TRANSCRIBE, 2),  # 재시작 후 같은 단계도 다시 실행하지 않는다.
+                (PipelineStep.MERGE, 4),
+                (PipelineStep.SUMMARIZE, 6),
+            ):
+                state = await pipeline.run(
+                    audio_file, meeting_id="bulk_phases", stop_after=boundary
+                )
+                assert state.status == "paused"
+                assert state.current_step == ""
+                assert state.skipped_steps == []
+                assert state.completed_steps == [s.value for s in PIPELINE_STEPS[:expected_count]]
+                assert len(calls) == expected_count
+                assert pipeline.get_status("bulk_phases").status == "paused"
+
+            state = await pipeline.run(audio_file, meeting_id="bulk_phases")
+            assert state.status == "completed"
+            assert calls == [s.value for s in PIPELINE_STEPS]
+            assert audio_file.read_bytes() == original_audio
+
+    @pytest.mark.asyncio
+    async def test_pause_requires_checkpoint_before_any_mutation(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        pipeline._checkpoint_enabled = False
+        with pytest.raises(PipelineError, match="체크포인트"):
+            await pipeline.run(
+                audio_file, meeting_id="no_checkpoint", stop_after=PipelineStep.TRANSCRIBE
+            )
+        assert not pipeline._get_state_path("no_checkpoint").exists()
+
+    @pytest.mark.asyncio
+    async def test_non_prefix_state_is_rejected_without_overwrite(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+    ) -> None:
+        path = pipeline._get_state_path("invalid_prefix")
+        state = PipelineState(
+            meeting_id="invalid_prefix",
+            audio_path=str(audio_file),
+            completed_steps=["merge"],
+        )
+        pipeline._save_state(state, path)
+        before = path.read_bytes()
+        with pytest.raises(PipelineError, match="순서"):
+            await pipeline.run(
+                audio_file, meeting_id="invalid_prefix", stop_after=PipelineStep.MERGE
+            )
+        assert path.read_bytes() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("corrupt", [False, True])
+    async def test_resumed_wiki_restores_summary_inside_nonfatal_boundary(
+        self,
+        pipeline: PipelineManager,
+        audio_file: Path,
+        corrupt: bool,
+    ) -> None:
+        """최종 단계 재개 시 요약을 복원하되 부가 Wiki 실패가 완료를 뒤집지 않는다."""
+        mid = "wiki_phase_resume"
+        state_path = pipeline._get_state_path(mid)
+        state = PipelineState(
+            meeting_id=mid,
+            audio_path=str(audio_file),
+            status="completed",
+            completed_steps=[step.value for step in PIPELINE_STEPS],
+        )
+        pipeline._save_state(state, state_path)
+        summary_cp = pipeline._get_checkpoint_path(mid, PipelineStep.SUMMARIZE)
+        if corrupt:
+            summary_cp.write_text("{invalid json", encoding="utf-8")
+        else:
+            _make_real_summary_result().save_checkpoint(summary_cp)
+        before = summary_cp.read_bytes()
+        wiki = MagicMock(run=AsyncMock(return_value={"status": "completed"}))
+        with patch("steps.wiki_compiler.WikiCompiler", return_value=wiki):
+            await pipeline._run_step_wiki_compile(
+                meeting_id=mid,
+                meeting_date="2026-09-15",
+                summary_result=None,
+                corrected_result=None,
+                state=state,
+                state_path=state_path,
+            )
+        assert state.status == "completed"
+        assert pipeline.get_status(mid).status == "completed"
+        assert summary_cp.read_bytes() == before
+        if corrupt:
+            wiki.run.assert_not_awaited()
+            assert state.step_results[-1]["success"] is False
+            assert state.warnings
+        else:
+            assert wiki.run.await_args.kwargs["summary"] == _make_real_summary_result().markdown
+
+
 class TestPipelineStep:
     """PipelineStep 열거형 테스트."""
 

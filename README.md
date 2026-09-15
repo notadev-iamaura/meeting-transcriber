@@ -749,6 +749,17 @@ DB/quarantine 변경은 순차 처리합니다. 감사 중에도 `/api/health`�
 | `HUGGINGFACE_TOKEN` | 현재 프로세스용 HuggingFace 토큰 폴백. LaunchAgent는 CLI 캐시 사용 |
 | `OPENAI_API_KEY` | 개발/CI용 OpenAI 키 폴백. 일반 사용은 macOS Keychain 권장 |
 
+## 로컬 일괄 처리 시험 옵션
+
+`config.yaml`의 `pipeline.bulk_stage_batching: true`를 켜면 같은 로컬 STT 모델의
+전체 처리 대기 회의 두 건을 전사부터 묶어서 처리합니다. Whisper와 LLM을 묶음 안에서
+재사용하고, 저장한 단계 다음부터 재개합니다. 한 번에 하나의 대형 모델만 사용하며
+기존 2건 후 쿨다운을 유지합니다. 기본값은 `false`입니다.
+
+전체 묶음의 모델 전환은 줄지만 첫 회의의 교정본이 나오는 시점은 늦어질 수 있습니다.
+설정·취소·복구 계약과 검증 범위는
+[단계별 일괄 처리](docs/design-decisions/bulk-stage-processing.md)를 참고하세요.
+
 ## 프로젝트 구조
 
 ```

@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from config import AppConfig
 from core.io_utils import atomic_write_json
@@ -36,8 +40,9 @@ from core.job_queue import (
 )
 from core.meeting_mutation import MeetingMutationCoordinator
 from core.perf_stats import PerfStats
-from core.pipeline import InvalidInputError, PipelineManager
+from core.pipeline import InvalidInputError, PipelineManager, PipelineStep
 from core.quarantine import restore_from_quarantine
+from core.stage_work_queue import StageWorkQueue, StageWorkSpec
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +91,8 @@ class JobProcessor:
         # _process_job 의 on_step_start 콜백이 단계 경계에서 감지하여
         # asyncio.CancelledError 를 발생시키고 작업을 recorded 로 되돌린다.
         self._cancellation_requests: set[str] = set()
+        self._bulk_session_id = str(uuid4())
+        self._stage_work_queue: StageWorkQueue | None = None
 
         # 단계별 성능 통계 (EMA) — ETA 예측 및 이상 탐지용
         self._perf_stats: PerfStats | None
@@ -570,9 +577,16 @@ class JobProcessor:
         try:
             while self._running:
                 try:
+                    if self._native_cleanup_pending():
+                        await asyncio.sleep(self._poll_interval)
+                        continue
                     job = await self._get_next_job()
                     if job is not None:
-                        await self._process_job(job)
+                        cohort = await self._select_bulk_cohort(job)
+                        if len(cohort) > 1:
+                            await self._process_bulk_cohort(cohort)
+                        else:
+                            await self._process_job(job)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -597,6 +611,291 @@ class JobProcessor:
         except Exception as e:
             logger.error(f"작업 큐 조회 실패: {e}")
             return None
+
+    async def _select_bulk_cohort(self, first_job: Any) -> list[Any]:
+        """명시적 opt-in에서 같은 로컬 full 요청 두 건까지만 고정한다."""
+        config = getattr(self._pipeline, "_config", None)
+        pipeline_config = getattr(config, "pipeline", None)
+        if (
+            getattr(pipeline_config, "bulk_stage_batching", False) is not True
+            or getattr(pipeline_config, "checkpoint_enabled", False) is not True
+        ):
+            return [first_job]
+        max_items = getattr(pipeline_config, "bulk_max_items", 2)
+        if not isinstance(max_items, int) or isinstance(max_items, bool):
+            return [first_job]
+        max_items = max(1, min(max_items, 2))
+        batch_count = getattr(self._thermal_manager, "batch_count", 0)
+        batch_limit = getattr(getattr(config, "thermal", None), "batch_size", 2)
+        if isinstance(batch_count, int) and isinstance(batch_limit, int):
+            max_items = min(max_items, max(1, batch_limit - batch_count))
+        if (
+            first_job.requested_action != "full"
+            or first_job.stt_provider != "local"
+            or not first_job.stt_model
+            or max_items < 2
+            or not self._has_bulk_source(first_job)
+        ):
+            return [first_job]
+        pending = await self._job_queue.get_pending_jobs()
+        cohort = [first_job]
+        for job in pending:
+            if job.id == first_job.id:
+                continue
+            if (
+                job.requested_action == "full"
+                and job.stt_provider == "local"
+                and job.stt_model == first_job.stt_model
+                and self._has_bulk_source(job)
+            ):
+                cohort.append(job)
+                if len(cohort) >= max_items:
+                    break
+        return cohort
+
+    @staticmethod
+    def _has_bulk_source(job: Any) -> bool:
+        """원본 없는 checkpoint 재개와 symlink 입력은 기존 단건 admission에 맡긴다."""
+        try:
+            return stat.S_ISREG(Path(job.audio_path).lstat().st_mode)
+        except (OSError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _bulk_input_fingerprint(job: Any) -> str:
+        """경로를 저장하지 않고 원본의 no-follow metadata fingerprint를 만든다."""
+        source: tuple[int, ...]
+        try:
+            identity = Path(job.audio_path).lstat()
+            source = (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns)
+        except OSError:
+            # 실제 입력 admission은 PipelineManager가 기존 계약대로 처리한다.
+            source = ()
+        payload = json.dumps([job.meeting_id, job.id, source], separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _native_cleanup_pending(self) -> bool:
+        """이전 native 실행이 실제로 종료되지 않았다면 새 작업 선점을 보류한다."""
+        manager = getattr(self._pipeline, "_model_manager", None)
+        get_status = getattr(manager, "get_status", None)
+        if not callable(get_status) or asyncio.iscoroutinefunction(get_status):
+            return False
+        status = get_status()
+        return isinstance(status, dict) and status.get("native_cleanup_pending") is True
+
+    def _bulk_llm_snapshot(self) -> str:
+        """비밀 필드가 없는 LLMConfig 전체를 고정하여 옵션 변경도 감지한다."""
+        llm = self._pipeline._config.llm
+        dump = getattr(llm, "model_dump", None)
+        values = dump(mode="json") if callable(dump) else vars(llm)
+        return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    async def _process_bulk_cohort(self, jobs: list[Any]) -> None:
+        """유한 묶음의 단계를 순차 실행하고 기존 jobs/checkpoint를 복구 기준으로 둔다.
+
+        단계 큐는 이번 실행의 감사 기록이다. 과거 세션의 native 종료를 확인하지
+        못한 running 기록은 자동 회수하지 않는다. pyannote와 e5 수명은 그대로 둔다.
+        """
+        if self._stage_work_queue is None:
+            stage_queue = StageWorkQueue(self._job_queue.queue.db_path)
+            await asyncio.to_thread(stage_queue.initialize)
+            self._stage_work_queue = stage_queue
+        stage_queue = self._stage_work_queue
+        cohort_id = str(uuid4())
+        config = self._pipeline._config
+        llm_snapshot = self._bulk_llm_snapshot()
+        llm_model = (
+            config.llm.mlx_model_name if config.llm.backend == "mlx" else config.llm.model_name
+        )
+        phases = (
+            ("transcribe", PipelineStep.TRANSCRIBE, "whisper"),
+            ("merge", PipelineStep.MERGE, None),
+            ("summarize", PipelineStep.SUMMARIZE, "exaone"),
+            ("embed", None, None),
+        )
+        specs = []
+        fingerprints = {job.meeting_id: self._bulk_input_fingerprint(job) for job in jobs}
+        for job in jobs:
+            previous: str | None = None
+            for phase, _stop_after, model_name in phases:
+                model_snapshot = {"model": job.stt_model, "provider": "local"}
+                if model_name == "exaone":
+                    model_snapshot = {
+                        "model": llm_model,
+                        "provider": config.llm.backend,
+                        "options": json.loads(llm_snapshot),
+                    }
+                specs.append(
+                    StageWorkSpec(
+                        meeting_id=job.meeting_id,
+                        generation=cohort_id,
+                        stage=phase,
+                        dependencies=() if previous is None else (previous,),
+                        input_fingerprint=fingerprints[job.meeting_id],
+                        model_snapshot=model_snapshot,
+                    )
+                )
+                previous = phase
+        await asyncio.to_thread(stage_queue.enqueue_cohort, cohort_id, specs)
+        active = {job.meeting_id: job for job in jobs}
+        started: set[str] = set()
+        try:
+            for phase_index, (phase, stop_after, model_name) in enumerate(phases):
+                if self._bulk_llm_snapshot() != llm_snapshot or self._native_cleanup_pending():
+                    return
+                async with contextlib.AsyncExitStack() as stack:
+                    if model_name is not None and active:
+                        await stack.enter_async_context(
+                            self._pipeline._model_manager.residency_scope(
+                                model_name,
+                                reuse_key=hashlib.sha256(
+                                    f"{cohort_id}:{phase}:{jobs[0].stt_model}:{llm_snapshot}".encode()
+                                ).hexdigest(),
+                            )
+                        )
+                    for job in jobs:
+                        if job.meeting_id not in active:
+                            continue
+                        if (
+                            self._bulk_llm_snapshot() != llm_snapshot
+                            or self._native_cleanup_pending()
+                        ):
+                            return
+                        claims = await asyncio.to_thread(
+                            stage_queue.claim_ready,
+                            cohort_id,
+                            self._bulk_session_id,
+                            phase,
+                            limit=1,
+                        )
+                        if not claims:
+                            raise RuntimeError("벌크 단계의 준비된 실행 기록을 찾을 수 없습니다")
+                        claim = claims[0]
+                        if claim.meeting_id != job.meeting_id:
+                            raise RuntimeError("벌크 단계 실행 순서가 접수 순서와 다릅니다")
+                        async with self._pipeline.meeting_mutation_coordinator.lease(
+                            job.meeting_id
+                        ):
+                            if self._is_job_cancellation_requested(job.meeting_id, job.id):
+                                await self._finalize_user_cancellation(job.id, job.meeting_id)
+                                successful = False
+                            elif self._bulk_input_fingerprint(job) != fingerprints[job.meeting_id]:
+                                await self._update_job_status_safe(
+                                    job.id,
+                                    "failed",
+                                    "원본이 변경되어 저장된 단계의 이어가기를 중단했습니다.",
+                                )
+                                if job.meeting_id in started:
+                                    await self._thermal_manager.notify_job_completed()
+                                await self._broadcast_event(
+                                    "job_failed",
+                                    {
+                                        "job_id": job.id,
+                                        "meeting_id": job.meeting_id,
+                                        "error": "원본이 변경되어 저장된 단계의 이어가기를 중단했습니다.",
+                                    },
+                                )
+                                successful = False
+                            else:
+                                started.add(job.meeting_id)
+                                successful = await self._process_job(
+                                    job,
+                                    stop_after=stop_after,
+                                    already_claimed=phase_index > 0,
+                                )
+                        if successful:
+                            await asyncio.to_thread(
+                                stage_queue.complete,
+                                claim.id,
+                                self._bulk_session_id,
+                                claim.claim_token,
+                            )
+                        else:
+                            current = await asyncio.to_thread(
+                                self._job_queue.queue.get_job, job.id
+                            )
+                            if current.error_message.startswith("사용자가 취소함"):
+                                await asyncio.to_thread(
+                                    stage_queue.request_cancel, job.meeting_id, cohort_id
+                                )
+                                if not self._native_cleanup_pending():
+                                    await asyncio.to_thread(
+                                        stage_queue.acknowledge_cancel,
+                                        claim.id,
+                                        self._bulk_session_id,
+                                        claim.claim_token,
+                                    )
+                            else:
+                                await asyncio.to_thread(
+                                    stage_queue.fail,
+                                    claim.id,
+                                    self._bulk_session_id,
+                                    claim.claim_token,
+                                    "PIPELINE_STOPPED",
+                                )
+                            active.pop(job.meeting_id, None)
+                            started.discard(job.meeting_id)
+                        if self._native_cleanup_pending():
+                            return
+            started.clear()
+        finally:
+            # stop/cancel 또는 감사 저장 실패로 빠져나오더라도 중간 단계 작업을
+            # 진행 상태에 버려두지 않는다. native 소유권은 ModelLoadManager가 유지한다.
+            for meeting_id in sorted(started):
+                job = active[meeting_id]
+                try:
+                    await self._restore_interrupted_bulk_job(job)
+                except JobNotFoundError:
+                    # 다른 mutation이 회의를 제거했다면 다른 회의의 복구를 계속한다.
+                    logger.info("벌크 중단 정리 대상 없음: job_id=%s", job.id)
+                except Exception as exc:
+                    # 한 회의의 저장 실패나 경쟁이 나머지 회의를 진행 상태에 가두지 않는다.
+                    logger.error(
+                        "벌크 중단 정리 실패: job_id=%s, error_type=%s",
+                        job.id,
+                        type(exc).__name__,
+                    )
+
+    async def _restore_interrupted_bulk_job(self, job: Any) -> None:
+        """한 회의를 재대기하고 검사 직후 들어온 durable 취소 claim을 우선한다."""
+        meeting_id = job.meeting_id
+        if self._is_job_cancellation_requested(meeting_id, job.id):
+            await self._finalize_user_cancellation(job.id, meeting_id)
+            return
+        current = await asyncio.to_thread(self._job_queue.queue.get_job, job.id)
+        if (
+            current.status == JobStatus.RECORDING.value
+            and parse_cancellation_claim(str(current.requested_action or "")) is not None
+        ):
+            # 최초 취소 검사와 이 상태 조회 사이에 접수된 claim도 확정한다.
+            await self._finalize_user_cancellation(job.id, meeting_id)
+            return
+        if current.status not in {
+            JobStatus.TRANSCRIBING.value,
+            JobStatus.DIARIZING.value,
+            JobStatus.MERGING.value,
+            JobStatus.EMBEDDING.value,
+        }:
+            return
+        try:
+            await asyncio.to_thread(
+                self._job_queue.queue.force_set_status,
+                job.id,
+                JobStatus.QUEUED,
+                "벌크 처리가 중단되어 저장된 단계부터 재시도 대기 중입니다.",
+            )
+        except Exception:
+            # force_set_status의 CAS가 검사 직후 생성된 취소 claim을 보존한다.
+            # 현재 DB를 다시 읽어 사용자 취소로 확정하고 원래 복구 오류는 숨기지 않는다.
+            if self._is_job_cancellation_requested(meeting_id, job.id):
+                await self._finalize_user_cancellation(job.id, meeting_id)
+                return
+            raise
+        await self._thermal_manager.notify_job_completed()
+        await self._broadcast_event(
+            "job_interrupted",
+            {"job_id": job.id, "meeting_id": meeting_id, "status": "queued"},
+        )
 
     async def _update_job_status_safe(
         self,
@@ -822,7 +1121,13 @@ class JobProcessor:
         except Exception as e:
             logger.warning(f"이벤트 브로드캐스트 실패: {event_type}, error={e}")
 
-    async def _process_job(self, job: Any) -> None:
+    async def _process_job(
+        self,
+        job: Any,
+        *,
+        stop_after: PipelineStep | None = None,
+        already_claimed: bool = False,
+    ) -> bool:
         """단일 작업을 처리한다.
 
         서멀 대기 → 상태 업데이트 → 파이프라인 실행 → 결과 처리 순서로 진행한다.
@@ -851,7 +1156,20 @@ class JobProcessor:
         # 동안 사용자가 취소해 recorded가 된 작업은 여기서 반드시 중단한다.
         await self._thermal_manager.wait_if_needed()
         try:
-            claimed_job = await self._job_queue.claim_queued_job_for_processing(job_id)
+            if already_claimed:
+                claimed_job = await asyncio.to_thread(self._job_queue.queue.get_job, job_id)
+                if self._is_job_cancellation_requested(meeting_id, job_id):
+                    await self._finalize_user_cancellation(job_id, meeting_id)
+                    return False
+                if claimed_job.status not in {
+                    JobStatus.TRANSCRIBING.value,
+                    JobStatus.DIARIZING.value,
+                    JobStatus.MERGING.value,
+                    JobStatus.EMBEDDING.value,
+                }:
+                    return False
+            else:
+                claimed_job = await self._job_queue.claim_queued_job_for_processing(job_id)
         except (InvalidTransitionError, JobNotFoundError) as exc:
             logger.info(
                 "작업 처리 선점 실패로 파이프라인 생략: job_id=%s, meeting_id=%s, error=%s",
@@ -859,10 +1177,24 @@ class JobProcessor:
                 meeting_id,
                 exc,
             )
-            return
+            return False
 
         queued_stt_provider = str(getattr(claimed_job, "stt_provider", "") or "")
         queued_stt_model = str(getattr(claimed_job, "stt_model", "") or "")
+        if (stop_after is not None or already_claimed) and (
+            requested_action != str(claimed_job.requested_action or "")
+            or queued_stt_provider != job.stt_provider
+            or queued_stt_model != job.stt_model
+        ):
+            await asyncio.to_thread(
+                self._job_queue.queue.force_set_status,
+                job_id,
+                JobStatus.QUEUED,
+                "접수한 처리 설정이 변경되어 새 설정으로 재시도 대기 중입니다.",
+            )
+            if already_claimed:
+                await self._thermal_manager.notify_job_completed()
+            return False
         if not queued_stt_provider and not queued_stt_model:
             # v3 마이그레이션 전 legacy queued job만 실행 직전 설정을
             # 1회 snapshot한다. 신규 큐는 모두 등록 시점에 저장된다.
@@ -881,8 +1213,9 @@ class JobProcessor:
                 "failed",
                 error_message="전사 모델 선택 snapshot이 손상되었습니다.",
             )
-            return
-        await self._thermal_manager.notify_job_started()
+            return False
+        if not already_claimed:
+            await self._thermal_manager.notify_job_started()
 
         # 파이프라인 단계별 상태 업데이트 콜백
         async def on_step_start(step_name: str) -> None:
@@ -979,7 +1312,8 @@ class JobProcessor:
         try:
             # 파이프라인 실행: batch 가 명시한 실행 의도는 우선하고,
             # 빈 값이면 pipeline.run 내부에서 config.pipeline.skip_llm_steps 를 사용한다.
-            await self._pipeline.run(
+            extra_options = {} if stop_after is None else {"stop_after": stop_after}
+            result = await self._pipeline.run(
                 Path(audio_path),
                 meeting_id=meeting_id,
                 on_step_start=on_step_start,
@@ -988,10 +1322,16 @@ class JobProcessor:
                 should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
                 stt_provider=queued_stt_provider,
                 stt_model=queued_stt_model,
+                **extra_options,
             )
 
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
+
+            if stop_after is not None:
+                if result.status not in {"paused", "completed"}:
+                    raise RuntimeError("벌크 중간 단계가 paused 상태를 반환하지 않았습니다")
+                return True
 
             # 완료 상태 업데이트. 실패 시 복구 경로를 통해 pipeline_state 와 DB 상태를 맞춘다.
             status_recovered = await self._mark_job_completed_after_pipeline(job_id, meeting_id)
@@ -1017,6 +1357,7 @@ class JobProcessor:
             )
 
             logger.info(f"작업 처리 완료: job_id={job_id}")
+            return status_recovered
 
         except asyncio.CancelledError:
             is_user_cancel = self._is_job_cancellation_requested(meeting_id, job_id)
@@ -1024,7 +1365,7 @@ class JobProcessor:
             if is_user_cancel:
                 await self._finalize_user_cancellation(job_id, meeting_id)
                 # 사용자 취소는 작업 루프를 계속 동작시켜야 하므로 재전파하지 않는다.
-                return
+                return False
 
             self._cancellation_requests.discard(meeting_id)
             try:
@@ -1047,7 +1388,7 @@ class JobProcessor:
         except InvalidInputError as e:
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 await self._finalize_user_cancellation(job_id, meeting_id)
-                return
+                return False
             try:
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
@@ -1061,7 +1402,7 @@ class JobProcessor:
                 )
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 await self._finalize_user_cancellation(job_id, meeting_id)
-                return
+                return False
             await self._thermal_manager.notify_job_completed()
             logger.info(
                 f"입력 품질 검증 비수락으로 작업 보류: "
@@ -1075,7 +1416,7 @@ class JobProcessor:
         except Exception as e:
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 await self._finalize_user_cancellation(job_id, meeting_id)
-                return
+                return False
             # 실패 상태 업데이트
             error_msg = str(e)
             await self._update_job_status_safe(
@@ -1085,7 +1426,7 @@ class JobProcessor:
             )
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 await self._finalize_user_cancellation(job_id, meeting_id)
-                return
+                return False
             await self._thermal_manager.notify_job_completed()
             await self._broadcast_event(
                 "job_failed",
@@ -1093,6 +1434,7 @@ class JobProcessor:
             )
 
             logger.error(f"작업 처리 실패: job_id={job_id}, error={e}")
+        return False
 
 
 # === 파이프라인 단계 → 작업 상태 매핑 ===

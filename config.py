@@ -624,6 +624,11 @@ class PipelineConfig(BaseModel):
 
     peak_ram_limit_gb: float = Field(default=9.5, ge=1.0, le=16.0)
     checkpoint_enabled: bool = True
+    bulk_stage_batching: bool = Field(
+        default=False,
+        description="로컬 전체 처리 대기 2건을 전사→화자분리→LLM 순서로 묶는 시험 기능",
+    )
+    bulk_max_items: int = Field(default=2, ge=1, le=2)
     checkpoint_json_indent: int | None = Field(
         default=2,
         ge=0,

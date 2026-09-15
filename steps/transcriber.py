@@ -38,6 +38,7 @@ from core.io_utils import atomic_write_json
 from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
 from core.preflight import run_preflight
 from core.retry_policy import NonRetryableError, TranscriptionTimeoutError
+from core.whisper_backend import ThreadBoundWhisperBackend
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +609,8 @@ class Transcriber:
         TypeError가 발생할 수 있다. `**kwargs`만 있는 mock/래퍼는 실제 하위 구현이
         거부할 수 있으므로, 명시적 `batch_size` 파라미터가 있을 때만 활성화한다.
         """
+        if isinstance(whisper_module, ThreadBoundWhisperBackend):
+            return whisper_module.supports_batch_size
         transcribe_fn = getattr(whisper_module, "transcribe", None)
         if transcribe_fn is None:
             return False
@@ -713,7 +716,7 @@ class Transcriber:
             # 모델 로드 대기 중 교체되는 입력을 최대한 일찍 차단한다.
             self._assert_audio_identity(audio_path, audio_identity)
             async with self._manager.acquire(
-                "whisper", self._load_whisper_module
+                "whisper", lambda: ThreadBoundWhisperBackend(self._load_whisper_module)
             ) as whisper_module:
                 # acquire()가 모델을 로드하는 동안에도 파일이 바뀔 수 있으므로
                 # mlx-whisper가 경로를 열기 직전에 다시 확인한다.

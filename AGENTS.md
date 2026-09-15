@@ -433,6 +433,10 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
 ### 핵심 규칙
 
 1. **한 번에 하나의 대형 모델만 메모리 적재** — `ModelLoadManager` 뮤텍스
+   동기 load/cleanup의 기다림은 서버 루프 밖에서 수행한다. Whisper와 MLX LLM은
+   각각 전용 스레드에서 로딩·추론·캐시 정리를 수행하며, 취소 뒤에도 실제 native
+   종료까지 모델 admission을 유지한다. `residency_scope`는 모델 재사용 정책만
+   설정하고 묶음 전체에 걸쳐 잠금을 잡지 않는다.
 2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 회의록 → 청크 → 임베딩 (회의록 생성이 검색 인덱싱 실패에 의해 차단되지 않도록 순서 결정). OpenAI 단일 업로드 응답에 화자/시간 세그먼트가 있으면 pyannote를 우회하고, 여러 client-side 청크는 기존 로컬 pyannote를 사용한다.
 3. **피크 RAM 9.5GB 이하** 유지 (16GB 중 나머지는 OS + 앱)
 4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
@@ -453,6 +457,12 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
    회의의 FIFO lease 대기열에 등록한다. 재색인은 source read부터 index/checkpoint 게시까지
    lease를 유지하고 lexical no-follow source와 pinned checkpoint writer만 사용한다.
 8. **서멀 관리**: 2건 처리 후 3분 쿨다운 (팬리스 MacBook Air)
+   시험 옵션 `pipeline.bulk_stage_batching: true`는 같은 local/full/STT 모델의 대기
+   회의를 최대 2건 고정하여 전사→화자분리·병합→교정·요약→검색 순으로 묶는다.
+   기본은 false이며 서멀 잔여 여유가 2건 미만이면 단건 경로를 사용한다.
+   중간 결과는 `paused`와 완료 prefix로 저장한다. 복구 기준은 기존 JobQueue와
+   체크포인트이며, StageWorkQueue는 실행 기록이다. 상세 계약은
+   `docs/design-decisions/bulk-stage-processing.md`를 따른다.
 9. **자동 처리 backlog 보존** — 자동 처리를 활성화하면 기본 `max_items_per_run=0`으로 누락분 전체를 JobProcessor 순차 큐에 등록한다. startup 감사가 예약 시각을 넘긴 경우도 `run_on_startup_if_missed=true`로 당일 1회 catch-up한다.
 10. **짧거나 측정 불가능한 오디오는 전사 금지** — `audio_quality.min_duration_seconds` 기본 30초. 16 kHz mono full-decode sample count와 성공한 ffprobe duration 중 더 짧은 값으로 경계를 판정한다. 파일 자체 결함이 확정된 `MEDIA_INVALID`만 `audio_quarantine/`으로 격리하고, 길이를 확정할 수 없는 인프라·busy·보안 실패는 원본을 보존한 채 큐/STT 진입을 차단한다. 입력 및 저장 경로의 symlink는 지원하지 않는다.
 11. **HTTP readiness와 startup 감사 분리** — 기존 오디오 감사는 app-scoped background task로 실행하고 최초·최종 `lsof` 확인을 bounded concurrency와 설정된 단일 probe timeout으로 제한한다. 대상과 무관한 macOS 임시 HFS/APFS stat warning만 좁게 허용하고 권한·대상 mount·unknown stderr는 보류한다. 기존 DB 작업이 없는 startup 신규 ACCEPT만 짧은 writer attestation을 fingerprint 재검사와 함께 재사용하며, 기존 큐 복원·quarantine은 적용 직전에 다시 확인한다. ffmpeg 품질 검증과 DB/quarantine mutation은 순차 실행하고, JobProcessor·Lifecycle·AutoProcessing은 감사 완료 후 시작한다. 수동 복구는 missing-only preserve 경로로만 수행하며 기존 row·원본·quarantine을 변경하지 않는다. 메뉴바는 FastAPI readiness 실패 시 실행하지 않는다.
@@ -667,7 +677,8 @@ macOS Finder/메모 앱 스타일. CSS 변수 기반으로 light/dark 자동 전
 - 로깅: `logging` 모듈, `logger = logging.getLogger(__name__)`
 - 에러 처리: 구체적 예외 타입, bare except 금지
 - 설정값은 `config.yaml`에서 로드 (하드코딩 금지)
-- 비동기: `asyncio` 사용 (threading은 rumps/FastAPI 연동에만)
+- 비동기: `asyncio` 사용. rumps/FastAPI 연동과 native 모델의 전용 worker만 스레드를
+  사용하며 모델 연산은 `ModelLoadManager`의 취소 안전 lease 안에서 실행한다.
 - 문자열: f-string (`.format()` 또는 `%` 금지)
 - 경로: `pathlib.Path` (os.path 금지)
 - **UI/CSS/디자인 작업**: 반드시 [`docs/design.md`](docs/design.md) 먼저 읽고 시작 (디자인 토큰/컴포넌트 패턴/안티 패턴)

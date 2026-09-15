@@ -5,6 +5,76 @@
 - 시작 기준 커밋: `705d642414b27d106a63977c5571512ea5ca375f`
 - 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 → #65 모두 main 반영
 
+## Whisper 스레드 오류 수정 — 로컬 검증 (2026-09-15)
+
+- `20e4806`과 동일 의존성에서 beam 시도와 greedy 폴백의 worker를 바꾸면
+  `mlx_whisper/decoding.py`의 `mx.async_eval()`에서 CPU Stream 오류가 재현됩니다.
+- Whisper 전용 스레드에서 로딩·추론·캐시 정리를 수행하도록 수정했습니다.
+  모델 매니저의 잠금 및 timeout/cancel 후 deferred cleanup은 유지합니다.
+- MLX 0.32.2 / mlx-vlm 0.6.17을 유지한 채 한국어 합성 음성 47초를 두 번
+  연속 전사·Gemma E4B 교정했습니다. 각 12구간, 교정 실패 폴백 0건입니다.
+  이는 실제 모델을 사용하는 단계 통합 검증이며 제보자의 두 회의 복구나
+  전체 JobProcessor·화자분리·HTTP E2E 검증은 아닙니다.
+- 관련 테스트 211 passed, 재개·체크포인트 32 passed,
+  harness 152 passed / 1 skipped. 변경 Python Ruff 및 신규 실행 코드의
+  Python 3.12 대상 mypy를 통과했습니다.
+- 원인·재현 경로·검증 명령은
+  [Whisper MLX 스레드 호환성](design-decisions/whisper-thread-affinity.md)에 기록했습니다.
+
+## 모델 수명과 단계별 일괄 처리 개선 (2026-09-15)
+
+- 동기 모델 load/cleanup의 기다림을 서버 이벤트 루프 밖으로 옮겼습니다.
+  취소된 로드 결과도 실제로 받아 정리한 뒤 모델 슬롯을 반납합니다.
+- Whisper와 Gemma의 전용 스레드를 유지하면서, 이름·재사용 key·실제 모델 identity로
+  보호한 `residency_scope`를 추가했습니다. 범위 자체는 모델 잠금을 잡지 않습니다.
+- `bulk_stage_batching` 시험 옵션은 같은 local/full/STT 모델의 회의를 최대 2건씩
+  전사 → 화자분리·병합 → 교정·요약 → 검색 순으로 처리합니다. 기본은 false이며
+  서멀 잔여 용량과 기존 2건/180초 쿨다운을 유지합니다.
+- 중간 경계는 `paused`와 완료 checkpoint prefix로 저장합니다. 기존 JobQueue가
+  재시작 복구를 담당하고 새 StageWorkQueue는 이번 묶음의 실행 기록을 남깁니다.
+  사용자 취소·종료·원본 교체·설정 변경과 다른 회의의 정리 오류를 분리합니다.
+- MLX 생성 통계 조회를 추가하고, VLM temperature 전달과 raw mlx-lm cache의
+  요청 간 혼입을 수정했습니다. Gemma VLM의 실제 prefix cache 재사용은 유지합니다.
+- 의존성은 MLX/Metal 0.32.2, mlx-vlm 0.6.17, mlx-whisper 0.4.3입니다.
+  `uv pip check --python .venv/bin/python`에서 195개 패키지가 호환됩니다.
+
+### 격리된 짧은 입력 비교
+
+M4/24GiB에서 고정 한국어 문장 두 개를 각 한 번 생성한 결과입니다. 로드와 정리
+시간을 포함하며 실제 회의 전사·화자분리·요약·검색은 포함하지 않습니다.
+
+| 조건 | 전체 시간 | LLM 로드 | 재사용 |
+|---|---:|---:|---:|
+| 0.6.17, 매 요청 다시 로드 | 13.307초 | 2회 | 0회 |
+| 0.6.17, 모델 유지 | 11.218초 | 1회 | 1회 |
+| 격리 0.7.1, 모델 유지 | 9.530초 | 1회 | 1회 |
+
+세 조건의 대응 출력 hash는 같았습니다. 표본이 작고 실행 순서·첫 로딩 시간이 달라
+긴 회의의 개선율이나 0.7.1 업그레이드 근거로 일반화하지 않습니다. 프로젝트 환경의
+mlx-vlm은 변경하지 않았습니다. 재현 도구는 `scripts/benchmark_bulk_models.py`입니다.
+
+### 검증
+
+- 실제 `JobProcessor.start()` 경로에서 47초 한국어 합성 음성의 독립 복사본 두 건을
+  단계별 묶음으로 처리했습니다. 실제 converter·Whisper·병합·Gemma 교정/요약·chunk,
+  SQLite 큐와 체크포인트를 사용했습니다. pyannote credential 준비와 e5 가중치 캐시가
+  부족하여 화자분리와 검색 임베딩/저장은 명시적인 검증 대역으로 교체했습니다.
+- 두 작업과 8개 묶음 단계 기록이 모두 completed입니다. 각 전사 12구간,
+  교정 실패 0건, 요약 폴백 0건, 회의록 파일 존재와 원본 hash 보존을 확인했습니다.
+  Whisper/Gemma 각각 1회 로드했고 재사용 총 4회, 종료 후 모델·native/residency
+  cleanup pending은 모두 없습니다. 재현 도구는 `scripts/verify_bulk_pipeline.py`입니다.
+- 전체 699.7초에는 기존 180초 쿨다운이 포함됩니다. 실행 중 다른 테스트도 수행했고
+  가용 메모리 3.8~4.0GB 경고가 있어 정상 상태의 속도 비교 자료로 사용하지 않습니다.
+  제보자의 두 원본 회의, 16GB Mac, 실제 pyannote·e5 및 HTTP/UI 전체 E2E는 미검증입니다.
+- 기본 테스트: `pytest tests/ -q` → **4,029 passed, 1 skipped**, 240 deselected.
+  UI/E2E/native는 별도 marker라 이 명령에서 제외됩니다.
+- 릴리스 하네스: `pytest -m harness -q` → **152 passed, 1 skipped**.
+- 독립 검토에서 발견한 Wiki 복원·취소 경쟁은 수정 후 추가 회귀로 검증했습니다.
+  취소가 DB 조회/queued 변경 직전에 도착하는 두 경계와 회의별 정리 실패 격리를 포함합니다.
+  최종 관련 회귀 **115 passed**, 모델 수명·단계 큐·검증 도구 **56 passed**입니다.
+- 전체 Ruff·format, Python 3.12 대상 production mypy를 통과했습니다.
+- 구현 계약과 설정: [단계별 일괄 처리](design-decisions/bulk-stage-processing.md).
+
 ## 현재 판단
 
 이번 정리 wave 이후 프로젝트는 이전 평가에서 지적된 가장 큰 구조적 리스크를
