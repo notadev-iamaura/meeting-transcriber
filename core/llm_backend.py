@@ -353,6 +353,15 @@ class ThreadBoundLLMBackend:
             future.result()
             return
 
+    def get_generation_metrics(self) -> dict[str, int | float | str | None]:
+        """백엔드 전용 스레드에서 마지막 생성 통계의 복사본을 가져온다."""
+
+        def read_metrics(backend: LLMBackend) -> dict[str, int | float | str | None]:
+            getter = getattr(backend, "get_generation_metrics", None)
+            return dict(getter()) if callable(getter) else {}
+
+        return self._run_on_worker(read_metrics)
+
     def cleanup(self) -> None:
         """전용 worker thread에서 backend cleanup을 실행하고 executor를 종료한다."""
         if self._closed:

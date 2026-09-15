@@ -18,7 +18,9 @@ from __future__ import annotations
 import gc
 import hashlib
 import logging
+import math
 import sys
+import time
 from collections.abc import Iterator
 from typing import Any, cast
 
@@ -87,12 +89,12 @@ class MLXBackend:
             "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit",
         )
 
-        # Prompt cache — 같은 시스템 프롬프트를 반복 호출할 때 KV cache 재사용해
-        # 프리필 비용을 첫 호출로만 고정한다 (실측 Gemma 4: 38.4% 절감).
-        # 자동 관리: chat() 호출 시 system prompt 해시가 바뀌면 리셋.
+        # VLM은 라이브러리가 실제 토큰 prefix를 비교해 안전한 구간만 재사용한다.
+        # mlx-lm의 raw cache에는 이 비교가 없어 요청마다 새 cache를 사용한다.
         self._vlm_prompt_cache_state: Any = None  # mlx_vlm.generate.PromptCacheState
         self._lm_prompt_cache: list | None = None  # mlx_lm.models.cache 구조
         self._last_system_prompt_hash: str | None = None
+        self._generation_metrics: dict[str, int | float | str | None] = {}
 
         # Gemma 4 모델 여부 판별 → mlx-vlm 또는 mlx-lm 자동 분기
         model_name_lower = self._model_name.lower()
@@ -260,6 +262,8 @@ class MLXBackend:
         if self._model is None or self._tokenizer is None:
             raise MLXGenerationError("MLX 모델이 로드되지 않았습니다")
 
+        started = time.monotonic()
+        self._generation_metrics = {}
         try:
             self._maybe_reset_prompt_cache(messages)
             prompt = self._apply_chat_template(messages)
@@ -286,6 +290,7 @@ class MLXBackend:
                 stream_kwargs: dict[str, Any] = {
                     "max_tokens": token_limit,
                     "verbose": False,
+                    "temperature": temp,
                 }
                 if self._vlm_prompt_cache_state is not None:
                     stream_kwargs["prompt_cache_state"] = self._vlm_prompt_cache_state
@@ -300,6 +305,7 @@ class MLXBackend:
                     ):
                         # chunk.text 는 mlx-vlm stream 의 공식 필드
                         text_parts.append(getattr(chunk, "text", ""))
+                        self._capture_generation_metrics(chunk)
                     return "".join(text_parts)
 
                 # stream_generate 미지원 구버전 → 기존 generate 폴백
@@ -309,7 +315,9 @@ class MLXBackend:
                     prompt=prompt,
                     max_tokens=token_limit,
                     verbose=False,
+                    temperature=temp,
                 )
+                self._capture_generation_metrics(result)
                 return cast(str, result.text)
             else:
                 from mlx_lm import generate  # type: ignore[import-untyped]
@@ -326,8 +334,9 @@ class MLXBackend:
                 except ImportError:
                     gen_kwargs["temp"] = temp
 
-                # Prompt cache — 시스템 프롬프트가 유지되면 같은 cache 로 재호출해
-                # prefix prefill 을 건너뛴다.
+                # 전체 prompt를 raw KV cache에 다시 넣으면 이전 요청에 이어 붙는다.
+                # 회의 간 내용 혼입을 막기 위해 요청마다 빈 cache로 시작한다.
+                self._lm_prompt_cache = None
                 if self._lm_prompt_cache is None:
                     try:
                         from mlx_lm.models.cache import (  # type: ignore[import-untyped]
@@ -354,9 +363,44 @@ class MLXBackend:
                 return response
 
         except MLXGenerationError:
+            self.reset_prompt_cache()
             raise
         except Exception as e:
+            self.reset_prompt_cache()
             raise MLXGenerationError(f"MLX 텍스트 생성 실패: {e}") from e
+        finally:
+            self._generation_metrics["duration_seconds"] = time.monotonic() - started
+
+    def _capture_generation_metrics(self, result: Any) -> None:
+        """라이브러리가 제공한 숫자 통계만 저장하며 입력과 응답은 저장하지 않는다."""
+        for key, source in (
+            ("prompt_tokens", "prompt_tokens"),
+            ("generation_tokens", "generation_tokens"),
+            ("prompt_tps", "prompt_tps"),
+            ("generation_tps", "generation_tps"),
+            ("peak_memory_gb", "peak_memory"),
+        ):
+            value = getattr(result, source, None)
+            if type(value) not in (int, float):
+                continue
+            numeric = cast(int | float, value)
+            if math.isfinite(numeric) and numeric >= 0:
+                self._generation_metrics[key] = numeric
+
+    def get_generation_metrics(self) -> dict[str, int | float | str | None]:
+        """마지막 생성의 측정값을 복사해 반환하고 미제공 통계는 None으로 표시한다."""
+        metrics: dict[str, int | float | str | None] = dict.fromkeys(
+            (
+                "duration_seconds",
+                "prompt_tokens",
+                "generation_tokens",
+                "prompt_tps",
+                "generation_tps",
+                "peak_memory_gb",
+            )
+        )
+        metrics.update(getattr(self, "_generation_metrics", {}))
+        return metrics
 
     def chat_stream(
         self,
@@ -387,52 +431,51 @@ class MLXBackend:
         if self._model is None or self._tokenizer is None:
             raise MLXGenerationError("MLX 모델이 로드되지 않았습니다")
 
+        if self._use_vlm:
+            # 기존의 전체 생성 후 한 번 전달하는 계약을 유지하며 chat과 통계를 공유한다.
+            yield self.chat(
+                messages=messages,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            return
+
+        started = time.monotonic()
+        self._generation_metrics = {}
         try:
             prompt = self._apply_chat_template(messages)
             temp = temperature if temperature is not None else self._temperature
             token_limit = max_tokens if max_tokens is not None else self._max_tokens
 
-            if self._use_vlm:
-                # mlx-vlm은 스트리밍을 별도로 지원하지 않으므로
-                # 전체 생성 후 한번에 yield하는 폴백 처리
-                result = self._vlm_generate(
-                    self._model,
-                    self._processor,
-                    prompt=prompt,
-                    max_tokens=token_limit,
-                    verbose=False,
-                )
-                yield result.text
-            else:
-                from mlx_lm import stream_generate  # type: ignore[import-untyped]
+            from mlx_lm import stream_generate  # type: ignore[import-untyped]
 
-                # mlx-lm 0.30.x+ 에서 temp 인자가 제거되고 sampler 로 대체됨
-                stream_kwargs: dict[str, Any] = {
-                    "max_tokens": token_limit,
-                }
-                try:
-                    from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
+            stream_kwargs: dict[str, Any] = {"max_tokens": token_limit}
+            try:
+                from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
-                    stream_kwargs["sampler"] = make_sampler(temp=temp)
-                except ImportError:
-                    stream_kwargs["temp"] = temp
+                stream_kwargs["sampler"] = make_sampler(temp=temp)
+            except ImportError:
+                stream_kwargs["temp"] = temp
 
-                for response in stream_generate(
-                    self._model,
-                    self._tokenizer,
-                    prompt=prompt,
-                    **stream_kwargs,
-                ):
-                    # stream_generate는 GenerateStepOutput 객체를 반환
-                    # .text 속성에서 토큰 텍스트를 추출
-                    text = getattr(response, "text", str(response))
-                    if text:
-                        yield text
+            for response in stream_generate(
+                self._model,
+                self._tokenizer,
+                prompt=prompt,
+                **stream_kwargs,
+            ):
+                self._capture_generation_metrics(response)
+                text = getattr(response, "text", str(response))
+                if text:
+                    yield text
 
         except MLXGenerationError:
             raise
         except Exception as e:
             raise MLXGenerationError(f"MLX 스트리밍 생성 실패: {e}") from e
+        finally:
+            self._generation_metrics["duration_seconds"] = time.monotonic() - started
 
     def cleanup(self) -> None:
         """MLX 모델을 메모리에서 해제하고 Metal GPU 캐시를 정리한다.

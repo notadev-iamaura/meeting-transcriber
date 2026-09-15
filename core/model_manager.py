@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import logging
 import os
 import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine
-from contextvars import ContextVar, Token
+from contextvars import ContextVar, Token, copy_context
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, Union, cast
 
@@ -39,6 +40,9 @@ T = TypeVar("T")
 _active_model_context: ContextVar[Any] = ContextVar(
     "active_model_context",
     default=None,
+)
+_active_model_residencies: ContextVar[tuple[Any, ...]] = ContextVar(
+    "active_model_residencies", default=()
 )
 
 # 모델 로더 타입: 동기 또는 비동기 함수
@@ -107,6 +111,7 @@ class ModelInfo:
         loaded_at: 로드 시각 (Unix timestamp)
         memory_before_mb: 로드 전 프로세스 메모리 (MB)
         memory_after_mb: 로드 후 프로세스 메모리 (MB)
+        reuse_key: 동명 모델의 설정을 구분하는 재사용 식별자
     """
 
     name: str
@@ -114,6 +119,7 @@ class ModelInfo:
     loaded_at: float = field(default_factory=time.time)
     memory_before_mb: float = 0.0
     memory_after_mb: float = 0.0
+    reuse_key: str | None = None
 
     @property
     def memory_delta_mb(self) -> float:
@@ -134,8 +140,23 @@ class _NativeInferenceWorker:
     ``finished``는 함수 본문이 실제로 반환하거나 예외로 끝난 뒤에만 설정된다.
     """
 
-    task: asyncio.Task[Any]
+    task: asyncio.Future[Any]
     finished: threading.Event
+
+
+@dataclass
+class _ModelLifecycleOperation:
+    """취소된 동기 로드·정리의 실제 결과와 소유 모델을 보존한다."""
+
+    kind: str
+    model_name: str
+    started_at: float = field(default_factory=time.monotonic)
+    model_info: ModelInfo | None = None
+    reuse_key: str | None = None
+    result: Any = None
+    error: BaseException | None = None
+    finished_at: float | None = None
+    state_applied: bool = False
 
 
 @dataclass
@@ -145,6 +166,7 @@ class _DeferredContextCleanup:
     model_name: str
     workers: tuple[_NativeInferenceWorker, ...]
     unload_after: bool
+    lifecycle_operation: _ModelLifecycleOperation | None = None
     started_at: float = field(default_factory=time.time)
     task: asyncio.Task[None] | None = None
 
@@ -189,6 +211,12 @@ class ModelLoadManager:
         self._context_lock = asyncio.Lock()
         self._current: ModelInfo | None = None
         self._deferred_context_cleanup: _DeferredContextCleanup | None = None
+        self._residency_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._model_load_count = 0
+        self._model_reuse_count = 0
+        self._last_load_seconds: float | None = None
+        self._last_unload_seconds: float | None = None
+        self._last_context_wait_seconds: float | None = None
         self._config = get_config()
         self._gpu_cache_cleanup_enabled = (
             not _env_flag_enabled(_DISABLE_GPU_CACHE_CLEANUP_ENV)
@@ -275,33 +303,26 @@ class ModelLoadManager:
         except Exception as e:
             logger.warning(f"Metal 캐시 정리 중 오류 (무시): {e}")
 
-    async def _unload_current(self) -> None:
-        """현재 로드된 모델을 언로드하고 메모리를 해제한다.
+    def _cleanup_model_info(self, model_info: ModelInfo) -> None:
+        """동기 worker에서 backend 정리와 GC·공용 allocator 캐시 정리를 수행한다.
 
-        수행 순서:
-            1. 모델 참조 제거
-            2. gc.collect() 호출
-            3. Metal GPU 캐시 정리 (가능한 경우)
-            4. 메모리 변화 로깅
+        MLX/Whisper backend의 cleanup은 내부 전용 스레드로 다시 전달된다.
+        매니저는 해당 호출이 반환한 뒤 참조와 공용 캐시만 정리한다.
         """
-        if self._current is None:
-            return
-
-        model_name = self._current.name
+        model_name = model_info.name
         mem_before_unload = self._get_memory_usage_mb()
 
         logger.info(f"모델 언로드 시작: {model_name}")
 
         # 백엔드별 정리 (MLX: 모델 해제 + Metal 캐시, Ollama: no-op)
-        if self._current.instance is not None and hasattr(self._current.instance, "cleanup"):
+        if model_info.instance is not None and hasattr(model_info.instance, "cleanup"):
             try:
-                self._current.instance.cleanup()
+                model_info.instance.cleanup()
             except Exception as cleanup_err:
                 logger.warning(f"cleanup() 실행 중 오류 (무시): {cleanup_err}")
 
         # 모델 참조 제거
-        self._current.instance = None
-        self._current = None
+        model_info.instance = None
 
         # 가비지 컬렉션 수행 (실패해도 언로드 자체는 완료된 것으로 처리)
         try:
@@ -324,6 +345,74 @@ class ModelLoadManager:
             # 메모리 측정 실패 시에도 언로드 자체는 정상 완료
             logger.info(f"모델 언로드 완료: {model_name} | 메모리 측정 실패: {mem_err}")
 
+    async def _run_sync_lifecycle(
+        self,
+        operation: _ModelLifecycleOperation,
+        func: Callable[[], Any],
+    ) -> Any:
+        """동기 lifecycle을 서버 루프 밖에서 실행하고 취소 시 lease를 이전한다."""
+        finished = threading.Event()
+
+        def run_worker() -> None:
+            try:
+                operation.result = func()
+                return None
+            except BaseException as error:
+                operation.error = error
+                raise
+            finally:
+                operation.finished_at = time.monotonic()
+                finished.set()
+
+        # 바로 executor에 제출하여 to_thread wrapper Task가 실행되기 전 취소되어
+        # finished 신호가 영원히 남지 않는 경계를 피한다. ContextVar는 그대로 전달한다.
+        context = copy_context()
+        task = asyncio.get_running_loop().run_in_executor(None, context.run, run_worker)
+        task.add_done_callback(_ModelContext._observe_native_worker)
+        worker = _NativeInferenceWorker(task=task, finished=finished)
+        try:
+            await asyncio.shield(task)
+            return operation.result
+        except asyncio.CancelledError:
+            if self._deferred_context_cleanup is not None:
+                # 기존 finalizer가 시작한 unload는 같은 lease 안에서 끝까지 정리한다.
+                # worker Task가 직접 취소돼도 별도 결과 슬롯으로 실제 반환값을 보존한다.
+                await self._wait_for_deferred_native_workers(
+                    _DeferredContextCleanup(operation.model_name, (worker,), False)
+                )
+                if operation.error is not None:
+                    raise operation.error from None
+                return operation.result
+            self._defer_context_cleanup(
+                model_name=operation.model_name,
+                workers=(worker,),
+                unload_after=operation.kind == "load",
+                lifecycle_operation=operation,
+            )
+            raise
+
+    async def _unload_current(self) -> None:
+        """모델 슬롯을 유지하면서 동기 cleanup이 완료될 때까지 비동기로 기다린다."""
+        model_info = self._current
+        if model_info is None:
+            return
+        operation = _ModelLifecycleOperation("unload", model_info.name, model_info=model_info)
+        await self._run_sync_lifecycle(operation, lambda: self._cleanup_model_info(model_info))
+        self._complete_lifecycle_unload(operation)
+
+    def _complete_lifecycle_unload(self, operation: _ModelLifecycleOperation) -> None:
+        """실제 정리가 끝난 모델의 상태와 측정값을 서버 루프에서 갱신한다."""
+        if self._current is operation.model_info:
+            self._current = None
+        self._last_unload_seconds = (
+            operation.finished_at if operation.finished_at is not None else time.monotonic()
+        ) - operation.started_at
+
+    def _release_context_lock_unless_deferred(self) -> None:
+        """정리 소유권이 finalizer로 이전되지 않은 경우에만 모델 슬롯을 반납한다."""
+        if self._deferred_context_cleanup is None:
+            self._context_lock.release()
+
     def _check_memory_limit(self) -> None:
         """현재 메모리 사용량이 peak_ram_limit_gb를 초과하는지 확인한다.
 
@@ -339,16 +428,19 @@ class ModelLoadManager:
         self,
         name: str,
         loader: ModelLoader,
+        *,
+        reuse_key: str | None = None,
     ) -> Any:
         """모델을 로드한다. 이미 로드된 모델이 있으면 먼저 언로드한다.
 
-        같은 이름의 모델이 이미 로드되어 있으면 기존 인스턴스를 반환한다.
+        같은 이름과 reuse_key의 모델이 이미 로드되어 있으면 기존 인스턴스를 반환한다.
         다른 모델이 로드되어 있으면 언로드 후 새 모델을 로드한다.
         동시 호출 시 asyncio.Lock으로 순차 처리한다.
 
         Args:
             name: 모델 식별 이름 (예: "whisper", "pyannote", "exaone", "e5")
             loader: 모델을 로드하는 함수 (동기 또는 비동기)
+            reuse_key: 동명 모델의 설정을 구분하는 불변 식별자 (기본 None)
 
         Returns:
             로드된 모델 인스턴스
@@ -358,14 +450,16 @@ class ModelLoadManager:
         """
         await self._acquire_context_lock()
         try:
-            return await self._load_model_with_state_lock(name, loader)
+            return await self._load_model_with_state_lock(name, loader, reuse_key=reuse_key)
         finally:
-            self._context_lock.release()
+            self._release_context_lock_unless_deferred()
 
     async def _load_model_with_state_lock(
         self,
         name: str,
         loader: ModelLoader,
+        *,
+        reuse_key: str | None = None,
     ) -> Any:
         """context lock을 이미 보유한 상태에서 모델을 로드한다.
 
@@ -375,7 +469,12 @@ class ModelLoadManager:
         """
         async with self._lock:
             # 같은 모델이 이미 로드되어 있으면 재사용
-            if self._current is not None and self._current.name == name:
+            if (
+                self._current is not None
+                and self._current.name == name
+                and self._current.reuse_key == reuse_key
+            ):
+                self._model_reuse_count += 1
                 logger.info(f"모델 이미 로드됨, 재사용: {name}")
                 return self._current.instance
 
@@ -385,10 +484,16 @@ class ModelLoadManager:
             # 새 모델 로드
             mem_before = self._get_memory_usage_mb()
             logger.info(f"모델 로드 시작: {name} | 현재 메모리: {mem_before:.1f}MB")
+            load_started = time.monotonic()
 
             try:
                 # 로더가 비동기 함수인지 확인
-                result = loader()
+                if inspect.iscoroutinefunction(loader):
+                    result = loader()
+                else:
+                    result = await self._run_sync_lifecycle(
+                        _ModelLifecycleOperation("load", name, reuse_key=reuse_key), loader
+                    )
                 if asyncio.iscoroutine(result):
                     instance = await result
                 else:
@@ -405,7 +510,10 @@ class ModelLoadManager:
                 loaded_at=time.time(),
                 memory_before_mb=mem_before,
                 memory_after_mb=mem_after,
+                reuse_key=reuse_key,
             )
+            self._model_load_count += 1
+            self._last_load_seconds = time.monotonic() - load_started
 
             logger.info(
                 f"모델 로드 완료: {name} | "
@@ -441,7 +549,7 @@ class ModelLoadManager:
         try:
             await self._unload_model_locked()
         finally:
-            self._context_lock.release()
+            self._release_context_lock_unless_deferred()
 
     async def unload_if_current(self, name: str) -> bool:
         """현재 로드된 모델 이름이 일치할 때만 언로드한다.
@@ -472,7 +580,7 @@ class ModelLoadManager:
         try:
             return await self._unload_if_current_locked(name)
         finally:
-            self._context_lock.release()
+            self._release_context_lock_unless_deferred()
 
     async def _unload_model_locked(self) -> None:
         """context lock을 이미 보유한 상태에서 현재 모델을 언로드한다.
@@ -496,12 +604,50 @@ class ModelLoadManager:
         """acquire() 컨텍스트 종료 시 현재 모델을 언로드한다."""
         await self._unload_model_locked()
 
+    async def _unload_owned_model(self, model_info: ModelInfo) -> None:
+        """residency가 사용한 실제 인스턴스가 현재 모델일 때만 정리한다."""
+        if self._current is not model_info:
+            return
+        cleanup = self._deferred_context_cleanup
+        if cleanup is not None:
+            cleanup.unload_after = True
+            return
+        try:
+            await self._acquire_context_lock()
+        except NativeCleanupPendingError:
+            cleanup = self._deferred_context_cleanup
+            if self._current is model_info and cleanup is not None:
+                cleanup.unload_after = True
+            return
+        try:
+            async with self._lock:
+                if self._current is model_info:
+                    await self._unload_current()
+        finally:
+            self._release_context_lock_unless_deferred()
+
+    def _start_residency_cleanup(self, model_info: ModelInfo) -> asyncio.Task[None]:
+        """scope 호출자가 취소돼도 인스턴스 확인과 정리 요청이 남도록 보유한다."""
+        task = asyncio.create_task(
+            self._unload_owned_model(model_info), name=f"model-residency-cleanup:{model_info.name}"
+        )
+        self._residency_cleanup_tasks.add(task)
+        task.add_done_callback(self._observe_residency_cleanup)
+        return task
+
+    def _observe_residency_cleanup(self, task: asyncio.Task[None]) -> None:
+        """scope와 분리된 정리의 결과를 회수하고 task 참조를 해제한다."""
+        self._residency_cleanup_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error(f"모델 residency 정리 실패: {error}")
+
     def _defer_context_cleanup(
         self,
         *,
         model_name: str,
         workers: tuple[_NativeInferenceWorker, ...],
         unload_after: bool,
+        lifecycle_operation: _ModelLifecycleOperation | None = None,
     ) -> None:
         """남은 native worker가 끝날 때까지 context lease를 background로 이전한다.
 
@@ -517,6 +663,7 @@ class ModelLoadManager:
             model_name=model_name,
             workers=workers,
             unload_after=unload_after,
+            lifecycle_operation=lifecycle_operation,
         )
         self._deferred_context_cleanup = cleanup
         self._start_deferred_context_cleanup(cleanup)
@@ -548,6 +695,7 @@ class ModelLoadManager:
         시작되면 다음 짧은 polling 경계에서 typed 오류로 깨어난다. ``wait_for``가
         timeout될 때 asyncio.Lock waiter도 함께 취소되므로 고아 waiter를 남기지 않는다.
         """
+        started_at = time.monotonic()
         while True:
             self._raise_if_native_cleanup_pending()
             try:
@@ -563,6 +711,7 @@ class ModelLoadManager:
             except BaseException:
                 self._context_lock.release()
                 raise
+            self._last_context_wait_seconds = time.monotonic() - started_at
             return
 
     def _start_deferred_context_cleanup(self, cleanup: _DeferredContextCleanup) -> None:
@@ -698,6 +847,26 @@ class ModelLoadManager:
     ) -> None:
         """worker 종료 뒤 모델 cleanup과 admission lock 반납을 순서대로 수행한다."""
         await self._wait_for_deferred_native_workers(cleanup)
+        operation = cleanup.lifecycle_operation
+        if operation is not None and not operation.state_applied and operation.error is None:
+            if operation.kind == "load":
+                if asyncio.iscoroutine(operation.result):
+                    # 동기 factory가 만든 coroutine은 아직 실행 전이다.
+                    operation.result.close()
+                else:
+                    self._current = ModelInfo(
+                        operation.model_name, operation.result, reuse_key=operation.reuse_key
+                    )
+                    operation.result = None
+                    self._model_load_count += 1
+                    self._last_load_seconds = (
+                        operation.finished_at
+                        if operation.finished_at is not None
+                        else time.monotonic()
+                    ) - operation.started_at
+            else:
+                self._complete_lifecycle_unload(operation)
+            operation.state_applied = True
         if cleanup.unload_after:
             await self._await_deferred_unload(cleanup)
         self._complete_deferred_context_cleanup(cleanup)
@@ -721,6 +890,7 @@ class ModelLoadManager:
         loader: ModelLoader,
         *,
         keep_loaded: bool = False,
+        reuse_key: str | None = None,
     ) -> _ModelContext:
         """컨텍스트 매니저로 모델을 로드하고, 블록 종료 시 자동 언로드한다.
 
@@ -740,11 +910,40 @@ class ModelLoadManager:
             name: 모델 식별 이름
             loader: 모델 로드 함수 (동기 또는 비동기)
             keep_loaded: True면 블록 종료 후에도 모델 유지 (기본 False)
+            reuse_key: 설정이 다른 동명 모델을 구분하는 불변 키.
 
         Returns:
             비동기 컨텍스트 매니저 (_ModelContext)
         """
-        return _ModelContext(self, name, loader, keep_loaded=keep_loaded)
+        residency = next(
+            (
+                scope
+                for scope in reversed(_active_model_residencies.get())
+                if scope._manager is self
+                and scope._name == name
+                and scope._token is not None
+                and (reuse_key is None or reuse_key == scope._reuse_key)
+            ),
+            None,
+        )
+        if residency is not None:
+            reuse_key = residency._reuse_key
+        return _ModelContext(
+            self,
+            name,
+            loader,
+            keep_loaded=keep_loaded,
+            reuse_key=reuse_key,
+            residency=residency,
+        )
+
+    def residency_scope(self, name: str, *, reuse_key: str) -> _ModelResidencyContext:
+        """유한 작업 묶음 안에서 같은 모델을 유지하고 종료 시 자기 모델만 정리한다.
+
+        scope 자체는 모델 잠금을 보유하지 않는다. 각 acquire가 기존 admission과
+        native lease를 사용하며, 다른 작업은 필요하면 현재 모델을 교체할 수 있다.
+        """
+        return _ModelResidencyContext(self, name, reuse_key)
 
     def get_status(self) -> dict[str, Any]:
         """현재 모델 매니저의 상태 정보를 딕셔너리로 반환한다.
@@ -759,6 +958,12 @@ class ModelLoadManager:
             "memory_usage_gb": round(self._get_memory_usage_gb(), 3),
             "peak_ram_limit_gb": self._config.pipeline.peak_ram_limit_gb,
             "native_cleanup_pending": self._deferred_context_cleanup is not None,
+            "residency_cleanup_pending": bool(self._residency_cleanup_tasks),
+            "model_load_count": self._model_load_count,
+            "model_reuse_count": self._model_reuse_count,
+            "last_load_seconds": self._last_load_seconds,
+            "last_unload_seconds": self._last_unload_seconds,
+            "last_context_wait_seconds": self._last_context_wait_seconds,
         }
         if self._current is not None:
             status["model_memory_delta_mb"] = round(self._current.memory_delta_mb, 1)
@@ -770,7 +975,36 @@ class ModelLoadManager:
                 not worker.finished.is_set() for worker in cleanup.workers
             )
             status["native_cleanup_started_at"] = cleanup.started_at
+            if cleanup.lifecycle_operation is not None:
+                status["native_cleanup_operation"] = cleanup.lifecycle_operation.kind
         return status
+
+
+class _ModelResidencyContext:
+    """현재 task의 acquire 정책과 종료 시 정리할 모델 identity를 보유한다."""
+
+    def __init__(self, manager: ModelLoadManager, name: str, reuse_key: str) -> None:
+        self._manager = manager
+        self._name = name
+        self._reuse_key = reuse_key
+        self._model_info: ModelInfo | None = None
+        self._token: Token[tuple[Any, ...]] | None = None
+
+    async def __aenter__(self) -> _ModelResidencyContext:
+        """잠금을 잡지 않고 현재 task의 모델 재사용 정책을 등록한다."""
+        if self._token is not None:
+            raise RuntimeError("이미 사용 중인 모델 residency scope입니다.")
+        self._token = _active_model_residencies.set((*_active_model_residencies.get(), self))
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """정책을 복원하고 이 scope가 실제 사용했던 현재 모델만 정리한다."""
+        if self._token is not None:
+            _active_model_residencies.reset(self._token)
+            self._token = None
+        model_info, self._model_info = self._model_info, None
+        if model_info is not None:
+            await asyncio.shield(self._manager._start_residency_cleanup(model_info))
 
 
 class _ModelContext:
@@ -789,11 +1023,15 @@ class _ModelContext:
         loader: ModelLoader,
         *,
         keep_loaded: bool = False,
+        reuse_key: str | None = None,
+        residency: _ModelResidencyContext | None = None,
     ) -> None:
         self._manager = manager
         self._name = name
         self._loader = loader
         self._keep_loaded = keep_loaded
+        self._reuse_key = reuse_key
+        self._residency = residency
         self._context_token: Token[Any] | None = None
         self._native_workers: list[_NativeInferenceWorker] = []
         self._closing = False
@@ -803,18 +1041,22 @@ class _ModelContext:
         """모델을 로드하고 인스턴스를 반환한다."""
         await self._manager._acquire_context_lock()
         try:
-            model = await self._manager._load_model_with_state_lock(self._name, self._loader)
+            model = await self._manager._load_model_with_state_lock(
+                self._name, self._loader, reuse_key=self._reuse_key
+            )
+            if self._residency is not None and self._residency._token is not None:
+                self._residency._model_info = self._manager._current
             self._context_token = _active_model_context.set(self)
             return model
         except BaseException:
             # ``asyncio.CancelledError`` 는 Exception 계층 밖에 있으므로,
             # 비동기 loader 대기 중 취소되면 context lock도 반드시 반납해야 한다.
             # 그렇지 않으면 이후 모든 load/acquire가 영구 대기한다.
-            self._manager._context_lock.release()
+            self._manager._release_context_lock_unless_deferred()
             raise
 
     @staticmethod
-    def _observe_native_worker(task: asyncio.Task[Any]) -> None:
+    def _observe_native_worker(task: asyncio.Future[Any]) -> None:
         """완료된 worker 예외를 회수해 취소 뒤 경고 누락을 막는다."""
         if task.cancelled():
             return
@@ -873,12 +1115,15 @@ class _ModelContext:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """모델을 언로드한다. keep_loaded=True면 유지, 예외 시에는 항상 언로드."""
         release_context_lock = True
+        keep_loaded = self._keep_loaded or (
+            self._residency is not None and self._residency._token is not None
+        )
         try:
             pending_workers = self._take_pending_native_workers()
             if pending_workers:
                 # timeout/cancel은 호출자에게 즉시 전파한다. 대신 모델과 admission lock의
                 # 소유권을 finalizer로 옮겨 actual native thread 종료 전 cleanup을 막는다.
-                unload_after = not (self._keep_loaded and exc_type is None)
+                unload_after = not (keep_loaded and exc_type is None)
                 # finalizer 생성이 실패해도 lock을 먼저 반납하면 native worker가 모델을
                 # 계속 쓰는 중 use-after-unload가 된다. 그 드문 경우에는 안전하게 lock을
                 # 보존하고 오류를 전파해 운영자가 pending 상태/로그를 확인하게 한다.
@@ -891,8 +1136,8 @@ class _ModelContext:
                 return
 
             # PERF-001: keep_loaded=True이고 예외가 없으면 모델 유지
-            if self._keep_loaded and exc_type is None:
-                logger.debug(f"모델 유지 (keep_loaded=True): {self._name}")
+            if keep_loaded and exc_type is None:
+                logger.debug(f"모델 유지 (명시적 보유 또는 residency scope): {self._name}")
                 return
             await self._manager._unload_model_from_context()
         finally:
@@ -900,7 +1145,7 @@ class _ModelContext:
                 _active_model_context.reset(self._context_token)
                 self._context_token = None
             if release_context_lock:
-                self._manager._context_lock.release()
+                self._manager._release_context_lock_unless_deferred()
 
 
 # 모듈 수준 싱글턴 인스턴스 (threading.Lock으로 경합 조건 방지)

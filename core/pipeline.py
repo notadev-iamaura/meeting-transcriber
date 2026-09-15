@@ -2466,6 +2466,12 @@ class PipelineManager:
         step_start = time.monotonic()
         step_name = PipelineStep.WIKI_COMPILE.value
         try:
+            if summary_result is None and PipelineStep.SUMMARIZE.value not in state.skipped_steps:
+                from steps.summarizer import SummaryResult
+
+                summary_cp = self._get_checkpoint_path(meeting_id, PipelineStep.SUMMARIZE)
+                if summary_cp.exists():
+                    summary_result = SummaryResult.from_checkpoint(summary_cp)
             wiki = WikiCompiler(self._config, self._model_manager)
             summary_text = ""
             if summary_result is not None:
@@ -2535,6 +2541,7 @@ class PipelineManager:
         should_cancel: Callable[[], bool] | None = None,
         stt_provider: str | None = None,
         stt_model: str | None = None,
+        stop_after: PipelineStep | None = None,
     ) -> PipelineState:
         """회의 전체 파이프라인을 같은 회의의 다른 mutation과 직렬화해 실행한다.
 
@@ -2542,6 +2549,11 @@ class PipelineManager:
         확정하고 검증한 뒤 전체 실행 구간 동안 공유 lease를 유지한다.
         """
         # ID 자동 생성도 실제 본문과 동일한 lexical 입력 경로를 사용한다.
+        if stop_after is not None:
+            if not isinstance(stop_after, PipelineStep) or stop_after not in PIPELINE_STEPS:
+                raise PipelineError("stop_after는 유효한 PipelineStep이어야 합니다")
+            if not self._checkpoint_enabled:
+                raise PipelineError("단계별 일괄 처리에는 체크포인트가 필요합니다")
         normalized_audio_path = audio_path.expanduser().absolute()
         effective_meeting_id = meeting_id or self._generate_meeting_id(normalized_audio_path)
         self._validate_meeting_id(effective_meeting_id)
@@ -2556,6 +2568,7 @@ class PipelineManager:
                 should_cancel=should_cancel,
                 stt_provider=stt_provider,
                 stt_model=stt_model,
+                stop_after=stop_after,
             )
 
     async def _run_with_meeting_lease_held(
@@ -2568,6 +2581,7 @@ class PipelineManager:
         should_cancel: Callable[[], bool] | None = None,
         stt_provider: str | None = None,
         stt_model: str | None = None,
+        stop_after: PipelineStep | None = None,
     ) -> PipelineState:
         """공유 회의 mutation lease를 보유한 상태에서 파이프라인 본문을 실행한다.
 
@@ -2587,6 +2601,7 @@ class PipelineManager:
             should_cancel: OpenAI 청크 사이 사용자 취소 여부 확인 콜백
             stt_provider: 큐 등록 시점에 고정한 provider (legacy는 None)
             stt_model: 큐 등록 시점에 고정한 실제 모델 (legacy는 None)
+            stop_after: 이 단계의 체크포인트까지 저장하고 paused로 반환하는 경계
 
         Returns:
             최종 파이프라인 상태 (PipelineState)
@@ -2714,6 +2729,13 @@ class PipelineManager:
                 selected_model=state.stt_model,
             )
 
+        phase_end = (
+            PIPELINE_STEPS.index(stop_after) + 1 if stop_after is not None else len(PIPELINE_STEPS)
+        )
+        if stop_after is not None:
+            prefix = [step.value for step in PIPELINE_STEPS]
+            if state.completed_steps != prefix[: len(state.completed_steps)]:
+                raise PipelineError("단계별 일괄 처리의 완료 체크포인트 순서가 유효하지 않습니다")
         resume_idx = self._find_resume_step(state)
         if resume_idx is None:
             logger.info("모든 단계가 이미 완료되었습니다.")
@@ -2727,6 +2749,12 @@ class PipelineManager:
                 state.current_step = ""
                 state.error_message = ""
                 self._save_state(state, state_path)
+            return state
+
+        if resume_idx >= phase_end:
+            state.status = "paused"
+            state.current_step = ""
+            self._save_state(state, state_path)
             return state
 
         diarize_idx = PIPELINE_STEPS.index(PipelineStep.DIARIZE)
@@ -2839,7 +2867,7 @@ class PipelineManager:
         # 각 단계 순차 실행
         pipeline_start = time.monotonic()
 
-        for step_idx in range(resume_idx, len(PIPELINE_STEPS)):
+        for step_idx in range(resume_idx, phase_end):
             step = PIPELINE_STEPS[step_idx]
             checkpoint_path = self._get_checkpoint_path(meeting_id, step)
 
@@ -3164,6 +3192,14 @@ class PipelineManager:
                     step.value,
                     f"재시도 {self._retry_max}회 모두 실패: {last_error}",
                 ) from last_error
+
+        if phase_end < len(PIPELINE_STEPS):
+            state.status = "paused"
+            state.current_step = ""
+            state.error_message = ""
+            self._save_state(state, state_path)
+            logger.info(f"일괄 단계 저장 완료: meeting_id={meeting_id}, step={stop_after}")
+            return state
 
         # 전체 완료
         pipeline_elapsed = time.monotonic() - pipeline_start
