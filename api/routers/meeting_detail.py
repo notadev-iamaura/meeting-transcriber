@@ -11,7 +11,10 @@ import errno
 import json
 import logging
 import os
+import re
 import stat
+import subprocess
+import sys
 import threading
 import uuid
 from collections.abc import AsyncIterator
@@ -1451,6 +1454,136 @@ class MeetingPatchRequest(BaseModel):
         default=None,
         max_length=200,
         description="사용자 정의 제목 (빈 문자열이면 자동 타임스탬프 복귀)",
+    )
+
+
+class MeetingFolderResponse(BaseModel):
+    """원본 녹취 폴더를 연 결과."""
+
+    opened: bool
+    path: str
+
+
+class MeetingTitleSuggestion(BaseModel):
+    """사용자가 적용하기 전의 AI 제목 제안."""
+
+    title: str
+    recording_date: str
+    date_source: str
+    sampled: bool
+
+
+@router.post("/meetings/{meeting_id}/open-audio-folder", response_model=MeetingFolderResponse)
+async def open_meeting_audio_folder(request: Request, meeting_id: str) -> MeetingFolderResponse:
+    """DB에 등록된 원본 파일을 Finder에서 선택해 해당 폴더를 연다."""
+    from api.routers.transcription_models import require_loopback_server
+
+    _validate_meeting_id(meeting_id)
+    config = _get_config(request)
+    require_loopback_server(config, request, feature_label="녹취 폴더 열기")
+    queue = _get_job_queue(request)
+    raw_queue = getattr(queue, "queue", queue)
+    # 읽기 전용 동작이므로 긴 전사 작업의 mutation lease를 기다리지 않는다.
+    job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    path = _require_audio_in_config_base(config, Path(job.audio_path))
+    try:
+        await asyncio.to_thread(inspect_audio_path_no_symlinks, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="원본 녹취 파일이 없습니다.") from exc
+    except (AudioAdmissionError, EmptyAudioError, OSError) as exc:
+        raise HTTPException(
+            status_code=409, detail="원본 녹취 파일을 안전하게 확인할 수 없습니다."
+        ) from exc
+    if sys.platform != "darwin":
+        return MeetingFolderResponse(opened=False, path=str(path.parent))
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["/usr/bin/open", "-R", str(path)],
+            check=True,
+            capture_output=True,
+            timeout=5.0,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning(f"녹취 폴더 열기 실패: meeting_id={meeting_id}, error={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Finder에서 폴더를 열지 못했습니다.") from exc
+    return MeetingFolderResponse(opened=True, path=str(path.parent))
+
+
+@router.post("/meetings/{meeting_id}/title-suggestion", response_model=MeetingTitleSuggestion)
+async def suggest_meeting_title(request: Request, meeting_id: str) -> MeetingTitleSuggestion:
+    """전사문 스냅샷으로 날짜를 포함한 제목을 제안하며 기존 제목은 유지한다."""
+    from api.routers.transcription_models import require_loopback_server
+    from core.llm_backend import LLMBackendError
+    from core.meeting_title import suggest_title
+    from core.model_manager import NativeCleanupPendingError, get_model_manager
+    from core.search_revision import meeting_date
+
+    _validate_meeting_id(meeting_id)
+    config = _get_config(request)
+    require_loopback_server(config, request, feature_label="AI 제목 만들기")
+    coordinator = _get_meeting_mutation_coordinator(request)
+    if coordinator.locked(meeting_id):
+        raise HTTPException(
+            status_code=409, detail="이 녹취를 처리 중입니다. 완료 후 다시 시도해 주세요."
+        )
+    queue = _get_job_queue(request)
+    raw_queue = getattr(queue, "queue", queue)
+    async with coordinator.lease(meeting_id):
+        job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+        if job.status not in {"completed", "failed", "recorded"}:
+            raise HTTPException(status_code=409, detail="전사 작업 완료 후 다시 시도해 주세요.")
+        transcript = await get_transcript(request, meeting_id)
+        try:
+            recorded = await asyncio.to_thread(
+                meeting_date, config, meeting_id, {"audio_path": job.audio_path}
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="녹취 날짜 기록을 확인할 수 없습니다."
+            ) from exc
+        if not recorded:
+            raise HTTPException(
+                status_code=409,
+                detail="녹취 날짜를 확인할 수 없습니다. 제목을 직접 입력해 주세요.",
+            )
+        llm_config = config.llm.model_copy(deep=True)
+        texts = [utterance.text for utterance in transcript.utterances]
+        date_source = "recording_metadata"
+        saved_date = (
+            _configured_lexical_path(config, "checkpoints_dir") / meeting_id / "meeting_date.json"
+        )
+        try:
+            saved = json.loads(await asyncio.to_thread(read_text_no_follow, saved_date))
+            date_source = str(saved.get("source", "recording_metadata"))
+        except FileNotFoundError:
+            date_source = "filename" if re.search(r"\d{8}_\d{6}", meeting_id) else "audio_mtime"
+        except (OSError, ValueError, AttributeError):
+            pass
+    manager = getattr(request.app.state, "model_manager", None) or get_model_manager()
+    try:
+        title, sampled = await suggest_title(texts, llm_config, manager)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="AI 제목 생성 대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+        ) from exc
+    except (LLMBackendError, NativeCleanupPendingError) as exc:
+        logger.warning(f"AI 제목 생성 실패: meeting_id={meeting_id}, error={type(exc).__name__}")
+        raise HTTPException(
+            status_code=503, detail="AI 제목을 만들지 못했습니다. 다시 시도해 주세요."
+        ) from exc
+    return MeetingTitleSuggestion(
+        title=f"{recorded} · {title}",
+        recording_date=recorded,
+        date_source=date_source,
+        sampled=sampled,
     )
 
 
