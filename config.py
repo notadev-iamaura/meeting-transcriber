@@ -534,6 +534,9 @@ class LLMConfig(BaseModel):
         ge=100,
         description="RAG 채팅 응답 토큰 상한. None이 아닌 경우 mlx_max_tokens보다 우선한다.",
     )
+    title_max_tokens: int = Field(default=160, ge=64, le=512)
+    title_input_chars: int = Field(default=6000, ge=300, le=12000)
+    title_max_chars: int = Field(default=80, ge=20, le=180)
 
     # 공통 설정
     max_context_tokens: int = Field(default=6144, ge=1024)
