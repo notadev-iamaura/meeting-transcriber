@@ -1525,7 +1525,7 @@ async def suggest_meeting_title(request: Request, meeting_id: str) -> MeetingTit
     config = _get_config(request)
     require_loopback_server(config, request, feature_label="AI 제목 만들기")
     coordinator = _get_meeting_mutation_coordinator(request)
-    if coordinator.locked(meeting_id):
+    if coordinator.locked(meeting_id) and not coordinator.owned_by_current_task(meeting_id):
         raise HTTPException(
             status_code=409, detail="이 녹취를 처리 중입니다. 완료 후 다시 시도해 주세요."
         )

@@ -73,3 +73,8 @@ class MeetingMutationCoordinator:
         """회의별 lease가 현재 보유되었는지 반환한다."""
         state = self._states.get(meeting_id)
         return bool(state is not None and state.lock.locked())
+
+    def owned_by_current_task(self, meeting_id: str) -> bool:
+        """현재 task가 회의 lease를 이미 보유하는지 반환한다."""
+        state = self._states.get(meeting_id)
+        return bool(state is not None and state.owner is asyncio.current_task())

@@ -1779,6 +1779,102 @@ class JobQueue:
         logger.info("제목 업데이트: meeting_id=%s, title=%r", meeting_id, cleaned)
         return updated_job
 
+    def apply_generated_title(
+        self,
+        snapshot: Job,
+        title: str,
+        request_id: str,
+        *,
+        restore: bool = False,
+        date_source: str = "",
+        sampled: bool = False,
+    ) -> bool:
+        """제목 CAS와 복원 가능한 실행 기록을 같은 트랜잭션에 저장한다."""
+        cleaned = title.strip()
+        if len(cleaned) > 200 or (not cleaned and not restore):
+            raise JobQueueError("생성 제목 길이가 유효하지 않습니다")
+        conn = self._ensure_connection()
+        now = self._now_iso()
+        event = dict(
+            status="restored" if restore else "completed",
+            status_label="이전 제목으로 복원" if restore else "AI 제목 적용 완료",
+            previous_title=snapshot.title,
+            applied_title=cleaned,
+            write_revision=now,
+            job_id=snapshot.id,
+            audio_path=snapshot.audio_path,
+            date_source=date_source,
+            sampled=sampled,
+        )
+        with self._write_lock, conn:
+            latest = conn.execute(
+                "SELECT payload FROM batch_events WHERE request_id=? AND meeting_id=? ORDER BY id DESC LIMIT 1",
+                (request_id, snapshot.meeting_id),
+            ).fetchone()
+            latest_status = json.loads(latest[0]).get("status") if latest else None
+            if (restore and latest_status != "completed") or (
+                not restore
+                and latest_status
+                in {"cancelled", "interrupted", "skipped", "failed", "completed", "restored"}
+            ):
+                return False
+            changed = conn.execute(
+                "UPDATE jobs SET title=?, updated_at=? WHERE id=? AND meeting_id=? "
+                "AND title=? AND updated_at=? AND audio_path=? AND status=?",
+                (
+                    cleaned,
+                    now,
+                    snapshot.id,
+                    snapshot.meeting_id,
+                    snapshot.title,
+                    snapshot.updated_at,
+                    snapshot.audio_path,
+                    snapshot.status,
+                ),
+            )
+            if changed.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO batch_events(request_id, meeting_id, created_at, payload) VALUES (?, ?, ?, ?)",
+                (request_id, snapshot.meeting_id, now, json.dumps(event, ensure_ascii=False)),
+            )
+        return True
+
+    def cancel_title_request(self, request_id: str) -> int:
+        """완료되지 않은 제목 항목의 취소 의도를 원자적으로 기록한다."""
+        conn = self._ensure_connection()
+        cancelled = 0
+        with self._write_lock, conn:
+            receipts = self.get_batch_receipts(request_id)
+            if not receipts or receipts[0].get("action") != "title":
+                raise JobQueueError("AI 제목 접수를 찾을 수 없습니다")
+            receipt = receipts[0]
+            latest = {event["meeting_id"]: event for event in receipt["events"]}
+            for mid in receipt["meeting_ids"]:
+                if latest.get(mid, {}).get("status") in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                    "skipped",
+                    "restored",
+                }:
+                    continue
+                conn.execute(
+                    "INSERT INTO batch_events(request_id, meeting_id, created_at, payload) VALUES (?, ?, ?, ?)",
+                    (
+                        request_id,
+                        mid,
+                        self._now_iso(),
+                        json.dumps(
+                            dict(status="cancelled", status_label="제목 생성 취소"),
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                cancelled += 1
+        return cancelled
+
     def update_status(
         self,
         job_id: int,
@@ -2318,7 +2414,7 @@ class JobQueue:
                 else [
                     row[0]
                     for row in conn.execute(
-                        "SELECT request_id FROM batch_requests WHERE EXISTS (SELECT 1 FROM json_each(payload, '$.meeting_ids') WHERE value=?) ORDER BY created_at DESC",
+                        "SELECT request_id FROM batch_requests WHERE COALESCE(json_extract(payload, '$.action'), '') != 'title' AND EXISTS (SELECT 1 FROM json_each(payload, '$.meeting_ids') WHERE value=?) ORDER BY created_at DESC",
                         (meeting_id,),
                     )
                 ]
@@ -2334,6 +2430,8 @@ class JobQueue:
                     "cancelled",
                     "interrupted",
                     "blocked",
+                    "skipped",
+                    "restored",
                 }:
                     continue
                 conn.execute(

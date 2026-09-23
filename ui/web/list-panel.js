@@ -137,6 +137,11 @@
                 _emitSelectionChanged();
             }
 
+            function clearSelectedIds(ids) {
+                ids.forEach(function (id) { _selectedIds.delete(id); });
+                _emitSelectionChanged();
+            }
+
             /**
              * 외부에서 현재 선택된 id 목록 조회 (BulkActionBar 액션 클릭 시).
              */
@@ -1244,6 +1249,7 @@
                 destroy: destroy,
                 // 다중 선택 API — BulkActionBar 가 사용
                 clearSelection: clearSelection,
+                clearSelectedIds: clearSelectedIds,
                 getSelectedIds: getSelectedIds,
             };
         })();

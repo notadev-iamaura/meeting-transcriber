@@ -143,6 +143,28 @@ def test_cancelled_queued_job_is_terminal_in_receipt(tmp_path: Path) -> None:
         assert queue.get_batch_receipts("cancel")[0]["events"][-1]["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("status", ["completed", "failed", "skipped", "restored", "interrupted"])
+def test_title_terminal_history_survives_restart(tmp_path: Path, status: str) -> None:
+    """제목 정리의 종결 결과를 재시작 후 진행 중단으로 바꾸지 않는다."""
+    app = _make_test_app(tmp_path)
+    with TestClient(app) as client:
+        queue = app.state.job_queue.queue
+        queue.save_batch_receipt(
+            dict(
+                request_id="old-title",
+                action="title",
+                meeting_ids=["one"],
+                candidates=[],
+                queued=1,
+                server_session="old",
+                background_ids=["one"],
+            )
+        )
+        queue.record_batch_event("one", {"status": status}, "old-title")
+        receipt = client.get("/api/batch-requests").json()["requests"][0]
+        assert [event["status"] for event in receipt["events"]] == [status]
+
+
 def test_progress_does_not_treat_skipped_or_stale_steps_as_success() -> None:
     """건너뛴 교정은 완료에 넣지 않고 재대기 상태에서는 과거 실패를 숨긴다."""
     state = dict(

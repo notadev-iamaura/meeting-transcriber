@@ -384,7 +384,7 @@ class TestTitleEdit:
             db.execute("UPDATE jobs SET status=? WHERE meeting_id=?", (status, seeded_meeting_id))
         _open_viewer(page, seeded_meeting_id)
         expect(page.locator(".utterance-text").first).to_be_visible()
-        expect(page.get_by_role("button", name="AI로 제목 만들기")).to_be_disabled()
+        expect(page.get_by_role("button", name="제목 자동 정리")).to_be_disabled()
 
     def test_전사문이_없으면_AI_제목을_비활성화한다(
         self, page: Page, seeded_meeting_id: str
@@ -395,88 +395,95 @@ class TestTitleEdit:
             lambda route: route.fulfill(json={"utterances": []}),
         )
         _open_viewer(page, seeded_meeting_id)
-        expect(page.get_by_role("button", name="AI로 제목 만들기")).to_be_disabled()
+        expect(page.get_by_role("button", name="제목 자동 정리")).to_be_disabled()
         expect(page.get_by_role("button", name="녹음 폴더 열기")).to_be_enabled()
 
-    def test_AI_제목_미리보기_취소_수정_적용(self, page: Page, seeded_meeting_id: str) -> None:
-        """AI 제안은 자동 저장하지 않고 편집 후 명시적으로 적용한다."""
+    def test_AI_제목은_백그라운드에서_적용하고_화면이동을_허용한다(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """제목 작업 접수 후 모달 없이 진행하며 완료된 제목을 현재 화면에 반영한다."""
+        receipts: list[dict] = []
+        calls: list[dict] = []
+
+        def enqueue(route) -> None:
+            body = route.request.post_data_json
+            calls.append(body)
+            receipt = {
+                "request_id": body["request_id"],
+                "action": "title",
+                "queued": 1,
+                "skipped": 0,
+                "created_at": "2026-09-23T14:00:00",
+                "candidates": [{"meeting_id": seeded_meeting_id, "admission": "queued"}],
+                "events": [
+                    {
+                        "meeting_id": seeded_meeting_id,
+                        "status": "running",
+                        "status_label": "제목 정리 중",
+                    }
+                ],
+            }
+            receipts[:] = [receipt]
+            route.fulfill(json=receipt)
+
+        page.route("**/api/meetings/titles", enqueue)
         page.route(
-            "**/api/meetings/*/title-suggestion",
-            lambda route: route.fulfill(
-                json={
-                    "title": "2026-04-07 파이선 성능 개선 논의",
-                    "recording_date": "2026-04-07",
-                    "date_source": "meeting_id",
-                    "sampled": True,
-                }
-            ),
+            "**/api/batch-requests", lambda route: route.fulfill(json={"requests": receipts})
         )
         _open_viewer(page, seeded_meeting_id)
-        original = page.locator(".viewer-title-text").inner_text()
-        page.get_by_role("button", name="AI로 제목 만들기").click()
-        dialog = page.get_by_role("dialog", name="AI로 제목 만들기")
-        expect(dialog.locator("#titleSuggestionInput")).to_have_value(
-            "2026-04-07 파이선 성능 개선 논의"
+        page.get_by_role("button", name="제목 자동 정리", exact=True).click()
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        expect(page.get_by_role("button", name="제목 정리 중…")).to_be_disabled()
+        expect(page.locator("#backgroundWorkStatus")).to_contain_text("진행 중")
+        page.evaluate("window.SPA.Router.navigate('/app')")
+        expect(page.locator("#backgroundWorkStatus")).to_be_visible()
+        page.evaluate(f"window.SPA.Router.navigate('/app/viewer/{seeded_meeting_id}')")
+        expect(page.get_by_role("button", name="제목 정리 중…")).to_be_disabled()
+        title = "2026-04-07 · Python 성능 개선 결정"
+        page.request.patch(f"{BASE_URL}/api/meetings/{seeded_meeting_id}", data={"title": title})
+        receipts[0]["events"].append(
+            {
+                "meeting_id": seeded_meeting_id,
+                "status": "completed",
+                "status_label": "제목 정리 완료",
+                "applied_title": title,
+                "previous_title": "",
+                "date_source": "audio_mtime",
+                "sampled": True,
+            }
         )
-        expect(dialog).to_contain_text("일부 구간")
-        expect(page.locator(".viewer-title-text")).to_have_text(original)
-        dialog.get_by_role("button", name="취소", exact=True).click()
-        expect(dialog).to_have_count(0)
-        expect(page.locator(".viewer-title-text")).to_have_text(original)
+        expect(page.locator(".viewer-title-text")).to_have_text(title, timeout=8000)
+        expect(page.get_by_role("button", name="제목 자동 정리", exact=True)).to_be_enabled()
+        assert len(calls) == 1
+        page.locator("#backgroundWorkHistory").click()
+        dialog = page.get_by_role("dialog", name="작업 내역")
+        expect(dialog).to_contain_text(title)
+        expect(dialog).to_contain_text("원본 파일 수정일 기준")
+        expect(dialog).to_contain_text("긴 녹취 일부 발췌")
+        expect(dialog.get_by_role("button", name="이전 제목으로 되돌리기")).to_be_visible()
 
-        page.get_by_role("button", name="AI로 제목 만들기").click()
-        field = dialog.locator("#titleSuggestionInput")
-        expect(field).to_be_enabled()
-        field.fill("2026-04-07 Python 성능 개선 결정")
-        dialog.get_by_role("button", name="제목 적용").click()
-        expect(dialog).to_have_count(0)
-        expect(page.locator(".viewer-title-text")).to_have_text("2026-04-07 Python 성능 개선 결정")
-        page.reload()
-        expect(page.locator(".viewer-title-text")).to_have_text("2026-04-07 Python 성능 개선 결정")
+    def test_AI_제목_접수실패는_선택과_기존제목을_보존한다(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """통신 오류 뒤 같은 요청 ID로 재시도하여 중복 실행을 막는다."""
+        calls: list[dict] = []
 
-    def test_AI_제목_실패와_저장재시도(self, page: Page, seeded_meeting_id: str) -> None:
-        """실패는 기존 제목을 보존하고 저장 실패 시 입력을 유지한다."""
-        endpoint = "**/api/meetings/*/title-suggestion"
-        page.route(
-            endpoint,
-            lambda route: route.fulfill(status=503, json={"detail": "모델 준비 실패"}),
-        )
+        def fail(route) -> None:
+            calls.append(route.request.post_data_json)
+            route.fulfill(status=503, json={"detail": "일시적인 연결 오류"})
+
+        page.route("**/api/meetings/titles", fail)
         _open_viewer(page, seeded_meeting_id)
         original = page.locator(".viewer-title-text").inner_text()
-        page.get_by_role("button", name="AI로 제목 만들기").click()
-        dialog = page.get_by_role("dialog", name="AI로 제목 만들기")
-        expect(dialog.get_by_role("alert")).to_contain_text("모델 준비 실패")
-        expect(dialog.get_by_role("button", name="제목 적용")).to_be_disabled()
-        dialog.get_by_role("button", name="닫기").click()
+        button = page.get_by_role("button", name="제목 자동 정리", exact=True)
+        button.click()
+        expect(page.locator("#backgroundWorkMessage")).to_contain_text("접수 확인 실패")
+        expect(button).to_be_enabled()
+        button.click()
+        expect(button).to_be_enabled()
+        assert len(calls) == 2
+        assert calls[0]["request_id"] == calls[1]["request_id"]
         expect(page.locator(".viewer-title-text")).to_have_text(original)
-        page.unroute(endpoint)
-        page.route(
-            endpoint,
-            lambda route: route.fulfill(
-                json={"title": "2026-04-07 제안 제목", "date_source": "audio_mtime"}
-            ),
-        )
-        page.get_by_role("button", name="AI로 제목 만들기").click()
-        expect(dialog).to_contain_text("원본 파일의 수정 날짜")
-        field = dialog.locator("#titleSuggestionInput")
-        expect(field).to_be_enabled()
-        field.fill("2026-04-07 사용자가 수정한 제목")
-        save_endpoint = f"**/api/meetings/{seeded_meeting_id}"
-        page.route(
-            save_endpoint,
-            lambda route: (
-                route.fulfill(status=409, json={"detail": "잠시 후 재시도"})
-                if route.request.method == "PATCH"
-                else route.continue_()
-            ),
-        )
-        dialog.get_by_role("button", name="제목 적용").click()
-        expect(dialog.get_by_role("alert")).to_contain_text("저장하지 못했습니다")
-        expect(field).to_have_value("2026-04-07 사용자가 수정한 제목")
-        page.unroute(save_endpoint)
-        dialog.get_by_role("button", name="제목 적용").click()
-        expect(dialog).to_have_count(0)
-        expect(page.locator(".viewer-title-text")).to_have_text("2026-04-07 사용자가 수정한 제목")
 
     def test_녹음_폴더_열기_실패후_재시도(self, page: Page, seeded_meeting_id: str) -> None:
         """Finder 요청은 사용자 클릭 때만 보내고 실패 뒤 재시도를 허용한다."""
@@ -505,28 +512,6 @@ class TestTitleEdit:
         button.click()
         expect(button).to_be_enabled()
         assert requests == ["POST", "POST", "POST"]
-
-    def test_AI_생성중_화면이동은_모달을_정리한다(
-        self, page: Page, seeded_meeting_id: str
-    ) -> None:
-        """SPA 이동 뒤 늦은 응답이 다른 화면에 제목을 적용하지 않는다."""
-        _open_viewer(page, seeded_meeting_id)
-        page.evaluate("""() => {
-            const original = fetch;
-            fetch = (url, options) => String(url).endsWith('/title-suggestion')
-                ? new Promise(resolve => setTimeout(() => resolve(new Response(
-                    JSON.stringify({title: '늦게 도착한 제목'}),
-                    {headers: {'Content-Type': 'application/json'}}
-                )), 300))
-                : original(url, options);
-        }""")
-        page.get_by_role("button", name="AI로 제목 만들기").click()
-        expect(page.get_by_role("dialog", name="AI로 제목 만들기")).to_be_visible()
-        page.evaluate("window.SPA.Router.navigate('/app')")
-        expect(page.locator("#titleSuggestionModal")).to_have_count(0)
-        page.wait_for_timeout(450)
-        expect(page.locator("#titleSuggestionModal")).to_have_count(0)
-        assert "늦게 도착한 제목" not in page.title()
 
     def test_제목_기본_표시_타임스탬프(self, page: Page, seeded_meeting_id: str) -> None:
         """title 이 비어있으면 meeting_id 의 타임스탬프가 표시된다."""
@@ -696,6 +681,7 @@ class TestBulkReplaceAndVocabulary:
     def test_모두_바꾸기_버튼_존재(self, page: Page, seeded_meeting_id: str) -> None:
         """completed 상태 + 전사 로드 후 '모두 바꾸기' 버튼이 표시된다."""
         _open_viewer(page, seeded_meeting_id)
+        page.locator(".viewer-more-actions > summary").click()
         replace_btn = page.locator(".viewer-action-btn.replace")
         expect(replace_btn).to_be_visible(timeout=10000)
         expect(replace_btn).to_contain_text("모두 바꾸기")
@@ -709,6 +695,7 @@ class TestBulkReplaceAndVocabulary:
         # 초기: 첫 번째·두 번째 발화에 "파이선" 포함
         expect(page.locator(".utterance-text").first).to_contain_text("파이선")
 
+        page.locator(".viewer-more-actions").evaluate("el => el.open = true")
         page.locator(".viewer-action-btn.replace").click()
 
         modal = page.locator("#transcriptReplaceModal")
@@ -749,6 +736,7 @@ class TestBulkReplaceAndVocabulary:
         """모두 바꾸기 후 용어집에 term 이 신규 등록되었는지 /api/vocabulary 로 확인."""
         _open_viewer(page, seeded_meeting_id)
 
+        page.locator(".viewer-more-actions").evaluate("el => el.open = true")
         page.locator(".viewer-action-btn.replace").click()
         expect(page.locator("#transcriptReplaceModal")).to_be_visible()
 
@@ -772,6 +760,7 @@ class TestBulkReplaceAndVocabulary:
     def test_find과_replace_동일_거부(self, page: Page, seeded_meeting_id: str) -> None:
         """find 와 replace 가 같으면 에러 표시."""
         _open_viewer(page, seeded_meeting_id)
+        page.locator(".viewer-more-actions").evaluate("el => el.open = true")
         page.locator(".viewer-action-btn.replace").click()
         expect(page.locator("#transcriptReplaceModal")).to_be_visible()
 
@@ -887,7 +876,9 @@ class TestFullEditingFlow:
         # 3) 전사 탭으로 돌아가서 모두 바꾸기
         page.locator("#viewerTabTranscript").click()
         # 전사 탭이 활성화될 때까지 대기
+        page.locator(".viewer-more-actions > summary").click()
         expect(page.locator(".viewer-action-btn.replace")).to_be_visible(timeout=5000)
+        page.locator(".viewer-more-actions").evaluate("el => el.open = true")
         page.locator(".viewer-action-btn.replace").click()
         expect(page.locator("#transcriptReplaceModal")).to_be_visible()
 

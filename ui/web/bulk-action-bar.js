@@ -26,7 +26,17 @@
         var _initialized = false;
         var reviewDialog = null;
         var historyTimer = null;
+        var workTimer = null;
+        var workRefreshing = false;
+        var receipts = [];
+        var revisions = new Map();
+        var titleRequests = new Map();
+        var titlePending = new Set();
+        var historyMessages = new Map();
+        var historyPending = new Set();
+        var terminalStates = ["completed", "failed", "skipped", "interrupted", "restored", "cancelled", "blocked"];
         var ACTIONS = {
+            title: "제목 자동 정리",
             transcribe: "전사만",
             summarize: "교정·요약",
             full: "전사 + 교정·요약",
@@ -91,41 +101,234 @@
 
         function renderReceipt(receipt, host) {
             var box = makeElement("section", null, "batch-receipt");
-            box.appendChild(makeElement("h3", (ACTIONS[receipt.action] || receipt.action) + " · " + receipt.queued + "건 대기열 등록 · " + receipt.skipped + "건 제외"));
-            box.appendChild(makeElement("p", "접수 " + (receipt.created_at || "방금") + " · 요청 ID " + receipt.request_id));
+            box.appendChild(makeElement("h3", (ACTIONS[receipt.action] || receipt.action) + " · " + receipt.queued + "건 접수"));
+            box.appendChild(makeElement("p", App.formatDate ? App.formatDate(receipt.created_at) : (receipt.created_at || "방금")));
+            var retryIds = [];
+            var canUndo = false;
+            var canCancel = false;
             (receipt.candidates || []).forEach(function (row) {
                 var item = makeElement("div", null, "batch-review-row");
                 var link = makeElement("a", row.title || row.meeting_id);
+                link.dataset.historyKey = receipt.request_id + ":" + row.meeting_id + ":link";
                 link.href = "/app/viewer/" + encodeURIComponent(row.meeting_id);
                 item.appendChild(link);
                 var events = (receipt.events || []).filter(function (e) { return e.meeting_id === row.meeting_id; });
                 var last = events.length ? events[events.length - 1] : null;
+                if (receipt.action === "title" && row.admission === "queued" && (!last || terminalStates.indexOf(last.status) === -1)) canCancel = true;
                 var status = row.admission === "queued" ? "대기열 등록" : "제외 · " + row.reason;
                 if (last) status = last.status_label || App.getStatusLabel(last.status);
                 item.appendChild(makeElement("p", status, "batch-item-state"));
                 if (last && last.error_message) item.appendChild(makeElement("p", last.error_message));
+                if (receipt.action === "title" && last) {
+                    if (["failed", "interrupted", "cancelled"].indexOf(last.status) !== -1) retryIds.push(row.meeting_id);
+                    if (last.status === "completed") canUndo = true;
+                    if (last.applied_title) item.appendChild(makeElement("p", "변경 제목: " + last.applied_title));
+                    if (last.date_source === "audio_mtime") item.appendChild(makeElement("p", "원본 파일 수정일 기준 — 실제 녹취 날짜를 확인해 주세요."));
+                    if (last.sampled) item.appendChild(makeElement("p", "긴 녹취 일부 발췌"));
+                }
                 box.appendChild(item);
             });
+            if (canCancel) {
+                var cancel = makeElement("button", "중단", "btn-secondary");
+                cancel.type = "button";
+                cancel.dataset.historyKey = receipt.request_id + ":cancel";
+                cancel.disabled = historyPending.has(receipt.request_id);
+                cancel.onclick = async function () {
+                    if (historyPending.has(receipt.request_id)) return;
+                    historyPending.add(receipt.request_id);
+                    cancel.disabled = true;
+                    try {
+                        await App.apiPost("/title-jobs/" + encodeURIComponent(receipt.request_id) + "/cancel", {});
+                        showWorkMessage("제목 정리를 중단했습니다. 이미 적용한 제목은 작업 내역에서 되돌릴 수 있습니다.");
+                        await refreshWork();
+                        cancel.textContent = "중단 완료";
+                    } catch (err) { cancel.disabled = false; showWorkMessage("중단 요청 실패: " + err.message, true); }
+                    finally { historyPending.delete(receipt.request_id); }
+                };
+                box.appendChild(cancel);
+            }
+            if (retryIds.length) {
+                var retry = makeElement("button", retryIds.length + "건 다시 시도", "btn-secondary");
+                retry.type = "button";
+                retry.dataset.historyKey = receipt.request_id + ":retry";
+                retry.onclick = async function () {
+                    retry.disabled = true;
+                    try { await enqueueTitle(retryIds); }
+                    catch (_) { retry.disabled = false; }
+                };
+                box.appendChild(retry);
+            }
+            if (canUndo) {
+                var undo = makeElement("button", "이전 제목으로 되돌리기", "btn-secondary");
+                undo.type = "button";
+                undo.dataset.historyKey = receipt.request_id + ":undo";
+                undo.disabled = historyPending.has(receipt.request_id);
+                undo.onclick = async function () {
+                    if (historyPending.has(receipt.request_id)) return;
+                    historyPending.add(receipt.request_id);
+                    undo.disabled = true;
+                    try {
+                        var result = await App.apiPost("/title-jobs/" + encodeURIComponent(receipt.request_id) + "/undo", {});
+                        var message = result.restored + "건 제목을 되돌렸습니다." + (result.skipped ? " 이후 변경된 " + result.skipped + "건은 유지했습니다." : "");
+                        historyMessages.set(receipt.request_id, message);
+                        box.appendChild(makeElement("p", message, "batch-operation-result"));
+                        showWorkMessage(message);
+                        await refreshWork();
+                        if (ListPanel.loadMeetings) ListPanel.loadMeetings();
+                        doc.dispatchEvent(new CustomEvent("recap:titles-updated", {detail: {ids: (receipt.candidates || []).map(function (row) { return row.meeting_id; })}}));
+                        undo.textContent = "되돌리기 완료";
+                    } catch (err) {
+                        showWorkMessage("제목 되돌리기 실패: " + err.message, true);
+                        undo.disabled = false;
+                    }
+                    finally { historyPending.delete(receipt.request_id); }
+                };
+                box.appendChild(undo);
+            }
+            if (historyMessages.has(receipt.request_id)) box.appendChild(makeElement("p", historyMessages.get(receipt.request_id), "batch-operation-result"));
             host.appendChild(box);
         }
 
         function showHistory() {
-            var dialog = makeDialog("일괄 처리 접수 내역");
+            var dialog = makeDialog("작업 내역");
+            var errorStatus = makeElement("p");
+            errorStatus.setAttribute("role", "alert");
+            dialog.appendChild(errorStatus);
             var content = makeElement("div");
             dialog.appendChild(content);
+            var lastSnapshot = null;
             async function refresh() {
                 try {
                     var result = await App.apiRequest("/batch-requests");
                     if (!dialog.open) return;
-                    content.replaceChildren();
-                    if (!result.requests.length) content.appendChild(makeElement("p", "아직 접수 내역이 없습니다."));
-                    result.requests.forEach(function (receipt) { renderReceipt(receipt, content); });
+                    errorStatus.textContent = "";
+                    var snapshot = JSON.stringify([result.requests, Array.from(historyMessages), Array.from(historyPending)]);
+                    if (snapshot !== lastSnapshot) {
+                        var focusKey = doc.activeElement && doc.activeElement.dataset.historyKey;
+                        var scrollTop = dialog.scrollTop;
+                        content.replaceChildren();
+                        if (!result.requests.length) content.appendChild(makeElement("p", "아직 실행한 작업이 없습니다."));
+                        result.requests.forEach(function (receipt) { renderReceipt(receipt, content); });
+                        if (focusKey) {
+                            var target = Array.from(content.querySelectorAll("[data-history-key]")).find(function (el) { return el.dataset.historyKey === focusKey && !el.disabled; });
+                            (target || dialog.querySelector("button")).focus({preventScroll: true});
+                        }
+                        dialog.scrollTop = scrollTop;
+                        lastSnapshot = snapshot;
+                    }
                 } catch (err) {
-                    if (dialog.open) content.textContent = "내역 조회 실패: " + err.message;
+                    if (dialog.open) errorStatus.textContent = "내역 조회 실패: " + err.message + " 잠시 후 다시 확인합니다.";
                 }
                 if (dialog.open) historyTimer = setTimeoutFn(refresh, 3000);
             }
             refresh();
+        }
+
+        function showWorkMessage(message, error) {
+            var box = doc.getElementById("backgroundWorkStatus");
+            var text = doc.getElementById("backgroundWorkMessage");
+            if (!box || !text) return;
+            box.hidden = false;
+            text.textContent = message;
+            text.setAttribute("role", error ? "alert" : "status");
+        }
+
+        function lastEvent(receipt, id) {
+            var events = (receipt.events || []).filter(function (event) { return event.meeting_id === id; });
+            return events.length ? events[events.length - 1] : null;
+        }
+
+        function isTitlePending(id) {
+            return titlePending.has(id) || receipts.some(function (receipt) {
+                return receipt.action === "title" && (receipt.candidates || []).some(function (row) {
+                    var event = lastEvent(receipt, id);
+                    return row.meeting_id === id && row.admission === "queued" && (!event || terminalStates.indexOf(event.status) === -1);
+                });
+            });
+        }
+
+        async function refreshWork() {
+            if (workRefreshing) return;
+            workRefreshing = true;
+            try {
+                var result = await App.apiRequest("/batch-requests");
+                receipts = result.requests || [];
+                titleRequests.forEach(function (requestId, key) {
+                    if (receipts.some(function (receipt) { return receipt.request_id === requestId; })) titleRequests.delete(key);
+                });
+                var changed = new Set();
+                receipts.forEach(function (receipt) {
+                    (receipt.candidates || []).forEach(function (row) {
+                        var event = lastEvent(receipt, row.meeting_id);
+                        var key = receipt.request_id + ":" + row.meeting_id;
+                        var revision = JSON.stringify(event);
+                        if (receipt.action === "title" && event && revisions.get(key) !== revision &&
+                            (revisions.has(key) || ["completed", "restored"].indexOf(event.status) !== -1)) changed.add(row.meeting_id);
+                        revisions.set(key, revision);
+                    });
+                });
+                var active = receipts.filter(function (receipt) {
+                    return (receipt.candidates || []).some(function (row) {
+                        var event = lastEvent(receipt, row.meeting_id);
+                        return row.admission === "queued" && (!event || terminalStates.indexOf(event.status) === -1);
+                    });
+                });
+                var latest = active[0] || receipts[0];
+                if (latest) {
+                    var rows = (latest.candidates || []).filter(function (row) { return row.admission === "queued"; });
+                    var finished = rows.filter(function (row) { var e = lastEvent(latest, row.meeting_id); return e && terminalStates.indexOf(e.status) !== -1; }).length;
+                    var failed = rows.filter(function (row) { var e = lastEvent(latest, row.meeting_id); return e && ["failed", "interrupted", "blocked"].indexOf(e.status) !== -1; }).length;
+                    var stopped = rows.filter(function (row) { var e = lastEvent(latest, row.meeting_id); return e && e.status === "cancelled"; }).length;
+                    var restored = rows.filter(function (row) { var e = lastEvent(latest, row.meeting_id); return e && e.status === "restored"; }).length;
+                    var skipped = rows.filter(function (row) { var e = lastEvent(latest, row.meeting_id); return e && e.status === "skipped"; }).length + (latest.skipped || 0);
+                    var running = rows.some(function (row) { var e = lastEvent(latest, row.meeting_id); return e && e.status === "running"; });
+                    showWorkMessage(rows.length ? (ACTIONS[latest.action] || "작업") + " · " + finished + "/" + rows.length + "건 처리" + (finished < rows.length ? (running ? " · 진행 중" : " · 차례 대기 중") + " — 다른 화면을 이용해도 계속됩니다." : " 종료") + (failed ? " · " + failed + "건 재시도 필요" : "") + (stopped ? " · " + stopped + "건 중단" : "") + (restored ? " · " + restored + "건 되돌림" : "") + (skipped ? " · " + skipped + "건 제외" : "") : "실행할 대상이 없습니다. 작업 내역에서 제외 사유를 확인해 주세요.");
+                }
+                if (changed.size && ListPanel.loadMeetings) ListPanel.loadMeetings();
+                doc.dispatchEvent(new CustomEvent("recap:titles-updated", {detail: {ids: Array.from(changed)}}));
+            } catch (err) {
+                showWorkMessage("작업 상태를 확인하지 못했습니다. 잠시 후 자동으로 다시 확인합니다.", true);
+            } finally {
+                workRefreshing = false;
+                if (workTimer) clearTimeout(workTimer);
+                workTimer = setTimeoutFn(refreshWork, 3000);
+            }
+        }
+
+        async function enqueueTitle(ids) {
+            var selected = Array.from(new Set(ids)).filter(function (id) { return !isTitlePending(id); });
+            if (!selected.length) {
+                showWorkMessage("선택한 녹취의 제목을 이미 정리 중입니다. 작업 내역에서 진행 상황을 확인해 주세요.");
+                return;
+            }
+            var key = selected.slice().sort().join("\n");
+            var requestId = titleRequests.get(key);
+            if (!requestId) {
+                requestId = "title-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+                titleRequests.set(key, requestId);
+            }
+            selected.forEach(function (id) { titlePending.add(id); });
+            doc.dispatchEvent(new CustomEvent("recap:titles-updated", {detail: {ids: []}}));
+            showWorkMessage(selected.length + "건 제목 정리를 시작합니다…");
+            try {
+                var receipt = await App.apiPost("/meetings/titles", {meeting_ids: selected, request_id: requestId});
+                receipts.unshift(receipt);
+                (receipt.candidates || []).forEach(function (row) {
+                    revisions.set(receipt.request_id + ":" + row.meeting_id, JSON.stringify(lastEvent(receipt, row.meeting_id)));
+                });
+                titleRequests.delete(key);
+                var admitted = (receipt.candidates || []).filter(function (row) { return row.admission === "queued"; }).map(function (row) { return row.meeting_id; });
+                if (ListPanel.clearSelectedIds) ListPanel.clearSelectedIds(admitted);
+                showWorkMessage(receipt.queued + "건 제목을 정리하고 있습니다. 다른 화면을 이용해도 계속됩니다.");
+                await refreshWork();
+                return receipt;
+            } catch (err) {
+                showWorkMessage("제목 정리 접수 확인 실패: " + err.message + " 작업 내역을 확인한 뒤 다시 시도해 주세요.", true);
+                throw err;
+            } finally {
+                selected.forEach(function (id) { titlePending.delete(id); });
+                doc.dispatchEvent(new CustomEvent("recap:titles-updated", {detail: {ids: []}}));
+            }
         }
 
         async function openReview(payload) {
@@ -207,12 +410,12 @@
                 try {
                     var receipt = await App.apiPost("/meetings/batch", {action: payload.action, scope: "selected", meeting_ids: submittedIds, request_id: requestId});
                     if (ListPanel && ListPanel.loadMeetings) ListPanel.loadMeetings();
-                    if (ListPanel && ListPanel.clearSelection) ListPanel.clearSelection();
+                    if (ListPanel && ListPanel.clearSelectedIds) ListPanel.clearSelectedIds((receipt.candidates || []).filter(function (row) { return row.admission === "queued"; }).map(function (row) { return row.meeting_id; }));
                     doc.dispatchEvent(new CustomEvent("recap:dashboard-refresh"));
                     if (!dialog.open) return;
                     dialog.close();
-                    showBulkToast(receipt.queued + "건 대기열 등록 · 접수 내역에서 진행 상황을 확인하세요.", "info");
-                    showHistory();
+                    showWorkMessage(receipt.queued + "건을 접수했습니다. 다른 화면을 이용해도 계속됩니다.");
+                    refreshWork();
                 } catch (err) {
                     if (dialog.open) {
                         status.setAttribute("role", "alert");
@@ -290,6 +493,7 @@
             var bar = _bar;
             setTimeoutFn(function () {
                 if (!bar) return;
+                if (ListPanel.getSelectedIds().length) { bar.classList.remove("is-leaving"); return; }
                 bar.hidden = true;
                 bar.classList.remove("is-leaving");
             }, 200);
@@ -299,11 +503,6 @@
             if (!_bar) return;
             var detail = e.detail || {};
             var count = detail.count || 0;
-            var nearby = doc.getElementById("selectionActions");
-            if (nearby) {
-                nearby.hidden = count === 0;
-                nearby.querySelector("span").textContent = count + "건 선택";
-            }
             if (_countNum) App.safeText(_countNum, String(count));
             if (count > 0) {
                 _show();
@@ -318,6 +517,7 @@
                 ? ListPanel.getSelectedIds()
                 : [];
             if (ids.length === 0) return;
+            if (action === "title") { enqueueTitle(ids).catch(function () {}); return; }
             openReview({action: action, scope: "selected", meeting_ids: ids});
             return;
 
@@ -327,6 +527,10 @@
             var t = e.target.closest("[data-action]");
             if (!t || !_bar.contains(t)) return;
             var action = t.getAttribute("data-action");
+            if (action === "run") {
+                _executeAction(doc.getElementById("bulkTaskSelect").value);
+                return;
+            }
             if (action === "dismiss") {
                 if (_inFlight) return;
                 if (ListPanel && ListPanel.clearSelection) {
@@ -347,14 +551,12 @@
             _countNum = _bar.querySelector(".bulk-action-bar__count-num");
             _bar.addEventListener("click", _onClick);
             doc.addEventListener("recap:selection-changed", _onSelectionChanged);
-            var nearby = doc.getElementById("selectionActions");
-            if (nearby) nearby.addEventListener("click", function (event) {
-                var button = event.target.closest("button[data-batch-action]");
-                if (button) _executeAction(button.dataset.batchAction);
-            });
             var history = doc.getElementById("batchHistoryButton");
             if (history) history.addEventListener("click", showHistory);
+            var progressHistory = doc.getElementById("backgroundWorkHistory");
+            if (progressHistory) progressHistory.addEventListener("click", showHistory);
             _initialized = true;
+            refreshWork();
         }
 
         return {
@@ -362,6 +564,8 @@
             showBulkToast: showBulkToast,
             openReview: openReview,
             showHistory: showHistory,
+            enqueueTitle: enqueueTitle,
+            isTitlePending: isTitlePending,
         };
     }
 

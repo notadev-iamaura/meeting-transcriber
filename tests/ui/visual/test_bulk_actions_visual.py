@@ -268,35 +268,24 @@ def test_V4_one_selected_dark_desktop(browser: Browser, ui_bulk_base_url: str) -
 
 
 # ============================================================================
-# V5 — 3 개 선택 + 액션 바 (light mobile ≤640px) — 라벨 숨김 + 카운트 축약
+# V5 — 3개 선택 + 모바일 목록 패널의 단일 작업바
 # ============================================================================
 
 
 def test_V5_three_selected_light_mobile(browser: Browser, ui_bulk_base_url: str) -> None:
-    """모바일 ≤640px (light) — 액션 버튼 라벨 텍스트 숨김, 카운트 축약, kbd 숨김.
-
-    근거: mockup §3.2 "selection mode 활성 — 컨텍스트 액션 바 적응".
-          mockup §0 변종 매트릭스에 따라 모바일은 light 만 정의됨.
-    """
+    """모바일 목록을 열면 선택 개수·작업 선택·실행을 한 곳에서 확인한다."""
     with _make_page(browser, width=375, height=720, color_scheme="light") as page:
         _open_app(page, ui_bulk_base_url)
         _select_n(page, 3)
-        # `.label-text` 가 모바일에서 display:none — 액션 버튼 라벨 숨겨야 함
-        # (handoff §2.4 모바일 미디어 쿼리)
-        first_label = page.locator(".bulk-action-btn[data-action='transcribe'] .label-text").first
-        # 사전 검증 — 미구현 시 FAIL
-        if first_label.count() > 0:
-            display = first_label.evaluate("el => getComputedStyle(el).display")
-            assert display == "none", (
-                f"모바일 ≤640px 에서 .bulk-action-btn .label-text display:none 필요 (got {display!r})"
-            )
-        # `<kbd>` 도 모바일에서 숨김
-        kbd = page.locator(".bulk-action-bar__dismiss kbd")
-        if kbd.count() > 0:
-            kbd_display = kbd.first.evaluate("el => getComputedStyle(el).display")
-            assert kbd_display == "none", (
-                f"모바일 ≤640px 에서 dismiss <kbd> display:none 필요 (got {kbd_display!r})"
-            )
+        page.locator("#mobile-menu-toggle").click()
+        page.wait_for_timeout(300)
+        toolbar = page.locator("#list-panel #bulkActionBar")
+        expect(toolbar).to_be_visible()
+        expect(toolbar.locator("#bulkTaskSelect")).to_be_visible()
+        expect(toolbar.get_by_role("button", name="실행", exact=True)).to_be_visible()
+        expect(toolbar.locator(".bulk-action-bar__count")).to_contain_text("3")
+        assert page.locator("#bulkActionBar").count() == 1
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         # V5 한정 임계 완화 — DPR=2 + 모바일 viewport 375x720 + 인라인 SVG
         # 체크마크의 sub-pixel 렌더링이 풀 sweep 시점의 GPU/캐시 상태에 따라
         # 결정적이지 않다. 단독 실행 시 0%, sweep 시 0.28% 수준의 diff 가

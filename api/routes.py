@@ -150,6 +150,9 @@ transcribe_meeting = _meeting_detail_router.transcribe_meeting
 update_summary = _meeting_detail_router.update_summary
 update_transcript = _meeting_detail_router.update_transcript
 
+from api.routers import meeting_titles as _meeting_titles_router  # noqa: E402
+
+router.include_router(_meeting_titles_router.router)
 router.include_router(_meeting_detail_router.router)
 
 
