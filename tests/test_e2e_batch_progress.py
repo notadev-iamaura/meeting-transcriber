@@ -176,8 +176,9 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
         page.locator('.meeting-item[data-meeting-id="batch_00"]').locator(
             "[data-checkbox]"
         ).click()
-        expect(page.locator("#selectionActions")).to_be_visible()
-        page.locator("#selectionActions").get_by_role("button", name="전사만", exact=True).click()
+        expect(page.locator("#bulkActionBar")).to_be_visible()
+        page.locator("#bulkTaskSelect").select_option("transcribe")
+        page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog = page.get_by_role("dialog", name="일괄 처리 대상 확인")
         expect(dialog).to_contain_text("교정·요약은 나중에 따로 실행")
         dialog.get_by_role("button", name="닫기", exact=True).click()
@@ -191,8 +192,10 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
         expect(dialog).to_contain_text("선택 14건 · 실행 가능 12건 · 제외 2건")
         page.screenshot(path="/private/tmp/recap-batch-review.png", animations="disabled")
         dialog.get_by_role("button", name="12건 대기열에 등록", exact=True).click()
-        history = page.get_by_role("dialog", name="일괄 처리 접수 내역")
-        expect(history).to_contain_text("12건 대기열 등록 · 2건 제외", timeout=30000)
+        page.locator("#batchHistoryButton").click()
+        history = page.get_by_role("dialog", name="작업 내역")
+        expect(history).to_contain_text("전사 + 교정·요약 · 12건 접수", timeout=30000)
+        expect(history.locator(".batch-item-state").filter(has_text="제외 ·")).to_have_count(2)
         expect(
             history.locator(".batch-item-state").filter(has_text="전사 완료 · AI 교정 실패")
         ).to_have_count(2, timeout=120000)
@@ -213,8 +216,12 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
         )
         # 새로고침 후에도 동일한 요청과 실패 단계가 조회된다.
         page.reload()
-        page.get_by_role("button", name="접수 내역", exact=True).click()
-        expect(history).to_contain_text(receipt["request_id"])
+        page.locator("#batchHistoryButton").click()
+        expect(history).to_contain_text("전사 + 교정·요약 · 12건 접수")
+        assert (
+            page.request.get(url + "/api/batch-requests").json()["requests"][0]["request_id"]
+            == receipt["request_id"]
+        )
         history.get_by_role("link", name="batch_00", exact=True).click()
         expect(page.locator(".viewer-failure-notice")).to_contain_text("전사 완료 · AI 교정 실패")
         expect(page.locator(".utterance-text").first).to_contain_text("검증용 전사문")
@@ -230,7 +237,7 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
         page.set_viewport_size({"width": 390, "height": 844})
         page.goto(url + "/app")
         page.get_by_role("button", name="메뉴 열기", exact=True).click()
-        page.get_by_role("button", name="접수 내역", exact=True).click()
+        page.locator("#batchHistoryButton").click()
         expect(history).to_be_visible()
         assert history.evaluate("el => el.scrollWidth <= el.clientWidth")
         page.screenshot(path="/private/tmp/recap-batch-mobile.png", animations="disabled")
@@ -247,17 +254,19 @@ def test_deferred_correction_failure_retries_without_stt(batch_server, tmp_path:
         page.goto(url + "/app")
         expect(page.locator(".meeting-item")).to_have_count(16)
         page.locator('.meeting-item[data-meeting-id="batch_00"] [data-checkbox]').click()
-        page.locator("#selectionActions").get_by_role("button", name="전사만", exact=True).click()
+        page.locator("#bulkTaskSelect").select_option("transcribe")
+        page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog = page.get_by_role("dialog", name="일괄 처리 대상 확인")
         dialog.get_by_role("button", name="1건 대기열에 등록", exact=True).click()
-        history = page.get_by_role("dialog", name="일괄 처리 접수 내역")
+        page.locator("#batchHistoryButton").click()
+        history = page.get_by_role("dialog", name="작업 내역")
         expect(history).to_contain_text("전사 완료 · 교정·요약 대기", timeout=30000)
         history.get_by_role("button", name="닫기", exact=True).click()
         page.locator('.meeting-item[data-meeting-id="batch_00"] [data-checkbox]').click()
-        page.locator("#selectionActions").get_by_role(
-            "button", name="교정·요약", exact=True
-        ).click()
+        page.locator("#bulkTaskSelect").select_option("summarize")
+        page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog.get_by_role("button", name="1건 대기열에 등록", exact=True).click()
+        page.locator("#batchHistoryButton").click()
         expect(history).to_contain_text("전사 완료 · AI 교정 실패", timeout=30000)
         page.goto(url + "/app/viewer/batch_00")
         expect(page.locator(".viewer-failure-notice")).to_contain_text("전사 완료 · AI 교정 실패")

@@ -72,7 +72,9 @@ def _install_batch_route_mock(page: Page) -> dict[str, list[dict]]:
         receipt = dict(
             _BATCH_OK_RESPONSE,
             request_id=body.get("request_id", "test-request"),
-            candidates=[],
+            candidates=[
+                dict(meeting_id=mid, admission="queued") for mid in body.get("meeting_ids", [])
+            ],
             events=[],
         )
         captured["receipts"].append(receipt)
@@ -156,6 +158,172 @@ def _meeting_items(page: Page):
 def _bulk_bar(page: Page):
     """컨텍스트 액션 바 locator (mockup §3 — `.bulk-action-bar`)."""
     return page.locator(".bulk-action-bar")
+
+
+def test_title_batch_preserves_excluded_selection_and_survives_navigation(ui_page: Page) -> None:
+    """접수된 녹취만 선택 해제하고 모달 없이 중단·재시도를 제공한다."""
+    items = _meeting_items(ui_page)
+    ids = [items.nth(i).get_attribute("data-meeting-id") for i in range(2)]
+    receipts: list[dict] = []
+    requests: list[dict] = []
+
+    def enqueue(route) -> None:
+        body = route.request.post_data_json
+        requests.append(body)
+        receipt = {
+            "request_id": body["request_id"],
+            "action": "title",
+            "queued": 1,
+            "skipped": 1,
+            "created_at": "2026-09-23T14:00:00",
+            "candidates": [
+                {"meeting_id": ids[0], "admission": "queued"},
+                {"meeting_id": ids[1], "admission": "skipped", "reason": "전사문 없음"},
+            ],
+            "events": [],
+        }
+        receipts[:] = [receipt]
+        route.fulfill(json=receipt)
+
+    def cancel(route) -> None:
+        receipts[0]["events"].append(
+            {
+                "meeting_id": ids[0],
+                "status": "cancelled",
+                "status_label": "중단됨",
+            }
+        )
+        route.fulfill(json={"cancelled": 1})
+
+    ui_page.route(
+        "**/api/batch-requests", lambda route: route.fulfill(json={"requests": receipts})
+    )
+    ui_page.route("**/api/meetings/titles", enqueue)
+    ui_page.route("**/api/title-jobs/*/cancel", cancel)
+    for i in range(2):
+        items.nth(i).locator(".meeting-item-checkbox").click()
+    expect(ui_page.locator("#bulkActionBar")).to_have_count(1)
+    assert ui_page.locator("#list-panel #bulkActionBar").count() == 1
+    ui_page.locator("#bulkActionBar [data-action=run]").click()
+    expect(ui_page.get_by_role("dialog")).to_have_count(0)
+    expect(ui_page.locator(".bulk-action-bar__count-num")).to_have_text("1")
+    assert ui_page.evaluate("window.ListPanel.getSelectedIds()") == [ids[1]]
+    expect(ui_page.locator("#backgroundWorkMessage")).to_contain_text("차례 대기 중")
+    ui_page.evaluate("window.SPA.Router.navigate('/app/settings')")
+    expect(ui_page.locator("#backgroundWorkStatus")).to_be_visible()
+    ui_page.locator("#backgroundWorkHistory").click()
+    history = ui_page.get_by_role("dialog", name="작업 내역")
+    history.get_by_role("button", name="중단", exact=True).click()
+    expect(history).to_contain_text("중단됨", timeout=8000)
+    history.get_by_role("button", name="1건 다시 시도").click()
+    expect(history).to_contain_text("대기열 등록", timeout=8000)
+    assert len(requests) == 2
+    assert requests[1]["meeting_ids"] == [ids[0]]
+    assert requests[0]["request_id"] != requests[1]["request_id"]
+
+
+def test_title_mixed_pending_selection_submits_other_ids(ui_page: Page) -> None:
+    """이미 실행 중인 녹취와 새 대상을 함께 선택해도 새 대상은 접수한다."""
+    ids = [_meeting_items(ui_page).nth(i).get_attribute("data-meeting-id") for i in range(2)]
+    receipt = {
+        "request_id": "existing-title",
+        "action": "title",
+        "queued": 1,
+        "skipped": 0,
+        "candidates": [{"meeting_id": ids[0], "admission": "queued"}],
+        "events": [],
+    }
+    calls: list[dict] = []
+    ui_page.route(
+        "**/api/batch-requests", lambda route: route.fulfill(json={"requests": [receipt]})
+    )
+
+    def enqueue(route) -> None:
+        calls.append(route.request.post_data_json)
+        route.fulfill(
+            json={
+                "request_id": calls[-1]["request_id"],
+                "action": "title",
+                "queued": 1,
+                "skipped": 0,
+                "candidates": [{"meeting_id": ids[1], "admission": "queued"}],
+                "events": [],
+            }
+        )
+
+    ui_page.route("**/api/meetings/titles", enqueue)
+    expect(ui_page.locator("#backgroundWorkMessage")).to_contain_text("차례 대기 중", timeout=8000)
+    for i in range(2):
+        _meeting_items(ui_page).nth(i).locator(".meeting-item-checkbox").click()
+    ui_page.locator("#bulkActionBar [data-action=run]").click()
+    expect(ui_page.locator(".bulk-action-bar__count-num")).to_have_text("1")
+    assert calls[0]["meeting_ids"] == [ids[1]]
+    assert ui_page.evaluate("window.ListPanel.getSelectedIds()") == [ids[0]]
+
+
+def test_history_refresh_preserves_keyboard_focus_and_scroll(ui_page: Page) -> None:
+    """내역 갱신은 같은 항목의 키보드 포커스와 스크롤 위치를 유지한다."""
+    receipt = {
+        "request_id": "focus-title",
+        "action": "title",
+        "queued": 20,
+        "skipped": 0,
+        "candidates": [
+            {"meeting_id": f"focus-{i}", "title": f"녹취 {i}", "admission": "queued"}
+            for i in range(20)
+        ],
+        "events": [],
+    }
+    ui_page.route(
+        "**/api/batch-requests", lambda route: route.fulfill(json={"requests": [receipt]})
+    )
+    ui_page.locator("#batchHistoryButton").click()
+    dialog = ui_page.get_by_role("dialog", name="작업 내역")
+    last_link = dialog.get_by_role("link", name="녹취 19", exact=True)
+    last_link.focus()
+    before = dialog.evaluate("el => el.scrollTop")
+    receipt["events"].append(
+        {"meeting_id": "focus-0", "status": "failed", "status_label": "첫 녹취 실패"}
+    )
+    expect(dialog).to_contain_text("첫 녹취 실패", timeout=8000)
+    expect(last_link).to_be_focused()
+    assert abs(dialog.evaluate("el => el.scrollTop") - before) <= 1
+
+
+def test_contextual_toolbar_viewer_layout_desktop_and_mobile(ui_page: Page) -> None:
+    """현재 열린 녹취와 체크 선택을 구분하고 좁은 화면에서도 단일 작업바를 쓴다."""
+    ui_page.set_viewport_size({"width": 1440, "height": 1000})
+    items = _meeting_items(ui_page)
+    current = items.nth(3).get_attribute("data-meeting-id")
+    for i in range(3):
+        items.nth(i).locator(".meeting-item-checkbox").click()
+    ui_page.evaluate(f"window.SPA.Router.navigate('/app/viewer/{current}')")
+    expect(ui_page.locator(".viewer-title-text")).to_be_visible()
+    active = ui_page.locator(".meeting-item.active:not(.selected)")
+    expect(active).to_have_count(1)
+    assert active.evaluate("el => getComputedStyle(el).backgroundColor") != items.nth(0).evaluate(
+        "el => getComputedStyle(el).backgroundColor"
+    )
+    expect(ui_page.locator("#content-wrapper #bulkActionBar")).to_have_count(0)
+    ui_page.screenshot(
+        path="/private/tmp/recap-contextual-actions-desktop.png", animations="disabled"
+    )
+    ui_page.locator(".viewer-more-actions > summary").click()
+    expect(ui_page.locator(".viewer-more-panel")).to_be_visible()
+    ui_page.screenshot(
+        path="/private/tmp/recap-contextual-actions-more.png", animations="disabled"
+    )
+    ui_page.keyboard.press("Escape")
+    ui_page.set_viewport_size({"width": 390, "height": 844})
+    ui_page.wait_for_timeout(400)
+    ui_page.screenshot(path="/private/tmp/recap-contextual-actions-390.png", animations="disabled")
+    ui_page.locator("#mobile-menu-toggle").click()
+    ui_page.wait_for_timeout(300)
+    expect(ui_page.locator("#bulkActionBar")).to_be_visible()
+    ui_page.screenshot(
+        path="/private/tmp/recap-contextual-actions-selection-390.png", animations="disabled"
+    )
+    assert ui_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
 # ============================================================================
@@ -590,7 +758,8 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
 
@@ -614,7 +783,8 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator(".bulk-action-btn[data-action='summarize']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("summarize")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
@@ -637,7 +807,8 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator(".bulk-action-btn[data-action='both']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("full")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
         assert len(captured["calls"]) == 1, "batch API 1회 호출 기대"
@@ -684,7 +855,8 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
         # toast 는 .toast / .home-status / role="status" 중 하나에 출력 — 라벨 검색
@@ -696,7 +868,9 @@ class TestBulkActionBar:
         combined = " ".join(
             (toast_locator.nth(i).text_content() or "") for i in range(toast_locator.count())
         )
-        assert "대기열 등록" in combined, f"toast 에 처리/건너뜀 키워드 필요 (text={combined!r})"
+        assert "처리" in combined or "접수" in combined, (
+            f"toast 에 처리/건너뜀 키워드 필요 (text={combined!r})"
+        )
 
     def test_A9_액션_실행_후_selection_mode_자동_종료(self, ui_page: Page) -> None:
         """Given: 2 개 선택 + route mock
@@ -710,7 +884,8 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator(".bulk-action-btn[data-action='summarize']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("summarize")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
         for i in range(5):
@@ -758,7 +933,8 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(200)
 
         # 첫 클릭 (in-flight 진입)
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         # 응답 도착 전 재클릭 (200ms 후)
         ui_page.wait_for_timeout(200)
@@ -767,8 +943,8 @@ class TestBulkActionBar:
         # 의 visibility check 가 timeout 되는 환경 이슈가 있어, 핸들러의 in-flight
         # 가드 자체를 검증하기 위해 click 이벤트를 직접 dispatch (force=True 보다
         # 더 강한 우회 — visibility/scroll/actionability 모두 skip).
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").dispatch_event("click")
-        ui_page.locator(".bulk-action-btn[data-action='summarize']").dispatch_event("click")
+        ui_page.locator(".bulk-action-btn[data-action='run']").dispatch_event("click")
+        ui_page.locator(".bulk-action-btn[data-action='run']").dispatch_event("click")
 
         # 첫 응답 도착 + 추가 요청 가능성 모두 흡수 위해 충분히 대기
         ui_page.wait_for_timeout(2000)
@@ -804,7 +980,8 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator(".bulk-action-btn[data-action='transcribe']").click()
+        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
 

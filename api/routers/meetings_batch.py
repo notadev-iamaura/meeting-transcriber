@@ -918,12 +918,23 @@ async def batch_history(request: Request) -> dict[str, Any]:
         if receipt.get("server_session") and receipt["server_session"] != session:
             for mid in receipt.get("background_ids", []):
                 events = [e for e in receipt["events"] if e["meeting_id"] == mid]
-                if not events or events[-1].get("status") not in {"completed", "failed"}:
+                if not events or events[-1].get("status") not in {
+                    "completed",
+                    "failed",
+                    "skipped",
+                    "cancelled",
+                    "interrupted",
+                    "restored",
+                }:
                     receipt["events"].append(
                         dict(
                             meeting_id=mid,
                             status="interrupted",
-                            status_label="앱 재시작으로 후처리 중단 · 다시 접수 필요",
+                            status_label=(
+                                "앱 재시작으로 제목 정리 중단 · 다시 실행 가능"
+                                if receipt.get("action") == "title"
+                                else "앱 재시작으로 후처리 중단 · 다시 접수 필요"
+                            ),
                         )
                     )
     return {"requests": receipts}

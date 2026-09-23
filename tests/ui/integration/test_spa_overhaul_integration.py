@@ -3084,7 +3084,8 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
         path="/app/viewer/meeting-a",
         api_handler=viewer_api,
     ) as page:
-        page.wait_for_selector(".viewer-action-group.primary .viewer-action-btn.copy")
+        page.locator(".viewer-more-actions > summary").click()
+        page.wait_for_selector(".viewer-more-panel .viewer-action-btn.copy")
         groups = page.evaluate(
             "() => ({"
             "  primary: Array.from(document.querySelectorAll('.viewer-action-group.primary button')).map(b => b.textContent.trim()),"
@@ -3092,12 +3093,15 @@ def test_viewer_actions_are_grouped_by_risk(browser: Browser, spa_static_server:
             "  danger: Array.from(document.querySelectorAll('.viewer-action-group.danger button')).map(b => b.textContent.trim())"
             "})"
         )
-        assert any("복사" in text for text in groups["primary"])
-        assert any("다운로드" in text for text in groups["primary"])
+        assert any("녹음 폴더" in text for text in groups["primary"])
+        assert any("제목 자동 정리" in text for text in groups["primary"])
+        assert any("복사" in text for text in groups["secondary"])
+        assert any("다운로드" in text for text in groups["secondary"])
         assert any("A/B" in text for text in groups["secondary"])
         assert any("바꾸기" in text for text in groups["secondary"])
         assert any("삭제" in text for text in groups["danger"])
         assert any("다시 전사" in text for text in groups["danger"])
+        page.keyboard.press("Escape")
 
         page.locator("#viewerTabSummary").click()
         page.wait_for_selector("#viewerSummaryContent .summary-toolbar")

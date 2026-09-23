@@ -12,6 +12,7 @@
         var App = deps.App || window.MeetingApp;
         var Router = deps.Router || (window.SPA && window.SPA.Router);
         var ListPanel = deps.ListPanel || window.ListPanel;
+        var BulkActionBar = deps.BulkActionBar;
         var Icons = deps.Icons || {};
         var PIPELINE_STEPS = deps.PIPELINE_STEPS || [];
         var errorBanner = deps.errorBanner || { show: function () {} };
@@ -70,7 +71,6 @@
             self._alternateTranscriptionCleanup = null;
             self._startTranscriptionDialog = null;
             self._startTranscriptionCleanup = null;
-            self._titleSuggestionCleanup = null;
             self._audioFolderPending = false;
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
@@ -81,6 +81,16 @@
             self._render();
             self._bind();
             self._loadData();
+            self._lastTitlePending = false;
+            var onTitleUpdate = function (event) {
+                if (self._destroyed) return;
+                var pending = BulkActionBar && BulkActionBar.isTitlePending(self._meetingId);
+                if (pending !== self._lastTitlePending && self._lastMeetingData) self._renderActions(self._lastMeetingData);
+                self._lastTitlePending = pending;
+                if ((event.detail.ids || []).indexOf(self._meetingId) !== -1) self._loadMeetingInfo();
+            };
+            document.addEventListener("recap:titles-updated", onTitleUpdate);
+            self._listeners.push({el: document, type: "recap:titles-updated", fn: onTitleUpdate});
         }
 
         /**
@@ -1202,7 +1212,7 @@
                 els.meetingInfo.style.display = "block";
                 // 사용자 정의 title 우선, 없으면 타임스탬프 폴백
                 self._lastMeetingData = data;
-                self._renderMeetingTitle(data);
+                if (!els.meetingTitle.classList.contains("editing")) self._renderMeetingTitle(data);
 
                 els.meetingStatus.className = "viewer-status " + data.status;
                 App.safeText(els.meetingStatus, App.getStatusLabel(data));
@@ -1314,7 +1324,7 @@
             var cancelEdit = function () {
                 if (saved || saving) return;
                 saved = true;
-                self._renderMeetingTitle(data);
+                self._renderMeetingTitle(self._lastMeetingData || data);
             };
             var doSave = async function () {
                 if (saved || saving) return;
@@ -1322,7 +1332,7 @@
                 // 값이 기존과 동일하면 저장 스킵
                 if (next === currentTitle) {
                     saved = true;
-                    self._renderMeetingTitle(data);
+                    self._renderMeetingTitle(self._lastMeetingData || data);
                     return;
                 }
                 saving = true;
@@ -1433,104 +1443,15 @@
             }
         };
 
-        /** 로컬 AI가 제안한 날짜 포함 제목을 검토·수정한 뒤 적용한다. */
-        ViewerView.prototype._openTitleSuggestion = function (trigger) {
+        /** 로컬 AI 제목 작업을 접수하며 화면 이동 뒤에도 서버에서 계속 처리한다. */
+        ViewerView.prototype._enqueueTitle = async function () {
             var self = this;
-            if (self._destroyed || self._titleSuggestionCleanup) return;
-            var controller = new AbortController();
-            var overlay = document.createElement("div");
-            overlay.className = "modal-overlay";
-            overlay.id = "titleSuggestionModal";
-            overlay.setAttribute("role", "dialog");
-            overlay.setAttribute("aria-modal", "true");
-            overlay.setAttribute("aria-labelledby", "titleSuggestionHeading");
-            overlay.innerHTML = [
-                '<div class="modal-content">',
-                '  <h3 class="modal-title" id="titleSuggestionHeading">AI로 제목 만들기</h3>',
-                '  <p id="titleSuggestionStatus" role="status" aria-live="polite">이 Mac에서 녹취 내용을 읽고 제목을 만드는 중… 다른 작업 중에는 잠시 기다릴 수 있어요.</p>',
-                '  <div class="modal-field">',
-                '    <label class="modal-label" for="titleSuggestionInput">날짜와 주요 내용</label>',
-                '    <input class="modal-input" id="titleSuggestionInput" type="text" maxlength="200" disabled />',
-                '  </div>',
-                '  <div class="modal-error" id="titleSuggestionError" role="alert"></div>',
-                '  <div class="modal-actions">',
-                '    <button type="button" class="btn-secondary" id="titleSuggestionCancel">취소</button>',
-                '    <button type="button" class="settings-save-btn" id="titleSuggestionApply" disabled>제목 적용</button>',
-                '  </div>',
-                '</div>',
-            ].join("");
-            document.body.appendChild(overlay);
-            var input = overlay.querySelector("#titleSuggestionInput");
-            var status = overlay.querySelector("#titleSuggestionStatus");
-            var error = overlay.querySelector("#titleSuggestionError");
-            var cancel = overlay.querySelector("#titleSuggestionCancel");
-            var apply = overlay.querySelector("#titleSuggestionApply");
-            var closed = false;
-            var saving = false;
-            function close(restoreFocus) {
-                if (closed) return;
-                closed = true;
-                controller.abort();
-                document.removeEventListener("keydown", onKey);
-                overlay.remove();
-                self._titleSuggestionCleanup = null;
-                if (restoreFocus && trigger.isConnected) trigger.focus();
+            if (self._destroyed || !BulkActionBar || BulkActionBar.isTitlePending(self._meetingId)) return;
+            try {
+                await BulkActionBar.enqueueTitle([self._meetingId]);
+            } catch (_) {
+                // shell의 작업 상태에서 오류와 재시도 안내를 유지한다.
             }
-            function onKey(event) {
-                if (event.isComposing) return;
-                if (event.key === "Escape" && !saving) {
-                    event.preventDefault();
-                    close(true);
-                } else if (event.key === "Tab") {
-                    var focusable = [input, cancel, apply].filter(function (el) { return !el.disabled; });
-                    var index = focusable.indexOf(document.activeElement);
-                    event.preventDefault();
-                    if (focusable.length) focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
-                } else if (event.key === "Enter" && event.target === input && !apply.disabled) {
-                    event.preventDefault();
-                    apply.click();
-                }
-            }
-            self._titleSuggestionCleanup = close;
-            document.addEventListener("keydown", onKey);
-            cancel.addEventListener("click", function () { if (!saving) close(true); });
-            input.addEventListener("input", function () { apply.disabled = saving || !input.value.trim(); });
-            apply.addEventListener("click", async function () {
-                if (saving || closed || !input.value.trim()) return;
-                saving = true;
-                input.disabled = cancel.disabled = apply.disabled = true;
-                apply.textContent = "저장 중…";
-                error.textContent = "";
-                var ok = await self._saveTitle(input.value.trim());
-                if (closed || self._destroyed) return;
-                if (ok) { close(true); return; }
-                saving = false;
-                input.disabled = cancel.disabled = apply.disabled = false;
-                apply.textContent = "제목 적용";
-                error.textContent = "제목을 저장하지 못했습니다. 입력한 제목을 확인하고 다시 적용해 주세요.";
-                input.focus();
-            });
-            cancel.focus();
-            App.apiRequest(
-                "/meetings/" + encodeURIComponent(self._meetingId) + "/title-suggestion",
-                { method: "POST", signal: controller.signal }
-            ).then(function (result) {
-                if (closed || self._destroyed) return;
-                input.value = String(result.title || "");
-                input.disabled = false;
-                apply.disabled = !input.value.trim();
-                var dateNote = result.date_source === "audio_mtime"
-                    ? "원본 파일의 수정 날짜를 사용했습니다. 실제 녹취 날짜를 확인해 주세요."
-                    : "녹음 날짜와 주요 내용을 담았어요. 적용 전에 자유롭게 수정하세요.";
-                status.textContent = dateNote + (result.sampled ? " 긴 녹취는 일부 구간을 골라 읽었어요." : "");
-                input.focus();
-                input.select();
-            }).catch(function (e) {
-                if (closed || self._destroyed) return;
-                status.textContent = "기존 제목은 그대로 유지됩니다.";
-                error.textContent = "제목 생성 실패: " + e.message;
-                cancel.textContent = "닫기";
-            });
         };
 
         /**
@@ -1615,6 +1536,23 @@
             var primaryGroup = makeGroup("primary", "주요 작업");
             var secondaryGroup = makeGroup("secondary", "보조 작업");
             var dangerGroup = makeGroup("danger", "위험 작업");
+            var more = document.createElement("details");
+            more.className = "viewer-more-actions";
+            var moreLabel = document.createElement("summary");
+            moreLabel.textContent = "더 보기";
+            more.appendChild(moreLabel);
+            var morePanel = document.createElement("div");
+            morePanel.className = "viewer-more-panel";
+            morePanel.appendChild(secondaryGroup);
+            morePanel.appendChild(dangerGroup);
+            more.appendChild(morePanel);
+            actionsEl.appendChild(more);
+            more.addEventListener("keydown", function (event) {
+                if (event.key === "Escape") {
+                    event.preventDefault(); event.stopPropagation();
+                    more.open = false; moreLabel.focus();
+                }
+            });
 
             var folderBtn = document.createElement("button");
             folderBtn.type = "button";
@@ -1628,14 +1566,14 @@
             var aiTitleBtn = document.createElement("button");
             aiTitleBtn.type = "button";
             aiTitleBtn.className = "viewer-action-btn ai-title";
-            aiTitleBtn.textContent = "AI로 제목 만들기";
-            aiTitleBtn.setAttribute("aria-haspopup", "dialog");
+            var titlePending = BulkActionBar && BulkActionBar.isTitlePending(self._meetingId);
+            aiTitleBtn.textContent = titlePending ? "제목 정리 중…" : "제목 자동 정리";
             var titleBlockedByWork = ["queued", "recording", "transcribing", "diarizing", "merging", "embedding", "processing"].indexOf(data.status) !== -1;
-            aiTitleBtn.disabled = titleBlockedByWork || !self._allUtterances.length;
-            aiTitleBtn.title = aiTitleBtn.disabled
+            aiTitleBtn.disabled = titlePending || titleBlockedByWork || !self._allUtterances.length;
+            aiTitleBtn.title = titlePending ? "제목 정리 중입니다. 화면을 이동해도 계속되며 작업 내역에서 중단할 수 있습니다." : aiTitleBtn.disabled
                 ? (titleBlockedByWork ? "전사 작업 완료 후 제목을 만들 수 있습니다." : "전사문이 있어야 제목을 만들 수 있습니다.")
-                : "이 Mac의 AI로 녹음 날짜와 주요 내용을 담은 제목을 제안합니다.";
-            aiTitleBtn.addEventListener("click", function () { self._openTitleSuggestion(aiTitleBtn); });
+                : "이 Mac의 AI가 녹음 날짜와 주요 내용을 담은 제목으로 정리합니다. 작업 내역에서 되돌릴 수 있습니다.";
+            aiTitleBtn.addEventListener("click", function () { self._enqueueTitle(); });
             primaryGroup.appendChild(aiTitleBtn);
 
             // 진행 중(queued/transcribing/diarizing/merging/embedding) 시 취소 버튼
@@ -1752,7 +1690,7 @@
                 copyBtn.addEventListener("click", function () {
                     self._copyTranscript(copyBtn);
                 });
-                primaryGroup.appendChild(copyBtn);
+                secondaryGroup.appendChild(copyBtn);
 
                 var downloadBtn = document.createElement("button");
                 downloadBtn.className = "viewer-action-btn download-txt";
@@ -1761,7 +1699,7 @@
                 downloadBtn.addEventListener("click", function () {
                     self._downloadTranscript();
                 });
-                primaryGroup.appendChild(downloadBtn);
+                secondaryGroup.appendChild(downloadBtn);
 
                 if (self._canEditTranscript()) {
                     // 모두 바꾸기 (find/replace + 용어집 자동 등록)
@@ -3550,7 +3488,6 @@
          */
         ViewerView.prototype.destroy = function () {
             this._destroyed = true;
-            if (this._titleSuggestionCleanup) this._titleSuggestionCleanup(false);
             if (this._startTranscriptionCleanup) {
                 this._startTranscriptionCleanup(false);
             }

@@ -868,6 +868,7 @@
         ViewerViewModule && typeof ViewerViewModule.create === "function"
     )
         ? ViewerViewModule.create({
+            BulkActionBar: BulkActionBar,
             App: App,
             Router: Router,
             ListPanel: ListPanel,

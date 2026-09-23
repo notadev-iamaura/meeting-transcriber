@@ -74,7 +74,8 @@ def test_batch_review_dialog_accessibility_and_focus(ui_page: Page, theme: str) 
         ),
     )
     ui_page.locator(".meeting-item").first.locator(".meeting-item-checkbox").click()
-    trigger = ui_page.locator("#selectionActions [data-batch-action='transcribe']")
+    ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+    trigger = ui_page.locator("#bulkActionBar [data-action='run']")
     trigger.click()
     dialog = ui_page.get_by_role("dialog", name="일괄 처리 대상 확인")
     dialog.get_by_role("button", name="1건 대기열에 등록").wait_for()
@@ -396,9 +397,8 @@ def test_AA6_액션_바_버튼들이_Tab으로_도달_가능하다(ui_page: Page
     ui_page.evaluate("() => document.body.focus()")
     seen: set[str] = set()
     targets = {
-        "bulk-action-btn--transcribe",
-        "bulk-action-btn--summarize",
-        "bulk-action-btn--both",
+        "bulk-action-btn--run",
+        "bulk-task-select",
         "bulk-action-bar__dismiss",
     }
     # 최대 60 회 Tab 으로 모든 타겟 통과 확인 (헤더/사이드바/액션 바 등 포함 가능)
@@ -409,6 +409,7 @@ def test_AA6_액션_바_버튼들이_Tab으로_도달_가능하다(ui_page: Page
             () => {
               const el = document.activeElement;
               if (!el) return '';
+              if (el.id === 'bulkTaskSelect') return 'bulk-task-select';
               if (el.matches('.bulk-action-bar__dismiss, .bulk-action-bar__dismiss *'))
                 return 'bulk-action-bar__dismiss';
               const btn = el.closest('.bulk-action-btn');
@@ -441,7 +442,7 @@ def test_AA7_액션_버튼은_focus_시_ring_표시(ui_page: Page) -> None:
     근거: handoff §2.3 "`.bulk-action-btn:focus-visible { box-shadow: var(--focus-ring) }`".
     """
     _select_two(ui_page)
-    btn = ui_page.locator(".bulk-action-btn[data-action='transcribe']")
+    btn = ui_page.locator(".bulk-action-btn[data-action='run']")
     btn.focus()
     box_shadow = btn.evaluate("el => getComputedStyle(el).boxShadow")
     assert box_shadow and box_shadow != "none" and "rgb" in box_shadow.lower(), (
