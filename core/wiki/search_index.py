@@ -66,6 +66,52 @@ class WikiSearchResult:
         }
 
 
+def _append_meta_filters(
+    sql: str,
+    params: list[Any],
+    *,
+    page_types: list[str] | None = None,
+    status: str | None = None,
+    project: str | None = None,
+    participant: str | None = None,
+    owner: str | None = None,
+    person: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_confidence: int | None = None,
+) -> str:
+    """BM25·벡터 후보 조회에 동일한 메타 필터를 추가한다(m 별칭 사용)."""
+    if page_types:
+        placeholders = ",".join("?" for _ in page_types)
+        sql += f" AND m.page_type IN ({placeholders})"
+        params.extend(page_types)
+    if status:
+        sql += " AND m.status = ?"
+        params.append(status)
+    if project:
+        sql += " AND m.project = ?"
+        params.append(project)
+    if participant:
+        sql += " AND m.participants LIKE ?"
+        params.append(f"%{participant}%")
+    if owner:
+        sql += " AND m.owners LIKE ?"
+        params.append(f"%{owner}%")
+    if person:
+        sql += " AND (m.participants LIKE ? OR m.owners LIKE ?)"
+        params.extend([f"%{person}%", f"%{person}%"])
+    if date_from:
+        sql += " AND m.decision_date >= ?"
+        params.append(date_from)
+    if date_to:
+        sql += " AND m.decision_date <= ?"
+        params.append(date_to)
+    if min_confidence is not None:
+        sql += " AND m.confidence >= ?"
+        params.append(int(min_confidence))
+    return sql
+
+
 def _index_db_path(wiki_root: Path) -> Path:
     """wiki root 하위의 기본 검색 DB 경로를 반환한다."""
     return wiki_root / ".index" / _DEFAULT_DB_NAME
@@ -607,34 +653,19 @@ class WikiSearchIndex:
                 WHERE {_FTS_TABLE} MATCH ?
             """
             params: list[Any] = [fts_query]
-            if page_types:
-                placeholders = ",".join("?" for _ in page_types)
-                sql += f" AND m.page_type IN ({placeholders})"
-                params.extend(page_types)
-            if status:
-                sql += " AND m.status = ?"
-                params.append(status)
-            if project:
-                sql += " AND m.project = ?"
-                params.append(project)
-            if participant:
-                sql += " AND m.participants LIKE ?"
-                params.append(f"%{participant}%")
-            if owner:
-                sql += " AND m.owners LIKE ?"
-                params.append(f"%{owner}%")
-            if person:
-                sql += " AND (m.participants LIKE ? OR m.owners LIKE ?)"
-                params.extend([f"%{person}%", f"%{person}%"])
-            if date_from:
-                sql += " AND m.decision_date >= ?"
-                params.append(date_from)
-            if date_to:
-                sql += " AND m.decision_date <= ?"
-                params.append(date_to)
-            if min_confidence is not None:
-                sql += " AND m.confidence >= ?"
-                params.append(int(min_confidence))
+            sql = _append_meta_filters(
+                sql,
+                params,
+                page_types=page_types,
+                status=status,
+                project=project,
+                participant=participant,
+                owner=owner,
+                person=person,
+                date_from=date_from,
+                date_to=date_to,
+                min_confidence=min_confidence,
+            )
             sql += " ORDER BY rank_score LIMIT ?"
             params.append(max(1, int(limit)))
 
@@ -642,11 +673,25 @@ class WikiSearchIndex:
 
         return [_row_to_candidate(row, query, bm25=-float(row["rank_score"])) for row in rows]
 
-    def fetch_candidates(self, page_paths: list[str], query: str) -> dict[str, _Candidate]:
+    def fetch_candidates(
+        self,
+        page_paths: list[str],
+        query: str,
+        *,
+        page_types: list[str] | None = None,
+        status: str | None = None,
+        project: str | None = None,
+        participant: str | None = None,
+        owner: str | None = None,
+        person: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        min_confidence: int | None = None,
+    ) -> dict[str, _Candidate]:
         """주어진 page_path 들의 메타+본문을 _Candidate 로 조회한다.
 
         G1 하이브리드에서 벡터가 찾았으나 BM25 후보에 없는(어휘 비매칭) 페이지의
-        메타를 보강한다. bm25 는 0.0 placeholder(융합에서 RRF 로 대체).
+        동일한 메타 필터를 적용해 보강한다. bm25 는 0.0 placeholder(융합에서 RRF 로 대체).
         """
         paths = [str(p) for p in page_paths if p]
         if not paths:
@@ -654,8 +699,7 @@ class WikiSearchIndex:
         placeholders = ",".join("?" for _ in paths)
         with _connect(self._db_path) as conn:
             _ensure_schema(conn)
-            rows = conn.execute(
-                f"""
+            sql = f"""
                 SELECT
                     m.page_path,
                     m.page_type,
@@ -673,9 +717,22 @@ class WikiSearchIndex:
                 FROM {_META_TABLE} m
                 JOIN {_FTS_TABLE} f ON f.rowid = m.rowid
                 WHERE m.page_path IN ({placeholders})
-                """,
-                paths,
-            ).fetchall()
+                """
+            params: list[Any] = list(paths)
+            sql = _append_meta_filters(
+                sql,
+                params,
+                page_types=page_types,
+                status=status,
+                project=project,
+                participant=participant,
+                owner=owner,
+                person=person,
+                date_from=date_from,
+                date_to=date_to,
+                min_confidence=min_confidence,
+            )
+            rows = conn.execute(sql, params).fetchall()
         return {row["page_path"]: _row_to_candidate(row, query, bm25=0.0) for row in rows}
 
     @staticmethod

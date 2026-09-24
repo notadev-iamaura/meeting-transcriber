@@ -180,7 +180,23 @@ def fuse_hybrid(
     # 벡터가 찾았으나 BM25 후보에 없는(어휘 비매칭) 페이지의 메타 보강.
     missing = [path for path, _ in vector_ranked if path not in cand_map]
     if missing:
-        cand_map.update(search_index.fetch_candidates(missing, query))
+        cand_map.update(
+            search_index.fetch_candidates(
+                missing,
+                query,
+                page_types=page_types,
+                status=status,
+                project=project,
+                participant=participant,
+                owner=owner,
+                person=person,
+                date_from=date_from,
+                date_to=date_to,
+                min_confidence=min_confidence,
+            )
+        )
+    # 필터에서 제외된 경로는 융합 전에 제거하되 기존 벡터 순위는 보존한다.
+    vector_ranked = [(path, rank) for path, rank in vector_ranked if path in cand_map]
 
     return fuse_and_rerank(
         bm25_ranked,
