@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from config import WikiRankingConfig, WikiSemanticConfig, get_config
 from core.wiki.search_index import WikiSearchIndex
@@ -218,3 +221,81 @@ def test_async_래퍼는_벡터_0건이면_e5를_로드하지_않는다(tmp_path
 
     assert called == []  # 임베딩 콜백(=e5 로드) 미호출
     assert [r.page_path for r in results] == ["decisions/a.md"]  # BM25-only
+
+
+@pytest.mark.parametrize(
+    ("filters", "old_meta", "new_meta"),
+    [
+        ({"project": "Apollo"}, "project: Apollo", "project: Artemis"),
+        ({"status": "decided"}, "status: decided", "status: proposed"),
+        ({"participant": "민수"}, "participants: [민수]", "participants: [지수]"),
+        ({"owner": "민수"}, "owners: [민수]", "owners: [지수]"),
+        (
+            {"person": "민수"},
+            "participants: [민수]\nowners: [민수]",
+            "participants: [지수]\nowners: [지수]",
+        ),
+        ({"date_from": "2026-05-21"}, "decision_date: 2026-05-21", "decision_date: 2026-05-20"),
+        ({"date_to": "2026-05-21"}, "decision_date: 2026-05-21", "decision_date: 2026-05-22"),
+        ({"min_confidence": 9}, "confidence: 9", "confidence: 8"),
+    ],
+)
+def test_vector_only_candidates_obey_metadata_filters(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    filters: dict[str, Any],
+    old_meta: str,
+    new_meta: str,
+) -> None:
+    """벡터 전용 불일치 후보를 제외하고 일치 후보의 원래 RRF 순위를 보존한다."""
+    index = _build_index(tmp_path)
+    store = WikiStore(tmp_path / "wiki")
+    store.write_page(
+        Path("decisions/rejected.md"),
+        _md("제외 후보", "별개 사항").replace(old_meta, new_meta),
+    )
+    index.rebuild(store)
+    semantic_index = _FakeSemantic([("decisions/rejected.md", 1), ("decisions/b.md", 2)])
+    semantic = WikiSemanticConfig()
+    results = fuse_hybrid(
+        "예산",
+        search_index=index,
+        semantic_index=semantic_index,
+        query_embedding=[1.0, 0.0],
+        semantic=semantic,
+        ranking=WikiRankingConfig(enabled=False),
+        now=_NOW,
+        **filters,
+    )
+
+    assert {r.page_path for r in results} == {"decisions/a.md", "decisions/b.md"}
+    vector_result = next(r for r in results if r.page_path == "decisions/b.md")
+    assert vector_result.score == pytest.approx(semantic.vector_weight / (semantic.rrf_k + 2))
+    assert not [r for r in caplog.records if r.name == "core.wiki.semantic_search"]
+
+
+def test_vector_only_page_type_filter_uses_path_inferred_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """page_type 은 경로에서 추론되므로 people/ 벡터 전용 히트는 decision 필터에서 제외."""
+    index = _build_index(tmp_path)
+    store = WikiStore(tmp_path / "wiki")
+    store.write_page(Path("people/rejected.md"), _md("제외 후보", "별개 사항"))
+    index.rebuild(store)
+    semantic_index = _FakeSemantic([("people/rejected.md", 1), ("decisions/b.md", 2)])
+    semantic = WikiSemanticConfig()
+    results = fuse_hybrid(
+        "예산",
+        search_index=index,
+        semantic_index=semantic_index,
+        query_embedding=[1.0, 0.0],
+        semantic=semantic,
+        ranking=WikiRankingConfig(enabled=False),
+        now=_NOW,
+        page_types=["decision"],
+    )
+
+    assert {r.page_path for r in results} == {"decisions/a.md", "decisions/b.md"}
+    vector_result = next(r for r in results if r.page_path == "decisions/b.md")
+    assert vector_result.score == pytest.approx(semantic.vector_weight / (semantic.rrf_k + 2))
+    assert not [r for r in caplog.records if r.name == "core.wiki.semantic_search"]
