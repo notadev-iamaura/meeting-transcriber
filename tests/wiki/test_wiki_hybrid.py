@@ -255,9 +255,7 @@ def test_vector_only_candidates_obey_metadata_filters(
         _md("제외 후보", "별개 사항").replace(old_meta, new_meta),
     )
     index.rebuild(store)
-    semantic_index = _FakeSemantic(
-        [("decisions/rejected.md", 1), ("decisions/b.md", 2)]
-    )
+    semantic_index = _FakeSemantic([("decisions/rejected.md", 1), ("decisions/b.md", 2)])
     semantic = WikiSemanticConfig()
     results = fuse_hybrid(
         "예산",
@@ -284,9 +282,7 @@ def test_vector_only_page_type_filter_uses_path_inferred_type(
     store = WikiStore(tmp_path / "wiki")
     store.write_page(Path("people/rejected.md"), _md("제외 후보", "별개 사항"))
     index.rebuild(store)
-    semantic_index = _FakeSemantic(
-        [("people/rejected.md", 1), ("decisions/b.md", 2)]
-    )
+    semantic_index = _FakeSemantic([("people/rejected.md", 1), ("decisions/b.md", 2)])
     semantic = WikiSemanticConfig()
     results = fuse_hybrid(
         "예산",
