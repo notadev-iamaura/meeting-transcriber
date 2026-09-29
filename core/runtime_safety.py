@@ -113,13 +113,26 @@ def _is_safe_cached_file(path: Path, hub_root: Path) -> bool:
         return False
 
 
+# community-1 VBx PLDA는 두 npz가 모두 필요하다.
+_KNOWN_COMPONENT_REQUIRED_FILES: dict[str, tuple[str, ...]] = {
+    "plda": ("plda.npz", "xvec_transform.npz"),
+}
+
+
 def _is_safe_cached_component_dir(path: Path, hub_root: Path) -> bool:
-    """$model/<component> 디렉터리 안에 non-empty 가중치가 있는지 확인한다."""
+    """$model/<component> 디렉터리 안에 non-empty 가중치가 있는지 확인한다.
+
+    알려진 구성요소(plda)는 필수 파일 목록을 모두 요구하고,
+    그 외에는 하나 이상의 유효 가중치 파일이 있으면 통과한다.
+    """
     try:
         resolved = path.resolve()
         resolved.relative_to(hub_root)
         if not resolved.is_dir():
             return False
+        required = _KNOWN_COMPONENT_REQUIRED_FILES.get(resolved.name)
+        if required:
+            return all(_is_safe_cached_file(resolved / name, hub_root) for name in required)
         for child in resolved.rglob("*"):
             if child.suffix.lower() not in _WEIGHT_SUFFIXES:
                 continue

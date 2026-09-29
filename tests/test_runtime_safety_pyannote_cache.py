@@ -143,6 +143,20 @@ def test_community1_partial_cache_missing_embedding_is_incomplete(
     assert pyannote_cache_complete(model) is False
 
 
+def test_community1_half_plda_is_incomplete(tmp_path: Path, monkeypatch) -> None:
+    """plda.npz만 있고 xvec_transform.npz가 없으면 불완전이다."""
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    model = "pyannote/speaker-diarization-community-1"
+    snapshot = _make_community1_complete(hub, model)
+    (snapshot / "plda" / "xvec_transform.npz").unlink()
+
+    missing = missing_pyannote_cache_files(model)
+    assert f"{model}:plda" in missing
+    assert pyannote_cache_complete(model) is False
+
+
 def test_parent_symlink_escape_is_rejected(tmp_path: Path, monkeypatch) -> None:
     """중간 디렉터리 symlink가 hub 밖을 가리키면 불완전으로 본다."""
     hub = tmp_path / "hub"
