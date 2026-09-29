@@ -40,7 +40,7 @@ class FakePipeline:
     received_device: Any = None
 
     @classmethod
-    def from_pretrained(cls, model_name: str, token: str) -> FakePipeline:
+    def from_pretrained(cls, model_name: str, token: str | None = None) -> FakePipeline:
         cls.loaded_token = token
         return cls()
 
@@ -128,3 +128,98 @@ def test_worker_rejects_source_change_before_model_load(
 
     assert imported is False
     assert not output_path.exists()
+
+
+def test_worker_offline_cache_only_allows_missing_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """offline_cache_only + offline env 이면 토큰 없이 로드한다."""
+    FakePipeline.loaded_token = "sentinel"
+    audio_path = tmp_path / "audio.wav"
+    output_path = tmp_path / "result.json"
+    audio_path.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = FakePipeline
+    torch_module = types.ModuleType("torch")
+    torch_module.device = lambda name: name
+
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    _run(
+        {
+            "model_name": "pyannote/speaker-diarization-community-1",
+            "audio_path": str(audio_path),
+            "audio_identity": list(inspect_audio_path_no_symlinks(audio_path)),
+            "output_path": str(output_path),
+            "huggingface_token": None,
+            "offline_cache_only": True,
+        }
+    )
+
+    assert output_path.exists()
+    assert FakePipeline.loaded_token is None
+
+
+def test_worker_rejects_tokenless_without_offline_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """플래그 없이 토큰만 없으면 기존처럼 거부한다."""
+    audio_path = tmp_path / "audio.wav"
+    output_path = tmp_path / "result.json"
+    audio_path.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = FakePipeline
+    torch_module = types.ModuleType("torch")
+    torch_module.device = lambda name: name
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+
+    with pytest.raises(RuntimeError, match="토큰"):
+        _run(
+            {
+                "model_name": "pyannote/test",
+                "audio_path": str(audio_path),
+                "audio_identity": list(inspect_audio_path_no_symlinks(audio_path)),
+                "output_path": str(output_path),
+                "huggingface_token": None,
+            }
+        )
+
+
+def test_worker_offline_flag_requires_offline_env(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """offline_cache_only 인데 offline env가 없으면 거부한다."""
+    audio_path = tmp_path / "audio.wav"
+    output_path = tmp_path / "result.json"
+    audio_path.write_bytes(b"RIFF" + b"\x00" * 100)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = FakePipeline
+    torch_module = types.ModuleType("torch")
+    torch_module.device = lambda name: name
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+
+    with pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"):
+        _run(
+            {
+                "model_name": "pyannote/test",
+                "audio_path": str(audio_path),
+                "audio_identity": list(inspect_audio_path_no_symlinks(audio_path)),
+                "output_path": str(output_path),
+                "huggingface_token": None,
+                "offline_cache_only": True,
+            }
+        )

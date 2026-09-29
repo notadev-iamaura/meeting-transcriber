@@ -439,6 +439,40 @@ class TestTokenValidation:
         with pytest.raises(TokenNotConfiguredError):
             diarizer._validate_token()
 
+    def test_토큰_없고_캐시_완전하면_resolve는_offline(
+        self, mock_config, mock_manager, monkeypatch
+    ):
+        """토큰이 없어도 캐시가 완전하면 offline_cache_only를 허용한다."""
+        mock_config.diarization.huggingface_token = None
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        monkeypatch.setattr("steps.diarizer.pyannote_cache_complete", lambda _model: True)
+        token, offline = diarizer._resolve_huggingface_auth()
+        assert token is None
+        assert offline is True
+
+    def test_토큰_없고_캐시_불완전하면_TokenNotConfiguredError(
+        self, mock_config, mock_manager, monkeypatch
+    ):
+        """캐시가 불완전하면 기존처럼 토큰 에러를 낸다."""
+        mock_config.diarization.huggingface_token = None
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        monkeypatch.setattr("steps.diarizer.pyannote_cache_complete", lambda _model: False)
+        with pytest.raises(TokenNotConfiguredError):
+            diarizer._resolve_huggingface_auth()
+
+    def test_in_process_validate_token은_캐시_완전해도_토큰_필요(
+        self, mock_config, mock_manager, monkeypatch
+    ):
+        """in-process _validate_token은 캐시가 완전해도 토큰을 요구한다."""
+        mock_config.diarization.huggingface_token = None
+        manager, _ = mock_manager
+        diarizer = Diarizer(config=mock_config, model_manager=manager)
+        monkeypatch.setattr("steps.diarizer.pyannote_cache_complete", lambda _model: True)
+        with pytest.raises(TokenNotConfiguredError, match="worker"):
+            diarizer._validate_token()
+
 
 # === 오디오 검증 테스트 ===
 
@@ -1261,3 +1295,47 @@ def _import_error_for(
         return original_import(name, *args, **kwargs)
 
     return custom_import
+
+
+@pytest.mark.asyncio
+async def test_토큰_없이_캐시_완전하면_offline_worker_경로를_사용한다(
+    mock_config, mock_manager, sample_audio, monkeypatch
+):
+    """토큰 없고 캐시 완전이면 in-process 대신 offline worker를 탄다."""
+    mock_config.diarization.huggingface_token = None
+    mock_config.diarization.protect_zoom_meetings = False
+    manager, _ = mock_manager
+    diarizer = Diarizer(config=mock_config, model_manager=manager)
+    monkeypatch.setattr("steps.diarizer.pyannote_cache_complete", lambda _model: True)
+
+    expected = DiarizationResult(
+        segments=[DiarizationSegment("SPEAKER_00", 0.0, 1.0)],
+        num_speakers=1,
+        audio_path=str(sample_audio),
+    )
+
+    with patch.object(
+        diarizer,
+        "_run_offline_cache_worker",
+        new=AsyncMock(return_value=expected),
+    ) as run_offline:
+        with patch.object(diarizer, "_load_pipeline") as load_pipeline:
+            result = await diarizer.diarize(sample_audio)
+
+    run_offline.assert_awaited_once()
+    load_pipeline.assert_not_called()
+    assert result.num_speakers == 1
+
+
+def test_worker_payload_offline_cache_only_sets_flag(
+    mock_config, mock_manager, tmp_path, monkeypatch, sample_audio
+):
+    """offline 모드 payload는 token=None 과 offline_cache_only=True 를 담는다."""
+    mock_config.diarization.huggingface_token = None
+    manager, _ = mock_manager
+    diarizer = Diarizer(config=mock_config, model_manager=manager)
+    monkeypatch.setattr("steps.diarizer.pyannote_cache_complete", lambda _model: True)
+    identity = (1, 2, 3, 4, 5)
+    payload = diarizer._build_worker_payload(sample_audio, tmp_path / "out.json", identity)
+    assert payload["huggingface_token"] is None
+    assert payload["offline_cache_only"] is True

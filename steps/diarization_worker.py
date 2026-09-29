@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -88,13 +89,30 @@ def _run(payload: dict[str, Any]) -> None:
         raise RuntimeError("PyTorch가 설치되어 있지 않습니다.") from e
 
     token = payload.get("huggingface_token")
+    offline_cache_only = bool(payload.get("offline_cache_only"))
     min_speakers = payload.get("min_speakers")
     max_speakers = payload.get("max_speakers")
     output_mode = str(payload.get("output_mode", "regular"))
 
-    if not token:
-        raise RuntimeError("HuggingFace 토큰이 설정되지 않았습니다.")
-    pipeline = Pipeline.from_pretrained(model_name, token=str(token))
+    def _env_flag_on(name: str) -> bool:
+        value = os.environ.get(name)
+        return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+    offline_env = _env_flag_on("HF_HUB_OFFLINE") or _env_flag_on("TRANSFORMERS_OFFLINE")
+    if offline_cache_only:
+        if token:
+            raise RuntimeError(
+                "offline_cache_only 모드에서는 huggingface_token을 전달하면 안 됩니다."
+            )
+        if not offline_env:
+            raise RuntimeError(
+                "offline_cache_only 모드는 HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE 환경이 필요합니다."
+            )
+        pipeline = Pipeline.from_pretrained(model_name, token=None)
+    else:
+        if not token:
+            raise RuntimeError("HuggingFace 토큰이 설정되지 않았습니다.")
+        pipeline = Pipeline.from_pretrained(model_name, token=str(token))
     if pipeline is None:
         raise RuntimeError(f"pyannote 파이프라인 로드 실패: {model_name}")
 

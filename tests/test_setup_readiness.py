@@ -577,6 +577,10 @@ def test_missing_token_blocks_configuration(
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     _patch_hf_cli_cache(monkeypatch, usable=False, exists=False, private=False, reason="missing")
+    monkeypatch.setattr(
+        "security.setup_readiness.pyannote_cache_complete",
+        lambda _model: False,
+    )
 
     check = check_hf_token_configured(config)
     actions = _actions_by_id(check)
@@ -924,3 +928,29 @@ def test_stt_model_not_ready_links_to_settings(
     assert check.ready is False
     assert actions["open_stt_settings"].kind == "route"
     assert actions["open_stt_settings"].value == "/app/settings"
+
+
+def test_complete_pyannote_cache_without_token_is_ready_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """토큰이 없어도 pyannote 캐시가 완전하면 warn+ready=True."""
+    config = _make_config(tmp_path / "meeting-data", token=None)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    _patch_hf_cli_cache(monkeypatch, usable=False, exists=False, private=False, reason="missing")
+    monkeypatch.setattr(
+        "security.setup_readiness.pyannote_cache_complete",
+        lambda _model: True,
+    )
+    monkeypatch.setattr(
+        "security.setup_readiness.missing_pyannote_cache_files",
+        lambda _model: [],
+    )
+
+    check = check_hf_token_configured(config)
+
+    assert check.status == "warn"
+    assert check.ready is True
+    assert check.details["pyannote_model_cache_complete"] is True
+    assert check.details["configured"] is True

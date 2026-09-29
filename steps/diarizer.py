@@ -31,7 +31,7 @@ from typing import Any
 from config import AppConfig, get_config
 from core.audio_quality import AudioMeasurementError, measure_audio_duration
 from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
-from core.runtime_safety import pyannote_offline_cache_issue
+from core.runtime_safety import pyannote_cache_complete, pyannote_offline_cache_issue
 from steps.diarization_process_guard import (
     WorkerSupervisionTimeout,
     ZoomPauseGuard,
@@ -352,23 +352,57 @@ class Diarizer:
         """
         return object()
 
+    def _resolve_huggingface_auth(self) -> tuple[str | None, bool]:
+        """화자분리용 HuggingFace 인증 방식을 결정한다.
+
+        Returns:
+            (token, offline_cache_only)
+            - 토큰이 있으면 항상 토큰 경로를 쓴다.
+            - 토큰이 없고 로컬 pyannote 캐시(가중치 포함)가 완전하면
+              offline_cache_only=True 로 worker 경로만 허용한다.
+
+        Raises:
+            TokenNotConfiguredError: 토큰도 없고 캐시도 불완전할 때
+        """
+        if self._hf_token:
+            return str(self._hf_token), False
+        if pyannote_cache_complete(self._model_name):
+            return None, True
+        raise TokenNotConfiguredError(
+            "HuggingFace 토큰이 설정되지 않았고 로컬 pyannote 캐시도 불완전합니다. "
+            "환경변수 HUGGINGFACE_TOKEN을 설정하거나 "
+            "config.yaml의 diarization.huggingface_token을 설정하거나, "
+            "hf auth login 후 모델을 한 번 정상 다운로드하세요. "
+            "pyannote 게이트 모델은 최초 다운로드·약관 동의에 토큰이 필요합니다."
+        )
+
     def _validate_token(self) -> str:
-        """HuggingFace 토큰이 설정되어 있는지 검증한다.
+        """in-process 파이프라인 로드용으로 HuggingFace 토큰을 검증한다.
+
+        로컬 캐시만으로 실행하는 offline_cache_only 모드는 worker subprocess
+        경로에서만 허용한다. in-process에서 HF_HUB_OFFLINE을 사후에 켜면
+        huggingface_hub 상수에 반영되지 않을 수 있다.
 
         Returns:
             검증된 HuggingFace 토큰 문자열
 
         Raises:
-            TokenNotConfiguredError: 토큰이 없을 때
+            TokenNotConfiguredError: 토큰이 없을 때 (캐시 완전 여부 무관)
         """
-        if not self._hf_token:
+        token, offline_cache_only = self._resolve_huggingface_auth()
+        if token is not None:
+            return token
+        if offline_cache_only:
             raise TokenNotConfiguredError(
-                "HuggingFace 토큰이 설정되지 않았습니다. "
-                "환경변수 HUGGINGFACE_TOKEN을 설정하거나 "
-                "config.yaml의 diarization.huggingface_token을 설정하세요. "
-                "pyannote 모델 접근에 HuggingFace 토큰이 필요합니다."
+                "로컬 pyannote 캐시만으로 실행하려면 worker 오프라인 경로가 필요합니다. "
+                "in-process Pipeline 로드에는 HuggingFace 토큰이 필요합니다."
             )
-        return self._hf_token
+        raise TokenNotConfiguredError(
+            "HuggingFace 토큰이 설정되지 않았습니다. "
+            "환경변수 HUGGINGFACE_TOKEN을 설정하거나 "
+            "config.yaml의 diarization.huggingface_token을 설정하세요. "
+            "pyannote 모델 접근에 HuggingFace 토큰이 필요합니다."
+        )
 
     def _validate_offline_cache(self) -> None:
         """HF 오프라인 모드에서 pyannote 캐시가 완전한지 사전 검증한다."""
@@ -548,6 +582,12 @@ class Diarizer:
             and hasattr(signal, "SIGCONT")
         )
 
+    def _should_use_offline_cache_worker(self) -> bool:
+        """토큰 없이 완전 로컬 캐시만으로 worker를 쓸지 반환한다."""
+        if self._hf_token:
+            return False
+        return pyannote_cache_complete(self._model_name)
+
     def _build_worker_payload(
         self,
         audio_path: Path,
@@ -555,8 +595,12 @@ class Diarizer:
         expected_identity: AudioFileIdentity,
     ) -> dict[str, Any]:
         """worker 프로세스에 전달할 JSON payload 를 생성한다."""
-        token = self._validate_token()
+        token, offline_cache_only = self._resolve_huggingface_auth()
         self._validate_offline_cache()
+        if offline_cache_only and not pyannote_cache_complete(self._model_name):
+            raise TokenNotConfiguredError(
+                "offline_cache_only 모드인데 pyannote 캐시가 불완전합니다."
+            )
         return {
             "model_name": self._model_name,
             "audio_path": str(audio_path),
@@ -565,6 +609,7 @@ class Diarizer:
             "min_speakers": self._min_speakers,
             "max_speakers": self._max_speakers,
             "huggingface_token": token,
+            "offline_cache_only": offline_cache_only,
             "output_mode": self._output_mode,
         }
 
@@ -579,7 +624,8 @@ class Diarizer:
             expected_identity = self._validate_audio(audio_path)
         if timeout_seconds is None:
             timeout_seconds = self._resolve_timeout_seconds(audio_path)
-        self._validate_token()
+        # 토큰 또는 완전 캐시 중 하나는 있어야 worker를 시작할 수 있다.
+        self._resolve_huggingface_auth()
         process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
         detection_backend = getattr(
             getattr(self._config, "zoom", None),
@@ -613,11 +659,15 @@ class Diarizer:
     async def _run_zoom_protected_worker_with_guard(
         self,
         audio_path: Path,
-        guard: ZoomPauseGuard,
+        guard: ZoomPauseGuard | None,
         expected_identity: AudioFileIdentity,
         timeout_seconds: int,
     ) -> DiarizationResult:
-        """이미 ModelLoadManager 슬롯을 확보한 상태에서 worker를 실행한다."""
+        """이미 ModelLoadManager 슬롯을 확보한 상태에서 worker를 실행한다.
+
+        guard가 None이면 Zoom 일시정지 없이 일반 timeout 대기를 한다.
+        토큰 없는 offline_cache_only 모드에서 사용한다.
+        """
 
         with tempfile.TemporaryDirectory(prefix="meeting-transcriber-diarize-") as tmpdir:
             output_path = Path(tmpdir) / "diarization.json"
@@ -633,6 +683,11 @@ class Diarizer:
             env["PYTHONPATH"] = (
                 root if not env.get("PYTHONPATH") else f"{root}{os.pathsep}{env['PYTHONPATH']}"
             )
+            if payload.get("offline_cache_only"):
+                # huggingface_hub 는 import 시점에 OFFLINE 상수를 읽으므로
+                # 토큰 없는 모드는 새 worker 프로세스 env 로만 강제한다.
+                env["HF_HUB_OFFLINE"] = "1"
+                env["TRANSFORMERS_OFFLINE"] = "1"
 
             process: subprocess.Popen[str] | None = None
             with stderr_path.open("w+", encoding="utf-8", errors="replace") as stderr_file:
@@ -650,11 +705,28 @@ class Diarizer:
                     process.stdin.write(json.dumps(payload, ensure_ascii=False))
                     process.stdin.close()
 
+                    mode = (
+                        "offline-cache"
+                        if payload.get("offline_cache_only")
+                        else ("zoom-protected" if guard is not None else "worker")
+                    )
                     logger.info(
-                        f"Zoom 보호 화자분리 worker 시작: pid={process.pid}, "
+                        f"화자분리 worker 시작: mode={mode}, pid={process.pid}, "
                         f"audio={audio_path.name}"
                     )
-                    returncode = await guard.supervise(process, timeout_seconds)
+                    if guard is not None:
+                        returncode = await guard.supervise(process, timeout_seconds)
+                    else:
+                        loop = asyncio.get_running_loop()
+                        try:
+                            returncode = await asyncio.wait_for(
+                                loop.run_in_executor(None, process.wait),
+                                timeout=timeout_seconds,
+                            )
+                        except TimeoutError as e:
+                            raise DiarizationError(
+                                f"화자분리 worker 시간이 초과되었습니다 ({timeout_seconds}초)."
+                            ) from e
                     stderr = self._read_worker_stderr(stderr_file)
                 except asyncio.CancelledError:
                     if process is not None:
@@ -689,13 +761,44 @@ class Diarizer:
 
             if returncode != 0:
                 detail = stderr or f"exit={returncode}"
+                if payload.get("offline_cache_only"):
+                    raise DiarizationError(
+                        f"화자분리 worker 실패(오프라인 캐시 모드): {detail}. "
+                        "캐시가 손상됐을 수 있습니다. HuggingFace 로그인 후 "
+                        "모델을 다시 다운로드하세요."
+                    )
                 raise DiarizationError(f"화자분리 worker 실패: {detail}")
             if not output_path.exists():
                 raise DiarizationError("화자분리 worker 결과 파일이 생성되지 않았습니다.")
 
             result = DiarizationResult.from_checkpoint(output_path)
-            logger.info(f"Zoom 보호 화자분리 worker 완료: pid={process.pid}")
+            logger.info(f"화자분리 worker 완료: pid={process.pid}")
             return result
+
+    async def _run_offline_cache_worker(
+        self,
+        audio_path: Path,
+        expected_identity: AudioFileIdentity | None = None,
+        timeout_seconds: int | None = None,
+    ) -> DiarizationResult:
+        """토큰 없이 완전 로컬 캐시만으로 worker subprocess에서 화자분리한다."""
+        if expected_identity is None:
+            expected_identity = self._validate_audio(audio_path)
+        if timeout_seconds is None:
+            timeout_seconds = self._resolve_timeout_seconds(audio_path)
+        token, offline_cache_only = self._resolve_huggingface_auth()
+        if token is not None or not offline_cache_only:
+            raise DiarizationError("offline cache worker는 토큰 없는 완전 캐시 모드 전용입니다.")
+
+        self._assert_audio_identity(audio_path, expected_identity)
+        async with self._manager.acquire("pyannote", self._reserve_external_worker_slot):
+            self._assert_audio_identity(audio_path, expected_identity)
+            return await self._run_zoom_protected_worker_with_guard(
+                audio_path,
+                None,
+                expected_identity,
+                timeout_seconds,
+            )
 
     def _select_annotation_output(self, annotation: Any) -> tuple[Any, str]:
         """설정에 따라 pyannote DiarizeOutput에서 사용할 Annotation을 선택한다."""
@@ -799,12 +902,21 @@ class Diarizer:
 
         logger.info(f"화자분리 시작: {audio_path.name} | 실행 타임아웃: {timeout_seconds}초")
 
-        if self._should_use_zoom_protected_worker():
-            result = await self._run_zoom_protected_worker(
-                audio_path,
-                audio_identity,
-                timeout_seconds,
-            )
+        use_zoom_worker = self._should_use_zoom_protected_worker()
+        use_offline_worker = self._should_use_offline_cache_worker()
+        if use_zoom_worker or use_offline_worker:
+            if use_zoom_worker:
+                result = await self._run_zoom_protected_worker(
+                    audio_path,
+                    audio_identity,
+                    timeout_seconds,
+                )
+            else:
+                result = await self._run_offline_cache_worker(
+                    audio_path,
+                    audio_identity,
+                    timeout_seconds,
+                )
             if not result.segments:
                 raise EmptyAudioError(
                     "화자를 식별할 수 없습니다. "

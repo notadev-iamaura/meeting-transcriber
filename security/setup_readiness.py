@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from config import AppConfig
 from core.coreaudio_helper import get_aggregate_device_names
 from core.huggingface_credentials import inspect_huggingface_cli_token_cache
+from core.runtime_safety import missing_pyannote_cache_files, pyannote_cache_complete
 from core.stt_model_registry import STT_MODELS
 from core.stt_model_status import (
     ModelStatus,
@@ -491,11 +492,23 @@ def check_python_runtime() -> ReadinessCheck:
 
 
 def check_hf_token_configured(config: AppConfig) -> ReadinessCheck:
-    """LaunchAgent가 사용할 HuggingFace CLI 캐시를 값 노출 없이 확인한다."""
+    """LaunchAgent가 사용할 HuggingFace CLI 캐시를 값 노출 없이 확인한다.
+
+    토큰이 없어도 설정된 pyannote 모델의 로컬 HF 캐시(가중치 포함)가 완전하면
+    warn+ready=True로 통과시킨다. 캐시 삭제·모델 업데이트 시에는 다시 토큰이
+    필요하므로 pass가 아니라 warn이다.
+    """
     env_present = [name for name in _HF_TOKEN_ENV_NAMES if bool(os.environ.get(name))]
     config_token_configured = bool(getattr(config.diarization, "huggingface_token", None))
     cache_status = inspect_huggingface_cli_token_cache()
-    configured = bool(env_present or config_token_configured or cache_status.usable)
+    model_name = str(getattr(config.diarization, "model_name", "") or "")
+    model_cache_complete = bool(model_name) and pyannote_cache_complete(model_name)
+    missing_model_cache = (
+        missing_pyannote_cache_files(model_name) if model_name and not model_cache_complete else []
+    )
+    configured = bool(
+        env_present or config_token_configured or cache_status.usable or model_cache_complete
+    )
     details = {
         "configured": configured,
         "environment_variables": list(_HF_TOKEN_ENV_NAMES),
@@ -505,6 +518,9 @@ def check_hf_token_configured(config: AppConfig) -> ReadinessCheck:
         "persistent_cache_private": cache_status.private,
         "launchagent_credential_ready": cache_status.usable,
         "persistent_cache_issue": cache_status.reason,
+        "pyannote_model_name": model_name or None,
+        "pyannote_model_cache_complete": model_cache_complete,
+        "pyannote_model_cache_missing": list(missing_model_cache),
     }
 
     if cache_status.usable:
@@ -514,6 +530,23 @@ def check_hf_token_configured(config: AppConfig) -> ReadinessCheck:
             ready=True,
             message="화자분리용 HuggingFace CLI 영구 자격 증명이 준비되었습니다.",
             details=details,
+        )
+
+    if model_cache_complete and not (env_present or config_token_configured):
+        return ReadinessCheck(
+            id="hf_token_env",
+            status="warn",
+            ready=True,
+            message=(
+                "HuggingFace 토큰은 없지만 로컬 pyannote 모델 캐시가 완전하여 "
+                "오프라인 화자분리는 가능합니다."
+            ),
+            action_hint=(
+                "캐시를 삭제하거나 모델을 바꾸면 다시 토큰이 필요합니다. "
+                "신규 다운로드·약관 동의용으로 HuggingFace CLI 로그인을 권장합니다."
+            ),
+            details=details,
+            actions=_hf_token_actions(),
         )
 
     if configured:

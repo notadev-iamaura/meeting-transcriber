@@ -205,7 +205,8 @@ llm:
 ### 5. HuggingFace 토큰 설정 (화자 분리에 필요)
 
 화자 분리에 사용하는 [pyannote](https://github.com/pyannote/pyannote-audio) 모델은 HuggingFace에서 **게이트 모델(gated model)**로 배포됩니다.
-모델은 로컬에서 실행되지만, 최초 다운로드 시 인증이 필요합니다. (한 번만 하면 됩니다)
+모델은 로컬에서 실행되지만, **최초 다운로드·약관 동의** 시 인증이 필요합니다.
+이후 로컬 캐시(가중치 포함)가 완전하면 토큰 없이 오프라인 실행이 가능합니다.
 
 **설정 절차:**
 
@@ -388,9 +389,12 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 #   backend: "ollama"
 ```
 
-### 3. pyannote 화자 분리 모델 (게이트 모델 — 토큰 필수)
+### 3. pyannote 화자 분리 모델 (게이트 모델 — 최초 다운로드 시 토큰 필수)
 
-pyannote 모델은 HuggingFace **게이트 모델**이라 약관 동의 + 토큰이 반드시 필요합니다. **에이전트가 대신 동의하거나 공개 미러를 찾아 우회하면 안 됩니다.**
+pyannote 모델은 HuggingFace **게이트 모델**이라 **최초 다운로드·약관 동의**에는 토큰이 필요합니다.
+사용자가 게이트 페이지에서 직접 받아 둔 로컬 HF 캐시(가중치 포함)가 완전하면, 앱은 토큰 없이 오프라인 worker로 화자분리를 실행할 수 있습니다.
+캐시를 삭제하거나 모델을 바꾸면 다시 토큰이 필요합니다.
+**에이전트가 대신 동의하거나 공개 미러·비공식 재배포본으로 우회하면 안 됩니다.**
 
 1. <https://huggingface.co/pyannote/speaker-diarization-community-1> 방문 → **"Agree and access repository"** 클릭
 2. <https://huggingface.co/pyannote/segmentation-3.0> 방문 → 동일하게 동의
