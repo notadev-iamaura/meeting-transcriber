@@ -38,7 +38,7 @@ def _make_config(
     """테스트용 AppConfig를 생성한다."""
     return AppConfig(
         paths=PathsConfig(base_dir=str(base_dir)),
-        diarization=DiarizationConfig(huggingface_token=token),
+        diarization=DiarizationConfig(engine="community-1", huggingface_token=token),
         recording=RecordingConfig(
             enabled=True,
             prefer_system_audio=prefer_system_audio,

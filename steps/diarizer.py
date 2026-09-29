@@ -1,9 +1,9 @@
 """
 화자분리기 모듈 (Speaker Diarization Module)
 
-목적: pyannote-audio 3.1을 사용하여 오디오에서 화자별 발화 구간을 추출한다.
+목적: Senko / community-1 / speakrs로 화자별 발화 구간을 추출한다.
 주요 기능:
-    - pyannote/speaker-diarization-3.1 파이프라인 기반 화자분리
+    - Senko 기본 CoreML worker, 선택적 community-1 CPU / speakrs CoreML
     - ModelLoadManager를 통한 모델 라이프사이클 관리 (뮤텍스)
     - pyannote MPS 버그 회피를 위해 런타임 CPU 강제
     - 화자별 시간 구간(speaker, start, end) 반환
@@ -249,7 +249,12 @@ class Diarizer:
         self._manager = model_manager or get_model_manager()
 
         # 화자분리 설정 캐시
-        self._model_name = self._config.diarization.model_name
+        self._engine = self._config.diarization.engine
+        self._model_name = (
+            self._config.diarization.model_name
+            if self._engine == "community-1"
+            else f"{self._engine}-coreml"
+        )
         self._device = self._config.diarization.device
         self._output_mode = getattr(self._config.diarization, "output_mode", "regular")
         self._min_speakers = self._config.diarization.min_speakers
@@ -364,6 +369,8 @@ class Diarizer:
         Raises:
             TokenNotConfiguredError: 토큰도 없고 캐시도 불완전할 때
         """
+        if self._engine != "community-1":
+            return None, False
         if self._hf_token:
             return str(self._hf_token), False
         if pyannote_cache_complete(self._model_name):
@@ -584,7 +591,7 @@ class Diarizer:
 
     def _should_use_offline_cache_worker(self) -> bool:
         """토큰 없이 완전 로컬 캐시만으로 worker를 쓸지 반환한다."""
-        if self._hf_token:
+        if self._engine != "community-1" or self._hf_token:
             return False
         return pyannote_cache_complete(self._model_name)
 
@@ -596,12 +603,15 @@ class Diarizer:
     ) -> dict[str, Any]:
         """worker 프로세스에 전달할 JSON payload 를 생성한다."""
         token, offline_cache_only = self._resolve_huggingface_auth()
-        self._validate_offline_cache()
+        if self._engine == "community-1":
+            self._validate_offline_cache()
         if offline_cache_only and not pyannote_cache_complete(self._model_name):
             raise TokenNotConfiguredError(
                 "offline_cache_only 모드인데 pyannote 캐시가 불완전합니다."
             )
         return {
+            "engine": self._engine,
+            "speakrs_binary": self._config.diarization.speakrs_binary,
             "model_name": self._model_name,
             "audio_path": str(audio_path),
             "audio_identity": list(expected_identity),
@@ -624,7 +634,7 @@ class Diarizer:
             expected_identity = self._validate_audio(audio_path)
         if timeout_seconds is None:
             timeout_seconds = self._resolve_timeout_seconds(audio_path)
-        # 토큰 또는 완전 캐시 중 하나는 있어야 worker를 시작할 수 있다.
+        # community-1은 토큰 또는 완전 캐시가 필요하다. CoreML은 별도 설치 검사.
         self._resolve_huggingface_auth()
         process_name = getattr(getattr(self._config, "zoom", None), "process_name", "CptHost")
         detection_backend = getattr(
@@ -647,7 +657,10 @@ class Diarizer:
             ) from e
 
         self._assert_audio_identity(audio_path, expected_identity)
-        async with self._manager.acquire("pyannote", self._reserve_external_worker_slot):
+        async with self._manager.acquire(
+            "pyannote" if self._engine == "community-1" else self._engine,
+            self._reserve_external_worker_slot,
+        ):
             self._assert_audio_identity(audio_path, expected_identity)
             return await self._run_zoom_protected_worker_with_guard(
                 audio_path,
@@ -771,6 +784,7 @@ class Diarizer:
             if not output_path.exists():
                 raise DiarizationError("화자분리 worker 결과 파일이 생성되지 않았습니다.")
 
+            self._assert_audio_identity(audio_path, expected_identity)
             result = DiarizationResult.from_checkpoint(output_path)
             logger.info(f"화자분리 worker 완료: pid={process.pid}")
             return result
@@ -781,17 +795,20 @@ class Diarizer:
         expected_identity: AudioFileIdentity | None = None,
         timeout_seconds: int | None = None,
     ) -> DiarizationResult:
-        """토큰 없이 완전 로컬 캐시만으로 worker subprocess에서 화자분리한다."""
+        """Zoom 보호 없이 CoreML 또는 토큰 없는 pyannote 캐시 worker를 실행한다."""
         if expected_identity is None:
             expected_identity = self._validate_audio(audio_path)
         if timeout_seconds is None:
             timeout_seconds = self._resolve_timeout_seconds(audio_path)
         token, offline_cache_only = self._resolve_huggingface_auth()
-        if token is not None or not offline_cache_only:
+        if self._engine == "community-1" and (token is not None or not offline_cache_only):
             raise DiarizationError("offline cache worker는 토큰 없는 완전 캐시 모드 전용입니다.")
 
         self._assert_audio_identity(audio_path, expected_identity)
-        async with self._manager.acquire("pyannote", self._reserve_external_worker_slot):
+        async with self._manager.acquire(
+            "pyannote" if self._engine == "community-1" else self._engine,
+            self._reserve_external_worker_slot,
+        ):
             self._assert_audio_identity(audio_path, expected_identity)
             return await self._run_zoom_protected_worker_with_guard(
                 audio_path,
@@ -904,7 +921,7 @@ class Diarizer:
 
         use_zoom_worker = self._should_use_zoom_protected_worker()
         use_offline_worker = self._should_use_offline_cache_worker()
-        if use_zoom_worker or use_offline_worker:
+        if use_zoom_worker or use_offline_worker or self._engine != "community-1":
             if use_zoom_worker:
                 result = await self._run_zoom_protected_worker(
                     audio_path,

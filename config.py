@@ -401,6 +401,8 @@ class STTConfig(BaseModel):
 class DiarizationConfig(BaseModel):
     """화자분리 모델 설정"""
 
+    engine: Literal["senko", "community-1", "speakrs"] = "senko"
+    speakrs_binary: str = "recap-speakrs"
     model_name: str = "pyannote/speaker-diarization-community-1"
     device: str = "cpu"  # pyannote MPS 버그 회피: 런타임은 CPU 강제
     output_mode: str = Field(

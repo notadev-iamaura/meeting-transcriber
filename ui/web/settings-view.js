@@ -716,6 +716,15 @@
                 '    <h3 class="settings-section-title">음성 인식</h3>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsDiarizationEngine">화자분리 엔진</label>',
+                '        <select class="setting-select" id="settingsDiarizationEngine">',
+                '          <option value="senko">Senko (CoreML, 기본)</option>',
+                '          <option value="community-1">community-1 (pyannote CPU)</option>',
+                '          <option value="speakrs">speakrs (CoreML)</option>',
+                '        </select>',
+                '      </div>',
+                '      <p class="setting-help">Senko·speakrs는 Apple Silicon Mac이 필요합니다. Senko는 앱 venv에 설치하고, speakrs는 recap-speakrs 바이너리를 설치하세요 (README 화자분리 엔진). 설치되지 않으면 오류로 중단합니다. 화자 수 제한은 community-1에만 적용됩니다.</p>',
+                '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsLang">전사 언어</label>',
                 '        <select class="setting-select" id="settingsLang">',
                 '          <option value="ko">한국어</option>',
@@ -870,6 +879,7 @@
                 temp: document.getElementById("settingsTemp"),
                 tempValue: document.getElementById("settingsTempValue"),
                 skipLlm: document.getElementById("settingsSkipLlm"),
+                diarizationEngine: document.getElementById("settingsDiarizationEngine"),
                 lang: document.getElementById("settingsLang"),
                 defaultTranscriptionModel: document.getElementById("settingsDefaultTranscriptionModel"),
                 transcriptionLocation: document.getElementById("settingsTranscriptionLocation"),
@@ -1005,7 +1015,7 @@
                 self._setDirty(true);
             };
             [
-                els.model, els.backend, els.temp, els.skipLlm, els.lang,
+                els.model, els.backend, els.temp, els.skipLlm, els.lang, els.diarizationEngine,
                 els.hfEnabled, els.hfNoSpeech, els.hfCompRatio, els.hfRepetition,
                 els.lifecycleEnabled, els.lifecycleInterval, els.lifecycleHotDays,
                 els.lifecycleWarmDays, els.lifecycleRunOnStartup,
@@ -1090,6 +1100,7 @@
                     els.tempValue.textContent = data.llm_temperature;
                 }
                 els.skipLlm.checked = !!data.llm_skip_steps;
+                els.diarizationEngine.value = data.diarization_engine || "senko";
                 if (data.stt_language) els.lang.value = data.stt_language;
                 self._syncDefaultTranscriptionSelection(
                     self._dirty ? els.defaultTranscriptionModel.value : ""
@@ -1485,6 +1496,7 @@
                 llm_backend: els.backend.value,
                 llm_temperature: parseFloat(els.temp.value),
                 llm_skip_steps: els.skipLlm.checked,
+                diarization_engine: els.diarizationEngine.value,
                 stt_language: els.lang.value,
                 stt_provider: selectedTranscriptionModel.provider === "openai" ? "openai" : "local",
                 stt_openai_model: configuredOpenAIModel,

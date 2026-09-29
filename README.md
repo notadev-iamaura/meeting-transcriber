@@ -39,7 +39,7 @@ Decision Wiki 기능은 설정에서 활성화해 사용하는 로컬 LLM 기반
 - **음성 → 텍스트 변환**: 기본은 mlx-whisper 기반 로컬 한국어 STT, 선택적으로 OpenAI `gpt-4o-transcribe-diarize`
 - **전사 모델 선택기**: 웹 UI에서 기본 처리 위치와 로컬 음성 인식 모델을 관리
 - **회의별 다른 모델 전사**: 기존 회의록을 보존한 채 로컬/OpenAI 결과를 비파괴 A/B 작업으로 생성
-- **화자 분리**: `pyannote/speaker-diarization-community-1`로 발화자별 자동 분리
+- **화자 분리**: Senko CoreML 기본, community-1 (pyannote CPU) / speakrs CoreML 선택 가능
 - **AI 교정**: Gemma 4 (기본) 또는 EXAONE 3.5 로컬 LLM으로 전사 오류 교정 (MLX 기본, Ollama 선택 가능)
 - **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
 - **하이브리드 검색**: 전사문은 ChromaDB + SQLite FTS5 RAG로, Wiki는 BM25/FTS5 + e5-small 벡터 검색으로 탐색
@@ -204,7 +204,7 @@ llm:
 
 ### 5. HuggingFace 토큰 설정 (화자 분리에 필요)
 
-화자 분리에 사용하는 [pyannote](https://github.com/pyannote/pyannote-audio) 모델은 HuggingFace에서 **게이트 모델(gated model)**로 배포됩니다.
+`community-1` 선택 시 사용하는 [pyannote](https://github.com/pyannote/pyannote-audio) 모델은 HuggingFace에서 **게이트 모델(gated model)**로 배포됩니다.
 모델은 로컬에서 실행되지만, **최초 다운로드·약관 동의** 시 인증이 필요합니다.
 이후 로컬 캐시(가중치 포함)가 완전하면 토큰 없이 오프라인 실행이 가능합니다.
 
@@ -389,7 +389,59 @@ ollama pull exaone3.5:7.8b-instruct-q4_K_M
 #   backend: "ollama"
 ```
 
-### 3. pyannote 화자 분리 모델 (게이트 모델 — 최초 다운로드 시 토큰 필수)
+### 화자분리 엔진
+
+설정 → 일반 → **화자분리 엔진**에서 `senko` (기본), `community-1`, `speakrs`를
+선택합니다. API는 `GET/PUT /api/settings`의 `diarization_engine` 필드입니다.
+`diarization.engine`이 없는 기존 설정도 **senko**를 사용합니다. 기존 `model_name`으로
+community-1을 추론하지 않습니다. 명시된 engine과 model_name 값은 보존하며 설정 파일을
+자동 덮어쓰지 않습니다. 기존 pyannote 동작을 유지하려면 `engine: "community-1"`을 저장하세요.
+변경은 이후 화자분리 실행에 적용되며 이미 저장된 `diarize.json`은 재사용됩니다.
+OpenAI 단일 업로드의 화자 구간 재사용 경로는 그대로 유지됩니다.
+
+**Senko 설치 (macOS 14+ / Apple Silicon, Xcode Command Line Tools 필요):**
+
+```bash
+source .venv/bin/activate
+python -m pip install "git+https://github.com/narcotic-sh/senko.git@1bcb09041bfa170b4a5a4b0af92f66eff76204d5"
+python -m pip check
+```
+
+[Senko upstream](https://github.com/narcotic-sh/senko)의 Python API
+`senko.Diarizer(device="coreml", warmup=False, quiet=True).diarize(...)`를 앱의 Python
+worker에서 호출합니다. CoreML 패키지/모델은 upstream 설치·최초 실행 과정에서 준비됩니다.
+전사 병합에는 짧은 발화를 보존하는 `raw_segments`를 사용합니다. upstream 패키지는
+앱 기본 의존성에 포함되지 않아 위 설치가 필요합니다.
+
+**speakrs 설치 (Apple Silicon Mac, Rust/Cargo 1.88+ 및 C toolchain 필요):**
+
+```bash
+brew install openblas pkg-config
+PKG_CONFIG_PATH="$(brew --prefix openblas)/lib/pkgconfig" \
+  cargo install --path tools/speakrs-sidecar --locked
+# config.yaml의 diarization.speakrs_binary에 실제 설치 경로 지정:
+# 예: /Users/<계정>/.cargo/bin/recap-speakrs
+```
+
+저장소의 `recap-speakrs` sidecar는 [speakrs 0.5.0](https://docs.rs/speakrs/0.5.0/speakrs/)
+`OwnedDiarizationPipeline`을 `ExecutionMode::CoreMl`로 실행합니다. 최초 실행 시 upstream
+모델 번들을 다운로드하며 `SPEAKRS_MODELS_DIR`로 로컬 번들을 지정할 수 있습니다.
+LaunchAgent에서는 셸 PATH와 다를 수 있으므로 **바이너리 절대 경로**를 권장합니다.
+Python worker를 `exec`로 교체하므로 같은 PID에 모델 잠금·Zoom pause·취소·타임아웃이 적용됩니다.
+
+두 CoreML 엔진은 플랫폼/의존성이 없으면 명확한 오류로 중단하며 **자동 fallback은 없습니다**.
+설정에서 community-1을 직접 선택할 수 있습니다. community-1은 CPU 강제이며 기존 HF 토큰
+검사 및 완전한 로컬 캐시의 토큰 생략(#76)을 유지합니다. HF 캐시 검사는 이 엔진에만 적용합니다.
+`model_name`, `device`, `min_speakers`, `max_speakers`, `output_mode`는 community-1 전용이며,
+Senko/speakrs는 자체 화자 수 추정을 사용합니다. 다운로드 실패 시 SSL·게이트를 우회하지 않습니다.
+준비 상태 검사는 패키지/바이너리 존재까지 확인하며 모델 다운로드·실제 추론 성공을 보증하지 않습니다.
+
+ETA는 엔진별 통계를 분리하고 초기 RTF 힌트(Senko 0.01, speakrs 0.05, community-1 0.25)를
+사용합니다. 실제 관측값으로 갱신하며 최초 모델 다운로드 시간은 포함하지 않습니다.
+2026-09-29 M4 의사 GT A/B에서 Senko가 short/long DER·JER·속도 1위였으며 제품 결정으로
+기본값을 변경했습니다. 사람 RTTM 검증은 대기 중입니다. Linux 테스트는 CoreML을 모킹합니다.
+
+### 3. community-1 선택 시 pyannote 모델 (최초 다운로드 시 토큰 필수)
 
 pyannote 모델은 HuggingFace **게이트 모델**이라 **최초 다운로드·약관 동의**에는 토큰이 필요합니다.
 사용자가 게이트 페이지에서 직접 받아 둔 로컬 HF 캐시(가중치 포함)가 완전하면, 앱은 토큰 없이 오프라인 worker로 화자분리를 실행할 수 있습니다.
@@ -524,7 +576,7 @@ stt:
 |------|------|---------------------|
 | 변환 | ffmpeg → 16kHz mono WAV | ~3초 |
 | 전사 | mlx-whisper (GPU) | ~3분 |
-| 화자분리 | pyannote (CPU) | ~5분 |
+| 화자분리 | Senko (CoreML 기본), community-1 / speakrs 선택 | 엔진·길이·최초 로드에 따라 다름 |
 | 병합 | 전사+화자 매칭 | ~1초 |
 | LLM 보정 | EXAONE/Gemma 4 | ~2분 |
 | 요약 | AI 회의록 생성 | ~30초 |
@@ -682,6 +734,8 @@ bash scripts/setup_launchagent.sh
 | `stt.provider` | 기본 전사 처리 위치 (`local` 또는 명시적 `openai`) | `local` |
 | `stt.model_name` | 로컬 Whisper 모델 (HuggingFace ID 또는 로컬 경로) | `mlx-community/whisper-large-v3-turbo` |
 | `stt.openai_model` | 외부 전사 선택 시 사용하는 화자분리 모델 | `gpt-4o-transcribe-diarize` |
+| `diarization.engine` | 화자분리 엔진: `senko` / `community-1` / `speakrs` | `senko` |
+| `diarization.speakrs_binary` | speakrs sidecar 실행 파일 (PATH 또는 절대 경로) | `recap-speakrs` |
 | `diarization.timeout_seconds` | 화자분리 실제 실행 타임아웃 하한 | `1800`초 |
 | `diarization.dynamic_timeout_enabled` | 긴 오디오의 화자분리 실행 예산을 길이에 비례해 확대 | `true` |
 | `diarization.dynamic_timeout_multiplier` | 화자분리 동적 타임아웃 길이 배수 | `1.25` |

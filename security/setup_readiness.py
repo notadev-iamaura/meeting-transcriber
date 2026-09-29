@@ -498,6 +498,17 @@ def check_hf_token_configured(config: AppConfig) -> ReadinessCheck:
     warn+ready=True로 통과시킨다. 캐시 삭제·모델 업데이트 시에는 다시 토큰이
     필요하므로 pass가 아니라 warn이다.
     """
+    if config.diarization.engine != "community-1":
+        from steps.coreml_diarization import coreml_install_issue
+
+        issue = coreml_install_issue(config.diarization.engine, config.diarization.speakrs_binary)
+        return ReadinessCheck(
+            id="hf_token_env",
+            status="fail" if issue else "pass",
+            ready=issue is None,
+            message=issue or f"{config.diarization.engine} 설치 확인 (HF 토큰 검사 제외)",
+            details={"engine": config.diarization.engine},
+        )
     env_present = [name for name in _HF_TOKEN_ENV_NAMES if bool(os.environ.get(name))]
     config_token_configured = bool(getattr(config.diarization, "huggingface_token", None))
     cache_status = inspect_huggingface_cli_token_cache()

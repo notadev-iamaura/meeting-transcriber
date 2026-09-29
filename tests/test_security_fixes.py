@@ -458,6 +458,7 @@ auto_processing:
     from types import SimpleNamespace
 
     cfg = SimpleNamespace(
+        diarization=SimpleNamespace(engine="senko"),
         stt=SimpleNamespace(
             model_name="test/model",
             language="ko",

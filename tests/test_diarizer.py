@@ -51,6 +51,8 @@ def _reset_singletons():
 def mock_config():
     """테스트용 설정 객체를 생성한다."""
     config = MagicMock()
+    config.diarization.engine = "community-1"
+    config.diarization.speakrs_binary = "recap-speakrs"
     config.diarization.model_name = "pyannote/speaker-diarization-3.1"
     config.diarization.device = "cpu"
     config.diarization.output_mode = "regular"

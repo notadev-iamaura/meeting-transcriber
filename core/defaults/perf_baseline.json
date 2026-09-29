@@ -19,8 +19,13 @@
     },
     "diarize": {
       "_unit": "seconds_per_audio_second",
-      "_note": "pyannote CPU — 오디오 1초당 약 0.15초",
-      "default": 0.25
+      "_note": "엔진별 보수적 초기 RTF 힌트; 실제 실행 EMA로 대체. 다운로드 시간 제외.",
+      "default": 0.25,
+      "by_model": {
+        "senko": 0.01,
+        "speakrs": 0.05,
+        "community-1": 0.25
+      }
     },
     "merge": {
       "_unit": "seconds_per_audio_second",

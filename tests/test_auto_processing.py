@@ -220,6 +220,7 @@ async def test_auto_processing_runner는_HF_offline_pyannote_cache_누락시_보
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _make_config(tmp_path)
+    config.diarization.engine = "community-1"
     config = _with_auto_processing_overrides(config, max_items_per_run=0)
     audio = config.paths.resolved_audio_input_dir / "m1.wav"
     audio.parent.mkdir(parents=True, exist_ok=True)

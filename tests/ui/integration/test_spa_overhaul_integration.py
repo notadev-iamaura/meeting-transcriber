@@ -2699,6 +2699,11 @@ def test_settings_auto_processing_gui_save_and_run_now(
         api_handler=settings_api,
     ) as page:
         page.wait_for_selector("#settingsAutoProcessingEnabled", state="attached")
+        assert page.locator("#settingsDiarizationEngine").input_value() == "senko"
+        assert page.locator("#settingsDiarizationEngine option").evaluate_all(
+            "options => options.map(option => option.value)"
+        ) == ["senko", "community-1", "speakrs"]
+        page.locator("#settingsDiarizationEngine").select_option("speakrs")
         page.evaluate(
             """() => {
                 document.querySelector('#settingsAutoProcessingEnabled').checked = true;
@@ -2725,6 +2730,7 @@ def test_settings_auto_processing_gui_save_and_run_now(
 
         assert captured_settings
         payload = captured_settings[-1]
+        assert payload["diarization_engine"] == "speakrs"
         assert payload["auto_processing_enabled"] is True
         assert payload["auto_processing_run_at"] == "03:30"
         assert payload["auto_processing_recent_hours"] == 72

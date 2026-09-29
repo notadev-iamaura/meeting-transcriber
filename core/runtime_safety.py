@@ -386,7 +386,9 @@ def auto_processing_safety_issues(
     if uses_transcribe_path:
         diar = getattr(config, "diarization", None)
         model_name = str(getattr(diar, "model_name", "")) if diar is not None else ""
-        if bool(getattr(auto, "block_hf_offline_cache_miss", True)):
+        if getattr(diar, "engine", "senko") == "community-1" and bool(
+            getattr(auto, "block_hf_offline_cache_miss", True)
+        ):
             issue = pyannote_offline_cache_issue(model_name, environ)
             if issue is not None:
                 issues.append(issue)

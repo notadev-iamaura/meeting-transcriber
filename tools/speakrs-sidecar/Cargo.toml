@@ -1,0 +1,11 @@
+[package]
+name = "recap-speakrs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+speakrs = { version = "=0.5.0", default-features = false, features = ["online", "coreml", "openblas-system"] }
+hound = "3.5"
+serde_json = "1"
