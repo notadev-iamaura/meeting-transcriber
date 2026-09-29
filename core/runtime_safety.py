@@ -19,7 +19,9 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _HF_OFFLINE_FLAGS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
 _PYANNOTE_SEGMENTATION_REPO = "pyannote/segmentation-3.0"
 _WEIGHT_SUFFIXES = (".bin", ".safetensors", ".ckpt", ".pt", ".pth")
-_MODEL_PATH_RE = re.compile(r"(?:\$model/|['\"]|\s)([A-Za-z0-9_./-]+\.(?:bin|safetensors|ckpt|pt|pth))")
+_MODEL_PATH_RE = re.compile(
+    r"(?:\$model/|['\"]|\s)([A-Za-z0-9_./-]+\.(?:bin|safetensors|ckpt|pt|pth))"
+)
 _REPO_REF_RE = re.compile(r"(?:^|[\s'\"])((?:pyannote)/[A-Za-z0-9_.-]+)(?:[\s'\"]|$)")
 
 

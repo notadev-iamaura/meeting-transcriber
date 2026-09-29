@@ -175,7 +175,6 @@ def test_worker_rejects_tokenless_without_offline_flag(
     output_path = tmp_path / "result.json"
     audio_path.write_bytes(b"RIFF" + b"\x00" * 100)
 
-
     pyannote_audio_module = types.ModuleType("pyannote.audio")
     pyannote_audio_module.Pipeline = FakePipeline
     torch_module = types.ModuleType("torch")
@@ -206,7 +205,6 @@ def test_worker_offline_flag_requires_offline_env(
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
 
-
     pyannote_audio_module = types.ModuleType("pyannote.audio")
     pyannote_audio_module.Pipeline = FakePipeline
     torch_module = types.ModuleType("torch")
@@ -225,4 +223,3 @@ def test_worker_offline_flag_requires_offline_env(
                 "offline_cache_only": True,
             }
         )
-

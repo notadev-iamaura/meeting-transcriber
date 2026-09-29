@@ -1296,6 +1296,7 @@ def _import_error_for(
 
     return custom_import
 
+
 @pytest.mark.asyncio
 async def test_토큰_없이_캐시_완전하면_offline_worker_경로를_사용한다(
     mock_config, mock_manager, sample_audio, monkeypatch
@@ -1338,4 +1339,3 @@ def test_worker_payload_offline_cache_only_sets_flag(
     payload = diarizer._build_worker_payload(sample_audio, tmp_path / "out.json", identity)
     assert payload["huggingface_token"] is None
     assert payload["offline_cache_only"] is True
-

@@ -9,8 +9,8 @@ payload 로만 받는다.
 from __future__ import annotations
 
 import json
-import os
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -101,7 +101,9 @@ def _run(payload: dict[str, Any]) -> None:
     offline_env = _env_flag_on("HF_HUB_OFFLINE") or _env_flag_on("TRANSFORMERS_OFFLINE")
     if offline_cache_only:
         if token:
-            raise RuntimeError("offline_cache_only 모드에서는 huggingface_token을 전달하면 안 됩니다.")
+            raise RuntimeError(
+                "offline_cache_only 모드에서는 huggingface_token을 전달하면 안 됩니다."
+            )
         if not offline_env:
             raise RuntimeError(
                 "offline_cache_only 모드는 HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE 환경이 필요합니다."

@@ -954,4 +954,3 @@ def test_complete_pyannote_cache_without_token_is_ready_warn(
     assert check.ready is True
     assert check.details["pyannote_model_cache_complete"] is True
     assert check.details["configured"] is True
-

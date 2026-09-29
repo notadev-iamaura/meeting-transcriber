@@ -705,8 +705,10 @@ class Diarizer:
                     process.stdin.write(json.dumps(payload, ensure_ascii=False))
                     process.stdin.close()
 
-                    mode = "offline-cache" if payload.get("offline_cache_only") else (
-                        "zoom-protected" if guard is not None else "worker"
+                    mode = (
+                        "offline-cache"
+                        if payload.get("offline_cache_only")
+                        else ("zoom-protected" if guard is not None else "worker")
                     )
                     logger.info(
                         f"화자분리 worker 시작: mode={mode}, pid={process.pid}, "

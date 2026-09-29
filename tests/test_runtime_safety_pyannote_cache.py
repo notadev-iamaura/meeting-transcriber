@@ -44,9 +44,7 @@ def test_pyannote_cache_complete_requires_weights(tmp_path: Path, monkeypatch) -
     assert f"{model}:weights" in missing_pyannote_cache_files(model)
 
 
-def test_pyannote_cache_complete_with_config_and_weights(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_pyannote_cache_complete_with_config_and_weights(tmp_path: Path, monkeypatch) -> None:
     """config.yaml + non-empty 가중치가 있으면 완전이다."""
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -79,9 +77,7 @@ def test_pyannote_cache_checks_config_referenced_relative_file(
     assert pyannote_cache_complete(model) is False
 
 
-def test_speaker_diarization_3_requires_segmentation_cache(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_speaker_diarization_3_requires_segmentation_cache(tmp_path: Path, monkeypatch) -> None:
     """3.x diarization은 segmentation-3.0 캐시도 필요하다."""
     hub = tmp_path / "hub"
     hub.mkdir()
