@@ -93,7 +93,7 @@ chmod 700 ~/.meeting-transcriber
 > 섹션을 반드시 먼저 읽고** 우회 시도 금지 규칙을 지키세요.
 
 1. **Ollama 앱 설치**: https://ollama.com 에서 macOS 앱 다운로드 (brew 불가)
-2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 사용자가 직접:
+2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 **최초 다운로드·약관 동의**에 사용자가 직접:
    - https://huggingface.co/join 가입
    - https://huggingface.co/pyannote/speaker-diarization-community-1 → "Agree" 클릭
    - https://huggingface.co/pyannote/segmentation-3.0 → "Agree" 클릭
@@ -101,9 +101,12 @@ chmod 700 ~/.meeting-transcriber
    - `hf auth login` 실행 후 토큰 입력
    - `chmod 600 ~/.cache/huggingface/token`으로 소유자 전용 권한 확인
    - 셸 환경변수는 수동 실행 폴백일 뿐 LaunchAgent에 전달되지 않으므로, 로그인 자동
-     시작·새벽 자동 처리에는 CLI 캐시가 필수
-   - ⚠️ 토큰 없이 우회 금지 — 게이트 모델은 약관 동의가 필수이며 에이전트가
-     대신 동의하거나 공개 미러를 찾아 사용하면 안 됩니다.
+     시작·새벽 자동 처리에는 CLI 캐시가 필수(또는 이미 완전 캐시된 모델)
+   - 로컬 HF 캐시(가중치 포함)가 완전하면 토큰 없이 오프라인 worker 실행이 가능하다.
+     캐시 삭제·모델 변경 시에는 다시 토큰이 필요하다.
+   - ⚠️ 게이트/약관 우회 금지 — 에이전트가 대신 동의하거나 공개 미러·비공식
+     재배포본을 찾아 사용하면 안 됩니다. "캐시가 있다"는 사용자가 직접 동의한
+     뒤 받은 로컬 파일에만 해당합니다.
 3. **BlackHole 2ch 설치**: 시스템 오디오 루프백을 위한 가상 드라이버.
    `brew install blackhole-2ch` 실행. 설치 후 macOS 가 장치를 인식하려면
    로그아웃·재로그인 또는 재부팅이 필요할 수 있음. ⚠️ 에이전트가 자동 설치
