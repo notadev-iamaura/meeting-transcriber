@@ -30,6 +30,8 @@ stt:
 
 # === 화자분리 설정 ===
 diarization:
+  engine: "senko"  # senko | community-1 | speakrs; 누락 시 senko
+  speakrs_binary: "recap-speakrs"  # PATH 또는 설치한 바이너리 절대 경로
   model_name: "pyannote/speaker-diarization-community-1"
   device: "cpu"                              # pyannote MPS 버그 회피: CPU 강제
   output_mode: "auto"                        # regular | exclusive | auto (exclusive 출력이 있으면 우선 사용)

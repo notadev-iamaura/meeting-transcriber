@@ -78,6 +78,16 @@ def _run(payload: dict[str, Any]) -> None:
     if inspect_audio_path_no_symlinks(audio_path) != expected_identity:
         raise RuntimeError("화자분리 worker 시작 전 오디오가 변경되었습니다.")
 
+    engine = str(payload.get("engine", "community-1"))
+    if engine in {"senko", "speakrs"}:
+        from steps.coreml_diarization import run_coreml
+
+        result = run_coreml(payload)
+        output_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        return
+    if engine != "community-1":
+        raise RuntimeError("지원하지 않는 화자분리 엔진입니다.")
+
     try:
         from pyannote.audio import Pipeline  # type: ignore[import-untyped]
     except ImportError as e:

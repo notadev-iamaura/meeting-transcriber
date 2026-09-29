@@ -5,6 +5,21 @@
 - 시작 기준 커밋: `705d642414b27d106a63977c5571512ea5ca375f`
 - 최근 정리 wave: #41 → #38 → #39 → #40 → #42 → #43 → #44 → #45 → #46 → #47 → #48 → #52 → #53 → #65 모두 main 반영
 
+## 화자분리 엔진 선택 (2026-09-29)
+
+- `diarization.engine` 기본 Senko CoreML, community-1 CPU / speakrs CoreML 선택 가능.
+  engine 없는 기존 설정도 Senko이며 기존 model_name으로 엔진을 추론하지 않습니다.
+- 설정 API/UI, 설치 준비 검사, 엔진별 ETA 및 supervised worker에 연결했습니다.
+  community-1의 완전 HF 캐시 토큰 생략(#76)은 유지합니다. 자동 fallback은 없습니다.
+- Senko는 앱 venv의 Python API, speakrs는 저장소 Rust sidecar를 exec합니다.
+  설치 명령·화자 수 설정 적용 범위·체크포인트 재사용은 README에 기록했습니다.
+- Linux/Python 3.12 검증: 관련 회귀 576 passed, 확장 엔진 테스트 25 passed,
+  harness 152 passed, 브라우저 설정 2 passed. 전체 Ruff/format, JS syntax,
+  변경 production Python 경로 mypy(Python 3.12, follow-imports=silent) 통과.
+- CoreML 실제 추론·설치 및 사람 RTTM은 미검증. macOS에서
+  `cargo check --locked --manifest-path tools/speakrs-sidecar/Cargo.toml` 확인이 남아 있습니다.
+  Linux 테스트는 CoreML을 모킹합니다. CI workflow 변경은 OAuth workflow scope 부족으로 제외했습니다.
+
 ## 일괄 작업 UI와 백그라운드 제목 정리 (2026-09-23, 로컬 변경)
 
 - 중복 일괄 작업 버튼을 목록 위 선택 도구 모음 하나로 정리했습니다. 현재 열린

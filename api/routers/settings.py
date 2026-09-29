@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -81,6 +81,7 @@ class SettingsResponse(BaseModel):
     llm_temperature: float = 0.0
     llm_mlx_max_tokens: int = 2000
     llm_skip_steps: bool = False
+    diarization_engine: Literal["senko", "community-1", "speakrs"] = "senko"
     stt_language: str = "ko"
     stt_provider: str = "local"
     stt_openai_model: str = "gpt-4o-transcribe-diarize"
@@ -125,6 +126,7 @@ class SettingsUpdateRequest(BaseModel):
     llm_temperature: float | None = None
     llm_mlx_max_tokens: int | None = None
     llm_skip_steps: bool | None = None
+    diarization_engine: Literal["senko", "community-1", "speakrs"] | None = None
     stt_language: str | None = None
     stt_provider: str | None = None
     stt_openai_model: str | None = None
@@ -172,6 +174,7 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         llm_temperature=config.llm.temperature,
         llm_mlx_max_tokens=config.llm.mlx_max_tokens,
         llm_skip_steps=config.pipeline.skip_llm_steps,
+        diarization_engine=config.diarization.engine,
         stt_language=config.stt.language,
         stt_provider=getattr(config.stt, "provider", "local"),
         stt_openai_model=getattr(
@@ -454,6 +457,8 @@ async def _update_settings_locked(
     if "llm_skip_steps" in updates:
         changed_fields.append("llm_skip_steps")
 
+    if "diarization_engine" in updates:
+        changed_fields.append("diarization_engine")
     if "stt_language" in updates:
         changed_fields.append("stt_language")
     if "stt_provider" in updates:
@@ -521,6 +526,10 @@ async def _update_settings_locked(
         if "llm_skip_steps" in updates:
             val = "true" if updates["llm_skip_steps"] else "false"
             content = _replace_yaml_value(content, "pipeline", "skip_llm_steps", val)
+        if "diarization_engine" in updates:
+            content = _replace_yaml_value(
+                content, "diarization", "engine", f'"{updates["diarization_engine"]}"'
+            )
         if "stt_language" in updates:
             content = _replace_yaml_value(
                 content, "stt", "language", f'"{updates["stt_language"]}"'
@@ -658,6 +667,14 @@ async def _update_settings_locked(
         )
         config = config.model_copy(update={"pipeline": new_pipeline})
 
+    if "diarization_engine" in updates:
+        config = config.model_copy(
+            update={
+                "diarization": config.diarization.model_copy(
+                    update={"engine": updates["diarization_engine"]}
+                )
+            }
+        )
     stt_updates: dict[str, Any] = {}
     if "stt_language" in updates:
         stt_updates["language"] = updates["stt_language"]

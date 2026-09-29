@@ -631,7 +631,7 @@
             base_dir: "데이터 디렉토리",
             python_runtime: "Python 런타임",
             ffmpeg: "ffmpeg",
-            hf_token_env: "HuggingFace 토큰",
+            hf_token_env: "화자분리 엔진 / 인증",
             audio_devices: "오디오 장치",
             stt_model: "음성 인식 모델",
         };
@@ -763,6 +763,8 @@
             } else if (details.selected_is_executable === false) {
                 parts.push("실행 권한 없음");
             }
+        } else if (check.id === "hf_token_env" && details.engine) {
+            parts.push(details.engine + " (CoreML)");
         } else if (check.id === "hf_token_env") {
             parts.push(details.configured ? "설정됨" : "미설정");
             if (

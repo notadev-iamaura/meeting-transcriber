@@ -93,7 +93,7 @@ chmod 700 ~/.meeting-transcriber
 > 섹션을 반드시 먼저 읽고** 우회 시도 금지 규칙을 지키세요.
 
 1. **Ollama 앱 설치**: https://ollama.com 에서 macOS 앱 다운로드 (brew 불가)
-2. **HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 **최초 다운로드·약관 동의**에 사용자가 직접:
+2. **community-1 선택 시 HuggingFace 토큰**: pyannote 화자분리 모델은 게이트 모델(gated model)이라 **최초 다운로드·약관 동의**에 사용자가 직접:
    - https://huggingface.co/join 가입
    - https://huggingface.co/pyannote/speaker-diarization-community-1 → "Agree" 클릭
    - https://huggingface.co/pyannote/segmentation-3.0 → "Agree" 클릭
@@ -276,7 +276,7 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 | 영역 | 기술 | 디바이스 | 비고 |
 |------|------|---------|------|
 | STT | mlx-whisper — **`whisper-large-v3-turbo` 기본**; 선택적 OpenAI `gpt-4o-transcribe-diarize` | MPS(GPU) / OpenAI | 기본 로컬·자동 cloud fallback 없음. OpenAI는 명시적 동의 시만 음성 업로드 |
-| 화자분리 | `pyannote/speaker-diarization-community-1` via pyannote-audio | **CPU 강제** | `exclusive_speaker_diarization` 우선, MPS 버그 있음 |
+| 화자분리 | **Senko 기본**, community-1 / speakrs 선택 | CoreML / **community-1 CPU 강제** | `diarization.engine`으로 선택 |
 | LLM | **Gemma 4 E4B 기본** (EXAONE 3.5 / Gemma 4 E2B 선택 가능) — **MLX 기본** (Ollama 선택 가능) | GPU | `config.yaml`의 `llm.mlx_model_name` |
 | 임베딩 | intfloat/multilingual-e5-small (384차원) | MPS(GPU) | query:/passage: 접두사 필수 |
 | 벡터DB | ChromaDB PersistentClient | — | |
@@ -285,6 +285,23 @@ curl -s http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/manual-download
 | macOS UI | rumps | — | 메인 스레드 점유 |
 | 네이티브 창 | pywebview 4.x | — | 서브프로세스로 실행 (rumps와 메인스레드 충돌 방지) |
 | 프론트엔드 | 순수 HTML/CSS/JS (SPA) | — | 프레임워크 없음, History API 라우팅 |
+
+### 화자분리 엔진 (2026-09-29 제품 결정)
+
+- `diarization.engine`: **senko 기본** / `community-1` / `speakrs`.
+- engine 없는 과거 config도 senko. 기존 `model_name`에서 community-1을 추론하지 않는다.
+  명시된 engine/model_name을 보존하고 파일을 자동 변경하지 않는다.
+- 설정 API `diarization_engine`과 UI **화자분리 엔진**에서 선택한다.
+- Senko: 앱 venv에서 `python -m pip install "git+https://github.com/narcotic-sh/senko.git@1bcb09041bfa170b4a5a4b0af92f66eff76204d5"`.
+  macOS 14+ Apple Silicon, Xcode CLT 필요. Python worker 내 CoreML 실행.
+- speakrs: OpenBLAS/pkg-config 설치 후 README의 `cargo install --path tools/speakrs-sidecar --locked` 절차를 따르고
+  `diarization.speakrs_binary`에 설치된 `recap-speakrs` 절대 경로를 설정한다.
+  Rust speakrs 0.5.0/CoreML sidecar로 exec하여 기존 PID 감시·모델 lease를 유지한다.
+- 플랫폼/설치 실패는 명확한 오류. 자동 fallback 없음. community-1 CPU 경로만 HF 토큰 및
+  완전 캐시 토큰 생략(#76)을 적용한다. CoreML 모델의 최초 다운로드는 upstream이 담당한다.
+- 화자 수 범위와 pyannote output_mode는 community-1 전용. 기존 체크포인트 재사용은 유지한다.
+- 실제 CoreML 실행은 Mac 검증 대상이며 Linux CI는 모킹한다. 사람 RTTM 검증은 대기 중이다.
+- 상세 설치·마이그레이션은 README의 **화자분리 엔진**을 따른다.
 
 ### LLM 모델 선택 가이드
 
@@ -442,7 +459,7 @@ curl -X POST http://127.0.0.1:8765/api/stt-models/seastar-medium-4bit/activate
    설정하고 묶음 전체에 걸쳐 잠금을 잡지 않는다.
 2. **순차 실행**: STT → 화자분리 → 병합 → LLM보정 → 회의록 → 청크 → 임베딩 (회의록 생성이 검색 인덱싱 실패에 의해 차단되지 않도록 순서 결정). OpenAI 단일 업로드 응답에 화자/시간 세그먼트가 있으면 pyannote를 우회하고, 여러 client-side 청크는 기존 로컬 pyannote를 사용한다.
 3. **피크 RAM 9.5GB 이하** 유지 (16GB 중 나머지는 OS + 앱)
-4. **pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
+4. **community-1 선택 시 pyannote는 반드시 CPU** (`device="cpu"`) — MPS 버그
 5. **MLX는 in-process** (기본), Ollama 사용 시 localhost만 (`http://127.0.0.1:11434`)
 6. **rumps는 메인 스레드**, FastAPI는 데몬 스레드
 7. **모든 중간 결과는 JSON 체크포인트** — 실패 시 재개 가능. 상태 JSON의 부모는
@@ -487,7 +504,7 @@ PIPELINE_STEPS 순서:
     │                     기본: mlx-whisper(MPS), 명시 선택: OpenAI diarized transcription
     ▼
 [3] Diarizer        ──→  DiarizationResult
-    │                     OpenAI 단일 청크 화자 구간 재사용 또는 pyannote(CPU 강제)
+    │                     OpenAI 단일 청크 재사용 또는 Senko / community-1(CPU) / speakrs
     ▼
 [4] Merger          ──→  MergedResult (시간 겹침 기반 매칭)
     │

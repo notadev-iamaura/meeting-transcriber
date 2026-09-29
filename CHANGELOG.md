@@ -10,6 +10,12 @@
 ## [미출시 (Unreleased)]
 
 ### 변경됨
+- **화자분리 엔진 선택** (2026-09-29): Senko CoreML을 기본값으로 변경하고 community-1
+  (pyannote CPU), speakrs CoreML을 설정 API/UI에서 선택할 수 있습니다. `engine` 없는 기존
+  설정도 Senko이며 `model_name`에서 엔진을 추론하지 않습니다. 명시된 엔진/모델은 보존합니다.
+  HF 완전 캐시의 토큰 생략은 community-1 전용으로 유지합니다. CoreML 미지원/미설치 환경은
+  명확한 오류로 중단하며 자동 fallback하지 않습니다. 엔진별 ETA 통계를 분리했습니다.
+  Senko venv 및 speakrs sidecar 설치는 README 참고. 사람 RTTM 검증은 대기 중입니다.
 - **STT 기본 모델 교체** (PR #18, 2026-04-26): `youngouk/whisper-medium-komixv2-mlx`
   → `mlx-community/whisper-large-v3-turbo`. 6 회의 다중 파일 벤치마크 결과
   CER 평균 -16%p (66.17% → 49.80%). MLX 메모리 피크 거의 동일 (-32 MB).

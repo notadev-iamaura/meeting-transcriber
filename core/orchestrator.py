@@ -1031,6 +1031,8 @@ class JobProcessor:
             if config is None:
                 return "default"
 
+            if step == "diarize":
+                return str(config.diarization.engine)
             if step == "transcribe":
                 if stt_provider in {"local", "openai"} and stt_model:
                     return stt_model.split("/")[-1]
