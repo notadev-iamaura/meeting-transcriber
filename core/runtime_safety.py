@@ -18,10 +18,12 @@ from pathlib import Path
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _HF_OFFLINE_FLAGS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
 _PYANNOTE_SEGMENTATION_REPO = "pyannote/segmentation-3.0"
-_WEIGHT_SUFFIXES = (".bin", ".safetensors", ".ckpt", ".pt", ".pth")
+_WEIGHT_SUFFIXES = (".bin", ".safetensors", ".ckpt", ".pt", ".pth", ".npz")
 _MODEL_PATH_RE = re.compile(
-    r"(?:\$model/|['\"]|\s)([A-Za-z0-9_./-]+\.(?:bin|safetensors|ckpt|pt|pth))"
+    r"(?:\$model/|['\"]|\s)([A-Za-z0-9_./-]+\.(?:bin|safetensors|ckpt|pt|pth|npz))"
 )
+# community-1 config uses bare component dirs: $model/segmentation|embedding|plda
+_MODEL_DIR_RE = re.compile(r"\$model/([A-Za-z0-9_.-]+)(?![A-Za-z0-9_./-])")
 _REPO_REF_RE = re.compile(r"(?:^|[\s'\"])((?:pyannote)/[A-Za-z0-9_.-]+)(?:[\s'\"]|$)")
 
 
@@ -99,13 +101,31 @@ def resolve_hf_snapshot_dir(
 
 
 def _is_safe_cached_file(path: Path, hub_root: Path) -> bool:
-    """캐시 파일이 hub 루트 아래에서 실제 non-empty 파일인지 확인한다."""
+    """캐시 파일이 hub 루트 아래에서 실제 non-empty 파일인지 확인한다.
+
+    중간 디렉터리 symlink로 hub 밖을 가리키는 경우도 resolve 후 거부한다.
+    """
     try:
-        if path.is_symlink():
-            resolved = path.resolve()
-            resolved.relative_to(hub_root)
-            return resolved.is_file() and resolved.stat().st_size > 0
-        return path.is_file() and path.stat().st_size > 0
+        resolved = path.resolve()
+        resolved.relative_to(hub_root)
+        return resolved.is_file() and resolved.stat().st_size > 0
+    except (OSError, ValueError):
+        return False
+
+
+def _is_safe_cached_component_dir(path: Path, hub_root: Path) -> bool:
+    """$model/<component> 디렉터리 안에 non-empty 가중치가 있는지 확인한다."""
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(hub_root)
+        if not resolved.is_dir():
+            return False
+        for child in resolved.rglob("*"):
+            if child.suffix.lower() not in _WEIGHT_SUFFIXES:
+                continue
+            if _is_safe_cached_file(child, hub_root):
+                return True
+        return False
     except (OSError, ValueError):
         return False
 
@@ -131,10 +151,34 @@ def _referenced_relative_files(config_text: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     for match in _MODEL_PATH_RE.finditer(config_text):
-        rel = match.group(1).lstrip("./")
+        rel = match.group(1).removeprefix("./")
         if rel.startswith("http") or rel in seen:
             continue
         if ".." in Path(rel).parts:
+            continue
+        seen.add(rel)
+        found.append(rel)
+    return found
+
+
+def _referenced_model_dirs(config_text: str) -> list[str]:
+    """config.yaml의 $model/<component> 디렉터리 참조를 추출한다.
+
+    파일 경로($model/foo/bar.bin)는 제외하고, community-1처럼
+    segmentation/embedding/plda 디렉터리만 남긴다.
+    """
+    file_refs = set(_referenced_relative_files(config_text))
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _MODEL_DIR_RE.finditer(config_text):
+        rel = match.group(1)
+        if rel in seen or ".." in Path(rel).parts:
+            continue
+        # 이미 파일 참조로 잡힌 경로/접두사는 건너뛴다.
+        if any(fr == rel or fr.startswith(rel + "/") for fr in file_refs):
+            continue
+        # 확장자가 가중치면 파일로 취급(디렉터리 아님)
+        if Path(rel).suffix.lower() in _WEIGHT_SUFFIXES:
             continue
         seen.add(rel)
         found.append(rel)
@@ -157,8 +201,15 @@ def _referenced_external_repos(config_text: str, self_repo: str) -> list[str]:
 def missing_pyannote_repo_cache_files(
     repo_id: str,
     environ: Mapping[str, str] | None = None,
+    *,
+    _visited: set[str] | None = None,
 ) -> list[str]:
     """단일 HF repo snapshot이 불완전하면 누락 라벨 목록을 반환한다."""
+    visited = _visited if _visited is not None else set()
+    if repo_id in visited:
+        return []
+    visited.add(repo_id)
+
     hub_root = hf_hub_cache_root(environ).resolve()
     snapshot = resolve_hf_snapshot_dir(repo_id, environ=environ)
     if snapshot is None:
@@ -174,17 +225,28 @@ def missing_pyannote_repo_cache_files(
     except OSError:
         return [f"{repo_id}:config.yaml"]
 
-    for rel in _referenced_relative_files(config_text):
+    file_refs = _referenced_relative_files(config_text)
+    dir_refs = _referenced_model_dirs(config_text)
+
+    for rel in file_refs:
         candidate = snapshot / rel
         if not _is_safe_cached_file(candidate, hub_root):
             missing.append(f"{repo_id}:{rel}")
 
-    weights = _snapshot_weight_files(snapshot, hub_root)
-    if not weights:
-        missing.append(f"{repo_id}:weights")
+    for rel in dir_refs:
+        candidate = snapshot / rel
+        if not _is_safe_cached_component_dir(candidate, hub_root):
+            missing.append(f"{repo_id}:{rel}")
+
+    # config가 구성요소를 가리키지 않는 단순 snapshot만 catch-all 가중치 요구.
+    # community-1처럼 $model/<dir> 참조가 있으면 디렉터리 검사로 충분하다.
+    if not file_refs and not dir_refs:
+        weights = _snapshot_weight_files(snapshot, hub_root)
+        if not weights:
+            missing.append(f"{repo_id}:weights")
 
     for external in _referenced_external_repos(config_text, repo_id):
-        missing.extend(missing_pyannote_repo_cache_files(external, environ))
+        missing.extend(missing_pyannote_repo_cache_files(external, environ, _visited=visited))
 
     return missing
 
