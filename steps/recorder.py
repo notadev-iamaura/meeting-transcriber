@@ -188,6 +188,11 @@ class AudioRecorder:
         self._meeting_id: str | None = None
         self._max_duration_task: asyncio.Task[None] | None = None
         self._duration_broadcast_task: asyncio.Task[None] | None = None
+        # ffmpeg stdout/stderr를 아무도 읽지 않으면 OS 파이프 버퍼가 가득 차
+        # write()가 블록되어 graceful 종료(stdin 'q')에도 응답하지 못하고
+        # 결국 SIGKILL로만 죽어 WAV data 청크 크기가 갱신되지 않는다.
+        # 이를 막기 위해 프로세스별 drain 태스크를 추적한다.
+        self._pipe_drain_tasks: list[asyncio.Task[None]] = []
 
         # 멀티트랙 상태
         self._processes: dict[str, asyncio.subprocess.Process] = {}
@@ -595,6 +600,34 @@ class AudioRecorder:
                 await self._cleanup_failed_start()
                 raise
 
+    async def _drain_pipe(self, stream: asyncio.StreamReader) -> None:
+        """ffmpeg stdout/stderr를 EOF까지 계속 읽어 버린다.
+
+        아무도 읽지 않으면 OS 파이프 버퍼(보통 64KB)가 가득 차 ffmpeg의 write()가
+        블록되고, 그 상태에서는 stdin 'q'도 처리되지 않아 graceful 종료가 항상
+        타임아웃되며 SIGKILL로만 종료된다. 강제 종료 시점에 RIFF data 청크 크기가
+        갱신되지 않아 불완전한 WAV 헤더가 남는다.
+        """
+        try:
+            while True:
+                chunk = await stream.read(65536)
+                # 실제 StreamReader는 bytes를 반환한다. 단위 테스트의 MagicMock/
+                # AsyncMock처럼 bytes가 아니면 무한 루프·메모리 폭주를 막기 위해 중단한다.
+                if not chunk or not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # drain은 best-effort 백그라운드 작업이다. 어떤 예외든 녹음 자체를
+            # 막으면 안 되므로 로그만 남기고 조용히 끝낸다.
+            logger.debug(f"ffmpeg 파이프 drain 중 종료: {e}")
+
+    def _start_pipe_drain(self, proc: asyncio.subprocess.Process) -> None:
+        """프로세스의 stdout/stderr를 백그라운드에서 drain하기 시작한다."""
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                self._pipe_drain_tasks.append(asyncio.create_task(self._drain_pipe(stream)))
+
     async def _start_singletrack_recording(self, meeting_id: str) -> None:
         """싱글트랙 녹음을 시작한다 (기존 로직).
 
@@ -648,6 +681,7 @@ class AudioRecorder:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            self._start_pipe_drain(self._process)
         except FileNotFoundError as e:
             raise FFmpegRecordError(
                 "ffmpeg가 설치되어 있지 않습니다. 'brew install ffmpeg'로 설치하세요."
@@ -746,6 +780,7 @@ class AudioRecorder:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
+                self._start_pipe_drain(self._process)
             except FileNotFoundError as e:
                 raise FFmpegRecordError("ffmpeg가 설치되어 있지 않습니다.") from e
             except OSError as e:
@@ -781,6 +816,7 @@ class AudioRecorder:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
+                self._start_pipe_drain(proc)
                 self._processes[track_name] = proc
                 logger.info(
                     f"멀티트랙 녹음 시작: {track_name}=[{device.index}] {device.name}, "
@@ -867,7 +903,7 @@ class AudioRecorder:
                 if not terminated_cleanly:
                     await self._await_critical_cleanup(self._cleanup_recording_processes())
             finally:
-                self._reset_recording_state()
+                await self._reset_recording_state()
 
     async def _notify_recording_stopped(
         self,
@@ -952,7 +988,7 @@ class AudioRecorder:
                 await self._cancel_background_tasks(_from_guard=False)
                 await self._cleanup_recording_processes()
             finally:
-                self._reset_recording_state()
+                await self._reset_recording_state()
 
         await self._await_critical_cleanup(cleanup())
 
@@ -962,7 +998,7 @@ class AudioRecorder:
             await self._cleanup_multitrack_processes()
         await self._kill_orphan_process()
 
-    def _reset_recording_state(self) -> None:
+    async def _reset_recording_state(self) -> None:
         """다음 녹음 요청을 위한 상태 참조를 IDLE로 초기화한다."""
         self._state = RecordingState.IDLE
         self._process = None
@@ -975,6 +1011,14 @@ class AudioRecorder:
         self._processes.clear()
         self._current_files.clear()
         self._current_devices.clear()
+        # 프로세스 종료로 파이프는 이미 EOF에 도달했거나 곧 도달하므로 drain
+        # 태스크는 자연 종료되지만, 남아있는 태스크는 명시적으로 취소하고 기다린다.
+        drain_tasks, self._pipe_drain_tasks = self._pipe_drain_tasks, []
+        for task in drain_tasks:
+            if not task.done():
+                task.cancel()
+        if drain_tasks:
+            await asyncio.gather(*drain_tasks, return_exceptions=True)
 
     async def _terminate_ffmpeg(self) -> RecordingResult | None:
         """ffmpeg 프로세스를 종료하고 녹음 결과를 반환한다.
@@ -1284,7 +1328,7 @@ class AudioRecorder:
                     # STOPPING에서 취소된 경우와 IDLE인데 프로세스 참조만 남은 경우 모두
                     # 같은 lock 아래에서 정리해 다음 start가 고아 프로세스를 덮어쓰지 않게 한다.
                     await self._cleanup_recording_processes()
-                    self._reset_recording_state()
+                    await self._reset_recording_state()
             finally:
                 async with self._state_lock:
                     self._cleanup_in_progress = False
