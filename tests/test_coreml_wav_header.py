@@ -228,3 +228,64 @@ def test_run_coreml_cleans_up_temp_file_even_if_senko_raises(
     assert len(captured_paths) == 1
     assert not Path(captured_paths[0]).exists()
     assert audio_path.read_bytes() == corrupted
+
+def test_trailing_junk_chunk_is_not_absorbed_into_data(tmp_path: Path) -> None:
+    """data 뒤에 JUNK 청크가 있는 정상 WAV는 헤더를 바꾸지 않고 원본 경로를 쓴다."""
+    audio_path = tmp_path / "trailing.wav"
+    valid = bytearray(_write_valid_wav(audio_path, num_frames=16))
+    junk = b"JUNK" + struct.pack("<I", 4) + b"pad!"
+    valid.extend(junk)
+    valid[4:8] = struct.pack("<I", len(valid) - 8)
+    audio_path.write_bytes(valid)
+    original = audio_path.read_bytes()
+    assert struct.unpack_from("<I", original, 40)[0] == 32
+
+    with _senko_audio_path(audio_path) as senko_path:
+        assert senko_path == audio_path
+        assert audio_path.read_bytes() == original
+
+
+def test_odd_sized_data_with_pad_byte_is_left_alone(tmp_path: Path) -> None:
+    """홀수 data + RIFF 패딩 1바이트는 data 크기를 늘리지 않는다."""
+    audio_path = tmp_path / "odd.wav"
+    fmt = struct.pack("<HHIIHH", 1, 1, 16000, 16000, 1, 8)
+    data_payload = b"\x7f"
+    chunks = (
+        b"fmt "
+        + struct.pack("<I", 16)
+        + fmt
+        + b"data"
+        + struct.pack("<I", 1)
+        + data_payload
+        + b"\x00"
+    )
+    raw = bytearray(b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks)
+    audio_path.write_bytes(raw)
+    original = bytes(raw)
+
+    with _senko_audio_path(audio_path) as senko_path:
+        assert senko_path == audio_path
+        assert audio_path.read_bytes() == original
+        assert struct.unpack_from("<I", original, 40)[0] == 1
+
+
+def test_header_repair_does_not_load_entire_file_into_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """정규화 경로는 read_bytes로 전체 PCM을 올리지 않고 헤더만 스캔한다."""
+    audio_path = tmp_path / "bigish.wav"
+    valid_bytes = _write_valid_wav(audio_path)
+    corrupted = _corrupt_data_chunk_size(valid_bytes, declared_data_size=0xFFFFFFFF)
+    audio_path.write_bytes(corrupted)
+
+    def forbid_read_bytes(self):  # noqa: ANN001
+        raise AssertionError("read_bytes must not be used for Senko WAV normalize")
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+
+    with _senko_audio_path(audio_path) as senko_path:
+        assert senko_path != audio_path
+        # 검증용으로만 임시 파일을 직접 연다 (Path.read_bytes 패치 우회)
+        with open(senko_path, "rb") as f:
+            data = f.read()
+        assert struct.unpack_from("<I", data, 40)[0] == len(data) - 44
