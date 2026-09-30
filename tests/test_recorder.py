@@ -21,10 +21,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+async def _eof_stream_read(n: int = -1) -> bytes:
+    """테스트용: 즉시 EOF를 반환하는 StreamReader.read 대체."""
+    return b""
+
+
+def _mock_ffmpeg_process(*, pid: int = 12345) -> AsyncMock:
+    """create_subprocess_exec 대체용 프로세스 모의. stdout/stderr는 EOF 스트림."""
+    mock_process = AsyncMock()
+    mock_process.pid = pid
+    mock_process.stdin = MagicMock()
+    mock_process.stdin.write = MagicMock()
+    mock_process.stdin.drain = AsyncMock()
+    mock_process.wait = AsyncMock()
+    mock_process.terminate = MagicMock()
+    mock_process.kill = MagicMock()
+    stdout = MagicMock()
+    stdout.read = _eof_stream_read
+    stderr = MagicMock()
+    stderr.read = _eof_stream_read
+    mock_process.stdout = stdout
+    mock_process.stderr = stderr
+    return mock_process
+
 
 from config import AppConfig, PathsConfig, RecordingConfig
 from steps.recorder import (
@@ -471,7 +497,7 @@ class TestStartRecording:
         assert start_calls == ["first"]
         assert recorder.state == RecordingState.RECORDING
         await recorder._cancel_background_tasks(_from_guard=False)
-        recorder._reset_recording_state()
+        await recorder._reset_recording_state()
 
     @pytest.mark.asyncio
     async def test_시작중인_녹음과_정지는_같은_상태전이를_공유한다(self, tmp_path: Path) -> None:
@@ -565,10 +591,7 @@ class TestStartRecording:
 
         # 장치 선택 모킹
         mock_device = AudioDevice(index=0, name="Test Mic", is_blackhole=False)
-        mock_process = AsyncMock()
-        mock_process.pid = 12345
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=12345)
 
         with (
             patch.object(recorder, "_select_audio_device", return_value=mock_device),
@@ -599,10 +622,7 @@ class TestStartRecording:
         recorder = AudioRecorder(config=config)
 
         agg_device = AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True)
-        mock_process = AsyncMock()
-        mock_process.pid = 1
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=1)
 
         captured_cmd: list[str] = []
 
@@ -642,10 +662,7 @@ class TestStartRecording:
         recorder = AudioRecorder(config=config)
 
         agg_device = AudioDevice(index=2, name="Meeting Transcriber Aggregate", is_aggregate=True)
-        mock_process = AsyncMock()
-        mock_process.pid = 1
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=1)
 
         captured_cmd: list[str] = []
 
@@ -676,10 +693,7 @@ class TestStartRecording:
         recorder = AudioRecorder(config=config)
 
         mic_device = AudioDevice(index=0, name="MacBook Air Microphone")
-        mock_process = AsyncMock()
-        mock_process.pid = 1
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=1)
 
         captured_cmd: list[str] = []
 
@@ -708,10 +722,7 @@ class TestStartRecording:
         recorder = AudioRecorder(config=config)
 
         mock_device = AudioDevice(index=0, name="Test Mic", is_blackhole=False)
-        mock_process = AsyncMock()
-        mock_process.pid = 12345
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=12345)
 
         with (
             patch.object(recorder, "_select_audio_device", return_value=mock_device),
@@ -918,7 +929,7 @@ class TestStopRecording:
         assert recorder._meeting_id == "second"
         assert event_types == ["recording_stopped", "recording_started"]
         await recorder._cancel_background_tasks(_from_guard=False)
-        recorder._reset_recording_state()
+        await recorder._reset_recording_state()
 
     @pytest.mark.asyncio
     async def test_cleanup_중에는_완료_콜백이_새_녹음을_시작하지_못한다(
@@ -983,6 +994,104 @@ class TestStopRecording:
         assert recorder.state == RecordingState.IDLE
         assert recorder._meeting_id is None
         assert recorder._cleanup_in_progress is False
+
+
+# === TestPipeDrain ===
+#
+# ffmpeg stdout/stderr를 아무도 읽지 않으면 OS 파이프 버퍼(보통 64KB)가 가득 차
+# ffmpeg의 write()가 블록되어 stdin 'q'에도 응답하지 못하고 결국 SIGKILL로만
+# 종료된다. 이 경우 RIFF data 청크 크기가 갱신되지 않아 불완전한 WAV 헤더가
+# 남는다 (Senko "Invalid WAV data chunk size" → 0 segments).
+
+
+class TestPipeDrain:
+    """녹음 정지 시 stdout/stderr 파이프 drain 관련 테스트."""
+
+    @pytest.mark.asyncio
+    async def test_녹음_시작시_stdout_stderr_drain_태스크가_등록된다(self, tmp_path: Path) -> None:
+        """start_recording 이후 stdout/stderr drain 태스크가 백그라운드에 등록된다."""
+        config = _make_test_config(tmp_path)
+        recorder = AudioRecorder(config=config)
+
+        mock_device = AudioDevice(index=0, name="Test Mic")
+        mock_process = _mock_ffmpeg_process(pid=1)
+
+        with (
+            patch.object(recorder, "_select_audio_device", return_value=mock_device),
+            patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        ):
+            await recorder.start_recording(meeting_id="drain_test")
+
+        assert len(recorder._pipe_drain_tasks) == 2
+
+        recorder._state = RecordingState.IDLE
+        if recorder._max_duration_task:
+            recorder._max_duration_task.cancel()
+        if recorder._duration_broadcast_task:
+            recorder._duration_broadcast_task.cancel()
+        for task in recorder._pipe_drain_tasks:
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_stderr_버퍼가_가득차도_drain하면_SIGKILL_없이_정상_종료된다(
+        self, tmp_path: Path
+    ) -> None:
+        """stdout/stderr PIPE 버퍼가 가득 차는 실제 상황을 재현해도, drain 태스크가
+        있으면 자식 프로세스가 stdin을 읽어 스스로 종료한다 (SIGTERM/SIGKILL에
+        기대지 않는 graceful 경로).
+        """
+        config = _make_test_config(tmp_path)
+        config.recording.ffmpeg_graceful_timeout_seconds = 10
+        recorder = AudioRecorder(config=config)
+
+        # 실제 ffmpeg가 progress 로그로 stderr를 채우는 상황의 축소판:
+        # OS 파이프 버퍼(전형적으로 64KB)보다 큰 데이터를 먼저 stderr에 쓴 뒤
+        # stdin 한 줄을 읽으면 종료한다. drain이 없으면 stderr write()가 블록되어
+        # stdin을 영영 읽지 못한다.
+        child_script = (
+            "import sys\n"
+            "sys.stderr.buffer.write(b'x' * 300000)\n"
+            "sys.stderr.buffer.flush()\n"
+            "sys.stdin.buffer.read(1)\n"
+            "sys.exit(0)\n"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            child_script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        recorder._start_pipe_drain(proc)
+
+        try:
+            await asyncio.wait_for(recorder._terminate_one_ffmpeg(proc, "test"), timeout=8)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+        # SIGTERM/SIGKILL로 종료됐다면 returncode가 음수(-15/-9)다.
+        # graceful stdin 경로로 스스로 exit(0)했는지 확인한다.
+        assert proc.returncode == 0
+        await recorder._reset_recording_state()
+
+    @pytest.mark.asyncio
+    async def test_drain_태스크는_정지_후_정리된다(self, tmp_path: Path) -> None:
+        """정지 처리 후 _reset_recording_state가 drain 태스크 목록을 비운다."""
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+
+        async def never_ends() -> None:
+            await asyncio.Event().wait()
+
+        pending_task = asyncio.create_task(never_ends())
+        recorder._pipe_drain_tasks = [pending_task]
+
+        await recorder._reset_recording_state()
+
+        assert recorder._pipe_drain_tasks == []
+        assert pending_task.cancelled()
 
 
 # === TestRecordingCallbacks ===
@@ -1244,14 +1353,10 @@ class TestMultiTrackRecording:
             "mic": AudioDevice(index=0, name="MacBook Air Microphone", is_blackhole=False),
         }
 
-        mock_proc1 = AsyncMock()
-        mock_proc1.pid = 1001
-        mock_proc1.stdin = MagicMock()
+        mock_proc1 = _mock_ffmpeg_process(pid=1001)
         mock_proc1.wait = AsyncMock()
 
-        mock_proc2 = AsyncMock()
-        mock_proc2.pid = 1002
-        mock_proc2.stdin = MagicMock()
+        mock_proc2 = _mock_ffmpeg_process(pid=1002)
         mock_proc2.wait = AsyncMock()
 
         call_count = 0
@@ -1290,9 +1395,7 @@ class TestMultiTrackRecording:
             "mic": AudioDevice(index=0, name="Mic", is_blackhole=False),
         }
 
-        mock_proc = AsyncMock()
-        mock_proc.pid = 999
-        mock_proc.stdin = MagicMock()
+        mock_proc = _mock_ffmpeg_process(pid=999)
         mock_proc.wait = AsyncMock()
 
         with (
@@ -1368,10 +1471,7 @@ class TestMultiTrackRecording:
         assert recorder._multi_track is False
 
         mock_device = AudioDevice(index=0, name="Test Mic", is_blackhole=False)
-        mock_process = AsyncMock()
-        mock_process.pid = 12345
-        mock_process.stdin = MagicMock()
-        mock_process.wait = AsyncMock()
+        mock_process = _mock_ffmpeg_process(pid=12345)
 
         with (
             patch.object(recorder, "_select_audio_device", return_value=mock_device),
