@@ -111,10 +111,18 @@ def _wav_header_repair(
         pad = declared_data % 2
         next_off = payload_start + declared_data + pad
         has_trailing = False
-        if next_off + _CHUNK_HEADER_SIZE <= file_size and next_off + _CHUNK_HEADER_SIZE <= len(header):
+        if next_off + _CHUNK_HEADER_SIZE <= file_size and next_off + _CHUNK_HEADER_SIZE <= len(
+            header
+        ):
             # 헤더 버퍼 안에 next chunk id가 있으면 검사
             chunk_id = header[next_off : next_off + 4]
-            has_trailing = chunk_id.isalnum() or chunk_id in {b"JUNK", b"LIST", b"fact", b"PEAK", b"cue "}
+            has_trailing = chunk_id.isalnum() or chunk_id in {
+                b"JUNK",
+                b"LIST",
+                b"fact",
+                b"PEAK",
+                b"cue ",
+            }
         elif next_off + _CHUNK_HEADER_SIZE <= file_size:
             # next chunk가 헤더 스캔 밖(드묾) — data를 확장하지 않고 통과
             has_trailing = True

@@ -98,9 +98,7 @@ def test_truncated_riff_size_is_also_normalized(tmp_path: Path) -> None:
     """RIFF 전체 크기 필드도 실제 바이트 수와 어긋나면 함께 바로잡는다."""
     audio_path = tmp_path / "truncated.wav"
     valid_bytes = _write_valid_wav(audio_path)
-    corrupted = _corrupt_data_chunk_size(
-        valid_bytes, declared_data_size=0, declared_riff_size=0
-    )
+    corrupted = _corrupt_data_chunk_size(valid_bytes, declared_data_size=0, declared_riff_size=0)
     audio_path.write_bytes(corrupted)
 
     with _senko_audio_path(audio_path) as senko_path:
@@ -136,9 +134,7 @@ def test_non_wav_content_passes_through_unchanged(tmp_path: Path) -> None:
 # === run_coreml 통합 테스트 (senko 모킹) ===
 
 
-def test_run_coreml_feeds_normalized_temp_path_to_senko(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_coreml_feeds_normalized_temp_path_to_senko(tmp_path: Path, monkeypatch) -> None:
     """run_coreml은 헤더가 깨진 오디오일 때 정규화된 임시 경로를 Senko에 넘긴다."""
     audio_path = tmp_path / "input.wav"
     valid_bytes = _write_valid_wav(audio_path)
@@ -199,9 +195,7 @@ def test_run_coreml_uses_original_path_when_header_already_valid(
     assert audio_path.read_bytes() == valid_bytes
 
 
-def test_run_coreml_cleans_up_temp_file_even_if_senko_raises(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_run_coreml_cleans_up_temp_file_even_if_senko_raises(tmp_path: Path, monkeypatch) -> None:
     """Senko diarize가 예외를 던져도 임시 파일은 finally에서 정리된다."""
     audio_path = tmp_path / "input.wav"
     valid_bytes = _write_valid_wav(audio_path)
@@ -228,6 +222,7 @@ def test_run_coreml_cleans_up_temp_file_even_if_senko_raises(
     assert len(captured_paths) == 1
     assert not Path(captured_paths[0]).exists()
     assert audio_path.read_bytes() == corrupted
+
 
 def test_trailing_junk_chunk_is_not_absorbed_into_data(tmp_path: Path) -> None:
     """data 뒤에 JUNK 청크가 있는 정상 WAV는 헤더를 바꾸지 않고 원본 경로를 쓴다."""
@@ -269,9 +264,7 @@ def test_odd_sized_data_with_pad_byte_is_left_alone(tmp_path: Path) -> None:
         assert struct.unpack_from("<I", original, 40)[0] == 1
 
 
-def test_header_repair_does_not_load_entire_file_into_memory(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_header_repair_does_not_load_entire_file_into_memory(tmp_path: Path, monkeypatch) -> None:
     """정규화 경로는 read_bytes로 전체 PCM을 올리지 않고 헤더만 스캔한다."""
     audio_path = tmp_path / "bigish.wav"
     valid_bytes = _write_valid_wav(audio_path)

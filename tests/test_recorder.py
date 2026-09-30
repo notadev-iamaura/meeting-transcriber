@@ -1008,9 +1008,7 @@ class TestPipeDrain:
     """녹음 정지 시 stdout/stderr 파이프 drain 관련 테스트."""
 
     @pytest.mark.asyncio
-    async def test_녹음_시작시_stdout_stderr_drain_태스크가_등록된다(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_녹음_시작시_stdout_stderr_drain_태스크가_등록된다(self, tmp_path: Path) -> None:
         """start_recording 이후 stdout/stderr drain 태스크가 백그라운드에 등록된다."""
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
