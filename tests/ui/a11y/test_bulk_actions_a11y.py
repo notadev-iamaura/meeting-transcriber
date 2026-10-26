@@ -74,7 +74,7 @@ def test_batch_review_dialog_accessibility_and_focus(ui_page: Page, theme: str) 
         ),
     )
     ui_page.locator(".meeting-item").first.locator(".meeting-item-checkbox").click()
-    ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+    ui_page.locator('input[name="bulkTask"][value="transcribe"]').check()
     trigger = ui_page.locator("#bulkActionBar [data-action='run']")
     trigger.click()
     dialog = ui_page.get_by_role("dialog", name="일괄 처리 대상 확인")
@@ -281,6 +281,11 @@ def _run_axe_on(page: Page, include_selectors: list[str]) -> tuple[list[dict], d
 def _format_violations(violations: list[dict]) -> str:
     return "\n".join(
         f"  - {v['id']} ({v.get('impact')}): {v.get('help')} — nodes: {len(v.get('nodes', []))}"
+        + "\n"
+        + "\n".join(
+            str(node.get("target")) + ": " + node.get("failureSummary", "")
+            for node in v.get("nodes", [])
+        )
         for v in violations
     )
 
@@ -409,7 +414,7 @@ def test_AA6_액션_바_버튼들이_Tab으로_도달_가능하다(ui_page: Page
             () => {
               const el = document.activeElement;
               if (!el) return '';
-              if (el.id === 'bulkTaskSelect') return 'bulk-task-select';
+              if (el.matches('input[name="bulkTask"]')) return 'bulk-task-select';
               if (el.matches('.bulk-action-bar__dismiss, .bulk-action-bar__dismiss *'))
                 return 'bulk-action-bar__dismiss';
               const btn = el.closest('.bulk-action-btn');

@@ -203,7 +203,8 @@ def test_title_batch_preserves_excluded_selection_and_survives_navigation(ui_pag
     for i in range(2):
         items.nth(i).locator(".meeting-item-checkbox").click()
     expect(ui_page.locator("#bulkActionBar")).to_have_count(1)
-    assert ui_page.locator("#list-panel #bulkActionBar").count() == 1
+    assert ui_page.locator("#content-wrapper #bulkActionBar").count() == 1
+    ui_page.locator('input[name="bulkTask"][value="title"]').check()
     ui_page.locator("#bulkActionBar [data-action=run]").click()
     expect(ui_page.get_by_role("dialog")).to_have_count(0)
     expect(ui_page.locator(".bulk-action-bar__count-num")).to_have_text("1")
@@ -255,6 +256,7 @@ def test_title_mixed_pending_selection_submits_other_ids(ui_page: Page) -> None:
     expect(ui_page.locator("#backgroundWorkMessage")).to_contain_text("차례 대기 중", timeout=8000)
     for i in range(2):
         _meeting_items(ui_page).nth(i).locator(".meeting-item-checkbox").click()
+    ui_page.locator('input[name="bulkTask"][value="title"]').check()
     ui_page.locator("#bulkActionBar [data-action=run]").click()
     expect(ui_page.locator(".bulk-action-bar__count-num")).to_have_text("1")
     assert calls[0]["meeting_ids"] == [ids[1]]
@@ -304,10 +306,11 @@ def test_contextual_toolbar_viewer_layout_desktop_and_mobile(ui_page: Page) -> N
     assert active.evaluate("el => getComputedStyle(el).backgroundColor") != items.nth(0).evaluate(
         "el => getComputedStyle(el).backgroundColor"
     )
-    expect(ui_page.locator("#content-wrapper #bulkActionBar")).to_have_count(0)
+    expect(ui_page.locator("#content-wrapper #bulkActionBar")).to_have_count(1)
     ui_page.screenshot(
         path="/private/tmp/recap-contextual-actions-desktop.png", animations="disabled"
     )
+    _bulk_bar(ui_page).get_by_role("button", name="작업 선택 접기").click()
     ui_page.locator(".viewer-more-actions > summary").click()
     expect(ui_page.locator(".viewer-more-panel")).to_be_visible()
     ui_page.screenshot(
@@ -319,6 +322,7 @@ def test_contextual_toolbar_viewer_layout_desktop_and_mobile(ui_page: Page) -> N
     ui_page.screenshot(path="/private/tmp/recap-contextual-actions-390.png", animations="disabled")
     ui_page.locator("#mobile-menu-toggle").click()
     ui_page.wait_for_timeout(300)
+    ui_page.locator("#bulkActionResume").click()
     expect(ui_page.locator("#bulkActionBar")).to_be_visible()
     ui_page.screenshot(
         path="/private/tmp/recap-contextual-actions-selection-390.png", animations="disabled"
@@ -688,6 +692,56 @@ class TestSidebarMultiSelect:
 # ============================================================================
 
 
+@pytest.mark.parametrize("width", [1280, 900, 390])
+def test_bulk_selection_keeps_rows_and_scroll_position(ui_page: Page, width: int) -> None:
+    """선택·추가·해제·페이드 중에도 목록과 스크롤 위치를 유지한다."""
+    ui_page.set_viewport_size({"width": width, "height": 720})
+    if width <= 768:
+        ui_page.locator("#mobile-menu-toggle").click()
+    items = _meeting_items(ui_page)
+    before = items.evaluate_all("els => els.map(el => el.getBoundingClientRect().y)")
+    scroll_before = ui_page.locator("#listContent").evaluate("el => el.scrollTop")
+    items.first.locator(".meeting-item-checkbox").click()
+    expect(_bulk_bar(ui_page)).to_be_visible()
+    expect(ui_page.locator(".list-sort")).to_be_visible()
+    box = _bulk_bar(ui_page).bounding_box()
+    assert box["y"] >= 0 and box["y"] + box["height"] <= 720
+    expect(ui_page.locator('input[name="bulkTask"]:checked')).to_have_value("full_title")
+    assert items.evaluate_all("els => els.map(el => el.getBoundingClientRect().y)") == before
+    _bulk_bar(ui_page).get_by_role("button", name="작업 선택 접기").click()
+    expect(ui_page.locator("#bulkActionResume")).to_be_visible()
+    items.nth(1).locator(".meeting-item-checkbox").click()
+    expect(_bulk_bar(ui_page)).to_be_hidden()
+    expect(ui_page.locator("#bulkActionResume")).to_contain_text("2건 선택")
+    ui_page.locator("#bulkActionResume").click()
+    expect(_bulk_bar(ui_page)).to_be_visible()
+    assert items.evaluate_all("els => els.map(el => el.getBoundingClientRect().y)") == before
+    # 페이드 직후와 완료 후 모두 위치를 비교한다.
+    ui_page.locator("#bulkActionBar [data-action=dismiss]").click()
+    assert items.evaluate_all("els => els.map(el => el.getBoundingClientRect().y)") == before
+    expect(_bulk_bar(ui_page)).to_be_hidden()
+    expect(ui_page.locator(".list-sort")).to_be_visible()
+    assert items.evaluate_all("els => els.map(el => el.getBoundingClientRect().y)") == before
+    assert ui_page.locator("#listContent").evaluate("el => el.scrollTop") == scroll_before
+    assert ui_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_combined_bulk_option_dispatches_once(ui_page: Page) -> None:
+    """5가지 작업을 표시하고 제목 포함 작업의 확인·접수 payload를 유지한다."""
+    captured = _install_batch_route_mock(ui_page)
+    options = ui_page.locator('input[name="bulkTask"]').evaluate_all(
+        "els => els.map(el => el.value)"
+    )
+    assert options == ["full_title", "full", "transcribe", "summarize", "title"]
+    _meeting_items(ui_page).first.locator(".meeting-item-checkbox").click()
+    ui_page.locator("#bulkActionBar [data-action=run]").click()
+    expect(ui_page.get_by_role("dialog")).to_contain_text("제목 자동 정리")
+    ui_page.locator("#homeBatchConfirmStart").click()
+    assert captured["preview_calls"][0]["body"]["action"] == "full_title"
+    assert len(captured["calls"]) == 1
+    assert captured["calls"][0]["body"]["action"] == "full_title"
+
+
 class TestBulkActionBar:
     """선택 카운트 기반 sticky 액션 바 + POST /api/meetings/batch 디스패치."""
 
@@ -703,12 +757,12 @@ class TestBulkActionBar:
             return  # absent 도 정책상 OK
         assert bar.first.is_hidden(), "선택 0 일 때 액션 바는 hidden 이어야 함"
 
-    def test_A2_1개_선택_시_액션_바_슬라이드_다운(self, ui_page: Page) -> None:
+    def test_A2_1개_선택_시_액션_바_페이드_인(self, ui_page: Page) -> None:
         """Given: 비선택 상태
         When:  첫 체크박스 클릭
-        Then:  `.bulk-action-bar` 표시 + transform translateY 가 0 (슬라이드 완료).
+        Then:  `.bulk-action-bar` 표시 + 위치 변형 없이 페이드만 적용.
 
-        근거: bulk-actions.md §2.4 "0 → 1 선택: slide-down + fade-in".
+        근거: 목록 좌표를 유지하는 콘텐츠 상단 플로팅 도구막대 계약.
         """
         items = _meeting_items(ui_page)
         items.nth(0).locator(".meeting-item-checkbox").click()
@@ -758,7 +812,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator('input[name="bulkTask"][value="transcribe"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
@@ -783,7 +837,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator("#bulkTaskSelect").select_option("summarize")
+        ui_page.locator('input[name="bulkTask"][value="summarize"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
@@ -807,7 +861,7 @@ class TestBulkActionBar:
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
 
-        ui_page.locator("#bulkTaskSelect").select_option("full")
+        ui_page.locator('input[name="bulkTask"][value="full"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(500)
@@ -855,7 +909,7 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator('input[name="bulkTask"][value="transcribe"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
@@ -884,7 +938,7 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator("#bulkTaskSelect").select_option("summarize")
+        ui_page.locator('input[name="bulkTask"][value="summarize"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)
@@ -933,7 +987,7 @@ class TestBulkActionBar:
         ui_page.wait_for_timeout(200)
 
         # 첫 클릭 (in-flight 진입)
-        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator('input[name="bulkTask"][value="transcribe"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         # 응답 도착 전 재클릭 (200ms 후)
@@ -980,7 +1034,7 @@ class TestBulkActionBar:
         items.nth(0).locator(".meeting-item-checkbox").click()
         items.nth(1).locator(".meeting-item-checkbox").click()
         ui_page.wait_for_timeout(200)
-        ui_page.locator("#bulkTaskSelect").select_option("transcribe")
+        ui_page.locator('input[name="bulkTask"][value="transcribe"]').check()
         ui_page.locator(".bulk-action-btn[data-action='run']").click()
         ui_page.locator("#homeBatchConfirmStart").click()
         ui_page.wait_for_timeout(800)

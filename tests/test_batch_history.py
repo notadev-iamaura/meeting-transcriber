@@ -11,6 +11,35 @@ from core.meeting_progress import meeting_progress
 from tests.test_routes_meetings_batch import _make_test_app, _setup_pipeline_mock
 
 
+@pytest.mark.parametrize("action", ["full", "full_title"])
+def test_full_title_queues_full_pipeline_with_explicit_followup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """제목 포함 옵션만 후속 worker를 예약하고 기존 full 큐 의도를 보존한다."""
+    calls = []
+
+    async def follow(request: object, rid: str, mids: list[str]) -> None:
+        calls.append((rid, mids))
+
+    monkeypatch.setattr("api.routers.meeting_titles.follow_batch_titles", follow)
+    app = _make_test_app(tmp_path)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        _setup_pipeline_mock(app)
+        queue = app.state.job_queue.queue
+        audio = tmp_path / "one.wav"
+        audio.write_bytes(b"audio")
+        queue.add_job("one", str(audio), initial_status="recorded")
+        body = dict(action=action, scope="selected", meeting_ids=["one"], request_id="combo")
+        preview = client.post("/api/meetings/batch/review", json=body)
+        assert preview.status_code == 200 and preview.json()["queued"] == 1
+        response = client.post("/api/meetings/batch", json=body)
+        assert response.status_code == 200 and response.json()["queued"] == 1
+        assert client.post("/api/meetings/batch", json=body).json() == response.json()
+        assert queue.get_job_by_meeting_id("one").requested_action == "full"
+        assert queue.get_batch_receipts("combo")[0]["action"] == action
+    assert calls == ([("combo", ["one"])] if action == "full_title" else [])
+
+
 def test_receipt_and_queue_commit_or_rollback_together(tmp_path: Path) -> None:
     """큐 CAS 실패·중복 요청에는 접수 성공 내역이나 일부 큐잉을 남기지 않는다."""
     db = tmp_path / "jobs.db"

@@ -293,14 +293,14 @@ class BatchActionRequest(BaseModel):
     """일괄 처리 요청 스키마.
 
     Attributes:
-        action: 수행할 작업 종류 — "transcribe" | "summarize" | "full"
+        action: 전사만 / 교정·요약 / 전사·교정·요약 / 제목 정리까지의 작업 종류
         scope: 대상 회의 수집 정책 — "all" | "recent" | "selected"
         hours: scope="recent" 일 때의 시간 윈도우 (1~720)
         meeting_ids: scope="selected" 일 때의 명시 회의 ID 목록.
             최대 500 개로 제한 (Phase 6 보안 감사 Medium-01: DoS 차단).
     """
 
-    action: Literal["transcribe", "summarize", "full"]
+    action: Literal["transcribe", "summarize", "full", "full_title"]
     scope: Literal["all", "recent", "selected"]
     hours: int = Field(default=24, ge=1, le=720)
     # 보안 Medium-01 (Phase 6): 비정상적으로 큰 배열로 fs I/O / 정규식 매칭이
@@ -460,7 +460,7 @@ def _is_meeting_eligible(
         return classification == "transcribe"
     if action == "summarize":
         return classification == "summarize"
-    if action == "full":
+    if action in {"full", "full_title"}:
         return classification in ("transcribe", "summarize")
     return False
 
@@ -751,6 +751,7 @@ async def _prepare_batch(
         row: dict[str, Any] = {
             "meeting_id": mid,
             "title": getattr(job, "title", "") or mid,
+            "original_title": getattr(job, "title", "") or "",
             "created_at": getattr(job, "created_at", ""),
             "status": getattr(job, "status", "") or "unknown",
             "eligible": False,
@@ -1001,6 +1002,10 @@ async def _execute_batch_action(
     config = getattr(request.app.state, "config", None)
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
+    if body.action == "full_title":
+        from api.routers.transcription_models import require_loopback_server
+
+        require_loopback_server(config, request, feature_label="제목 자동 정리")
     prepared = await _prepare_batch(request, body)
     matched = prepared.matched
     skipped = prepared.skipped
@@ -1064,7 +1069,7 @@ async def _execute_batch_action(
                 await asyncio.to_thread(
                     sync_queue.queue_jobs_atomically,
                     [job_id for _mid, job_id, _job in validated_transcribe],
-                    body.action,
+                    "full" if body.action == "full_title" else body.action,
                     stt_selections=stt_selections,
                     receipt=dict(
                         _receipt(
@@ -1074,7 +1079,12 @@ async def _execute_batch_action(
                             + [item[0] for item in background_items],
                         ),
                         server_session=server_session,
-                        background_ids=[item[0] for item in background_items],
+                        background_ids=(
+                            [mid for mid, _jid, _job in validated_transcribe]
+                            + [item[0] for item in background_items]
+                            if body.action == "full_title"
+                            else [item[0] for item in background_items]
+                        ),
                     ),
                 )
                 queued_transcribe_ids = [mid for mid, _job_id, _job in validated_transcribe]
@@ -1092,7 +1102,9 @@ async def _execute_batch_action(
     receipt = dict(
         _receipt(body, prepared, queued_ids),
         server_session=server_session,
-        background_ids=[item[0] for item in background_items],
+        background_ids=queued_ids
+        if body.action == "full_title"
+        else [item[0] for item in background_items],
     )
     if sync_queue is None:
         raise HTTPException(status_code=503, detail="접수 기록 저장소가 준비되지 않았습니다.")
@@ -1195,6 +1207,20 @@ async def _execute_batch_action(
             task.add_done_callback(running_tasks.discard)
         else:
             task.add_done_callback(_log_task_exception)
+
+    if body.action == "full_title":
+        from api.routers.meeting_titles import follow_batch_titles
+
+        running_tasks = getattr(request.app.state, "running_tasks", None)
+        if running_tasks is None:
+            running_tasks = request.app.state.running_tasks = set()
+        task = asyncio.create_task(
+            follow_batch_titles(request, body.request_id or "", queued_ids),
+            name="batch-title-followup",
+        )
+        running_tasks.add(task)
+        task.add_done_callback(_log_task_exception)
+        task.add_done_callback(running_tasks.discard)
 
     logger.info(
         f"일괄 처리 시작: action={body.action}, scope={body.scope}, "

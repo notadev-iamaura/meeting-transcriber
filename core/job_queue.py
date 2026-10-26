@@ -2434,13 +2434,24 @@ class JobQueue:
                     "restored",
                 }:
                     continue
+                saved_event = event
+                if (
+                    receipt.get("action") == "full_title"
+                    and event.get("status") == "completed"
+                    and event.get("stage") != "title"
+                ):
+                    saved_event = dict(
+                        event,
+                        status="pipeline_completed",
+                        status_label="전사·요약 완료 · 제목 정리 대기",
+                    )
                 conn.execute(
                     "INSERT INTO batch_events(request_id, meeting_id, created_at, payload) VALUES (?, ?, ?, ?)",
                     (
                         receipt["request_id"],
                         meeting_id,
                         self._now_iso(),
-                        json.dumps(event, ensure_ascii=False),
+                        json.dumps(saved_event, ensure_ascii=False),
                     ),
                 )
                 # 일반 worker 이벤트는 가장 최근의 활성 접수에만 귀속한다.

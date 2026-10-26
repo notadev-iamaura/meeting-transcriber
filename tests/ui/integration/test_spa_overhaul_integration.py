@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from playwright.sync_api import Browser, Page, Route
+from playwright.sync_api import Browser, Page, Route, expect
 
 pytestmark = [pytest.mark.ui]
 
@@ -374,6 +374,47 @@ def test_meeting_list_loads_more_in_50_item_pages(
     assert requests[:3] == [(0, 50), (50, 50), (100, 50)]
 
 
+def test_home_recent_meetings_preserves_focus_and_opens_viewer(
+    browser: Browser, spa_static_server: str
+) -> None:
+    """최근 녹취 6건의 표시·갱신 포커스·상세 화면 이동을 확인한다."""
+
+    def recent_api(route: Route) -> None:
+        if urlparse(route.request.url).path == "/api/meetings":
+            route.fulfill(
+                json={
+                    "meetings": [
+                        {
+                            "meeting_id": f"recent-{i}",
+                            "title": f"최근 회의 {i}",
+                            "status": "recorded",
+                            "status_label": "녹음 완료",
+                        }
+                        for i in range(6)
+                    ]
+                }
+            )
+            return
+        _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1280, "height": 800},
+        path="/app",
+        api_handler=recent_api,
+    ) as page:
+        rows = page.locator(".home-recent-row")
+        expect(rows).to_have_count(6)
+        expect(page.locator(".home-view .empty-view")).to_be_hidden()
+        rows.nth(2).focus()
+        with page.expect_response("**/api/meetings?limit=6"):
+            page.evaluate("document.dispatchEvent(new CustomEvent('recap:dashboard-refresh'))")
+        expect(rows.nth(2)).to_be_focused()
+        rows.nth(2).click()
+        page.wait_for_url("**/app/viewer/recent-2")
+
+
 def test_home_route_stats_actions_dropdowns_and_public_boundary(
     browser: Browser,
     spa_static_server: str,
@@ -407,11 +448,21 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
                 body='{"opened": true, "path": "/tmp/audio_input"}',
             )
             return
-        if "/api/meetings/batch/preview" in url:
+        if "/api/meetings/batch/review" in url:
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body='{"queued": 2, "skipped": 1, "matched": 3}',
+                body=json.dumps(
+                    {
+                        "queued": 2,
+                        "skipped": 0,
+                        "matched": 2,
+                        "candidates": [
+                            {"meeting_id": mid, "eligible": True}
+                            for mid in ["review-a", "review-b"]
+                        ],
+                    }
+                ),
             )
             return
         if "/api/meetings/batch" in url:
@@ -470,7 +521,7 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
         page.wait_for_selector("#homeBatchConfirmStart:not(:disabled)")
         page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
-            "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
+            "() => document.querySelector('#backgroundWorkMessage').textContent.includes('2건을 접수')"
         )
 
         page.evaluate("() => window.SPA.Router.navigate('/app/chat')")
@@ -485,13 +536,14 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
         page.wait_for_selector("#homeBatchConfirmStart:not(:disabled)")
         page.locator("#homeBatchConfirmStart").click()
         page.wait_for_function(
-            "() => document.querySelector('#homeStatusMessage').textContent.includes('2건 처리')"
+            "() => document.querySelector('#backgroundWorkMessage').textContent.includes('2건을 접수')"
         )
 
-    assert batch_payloads == [
-        {"action": "full", "scope": "all"},
-        {"action": "transcribe", "scope": "recent", "hours": 24},
-    ]
+    assert [body["action"] for body in batch_payloads] == ["full", "transcribe"]
+    assert all(
+        body["scope"] == "selected" and body["meeting_ids"] == ["review-a", "review-b"]
+        for body in batch_payloads
+    )
 
 
 def test_home_zero_meetings_prioritizes_first_meeting_cta(
@@ -616,6 +668,16 @@ def test_bulk_action_bar_module_wiring_posts_once(
 
     def bulk_api(route: Route) -> None:
         url = route.request.url
+        if urlparse(url).path == "/api/meetings/batch/review":
+            body = route.request.post_data_json
+            route.fulfill(
+                json={
+                    "candidates": [
+                        {"meeting_id": mid, "eligible": True} for mid in body["meeting_ids"]
+                    ]
+                }
+            )
+            return
         if "/api/meetings/batch" in url:
             batch_payloads.append(json.loads(route.request.post_data or "{}"))
             route.fulfill(
@@ -666,10 +728,12 @@ def test_bulk_action_bar_module_wiring_posts_once(
 
         page.locator(".meeting-item").nth(0).locator(".meeting-item-checkbox").click()
         page.wait_for_selector(".bulk-action-bar:not([hidden])", state="attached")
-        page.locator(".bulk-action-btn[data-action='transcribe']").click()
-        page.wait_for_function("() => document.body.textContent.includes('1건 처리')")
+        page.locator('input[name="bulkTask"][value="transcribe"]').check()
+        page.locator(".bulk-action-btn[data-action='run']").click()
+        page.locator("#homeBatchConfirmStart").click()
+        expect(page.locator("#backgroundWorkMessage")).to_contain_text("1건을 접수")
 
-    assert batch_payloads == [
+    assert [{k: v for k, v in body.items() if k != "request_id"} for body in batch_payloads] == [
         {
             "action": "transcribe",
             "scope": "selected",
@@ -4114,7 +4178,11 @@ def test_t302_mobile_meeting_selection_closes_drawer_and_restores_background(
         page.wait_for_function(
             "() => document.querySelector('#list-panel').classList.contains('is-open')"
         )
-        assert page.evaluate("() => document.querySelector('#content-wrapper').inert") is True
+        assert page.evaluate("() => document.querySelector('#content').inert") is True
+        assert (
+            page.evaluate("() => document.querySelector('#bulkActionBar').closest('[inert]')")
+            is None
+        )
 
         page.locator(".meeting-item[data-meeting-id='meeting-a']").click()
         page.wait_for_url("**/app/viewer/meeting-a")
@@ -4125,7 +4193,7 @@ def test_t302_mobile_meeting_selection_closes_drawer_and_restores_background(
         state = page.evaluate(
             "() => ({"
             "  expanded: document.querySelector('#mobile-menu-toggle').getAttribute('aria-expanded'),"
-            "  contentInert: document.querySelector('#content-wrapper').inert,"
+            "  contentInert: document.querySelector('#content').inert,"
             "  navInert: document.querySelector('#nav-bar').inert"
             "})"
         )

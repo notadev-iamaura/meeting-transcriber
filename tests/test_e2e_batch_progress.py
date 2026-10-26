@@ -177,12 +177,13 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
             "[data-checkbox]"
         ).click()
         expect(page.locator("#bulkActionBar")).to_be_visible()
-        page.locator("#bulkTaskSelect").select_option("transcribe")
+        page.locator('input[name="bulkTask"][value="transcribe"]').check()
         page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog = page.get_by_role("dialog", name="일괄 처리 대상 확인")
         expect(dialog).to_contain_text("교정·요약은 나중에 따로 실행")
         dialog.get_by_role("button", name="닫기", exact=True).click()
         assert not transcribed
+        page.get_by_role("button", name="작업 선택 접기", exact=True).click()
         page.get_by_role("button", name="최근 등록 24시간").click()
         page.get_by_role("menuitemradio", name="전사 + 교정·요약").click()
         expect(dialog).to_contain_text("녹음 시각이 아닌 앱에 등록된 시각", timeout=30000)
@@ -245,6 +246,45 @@ def test_twelve_jobs_receipt_failure_preservation_and_resume(
         browser.close()
 
 
+def test_full_title_runs_after_pipeline_and_updates_list(
+    batch_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실제 브라우저·큐·체크포인트를 통해 요약 이후 제목 적용까지 확인한다."""
+    from types import SimpleNamespace
+
+    from api.routers import meeting_titles
+
+    url, app, _, transcribed = batch_server
+
+    async def suggest(request: Any, mid: str) -> Any:
+        assert (tmp_path / "outputs" / mid / "summary.md").is_file()
+        assert app.state.job_queue.queue.get_job_by_meeting_id(mid).status == "completed"
+        return SimpleNamespace(title="2026-10-26 · 일괄 처리 검증 회의")
+
+    monkeypatch.setattr(meeting_titles, "suggest_meeting_title", suggest)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(url + "/app")
+        item = page.locator('.meeting-item[data-meeting-id="batch_02"]')
+        item.locator("[data-checkbox]").click()
+        page.locator('input[name="bulkTask"][value="full_title"]').check()
+        page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
+        page.get_by_role("dialog").get_by_role(
+            "button", name="1건 대기열에 등록", exact=True
+        ).click()
+        expect(item.locator(".meeting-item-title")).to_contain_text(
+            "일괄 처리 검증 회의", timeout=30000
+        )
+        assert transcribed == ["batch_02"]
+        receipt = app.state.job_queue.queue.get_batch_receipts()[0]
+        assert receipt["action"] == "full_title"
+        statuses = [event["status"] for event in receipt["events"]]
+        assert "pipeline_completed" in statuses and statuses[-1] == "completed"
+        assert receipt["events"][-1]["applied_title"] == "2026-10-26 · 일괄 처리 검증 회의"
+        browser.close()
+
+
 def test_deferred_correction_failure_retries_without_stt(batch_server, tmp_path: Path) -> None:
     """전사만 완료한 뒤 별도로 실패한 교정도 표시하고 LLM만 재시도한다."""
     url, app, failures, transcribed = batch_server
@@ -254,7 +294,7 @@ def test_deferred_correction_failure_retries_without_stt(batch_server, tmp_path:
         page.goto(url + "/app")
         expect(page.locator(".meeting-item")).to_have_count(16)
         page.locator('.meeting-item[data-meeting-id="batch_00"] [data-checkbox]').click()
-        page.locator("#bulkTaskSelect").select_option("transcribe")
+        page.locator('input[name="bulkTask"][value="transcribe"]').check()
         page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog = page.get_by_role("dialog", name="일괄 처리 대상 확인")
         dialog.get_by_role("button", name="1건 대기열에 등록", exact=True).click()
@@ -263,7 +303,7 @@ def test_deferred_correction_failure_retries_without_stt(batch_server, tmp_path:
         expect(history).to_contain_text("전사 완료 · 교정·요약 대기", timeout=30000)
         history.get_by_role("button", name="닫기", exact=True).click()
         page.locator('.meeting-item[data-meeting-id="batch_00"] [data-checkbox]').click()
-        page.locator("#bulkTaskSelect").select_option("summarize")
+        page.locator('input[name="bulkTask"][value="summarize"]').check()
         page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         dialog.get_by_role("button", name="1건 대기열에 등록", exact=True).click()
         page.locator("#batchHistoryButton").click()

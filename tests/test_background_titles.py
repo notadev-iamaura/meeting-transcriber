@@ -61,6 +61,87 @@ async def drain(app: FastAPI) -> None:
     await app.state.title_worker.task
 
 
+async def test_full_title_only_follows_success_and_preserves_undo(setup_titles: Any) -> None:
+    """전사·요약 실패는 건너뛰고 성공한 회의의 제목을 같은 접수에 적용한다."""
+    from starlette.requests import Request
+
+    app, queue, _ = setup_titles
+    queue.save_batch_receipt(
+        dict(
+            request_id="combined",
+            action="full_title",
+            meeting_ids=["one", "two"],
+            candidates=[],
+            queued=2,
+        )
+    )
+    queue.record_batch_event("one", dict(status="completed"))
+    queue.record_batch_event("two", dict(status="failed"))
+    assert queue.get_batch_receipts("combined")[0]["events"][0]["status"] == "pipeline_completed"
+    request = Request({"type": "http", "app": app})
+    await meeting_titles.follow_batch_titles(request, "combined", ["one", "two"])
+    await drain(app)
+    assert queue.get_job_by_meeting_id("one").title == "2026-09-23 · generated one"
+    assert queue.get_job_by_meeting_id("two").title == "original two"
+    events = queue.get_batch_receipts("combined")[0]["events"]
+    assert [event["status"] for event in events if event["meeting_id"] == "one"][-1] == "completed"
+    async with client_for(app) as client:
+        response = await client.post("/api/title-jobs/combined/undo")
+        assert response.status_code == 200
+        assert response.json()["restored"] == 1
+    assert queue.get_job_by_meeting_id("one").title == "original one"
+
+
+async def test_full_title_waits_and_records_shutdown(setup_titles: Any) -> None:
+    """전사가 끝나기 전에 제목을 만들지 않으며 종료 시 중단 상태를 남긴다."""
+    from starlette.requests import Request
+
+    app, queue, _ = setup_titles
+    queue.save_batch_receipt(
+        dict(
+            request_id="waiting",
+            action="full_title",
+            meeting_ids=["three"],
+            candidates=[],
+            queued=1,
+        )
+    )
+    request = Request({"type": "http", "app": app})
+    task = asyncio.create_task(meeting_titles.follow_batch_titles(request, "waiting", ["three"]))
+    while not getattr(app.state, "title_worker", None):
+        await asyncio.sleep(0)
+    assert app.state.title_worker.task is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert queue.get_batch_receipts("waiting")[0]["events"][-1]["status"] == "interrupted"
+    assert queue.get_job_by_meeting_id("three").title == "original three"
+
+
+async def test_full_title_preserves_title_edited_during_transcription(setup_titles: Any) -> None:
+    """후속 제목 단계가 접수 이후 전사 중에 사용자가 수정한 제목을 보존한다."""
+    from starlette.requests import Request
+
+    app, queue, _ = setup_titles
+    queue.save_batch_receipt(
+        dict(
+            request_id="edited",
+            action="full_title",
+            meeting_ids=["one"],
+            queued=1,
+            candidates=[dict(meeting_id="one", original_title="original one")],
+        )
+    )
+    queue.update_title("one", "사용자가 정한 제목")
+    queue.record_batch_event("one", dict(status="completed"))
+    await meeting_titles.follow_batch_titles(
+        Request({"type": "http", "app": app}), "edited", ["one"]
+    )
+    assert app.state.title_worker.task is None
+    assert queue.get_job_by_meeting_id("one").title == "사용자가 정한 제목"
+    assert queue.get_batch_receipts("edited")[0]["events"][-1]["status"] == "skipped"
+
+
 async def test_ack_sequential_idempotent_overlap(setup_titles: Any, monkeypatch: Any) -> None:
     app, queue, _ = setup_titles
     entered = asyncio.Event()

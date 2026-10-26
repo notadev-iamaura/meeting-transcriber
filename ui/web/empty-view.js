@@ -360,10 +360,15 @@
             '',
             '  <div class="home-status" id="homeStatusMessage" role="status" aria-live="polite"></div>',
             '',
+            '  <section class="home-recent" id="homeRecent" aria-label="최근 녹취" hidden>',
+            '    <div class="home-section-heading"><h2>최근 녹취</h2><span>최신 6건</span></div>',
+            '    <div id="homeRecentRows"></div>',
+            '    <p class="home-selection-hint">여러 회의를 처리하려면 왼쪽 목록의 체크박스를 선택하세요.</p>',
+            '  </section>',
             '  <div class="empty-view">',
             '    <div class="empty-view-icon">' + Icons.clipboard + '</div>',
-            '    <h2 class="empty-view-title">아직 선택된 회의가 없습니다</h2>',
-            '    <p class="empty-view-desc">회의가 생기면 여기에서 전사문과 요약을 바로 열 수 있습니다.</p>',
+            '    <h2 class="empty-view-title">회의를 선택해 내용을 확인하세요</h2>',
+            '    <p class="empty-view-desc">왼쪽 목록에서 회의를 열거나, 체크박스로 여러 회의를 선택해 한 번에 처리하세요.</p>',
             '    <div class="empty-view-shortcuts">',
             '      <div class="empty-view-shortcut">\u2318K 검색</div>',
             '    </div>',
@@ -420,6 +425,7 @@
         if (self._destroyed) return;
         var seq = self._statsSeq + 1;
         self._statsSeq = seq;
+        self._loadRecent(seq);
         App.apiRequest("/dashboard/stats")
             .then(function (data) {
                 if (self._destroyed || seq !== self._statsSeq) return;
@@ -452,6 +458,56 @@
             .catch(function () {
                 // 통계 실패는 무시 — 헤더 status indicator 가 별도로 알림 책임.
             });
+    };
+
+    EmptyView.prototype._loadRecent = function (seq) {
+        var self = this;
+        App.apiRequest("/meetings?limit=6")
+            .then(function (data) {
+                if (self._destroyed || seq !== self._statsSeq) return;
+                var section = document.getElementById("homeRecent");
+                var host = document.getElementById("homeRecentRows");
+                if (!section || !host) return;
+                var meetings = (data.meetings || []).slice(0, 6);
+                var snapshot = JSON.stringify(meetings);
+                if (snapshot === self._recentSnapshot) return;
+                self._recentSnapshot = snapshot;
+                var focusedHref = host.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
+                host.replaceChildren();
+                meetings.forEach(function (meeting) {
+                    var link = document.createElement("a");
+                    link.className = "home-recent-row";
+                    link.href = "/app/viewer/" + encodeURIComponent(meeting.meeting_id);
+                    var title = document.createElement("span");
+                    title.className = "home-recent-title";
+                    var match = (meeting.meeting_id || "").match(/^meeting_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
+                    title.textContent = meeting.title || (match
+                        ? match[1] + "-" + match[2] + "-" + match[3] + " " + match[4] + ":" + match[5] + " 녹취"
+                        : meeting.meeting_id);
+                    var status = document.createElement("span");
+                    status.className = "home-recent-status";
+                    status.dataset.status = meeting.status;
+                    status.textContent = meeting.status_label || App.getStatusLabel(meeting.status);
+                    link.appendChild(title);
+                    link.appendChild(status);
+                    link.addEventListener("click", function (event) {
+                        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                        event.preventDefault();
+                        Router.navigate(link.getAttribute("href"));
+                    });
+                    host.appendChild(link);
+                });
+                if (focusedHref) {
+                    var focusTarget = Array.from(host.querySelectorAll("a")).find(function (link) {
+                        return link.getAttribute("href") === focusedHref;
+                    }) || host.querySelector("a");
+                    if (focusTarget) focusTarget.focus({preventScroll: true});
+                }
+                section.hidden = !meetings.length;
+                var hint = document.querySelector(".home-view .empty-view");
+                if (hint) hint.hidden = meetings.length > 0;
+            })
+            .catch(function () { /* 목록 조회 실패 시 기존 안내를 유지한다. */ });
     };
 
     EmptyView.prototype._openImportModal = function () {

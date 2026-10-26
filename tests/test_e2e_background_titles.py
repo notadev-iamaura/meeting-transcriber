@@ -81,7 +81,7 @@ def test_bulk_titles_survive_navigation_and_restore(
         expect(page.locator(".meeting-item")).to_have_count(2)
         for mid in IDS:
             page.locator(f'.meeting-item[data-meeting-id="{mid}"] [data-checkbox]').click()
-        page.locator("#bulkTaskSelect").select_option("title")
+        page.locator('input[name="bulkTask"][value="title"]').check()
         page.screenshot(path="/private/tmp/recap-title-bulk-ready.png", animations="disabled")
         page.locator("#bulkActionBar").get_by_role("button", name="실행", exact=True).click()
         assert started.wait(5)

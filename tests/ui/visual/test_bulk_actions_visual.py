@@ -276,10 +276,10 @@ def test_V5_three_selected_light_mobile(browser: Browser, ui_bulk_base_url: str)
     """모바일 목록을 열면 선택 개수·작업 선택·실행을 한 곳에서 확인한다."""
     with _make_page(browser, width=375, height=720, color_scheme="light") as page:
         _open_app(page, ui_bulk_base_url)
-        _select_n(page, 3)
         page.locator("#mobile-menu-toggle").click()
         page.wait_for_timeout(300)
-        toolbar = page.locator("#list-panel #bulkActionBar")
+        _select_n(page, 3)
+        toolbar = page.locator("#content-wrapper #bulkActionBar")
         expect(toolbar).to_be_visible()
         expect(toolbar.locator("#bulkTaskSelect")).to_be_visible()
         expect(toolbar.get_by_role("button", name="실행", exact=True)).to_be_visible()
