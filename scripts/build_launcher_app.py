@@ -521,18 +521,13 @@ fi
 exec "${{PYTHON_LAUNCH[@]}}" - "${{PROJECT_DIR}}" "${{PYTHON_BIN}}" "${{SERVER_HOST}}" "${{SERVER_PORT}}" "${{LOG_FILE}}" "${{APP_NAME}}" <<'PY'
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 
 project_dir, python_bin, server_host, server_port, log_file, app_name = sys.argv[1:7]
 sys.path.insert(0, project_dir)
 
 from ui.launcher import build_launcher_spec, collect_launcher_preflight
+from ui.desktop_app import launch_desktop_app
 
 spec = build_launcher_spec(
     project_dir=project_dir,
@@ -547,47 +542,7 @@ if not report.ready:
     print(f"{{app_name}} launcher preflight failed: {{failed}}", file=sys.stderr)
     raise SystemExit(1)
 
-base_url = spec.app_url.rsplit("/app", 1)[0]
-health_url = base_url + "/api/health"
-
-def open_setup_if_healthy() -> bool:
-    try:
-        with urllib.request.urlopen(health_url, timeout=1) as response:
-            if response.status == 200:
-                subprocess.run(["open", spec.setup_url], check=False)
-                return True
-    except (urllib.error.URLError, TimeoutError):
-        return False
-    return False
-
-if open_setup_if_healthy():
-    raise SystemExit(0)
-
-env = os.environ.copy()
-env.update(spec.build_environment_overrides())
-log_path = Path(spec.log_file)
-log_path.parent.mkdir(parents=True, exist_ok=True)
-with log_path.open("a", encoding="utf-8") as log_handle:
-    server = subprocess.Popen(
-        spec.build_server_argv(),
-        cwd=str(spec.project_dir),
-        env=env,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
-
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        if open_setup_if_healthy():
-            raise SystemExit(server.wait())
-
-        return_code = server.poll()
-        if return_code is not None:
-            raise SystemExit(return_code)
-        time.sleep(0.5)
-
-    server.terminate()
-raise SystemExit(1)
+raise SystemExit(launch_desktop_app(spec, app_name=app_name))
 PY
 """
     path.write_text(script, encoding="utf-8")

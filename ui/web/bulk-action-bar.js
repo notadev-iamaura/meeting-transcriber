@@ -24,6 +24,7 @@
         var _countNum = null;
         var _inFlight = false;
         var _initialized = false;
+        var _collapsed = false;
         var reviewDialog = null;
         var historyTimer = null;
         var workTimer = null;
@@ -40,11 +41,13 @@
             transcribe: "전사만",
             summarize: "교정·요약",
             full: "전사 + 교정·요약",
+            full_title: "전사 + 교정·요약 + 제목 자동 정리",
         };
         var DETAILS = {
             transcribe: "음성 인식·화자분리·병합까지 진행하고 전사문을 저장합니다. 교정·요약은 나중에 따로 실행합니다.",
             summarize: "저장된 전사문을 사용해 교정·요약을 만듭니다. 음성을 다시 인식하지 않습니다.",
             full: "회의마다 전사 → 교정·요약 순서로 처리합니다. 한 회의가 실패해도 나머지 접수된 회의는 계속 진행합니다.",
+            full_title: "전사 → 교정·요약 → 제목 자동 정리 순서로 처리합니다. 기존 전사문이 있으면 교정·요약부터 이어서 진행합니다. 제목은 전사·요약에 성공한 회의에만 적용합니다.",
         };
 
         function makeElement(tag, text, className) {
@@ -119,7 +122,7 @@
                 if (last) status = last.status_label || App.getStatusLabel(last.status);
                 item.appendChild(makeElement("p", status, "batch-item-state"));
                 if (last && last.error_message) item.appendChild(makeElement("p", last.error_message));
-                if (receipt.action === "title" && last) {
+                if (last && (receipt.action === "title" || (receipt.action === "full_title" && (last.stage === "title" || last.applied_title)))) {
                     if (["failed", "interrupted", "cancelled"].indexOf(last.status) !== -1) retryIds.push(row.meeting_id);
                     if (last.status === "completed") canUndo = true;
                     if (last.applied_title) item.appendChild(makeElement("p", "변경 제목: " + last.applied_title));
@@ -240,7 +243,7 @@
 
         function isTitlePending(id) {
             return titlePending.has(id) || receipts.some(function (receipt) {
-                return receipt.action === "title" && (receipt.candidates || []).some(function (row) {
+                return ["title", "full_title"].indexOf(receipt.action) !== -1 && (receipt.candidates || []).some(function (row) {
                     var event = lastEvent(receipt, id);
                     return row.meeting_id === id && row.admission === "queued" && (!event || terminalStates.indexOf(event.status) === -1);
                 });
@@ -262,7 +265,7 @@
                         var event = lastEvent(receipt, row.meeting_id);
                         var key = receipt.request_id + ":" + row.meeting_id;
                         var revision = JSON.stringify(event);
-                        if (receipt.action === "title" && event && revisions.get(key) !== revision &&
+                        if (["title", "full_title"].indexOf(receipt.action) !== -1 && event && revisions.get(key) !== revision &&
                             (revisions.has(key) || ["completed", "restored"].indexOf(event.status) !== -1)) changed.add(row.meeting_id);
                         revisions.set(key, revision);
                     });
@@ -319,6 +322,7 @@
                 titleRequests.delete(key);
                 var admitted = (receipt.candidates || []).filter(function (row) { return row.admission === "queued"; }).map(function (row) { return row.meeting_id; });
                 if (ListPanel.clearSelectedIds) ListPanel.clearSelectedIds(admitted);
+                if (_bar && !_bar.hidden && ListPanel.getSelectedIds().length) _minimize();
                 showWorkMessage(receipt.queued + "건 제목을 정리하고 있습니다. 다른 화면을 이용해도 계속됩니다.");
                 await refreshWork();
                 return receipt;
@@ -428,6 +432,7 @@
                     _inFlight = false;
                     if (_bar) _bar.removeAttribute("data-inflight");
                     if (!ListPanel.getSelectedIds().length) _hide();
+                    else if (!dialog.open) _minimize();
                 }
             });
         }
@@ -475,6 +480,10 @@
 
         function _show() {
             if (!_bar) return;
+            var backdrop = doc.getElementById("bulkActionBackdrop");
+            var resume = doc.getElementById("bulkActionResume");
+            if (backdrop) backdrop.hidden = false;
+            if (resume) resume.hidden = true;
             if (!_bar.hidden && !_bar.classList.contains("is-leaving")) {
                 return;
             }
@@ -489,11 +498,19 @@
         function _hide() {
             if (!_bar) return;
             if (_inFlight) return;
+            var backdrop = doc.getElementById("bulkActionBackdrop");
+            var resume = doc.getElementById("bulkActionResume");
+            if (backdrop) backdrop.hidden = true;
+            if (resume) resume.hidden = true;
             _bar.classList.add("is-leaving");
             var bar = _bar;
             setTimeoutFn(function () {
                 if (!bar) return;
                 if (ListPanel.getSelectedIds().length) { bar.classList.remove("is-leaving"); return; }
+                if (bar.contains(doc.activeElement)) {
+                    var list = doc.getElementById("listContent");
+                    if (list) list.focus({preventScroll: true});
+                }
                 bar.hidden = true;
                 bar.classList.remove("is-leaving");
             }, 200);
@@ -504,11 +521,32 @@
             var detail = e.detail || {};
             var count = detail.count || 0;
             if (_countNum) App.safeText(_countNum, String(count));
+            var resume = doc.getElementById("bulkActionResume");
+            if (resume) {
+                resume.querySelector("span").textContent = String(count);
+                resume.hidden = count === 0 || !_collapsed;
+            }
+            var run = _bar.querySelector("[data-action='run']");
+            if (run) run.disabled = count === 0 || _inFlight;
             if (count > 0) {
-                _show();
+                if (!_collapsed) _show();
             } else {
+                _collapsed = false;
                 _hide();
             }
+        }
+
+        function _minimize() {
+            if (!_bar || _inFlight) return;
+            _collapsed = true;
+            _bar.hidden = true;
+            _bar.classList.remove("is-leaving");
+            var backdrop = doc.getElementById("bulkActionBackdrop");
+            var resume = doc.getElementById("bulkActionResume");
+            if (backdrop) backdrop.hidden = true;
+            if (resume) resume.hidden = !ListPanel.getSelectedIds().length;
+            var list = doc.getElementById("listContent");
+            if (list) list.focus({preventScroll: true});
         }
 
         function _executeAction(action) {
@@ -528,9 +566,11 @@
             if (!t || !_bar.contains(t)) return;
             var action = t.getAttribute("data-action");
             if (action === "run") {
-                _executeAction(doc.getElementById("bulkTaskSelect").value);
+                var choice = _bar.querySelector("input[name='bulkTask']:checked");
+                if (choice) _executeAction(choice.value);
                 return;
             }
+            if (action === "minimize") { _minimize(); return; }
             if (action === "dismiss") {
                 if (_inFlight) return;
                 if (ListPanel && ListPanel.clearSelection) {
@@ -550,6 +590,15 @@
             if (!_bar) return;
             _countNum = _bar.querySelector(".bulk-action-bar__count-num");
             _bar.addEventListener("click", _onClick);
+            var backdrop = doc.getElementById("bulkActionBackdrop");
+            if (backdrop) backdrop.addEventListener("click", _minimize);
+            var resume = doc.getElementById("bulkActionResume");
+            if (resume) resume.addEventListener("click", function () {
+                _collapsed = false;
+                _show();
+                var choice = _bar.querySelector("input[name='bulkTask']:checked");
+                if (choice) choice.focus({preventScroll: true});
+            });
             doc.addEventListener("recap:selection-changed", _onSelectionChanged);
             var history = doc.getElementById("batchHistoryButton");
             if (history) history.addEventListener("click", showHistory);

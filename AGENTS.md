@@ -571,6 +571,7 @@ meeting-transcriber/
 │   ├── menubar.py           # macOS 메뉴바 (rumps) — 네이티브 창 통합
 │   ├── native_window.py     # PyWebView 네이티브 창 (서브프로세스 실행)
 │   ├── launcher.py          # 경량 .app 런처용 read-only preflight/command 계약
+│   ├── desktop_app.py       # .app 전용 창 실행 + 직접 시작한 서버의 수명 관리
 │   └── web/                 # 웹 UI (SPA, 순수 HTML/CSS/JS)
 │       ├── index.html       # SPA 셸 (사이드바 + 콘텐츠 영역)
 │       ├── viewer.html      # SPA 리다이렉트 스텁 → /app/viewer/{id}
@@ -654,6 +655,7 @@ rumps (메인 스레드)
 
 - `ui/native_window.py`: `NativeWindowConfig`(dataclass) + `build_window_config()` + `launch_native_window()` + `run_webview_window()`
 - `ui/launcher.py`: 경량 `.app` 런처가 서버 시작 전에 사용할 read-only preflight/command 계약. `main.py --no-menubar` argv, cwd, 비밀 없는 환경변수 override, `/app/setup` URL을 JSON으로 반환하며 프로세스 실행·설치·권한 변경은 하지 않음.
+- `ui/desktop_app.py`: 생성된 `.app`의 실행 진입점. 브라우저 대신 `ui.native_window` 전용 창을 별도 프로세스로 열고, 기존 로컬 서버에 연결하거나 서버를 직접 시작한다. 창 종료·실패 시 직접 시작한 서버만 SIGINT로 정상 종료하고 기존 서버는 보존한다. 창 크기는 `window`, 서버 준비 대기는 `server.startup_timeout_seconds`를 사용하며 브라우저 폴백은 하지 않는다.
 - `scripts/build_launcher_app.py`: unsigned local `.app`를 생성. `--bundle-source`를 명시하면 allowlist 기반 런타임 소스(`main.py`, config/pyproject, `api/core/steps/search/security/ui`)만 `Contents/Resources/project`에 포함하며 `.env*`, `.git`, `.venv`, 캐시, 테스트, benchmark/build/dist/output/state, 모델/오디오/DB 산출물, symlink escape는 제외. 번들 `config.yaml` 복사본의 HuggingFace 토큰 값/comment도 제거. 앱 실행·설치·네트워크 작업은 하지 않음.
 - `scripts/validate_launcher_app.py`: 생성된 unsigned `.app`의 Info.plist, executable 권한, launcher metadata, optional source bundle 계약, secret marker, optional codesign readiness를 read-only로 검증. 앱 실행·서명·공증·네트워크·파일 mutation 금지.
 - `scripts/build_launcher_dmg.py`: `local_ready` unsigned `.app`만 `hdiutil create -format UDZO`로 unsigned local DMG에 패키징. `.app` 내부 출력, symlink/디렉토리 overwrite, 앱 실행, attach, 서명, 공증, 네트워크, 설치 작업 금지. 생성된 `.dmg`는 일반 파일/non-empty로 재검증하며 distribution readiness와 서명/공증은 별도 범위.

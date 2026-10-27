@@ -20,6 +20,24 @@
   `cargo check --locked --manifest-path tools/speakrs-sidecar/Cargo.toml` 확인이 남아 있습니다.
   Linux 테스트는 CoreML을 모킹합니다. CI workflow 변경은 OAuth workflow scope 부족으로 제외했습니다.
 
+## 선택 도구막대와 화면 밀도 개선 (2026-10-26, 로컬 변경)
+
+- 일괄 작업은 콘텐츠 가운데의 세로형 플로팅 패널로 표시합니다. 5가지 작업을 설명과 함께
+  모두 펼쳐 보여줍니다. 선택을 유지한 채 `접기`로 목록을 더 고르고 다시 열 수 있습니다.
+  94% 불투명도·backdrop blur·배경 dim·선택 배지·큰 실행 버튼을 적용했습니다. 표시·추가 선택·해제 시
+  회의 목록과 스크롤 위치가 바뀌지 않습니다. 검색·정렬 주변과 회의 행의 여백을 줄였습니다.
+- 선택 작업은 `전사 + 교정·요약 + 제목 자동 정리`, `전사 + 교정·요약`, `전사만`,
+  `교정·요약`, `제목 자동 정리` 순서입니다. 첫 번째는 API action `full_title`이며
+  기존 `full` 큐를 사용한 뒤 성공한 회의만 앱 소유 제목 worker로 이어집니다.
+  접수 기록은 제목 적용까지 완료로 표시하지 않으며, 수동 제목 변경 보호와 복원을 유지합니다.
+- 화면 이동·새로고침은 작업에 영향을 주지 않습니다. 앱 종료로 미완료된 후속 작업은
+  중단으로 표시하며, 전사·요약이 끝난 회의의 제목은 `제목 자동 정리`로 다시 실행할 수 있습니다.
+- 홈에는 최근 녹취 6건과 상태를 표시하고, 빈 안내는 실제 목록이 없을 때만 표시합니다.
+  모바일은 통계를 2열로 표시하며 선택 도구막대도 drawer에서 키보드·포인터로 조작할 수 있습니다.
+- 세로형 패널 검증: 선택 동작·axe·키보드 접근성 11개, 시각 회귀 6개, 일괄 작업·제목 E2E 6개,
+  frontend boundary 33개를 통과했습니다. JS 문법·Python Ruff·변경 diff 검사도 통과했습니다.
+  E2E는 격리 WAV와 추론 대역을 사용하며 실제 사용자 녹취나 외부 API는 실행하지 않았습니다.
+
 ## 일괄 작업 UI와 백그라운드 제목 정리 (2026-09-23, 로컬 변경)
 
 - 중복 일괄 작업 버튼을 목록 위 선택 도구 모음 하나로 정리했습니다. 현재 열린
@@ -624,6 +642,14 @@ bundle은 `Info.plist`, `Contents/MacOS/<executable>`,
 `Resources/launcher-metadata.json`으로 구성됩니다.
 생성된 executable은 metadata와 같은 host, port, log path를 런타임 spec에 전달해
 non-default 로컬 포트 번들도 빌드 시 지정한 endpoint를 그대로 사용합니다.
+`ui/desktop_app.py`는 `.app` 실행 시 브라우저 호출 없이 `ui.native_window`의
+전용 macOS 창을 별도 프로세스로 엽니다. 창은 `/app`으로 시작하고 크기는 기존
+`window` 설정을 사용합니다. 로컬 서버가 이미 준비되어 있으면 재사용하며, 없으면
+서버를 시작한 뒤 설정된 `server.startup_timeout_seconds` 안에 준비 상태를 확인합니다.
+창 닫기나 Cmd+Q로 창 프로세스가 종료되면 앱이 직접 시작한 서버에만 SIGINT를 보내고
+정상 종료를 기다립니다. 기존 서버는 종료하지 않으며, 전용 창 실패 시 브라우저로
+폴백하지 않고 macOS 알림과 로컬 로그로 안내합니다. Python 런타임은 여전히 외부
+venv를 사용하므로 이 변경이 독립 배포·서명·공증 완료를 뜻하지는 않습니다.
 새 서버 프로세스를 시작하는 경로에서는 child stdout/stderr를 같은 로컬 launcher log에
 append합니다. 이 로그는 사용자 로컬 파일에만 남으며 원격 수집되지 않습니다. 이미 떠 있는
 서버를 여는 경로나 wrapper preflight 이전 실패까지 모두 포착한다는 의미는 아닙니다.
@@ -776,7 +802,7 @@ Launcher/setup preflight 변경:
 
 ```bash
 .venv/bin/python -m py_compile scripts/build_unsigned_release.py scripts/build_release_manifest.py scripts/build_launcher_app.py scripts/validate_launcher_app.py scripts/build_launcher_dmg.py ui/launcher.py
-.venv/bin/python -m pytest tests/test_build_unsigned_release.py tests/test_build_release_manifest.py tests/test_build_launcher_dmg.py tests/test_validate_launcher_app.py tests/test_build_launcher_app.py tests/test_launcher.py tests/test_native_window.py tests/test_setup_launchagent.py tests/test_install.py -q
+.venv/bin/python -m pytest tests/test_desktop_app.py tests/test_build_unsigned_release.py tests/test_build_release_manifest.py tests/test_build_launcher_dmg.py tests/test_validate_launcher_app.py tests/test_build_launcher_app.py tests/test_launcher.py tests/test_native_window.py tests/test_setup_launchagent.py tests/test_install.py -q
 .venv/bin/python -m pytest tests/test_setup_readiness.py tests/test_routes_setup_readiness.py -q
 bash -n scripts/install.sh && bash -n scripts/setup_launchagent.sh
 ```

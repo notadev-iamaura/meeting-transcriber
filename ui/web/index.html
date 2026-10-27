@@ -123,25 +123,15 @@
       <div class="list-search">
         <input type="search" id="listSearchInput" placeholder="회의 검색..." aria-label="회의 검색">
       </div>
-      <div class="list-sort">
-        <select id="listSortSelect" aria-label="정렬">
-          <option value="newest">최신순</option>
-          <option value="oldest">오래된순</option>
-          <option value="status">상태별</option>
-        </select>
-        <button id="batchHistoryButton" class="btn-secondary" type="button">작업 내역</button>
-      </div>
-      <div id="bulkActionBar" class="bulk-action-bar" role="toolbar" aria-label="선택된 회의 일괄 작업" data-component="bulk-actions" hidden>
-        <span class="bulk-action-bar__count" aria-live="polite"><span class="bulk-action-bar__count-num">0</span>건 선택</span>
-        <button class="bulk-action-bar__dismiss" data-action="dismiss" type="button" aria-label="선택 해제">선택 해제</button>
-        <label class="bulk-task-label" for="bulkTaskSelect">선택한 녹취에 할 작업</label>
-        <select id="bulkTaskSelect">
-          <option value="title">제목 자동 정리</option>
-          <option value="transcribe">전사만</option>
-          <option value="full">전사 + 교정·요약</option>
-          <option value="summarize">교정·요약</option>
-        </select>
-        <button class="bulk-action-btn" data-action="run" type="button">실행</button>
+      <div class="list-tools">
+        <div class="list-sort">
+          <select id="listSortSelect" aria-label="정렬">
+            <option value="newest">최신순</option>
+            <option value="oldest">오래된순</option>
+            <option value="status">상태별</option>
+          </select>
+          <button id="batchHistoryButton" class="btn-secondary" type="button">작업 내역</button>
+        </div>
       </div>
       <div
         class="list-content"
@@ -158,6 +148,46 @@
 
     <!-- 3. 콘텐츠 영역 — 화면을 이동해도 백그라운드 작업 상태는 유지한다. -->
     <div id="content-wrapper" class="content-wrapper">
+      <div id="bulkActionBackdrop" class="bulk-action-backdrop" hidden aria-hidden="true"></div>
+      <button id="bulkActionResume" class="bulk-action-resume" type="button" hidden><span>0</span>건 선택 · 작업 선택</button>
+      <!-- 가운데 작업 패널은 목록·본문 레이아웃에 영향을 주지 않는다. -->
+      <div id="bulkActionBar" class="bulk-action-bar" role="toolbar" aria-label="선택된 회의 일괄 작업" data-component="bulk-actions" hidden>
+        <div class="bulk-panel-header">
+          <span class="bulk-action-bar__count" aria-live="polite"><span class="bulk-action-bar__count-num">0</span>건 선택</span>
+          <button class="bulk-action-bar__dismiss" data-action="minimize" type="button" aria-label="작업 선택 접기">접기</button>
+        </div>
+        <div class="bulk-panel-heading">
+          <h2>어떤 작업을 할까요?</h2>
+          <p>목록에서 회의를 더 선택할 수 있어요.</p>
+        </div>
+        <fieldset id="bulkTaskSelect" class="bulk-task-options">
+          <legend class="sr-only">선택한 녹취에 할 작업</legend>
+          <label class="bulk-task-option">
+            <input type="radio" name="bulkTask" value="full_title" checked>
+            <span><strong>전사 + 교정·요약 + 제목 자동 정리</strong><small>전사부터 제목 정리까지 한 번에</small></span>
+          </label>
+          <label class="bulk-task-option">
+            <input type="radio" name="bulkTask" value="full">
+            <span><strong>전사 + 교정·요약</strong><small>음성을 텍스트와 회의록으로</small></span>
+          </label>
+          <label class="bulk-task-option">
+            <input type="radio" name="bulkTask" value="transcribe">
+            <span><strong>전사만</strong><small>음성 인식과 화자분리까지</small></span>
+          </label>
+          <label class="bulk-task-option">
+            <input type="radio" name="bulkTask" value="summarize">
+            <span><strong>교정·요약</strong><small>저장된 전사문으로 회의록 만들기</small></span>
+          </label>
+          <label class="bulk-task-option">
+            <input type="radio" name="bulkTask" value="title">
+            <span><strong>제목 자동 정리</strong><small>내용에 맞는 제목으로 정리</small></span>
+          </label>
+        </fieldset>
+        <div class="bulk-action-footer">
+          <button class="bulk-action-bar__dismiss" data-action="dismiss" type="button" aria-label="선택 해제" title="선택 해제 (Esc)">선택 해제 <kbd>Esc</kbd></button>
+          <button class="bulk-action-btn" data-action="run" type="button">실행</button>
+        </div>
+      </div>
       <div id="backgroundWorkStatus" class="background-work-status" hidden>
         <span id="backgroundWorkMessage" role="status" aria-live="polite"></span>
         <button id="backgroundWorkHistory" type="button" class="btn-secondary">작업 내역</button>

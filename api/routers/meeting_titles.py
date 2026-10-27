@@ -140,9 +140,29 @@ class TitleWorker:
         await asyncio.to_thread(
             self.queue.record_batch_event,
             mid,
-            dict(status=status, status_label=label),
+            dict(status=status, status_label=label, stage="title"),
             rid,
         )
+
+    async def submit_followup(self, rid: str, mid: str, expected_title: str | None = None) -> None:
+        """전사·요약이 끝난 회의를 원래 접수 내역의 제목 단계에 연결한다."""
+        async with self.lock:
+            job = await asyncio.to_thread(self.queue.get_job_by_meeting_id, mid)
+            if mid in self.pending or job is None or job.status != "completed":
+                await self.event(rid, mid, "skipped", "상태가 변경되어 제목 정리 건너뜀")
+                return
+            if expected_title is not None and job.title != expected_title:
+                await self.event(rid, mid, "skipped", "접수 후 제목이 변경되어 자동 정리 건너뜀")
+                return
+            revision = await _source_revision(self.request, mid)
+            self.pending.add(mid)
+            self.items.append((rid, job, revision))
+            await self.event(rid, mid, "running", "제목 정리 대기 중")
+            if self.task is None or self.task.done():
+                self.task = asyncio.create_task(self.run(), name="meeting-title-worker")
+                tasks = self.request.app.state.running_tasks
+                tasks.add(self.task)
+                self.task.add_done_callback(tasks.discard)
 
     async def run(self) -> None:
         """개별 실패는 분리하고 종료 취소 시 남은 작업도 중단으로 기록한다."""
@@ -205,6 +225,46 @@ class TitleWorker:
                 await self.event(rid, mid, "skipped", "수동 변경 또는 작업 상태 변경으로 건너뜀")
 
 
+async def follow_batch_titles(request: Request, rid: str, mids: list[str]) -> None:
+    """성공한 파이프라인에만 제목 단계를 연결하고 개별 실패를 분리한다."""
+    queue = _queue(request)
+    state = request.app.state
+    worker = getattr(state, "title_worker", None)
+    if worker is None:
+        worker = state.title_worker = TitleWorker(request)
+    pending = set(mids)
+    terminal = {"failed", "skipped", "blocked", "cancelled", "interrupted", "completed"}
+    try:
+        while pending:
+            receipts = await asyncio.to_thread(queue.get_batch_receipts, rid)
+            if not receipts:
+                return
+            events = {event["meeting_id"]: event for event in receipts[0]["events"]}
+            titles = {
+                row["meeting_id"]: row.get("original_title")
+                for row in receipts[0].get("candidates", [])
+            }
+            for mid in list(pending):
+                event = events.get(mid, {})
+                if event.get("status") in terminal:
+                    pending.remove(mid)
+                elif event.get("status") == "pipeline_completed":
+                    try:
+                        await worker.submit_followup(rid, mid, titles.get(mid))
+                    except HTTPException as exc:
+                        await worker.event(rid, mid, "failed", str(exc.detail))
+                    except Exception:
+                        logger.exception(f"제목 후속 작업 접수 실패: meeting_id={mid}")
+                        await worker.event(rid, mid, "failed", "제목 정리 접수 실패 · 다시 시도")
+                    pending.remove(mid)
+            if pending:
+                await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        for mid in pending:
+            await worker.event(rid, mid, "interrupted", "앱 종료로 제목 후속 작업 중단")
+        raise
+
+
 @router.post("/meetings/titles")
 async def create_title_jobs(request: Request, body: TitleJobsRequest) -> dict[str, Any]:
     """AI 제목을 자동 적용할 백그라운드 작업으로 접수한다."""
@@ -228,7 +288,7 @@ async def undo_title_jobs(request: Request, request_id: str) -> dict[str, int]:
     require_loopback_server(get_config(request), request, feature_label="AI 제목 되돌리기")
     queue = _queue(request)
     receipts = await asyncio.to_thread(queue.get_batch_receipts, request_id)
-    if not receipts or receipts[0].get("action") != "title":
+    if not receipts or receipts[0].get("action") not in {"title", "full_title"}:
         raise HTTPException(status_code=404, detail="AI 제목 접수를 찾을 수 없습니다.")
     latest = {event["meeting_id"]: event for event in receipts[0]["events"]}
     restored = 0

@@ -150,15 +150,11 @@ def test_build_launcher_app_generated_executable_uses_launcher_contract(
     executable = result.executable_path.read_text(encoding="utf-8")
 
     assert "from ui.launcher import build_launcher_spec, collect_launcher_preflight" in executable
-    assert "open_setup_if_healthy()" in executable
-    assert executable.index("if open_setup_if_healthy():") < executable.index("subprocess.Popen")
-    assert "log_path = Path(spec.log_file)" in executable
-    assert "log_path.parent.mkdir(parents=True, exist_ok=True)" in executable
-    assert 'with log_path.open("a", encoding="utf-8") as log_handle:' in executable
-    assert "stdout=log_handle" in executable
-    assert "stderr=subprocess.STDOUT" in executable
-    assert executable.index("if open_setup_if_healthy():") < executable.index("log_path.open")
-    assert executable.index("log_path.open") < executable.index("subprocess.Popen")
+    assert "from ui.desktop_app import launch_desktop_app" in executable
+    assert "raise SystemExit(launch_desktop_app(spec, app_name=app_name))" in executable
+    assert executable.index("if not report.ready:") < executable.index("launch_desktop_app(spec")
+    assert 'subprocess.run(["open"' not in executable
+    assert "webbrowser" not in executable
     assert 'PYTHON_LAUNCH=("${PYTHON_BIN}")' in executable
     assert "/usr/bin/arch -arm64 /usr/bin/true" in executable
     assert 'PYTHON_LAUNCH=(/usr/bin/arch -arm64 "${PYTHON_BIN}")' in executable

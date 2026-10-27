@@ -31,9 +31,15 @@
 
         function getFocusable() {
             if (!panel) return [];
-            return Array.prototype.slice.call(panel.querySelectorAll(
-                'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-            ));
+            var selector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+            var focusables = Array.prototype.slice.call(panel.querySelectorAll(selector));
+            var toolbar = doc.getElementById("bulkActionBar");
+            if (toolbar && !toolbar.hidden) {
+                focusables = focusables.concat(Array.prototype.slice.call(toolbar.querySelectorAll(selector)));
+            }
+            var resume = doc.getElementById("bulkActionResume");
+            if (resume && !resume.hidden) focusables.push(resume);
+            return focusables.filter(function (el) { return el.getClientRects().length > 0; });
         }
 
         function isDrawerMode() {
@@ -54,13 +60,17 @@
         function collectInertTargets() {
             inertTargets = [
                 doc.getElementById("nav-bar"),
-                doc.getElementById("content-wrapper"),
+                doc.getElementById("content"),
+                doc.getElementById("backgroundWorkStatus"),
+                doc.getElementById("globalResourceBar"),
                 doc.getElementById("globalHomeButton"),
                 doc.getElementById("themeToggle"),
             ].filter(Boolean);
         }
 
         function setBackgroundInert(inert) {
+            // 선택 도구막대는 drawer와 함께 조작할 수 있도록 배경에서 제외한다.
+            collectInertTargets();
             inertTargets.forEach(function (el) {
                 el.inert = inert;
                 if (inert) {
@@ -159,6 +169,7 @@
             });
 
             doc.addEventListener("keydown", function (e) {
+                if (doc.querySelector("dialog[open]")) return;
                 if (e.key === "Escape" && isOpen()) {
                     close();
                 }
