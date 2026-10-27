@@ -627,6 +627,14 @@ bundle은 `Info.plist`, `Contents/MacOS/<executable>`,
 `Resources/launcher-metadata.json`으로 구성됩니다.
 생성된 executable은 metadata와 같은 host, port, log path를 런타임 spec에 전달해
 non-default 로컬 포트 번들도 빌드 시 지정한 endpoint를 그대로 사용합니다.
+`ui/desktop_app.py`는 `.app` 실행 시 브라우저 호출 없이 `ui.native_window`의
+전용 macOS 창을 별도 프로세스로 엽니다. 창은 `/app`으로 시작하고 크기는 기존
+`window` 설정을 사용합니다. 로컬 서버가 이미 준비되어 있으면 재사용하며, 없으면
+서버를 시작한 뒤 설정된 `server.startup_timeout_seconds` 안에 준비 상태를 확인합니다.
+창 닫기나 Cmd+Q로 창 프로세스가 종료되면 앱이 직접 시작한 서버에만 SIGINT를 보내고
+정상 종료를 기다립니다. 기존 서버는 종료하지 않으며, 전용 창 실패 시 브라우저로
+폴백하지 않고 macOS 알림과 로컬 로그로 안내합니다. Python 런타임은 여전히 외부
+venv를 사용하므로 이 변경이 독립 배포·서명·공증 완료를 뜻하지는 않습니다.
 새 서버 프로세스를 시작하는 경로에서는 child stdout/stderr를 같은 로컬 launcher log에
 append합니다. 이 로그는 사용자 로컬 파일에만 남으며 원격 수집되지 않습니다. 이미 떠 있는
 서버를 여는 경로나 wrapper preflight 이전 실패까지 모두 포착한다는 의미는 아닙니다.
@@ -779,7 +787,7 @@ Launcher/setup preflight 변경:
 
 ```bash
 .venv/bin/python -m py_compile scripts/build_unsigned_release.py scripts/build_release_manifest.py scripts/build_launcher_app.py scripts/validate_launcher_app.py scripts/build_launcher_dmg.py ui/launcher.py
-.venv/bin/python -m pytest tests/test_build_unsigned_release.py tests/test_build_release_manifest.py tests/test_build_launcher_dmg.py tests/test_validate_launcher_app.py tests/test_build_launcher_app.py tests/test_launcher.py tests/test_native_window.py tests/test_setup_launchagent.py tests/test_install.py -q
+.venv/bin/python -m pytest tests/test_desktop_app.py tests/test_build_unsigned_release.py tests/test_build_release_manifest.py tests/test_build_launcher_dmg.py tests/test_validate_launcher_app.py tests/test_build_launcher_app.py tests/test_launcher.py tests/test_native_window.py tests/test_setup_launchagent.py tests/test_install.py -q
 .venv/bin/python -m pytest tests/test_setup_readiness.py tests/test_routes_setup_readiness.py -q
 bash -n scripts/install.sh && bash -n scripts/setup_launchagent.sh
 ```
