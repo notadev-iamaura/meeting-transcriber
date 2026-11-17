@@ -481,6 +481,11 @@ class WikiSearchIndex:
         """검색 DB 경로."""
         return self._db_path
 
+    @property
+    def wiki_root(self) -> Path:
+        """검색 대상 원문 루트를 반환한다."""
+        return self._wiki_root
+
     def _resolve_ranking(self) -> WikiRankingConfig:
         """주입된 ranking 또는 전역 config 의 wiki.ranking 을 해석한다."""
         if self._ranking is not None:

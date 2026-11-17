@@ -28,21 +28,26 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from core.wiki.citations import CITATION_PATTERN
 from core.wiki.extractors.action_item import (
     ActionItemExtractor,
     ClosedActionItem,
     OpenActionItem,
+    parse_action_identity_comments,
 )
-from core.wiki.extractors.decision import DecisionExtractor
+from core.wiki.extractors.decision import DecisionExtractor, source_citation_markers
 from core.wiki.extractors.person import PersonExtractor
 from core.wiki.extractors.project import ProjectExtractor
 from core.wiki.extractors.topic import TopicExtractor
+from core.wiki.generated_document import (
+    normalize_generated_document as _normalize_generated_document,
+)
 from core.wiki.guard import GuardVerdict, WikiGuard
 from core.wiki.lint import WikiLinter
 from core.wiki.llm_client import WikiLLMClient, WikiLLMError
 from core.wiki.models import Citation
 from core.wiki.search_index import WikiSearchIndex
-from core.wiki.store import WikiStore, WikiStoreError
+from core.wiki.store import WikiStore, WikiStoreError, _parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -56,58 +61,15 @@ _OPEN_ACTION_RE = re.compile(r"^-\s*\[\s*\]\s*(?P<rest>.+?)\s*$")
 _TASK_PREFIX_RE = re.compile(r"^-\s*\[(?:\s*|[xX])\]")
 _EMPTY_ACTION_SECTION_RE = re.compile(r"^_\(없음\)_$")
 _CONFIDENCE_MARKER_RE = re.compile(r"^<!--\s*confidence\s*:\s*\d{1,2}\s*-->$")
+_PROJECT_STATUSES = frozenset({"in-progress", "blocked", "shipped", "cancelled"})
 _CLOSED_ACTION_RE = re.compile(
     r"^-\s*\[[xX]\]\s*~~(?P<description>.+?)~~\s*"
-    r"(?P<citation>\[meeting:[A-Za-z0-9_]+@\d{2}:\d{2}:\d{2}\])\s*$"
+    r"(?P<citation>(?:\[meeting:[A-Za-z0-9_]+@\d{2}:\d{2}:\d{2}\]\s*)+)\s*$"
 )
 _CLOSED_BY_RE = re.compile(
     r"^\s*-\s*Closed by:\s*(?P<speaker>.*?)\s+"
     r"(?P<citation>\[meeting:[A-Za-z0-9_]+@\d{2}:\d{2}:\d{2}\])\s*$"
 )
-
-
-def _first_utterance_timestamp(utterances: list[Any]) -> str | None:
-    """첫 정상 발화의 시작 시각을 HH:MM:SS 로 반환한다."""
-    best_seconds: float | None = None
-    for utt in utterances:
-        try:
-            if isinstance(utt, dict):
-                raw_start = utt.get("start")
-                raw_end = utt.get("end")
-            else:
-                raw_start = utt.start
-                raw_end = utt.end
-            start = float(raw_start)  # type: ignore[arg-type]  # None/이상치는 아래 except 에서 skip
-            end = float(raw_end)  # type: ignore[arg-type]
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if start < 0 or end < start:
-            continue
-        if best_seconds is None or start < best_seconds:
-            best_seconds = start
-    if best_seconds is None:
-        return None
-    total = int(best_seconds)
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def _normalize_zero_timestamp_citations(
-    content: str,
-    *,
-    meeting_id: str,
-    replacement_ts: str | None,
-) -> str:
-    """현재 회의의 00:00:00 citation 을 첫 실제 발화 시각으로 정규화한다."""
-    if not replacement_ts or replacement_ts == "00:00:00":
-        return content
-    old_marker = f"[meeting:{meeting_id}@00:00:00]"
-    if old_marker not in content:
-        return content
-    new_marker = f"[meeting:{meeting_id}@{replacement_ts}]"
-    return content.replace(old_marker, new_marker)
 
 
 def _parse_action_citation(marker: str) -> Citation:
@@ -560,9 +522,7 @@ class WikiCompilerV2:
         )
 
         # ── 5. DecisionExtractor.render_pages ────────────────────────
-        # PRD R3 리스크 대응: 회의당 갱신 페이지를 상한 8개로 제한.
-        # TODO(Phase 2.E): decisions 정렬 기준(confidence 내림차순) 추가 후
-        #   decisions = decisions[:8] 로 slice. 현재는 추출된 전체를 처리.
+        # render_pages가 신뢰도 내림차순 상위 8개 결정만 추가 추론 없이 렌더한다.
         decision_pages: list[tuple[str, str]] = []
         if decisions:
             try:
@@ -635,10 +595,9 @@ class WikiCompilerV2:
                 utterances=utterances,
                 summary=summary,
             )
-            # 기존 ExistingProject 목록은 Phase 3 에서 별도 인덱스 도입 전까지
-            # 빈 리스트로 둔다 — detect_status_transitions 는 빈 리스트에서
-            # LLM 호출 0회로 즉시 반환하므로 안전.
-            existing_projects: list = []
+            existing_projects = ProjectExtractor.load_existing_projects(
+                self._store, projects, meeting_date=meeting_date
+            )
             status_transitions = await self._project_extractor.detect_status_transitions(
                 existing_projects=existing_projects,
                 meeting_id=meeting_id,
@@ -715,21 +674,49 @@ class WikiCompilerV2:
             + project_pages_pairs
             + topic_pages_pairs
         )
-        zero_ts_replacement = _first_utterance_timestamp(utterances)
+        allowed_input_markers = source_citation_markers(meeting_id, utterances)
 
         for rel_path, content in all_pages:
-            normalized_content = _normalize_zero_timestamp_citations(
-                content,
-                meeting_id=meeting_id,
-                replacement_ts=zero_ts_replacement,
-            )
-            if normalized_content != content:
-                logger.warning(
-                    "00:00:00 citation 정규화: page=%s, replacement_ts=%s",
-                    rel_path,
-                    zero_ts_replacement,
+            try:
+                content = _normalize_generated_document(content)
+            except ValueError:
+                pages_rejected.append((rel_path, "malformed_document"))
+                logger.warning("Wiki 문서 wrapper 거부: reason=malformed_document")
+                continue
+            repair_unresolved = False
+            if (
+                rel_path.startswith("projects/")
+                and getattr(self._config, "wiki", self._config).grounding.enabled
+            ):
+                from core.wiki.citation_repair import repair_document_citations, source_lines
+
+                repaired = await repair_document_citations(
+                    content,
+                    source_lines(meeting_id, utterances),
+                    self._llm,
+                    getattr(self._config, "wiki", self._config).grounding,
                 )
-                content = normalized_content
+                content = repaired.content
+                repair_unresolved = repaired.unresolved > 0
+            metadata, _body = _parse_frontmatter(content)
+            zero_marker = f"[meeting:{meeting_id}@00:00:00]"
+            if (
+                repair_unresolved
+                or str(metadata.get("citation_unresolved", "")).lower() == "true"
+                or (zero_marker in content and zero_marker not in allowed_input_markers)
+            ):
+                # 누락 인용을 첫 발화로 바꾸거나 D1이 원문을 삭제하기 전에 격리한다.
+                self._dispatch_page_by_verdict(
+                    rel_path=rel_path,
+                    content=content,
+                    verdict=GuardVerdict(False, "citation_unresolved", -1),
+                    store=self._store,
+                    pages_created=pages_created,
+                    pages_updated=pages_updated,
+                    pages_pending=pages_pending,
+                    pages_rejected=pages_rejected,
+                )
+                continue
             verdict = await self._guard.verify(
                 page_path=rel_path,
                 new_content=content,
@@ -850,33 +837,52 @@ class WikiCompilerV2:
 
         from core.wiki.digest import parse_open_actions
 
-        _open_index, closed_index, expected_open, expected_closed = _validate_action_items_layout(
-            page.content
+        content, identities = parse_action_identity_comments(page.content)
+        open_index, closed_index, expected_open, expected_closed = _validate_action_items_layout(
+            content
         )
-        open_actions = parse_open_actions(page.content)
+        open_actions = parse_open_actions(content)
         if len(open_actions) != expected_open:
             raise ValueError("action_items.md Open 섹션의 모든 항목을 파싱하지 못했습니다.")
 
         existing_open: list[OpenActionItem] = []
-        for action in open_actions:
-            if not action.description or len(action.citations) != 1:
-                raise ValueError("Open 액션아이템은 설명과 정확히 한 개의 인용이 필요합니다.")
+        lines = content.splitlines()
+        open_line_indices = [
+            index
+            for index in range(open_index + 1, closed_index)
+            if _OPEN_ACTION_RE.fullmatch(lines[index])
+        ]
+        for action, line_index in zip(open_actions, open_line_indices, strict=True):
+            if not action.description or not action.citations:
+                raise ValueError(
+                    "Open 액션아이템은 설명과 정확히 한 개의 인용(주 인용)이 필요합니다."
+                )
             citation = _parse_action_citation(action.citations[0])
+            supporting = tuple(_parse_action_citation(marker) for marker in action.citations[1:])
             owner = action.owner or "미지정"
+            identity = identities.get(line_index)
+            if identity is not None and (
+                identity["owner"] != owner or identity["due_date"] != action.due_date
+            ):
+                raise ValueError("action_identity_visible_fields_mismatch")
             existing_open.append(
                 OpenActionItem(
-                    item_id=_action_item_id(owner, action.description, citation.meeting_id),
+                    item_id=identity["item_id"]
+                    if identity
+                    else _action_item_id(owner, action.description, citation.meeting_id),
                     owner=owner,
                     description=action.description,
                     from_meeting_id=citation.meeting_id,
-                    from_date="",
+                    from_date=identity["from_date"] if identity else "",
                     citation=citation,
                     due_date=action.due_date,
+                    project_slug=identity["project_slug"] if identity else None,
+                    identity_known=identity is not None,
+                    supporting_citations=supporting,
                 )
             )
 
         existing_closed: list[ClosedActionItem] = []
-        lines = page.content.splitlines()
         index = closed_index + 1
         while index < len(lines):
             closed_match = _CLOSED_ACTION_RE.fullmatch(lines[index].strip())
@@ -893,19 +899,30 @@ class WikiCompilerV2:
             if closed_by_match is None:
                 raise ValueError("Closed 액션아이템의 종료 정보를 파싱하지 못했습니다.")
 
-            original_citation = _parse_action_citation(closed_match.group("citation"))
+            original_citations = [
+                _parse_action_citation(match.group(0))
+                for match in CITATION_PATTERN.finditer(closed_match.group("citation"))
+            ]
+            original_citation = original_citations[0]
             closed_citation = _parse_action_citation(closed_by_match.group("citation"))
             description = closed_match.group("description").strip()
             if not description:
                 raise ValueError("Closed 액션아이템 설명이 비어 있습니다.")
-            owner = "미지정"
+            identity = identities.get(index)
+            owner = identity["owner"] if identity else "미지정"
             original = OpenActionItem(
-                item_id=_action_item_id(owner, description, original_citation.meeting_id),
+                item_id=identity["item_id"]
+                if identity
+                else _action_item_id(owner, description, original_citation.meeting_id),
                 owner=owner,
                 description=description,
                 from_meeting_id=original_citation.meeting_id,
-                from_date="",
+                from_date=identity["from_date"] if identity else "",
                 citation=original_citation,
+                due_date=identity["due_date"] if identity else None,
+                project_slug=identity["project_slug"] if identity else None,
+                identity_known=identity is not None,
+                supporting_citations=tuple(original_citations[1:]),
             )
             existing_closed.append(
                 ClosedActionItem(
@@ -913,7 +930,7 @@ class WikiCompilerV2:
                     closed_by_speaker=closed_by_match.group("speaker").strip(),
                     closed_at_meeting_id=closed_citation.meeting_id,
                     closed_citation=closed_citation,
-                    closed_reason="completed",
+                    closed_reason=identity["closed_reason"] if identity else "completed",
                 )
             )
             index = detail_index + 1
@@ -954,31 +971,71 @@ class WikiCompilerV2:
             try:
                 # 기존 페이지 존재 여부로 created/updated 분기
                 try:
-                    store.read_page(Path(rel_path))
+                    existing_page = store.read_page(Path(rel_path))
                     is_existing = True
-                except WikiStoreError:
+                    if any(
+                        existing_page.frontmatter.get(key) is True
+                        or str(existing_page.frontmatter.get(key, "")).lower() == "true"
+                        for key in ("human_edited", "human_reviewed")
+                    ):
+                        raise WikiStoreError("human_protected", "사용자 수정본을 보존합니다.")
+                except WikiStoreError as exc:
+                    if exc.reason != "page_not_found":
+                        raise
                     is_existing = False
-                store.write_page(Path(rel_path), content)
+                store.write_page(Path(rel_path), _strip_human_metadata(content))
                 if is_existing:
                     pages_updated.append(rel_path)
                 else:
                     pages_created.append(rel_path)
             except WikiStoreError as exc:
+                if exc.reason == "human_protected":
+                    WikiCompilerV2._dispatch_page_by_verdict(
+                        rel_path=rel_path,
+                        content=content,
+                        verdict=GuardVerdict(False, "human_protected", verdict.confidence),
+                        store=store,
+                        pages_created=pages_created,
+                        pages_updated=pages_updated,
+                        pages_pending=pages_pending,
+                        pages_rejected=pages_rejected,
+                    )
+                    return
                 logger.error("store.write_page 실패: path=%s, reason=%s", rel_path, exc.reason)
                 pages_rejected.append((rel_path, "write_failed"))
             except Exception as exc:  # noqa: BLE001
                 logger.error("store.write_page 예상치 못한 오류: path=%s, %r", rel_path, exc)
                 pages_rejected.append((rel_path, "write_failed"))
 
-        elif verdict.reason == "low_confidence":
-            # D3 미달 — pending/ 에 격리 저장 (사용자가 나중에 검토)
+        elif verdict.reason in {
+            "low_confidence",
+            "unsupported_claim",
+            "grounding_unavailable",
+            "grounding_limit",
+            "human_protected",
+            "citation_unresolved",
+        }:
+            # 검증 불가와 사용자 수정 충돌은 공개본을 보존한 채 검토 후보로 남긴다.
             pending_path = Path("pending") / rel_path
             try:
-                store.write_page(pending_path, _set_frontmatter_status(content, "pending"))
+                pending_content = _prepare_pending_content(content, verdict.reason)
+                with store.mutation_lock:
+                    try:
+                        store.read_page(pending_path)
+                    except WikiStoreError as exc:
+                        if exc.reason != "page_not_found":
+                            raise
+                    else:
+                        # 후보 선택부터 저장까지 직렬화해 동시 작성도 이전 후보를 보존한다.
+                        digest = hashlib.sha256(pending_content.encode("utf-8")).hexdigest()[:16]
+                        pending_path = pending_path.with_name(
+                            f"{pending_path.stem}-{digest}{pending_path.suffix}"
+                        )
+                    store.write_page(pending_path, pending_content)
                 pages_pending.append(rel_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("pending 저장 실패 — rejected 처리: path=%s, %r", rel_path, exc)
-                pages_pending.append(rel_path)  # 기록은 유지 (write 실패여도 pending 분류)
+                pages_rejected.append((rel_path, "pending_write_failed"))
 
         else:
             # D1 overflow, D2 phantom, malformed_confidence — 디스크 쓰기 없이 거부 기록
@@ -993,6 +1050,45 @@ class WikiCompilerV2:
 
 def _set_frontmatter_status(content: str, status: str) -> str:
     """Markdown frontmatter 의 status 값을 교체하거나 추가한다."""
+    return _set_frontmatter_field(content, "status", status)
+
+
+def _prepare_pending_content(content: str, reason: str) -> str:
+    """후보의 프로젝트 상태를 별도 보존하고 게시 상태·보류 이유를 기록한다."""
+    pending_content = _strip_human_metadata(content)
+    if reason == "citation_unresolved":
+        pending_content = _set_frontmatter_field(pending_content, "citation_unresolved", "true")
+    metadata, _ = _parse_frontmatter(pending_content)
+    status = metadata.get("status")
+    if (
+        metadata.get("type") == "project"
+        and isinstance(status, str)
+        and status in _PROJECT_STATUSES
+    ):
+        pending_content = _set_frontmatter_field(pending_content, "proposed_status", status)
+    pending_content = _set_frontmatter_status(pending_content, "pending")
+    return _set_frontmatter_field(pending_content, "review_reason", reason)
+
+
+def _strip_human_metadata(content: str) -> str:
+    """자동 생성기가 사용자 검토·편집 표시를 복제하거나 위조하지 못하게 한다."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content
+    try:
+        end_idx = next(idx for idx in range(1, len(lines)) if lines[idx].strip() == "---")
+    except StopIteration:
+        return content
+    lines[1:end_idx] = [
+        line
+        for line in lines[1:end_idx]
+        if not line.partition(":")[0].strip().startswith("human_")
+    ]
+    return "\n".join(lines) + ("\n" if content.endswith("\n") else "")
+
+
+def _set_frontmatter_field(content: str, key: str, value: str) -> str:
+    """예약 필드 하나만 바꾸고 본문과 다른 메타데이터를 보존한다."""
     lines = content.splitlines()
     if not lines or lines[0].strip() != "---":
         return content
@@ -1004,8 +1100,8 @@ def _set_frontmatter_status(content: str, status: str) -> str:
     if end_idx is None:
         return content
     for idx in range(1, end_idx):
-        if lines[idx].startswith("status:"):
-            lines[idx] = f"status: {status}"
+        if lines[idx].startswith(f"{key}:"):
+            lines[idx] = f"{key}: {value}"
             return "\n".join(lines) + ("\n" if content.endswith("\n") else "")
-    lines.insert(end_idx, f"status: {status}")
+    lines.insert(end_idx, f"{key}: {value}")
     return "\n".join(lines) + ("\n" if content.endswith("\n") else "")

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -84,6 +85,50 @@ _CHUNK_SUMMARY_PROMPT = """당신은 한국어 회의록 작성 전문가입니�
 - 기타 중요 내용
 
 간결한 불릿 포인트로 작성하세요. 전사문에 없는 내용은 추측하지 마세요."""
+
+_SUMMARY_EVIDENCE_RULES = """근거 보존 규칙 — 기존 출력 형식과 문체는 유지하세요.
+- 제공된 화자 집합 밖의 화자나 참석자 번호를 만들지 마세요. UNKNOWN도 다른 화자나 실명으로 임의 매핑하지 마세요.
+- 명시적 자기소개나 제공된 이름 매핑이 없으면 호명된 사람을 발화자의 실명으로 연결하지 마세요. 이름이 언급됐다는 이유로 참석자로 추가하지 마세요.
+- 요청자·요청받은 사람·수행을 약속한 사람을 구분하세요. 요청했다는 이유만으로 그 사람을 업무 담당자로 확정하지 마세요.
+- 질문·요청·제안·약속·확정·가능성·진행·완료와 조건을 그대로 구분하세요. 지연 가능성을 이미 발생한 지연으로, 조건부 작업을 무조건 확정으로 바꾸지 마세요.
+- 앞선 추정이나 설명이 뒤에서 명시적으로 정정되면 정정된 기준을 채택하세요. 상충이나 조건이 해결되지 않았다면 함께 표시하고 초기 추정을 결정으로 고정하지 마세요.
+- 숫자·단위·지표의 분모·측정 대상·비교 기준을 보존하세요. 전사에서 불명확한 수치를 문맥으로 복원해 확정 건수나 비율을 만들지 말고 불명확하다고 표시하세요.
+- 지역별 비교와 모델·측정 방법별 차이를 섞지 마세요. 같은 숫자여도 다른 주제·범위·기준의 수치를 결합하지 마세요.
+- 약어·명칭을 근거 없는 영문 풀네임으로 확장하지 마세요. 원문만으로 확인할 수 없는 연결이나 해석은 만들지 마세요."""
+
+_SUMMARY_LENGTH_RETRY = (
+    "이전 응답이 생성 토큰 상한에 도달했습니다. 원문과 사용자 출력 형식은 그대로 사용하되, "
+    "중요한 결론과 후속 작업을 우선해 설명과 항목 수를 줄여 더 간결하게 작성하세요. "
+    "조건·불확실성·수치의 기준은 삭제하거나 강화하지 말고 모든 문장을 끝까지 완결하세요."
+)
+
+
+def _with_summary_evidence_rules(prompt: str) -> str:
+    """사용자 프롬프트를 보존하면서 단일·부분·통합 요약에 같은 예방 규칙을 붙인다."""
+    if _SUMMARY_EVIDENCE_RULES in prompt:
+        return prompt
+    return f"{prompt}\n\n{_SUMMARY_EVIDENCE_RULES}"
+
+
+def _reached_generation_limit(backend: LLMBackend, max_tokens: int | None) -> bool:
+    """제공된 생성 토큰 실측값으로만 상한 도달을 판단한다. 미측정은 추정하지 않는다."""
+    if type(max_tokens) is not int or max_tokens <= 0:
+        return False
+    getter = getattr(backend, "get_generation_metrics", None)
+    if not callable(getter):
+        return False
+    try:
+        metrics = getter()
+    except (RuntimeError, ValueError, TypeError, AttributeError, OSError):
+        logger.debug("요약 생성 통계를 확인하지 못했습니다.")
+        return False
+    if not isinstance(metrics, dict):
+        return False
+    generated = metrics.get("generation_tokens")
+    if not isinstance(generated, (int, float)) or isinstance(generated, bool):
+        return False
+    return math.isfinite(generated) and generated >= max_tokens
+
 
 # PERF: 토큰 추정 상수 개선 — 한국어/영어 혼합 텍스트 고려
 # 한국어: 1토큰 ≈ 1.5글자, ASCII(영어): 1토큰 ≈ 4글자
@@ -386,17 +431,27 @@ class Summarizer:
         """
         try:
             max_tokens = getattr(self._config.llm, "summarize_max_tokens", None)
-            content = backend.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=max_tokens if isinstance(max_tokens, int) else None,
-            )
+            limit = max_tokens if isinstance(max_tokens, int) else None
+            system_prompt = _with_summary_evidence_rules(system_prompt)
+            for attempt in range(2):
+                content = backend.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=limit,
+                )
+                if not _reached_generation_limit(backend, limit):
+                    return unicodedata.normalize("NFC", content.strip())
+                if attempt:
+                    raise SummaryError("요약이 재시도 후에도 생성 토큰 상한에 도달했습니다.")
+                logger.warning(
+                    "요약 생성 상한에 도달해 같은 상한으로 간결한 응답을 한 번 재요청합니다."
+                )
+                user_prompt = f"{user_prompt}\n\n{_SUMMARY_LENGTH_RETRY}"
         except LLMGenerationError as e:
             raise SummaryError(str(e)) from e
-
-        return unicodedata.normalize("NFC", content.strip())
+        raise SummaryError("요약 생성을 완료하지 못했습니다.")
 
     def _load_system_prompt(self) -> str:
         """사용자가 편집한 요약 시스템 프롬프트를 로드한다.
@@ -407,10 +462,11 @@ class Summarizer:
             시스템 프롬프트 문자열
         """
         try:
-            return build_summarizer_system_prompt()
+            prompt = build_summarizer_system_prompt()
         except Exception as e:
             logger.warning(f"요약 프롬프트 로드 실패, 폴백 사용: {e}")
-            return _FALLBACK_SUMMARIZER_PROMPT
+            prompt = _FALLBACK_SUMMARIZER_PROMPT
+        return _with_summary_evidence_rules(prompt)
 
     def _summarize_single(
         self,
@@ -501,16 +557,11 @@ class Summarizer:
         try:
             return self._call_llm(backend, self._load_system_prompt(), user_prompt)
         except (SummaryError, LLMGenerationError) as e:
-            # 통합 단계 실패 시 부분 요약들을 이어붙여 폴백 반환
-            logger.warning(f"부분 요약 통합 실패, 파트별 요약 병합으로 대체: {e}")
-            fallback_lines = [
-                "## 회의 개요",
-                f"- 참석자: {', '.join(speakers)}",
-                "- (AI 통합 요약 실패 — 파트별 요약을 첨부합니다)",
-                "",
-            ]
-            fallback_lines.append(merged_summaries)
-            return "\n".join(fallback_lines)
+            # 통합이 실패하면 검증되지 않은 부분 요약 대신 전체 원문을 보존한다.
+            logger.warning(f"부분 요약 통합 실패, 전체 원본 전사문으로 대체: {e}")
+            return _build_fallback_markdown(
+                [utterance for chunk in chunks for utterance in chunk], speakers
+            )
 
     async def summarize(
         self,

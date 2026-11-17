@@ -11,6 +11,7 @@ STEP_LABELS = {
     "summarize": "요약",
     "chunk": "검색 준비",
     "embed": "검색 반영",
+    "wiki_compile": "Wiki 정리",
 }
 STATUS_LABELS = {
     "recorded": "녹음 완료",
@@ -51,6 +52,16 @@ def meeting_progress(status: str, state: dict[str, Any] | None = None) -> dict[s
     step = step if isinstance(step, str) and step in STEP_LABELS else ""
     failed = step if status == "failed" else ""
     transcript = "merge" in completed
+    outputs_ready = {"merge", "summarize", "embed"}.issubset(completed)
+    results = state.get("step_results", [])
+    wiki_result = next(
+        (
+            result
+            for result in reversed(results if isinstance(results, list) else [])
+            if isinstance(result, dict) and result.get("step") == "wiki_compile"
+        ),
+        {},
+    )
     label = STATUS_LABELS.get(status, status)
     if failed:
         prefix = (
@@ -59,10 +70,15 @@ def meeting_progress(status: str, state: dict[str, Any] | None = None) -> dict[s
             else ("음성 인식 완료 · " if "transcribe" in completed else "")
         )
         label = prefix + STEP_LABELS[failed] + " 실패"
+    elif status == "completed" and outputs_ready and wiki_result.get("success") is False:
+        label = "전사·요약·검색 완료 · Wiki 정리 실패"
     elif status == "completed" and transcript and "summarize" not in completed:
         label = "전사 완료 · 교정·요약 대기"
     elif status not in {"recorded", "recording", "queued", "completed", "failed"} and step:
-        label = ("전사 완료 · " if transcript else "") + STEP_LABELS[step] + " 중"
+        if step == "wiki_compile" and outputs_ready:
+            label = "전사·요약·검색 완료 · Wiki 정리 중"
+        else:
+            label = ("전사 완료 · " if transcript else "") + STEP_LABELS[step] + " 중"
     return {
         "status_label": label,
         "completed_steps": completed,

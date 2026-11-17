@@ -37,9 +37,9 @@ PAGE_LINK_PATTERN: re.Pattern[str] = re.compile(r"\[(\.\./)+[a-z_]+/[^\]]+\.md\]
 # 순수 마크다운 링크만 있는 줄. 예: "- [meeting_...](../../../app/viewer/meeting_...)"
 PURE_MD_LINK_PATTERN: re.Pattern[str] = re.compile(r"^-?\s*\[[^\]]+\]\([^)]+\)\s*$")
 
-# 빈 섹션 placeholder. 예: "- 없음.", "_(없음)_", "N/A"
+# 빈 섹션 placeholder. 예: "- 미확인", "- 없음.", "_(없음)_", "N/A"
 PLACEHOLDER_LINE_PATTERN: re.Pattern[str] = re.compile(
-    r"^(?:[-*]\s*)?(?:_?\(?\s*)?(없음|N/A|n/a|TBD|tbd|-)(?:\s*\)?_?)?\.?$"
+    r"^(?:[-*]\s*)?(?:_?\(?\s*)?(미확인|없음|N/A|n/a|TBD|tbd|-)(?:\s*\)?_?)?\.?$"
 )
 
 # 섹션 전체가 메타데이터인 경우 D1 인용 강제에서 제외한다.
@@ -116,7 +116,7 @@ def is_factual_statement(line: str) -> bool:
         - YAML frontmatter 구분자(---)
         - 순수 페이지 링크([../people/x.md])
         - 순수 마크다운 링크(- [meeting](url))
-        - 빈 섹션 placeholder(- 없음., _(없음)_, N/A 등)
+        - 빈 섹션 placeholder(미확인, - 없음., _(없음)_, N/A 등)
         - HTML 주석(<!-- ... -->)
         - 표 구분자 줄(|---|---|)
         - 코드블록 펜스(```)

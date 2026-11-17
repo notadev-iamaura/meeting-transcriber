@@ -231,9 +231,9 @@ def test_collect_project_status_프로젝트별_최신결정(tmp_path: Path) -> 
     by_project = {s.project: s for s in statuses}
 
     assert set(by_project) == {"Apollo", "Zeus"}
-    assert by_project["Apollo"].last_title == "Apollo 최신"
-    assert by_project["Apollo"].last_date == "2026-06-01"
-    assert by_project["Apollo"].status == "superseded"
+    assert by_project["Apollo"].last_title == "Apollo 초기"
+    assert by_project["Apollo"].last_date == "2026-05-01"
+    assert by_project["Apollo"].status == "decided"
     assert by_project["Zeus"].last_title == "Zeus 결정"
 
 

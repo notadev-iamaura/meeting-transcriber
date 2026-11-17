@@ -12,17 +12,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from config import WikiConfig
-from core.pipeline import PipelineManager
+from core.pipeline import PIPELINE_STEPS, PipelineManager
 
 # ─────────────────────────────────────────────────────────────────────────
 # 헬퍼
@@ -316,6 +319,94 @@ async def test_wiki_실패해도_pipeline은_정상_종료_non_fatal(tmp_path: P
     wiki_steps = [sr for sr in state.step_results if sr.get("step") == "wiki_compile"]
     assert len(wiki_steps) == 1
     assert wiki_steps[0]["success"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wiki_fails", [False, True])
+async def test_wiki_running_is_visible_until_nonfatal_phase_finishes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    wiki_fails: bool,
+) -> None:
+    """Wiki 대기 중에는 실행 상태를 보존하고 실제 전체 시간·종료 이벤트를 남긴다."""
+    from core.meeting_progress import meeting_progress
+
+    audio = _make_audio_file(tmp_path)
+    wav = _make_mock_wav(tmp_path)
+    config = _build_config(tmp_path=tmp_path, wiki_enabled=True)
+    pipeline = PipelineManager(config, MagicMock())
+    started, release = asyncio.Event(), asyncio.Event()
+    clock = [0.0]
+    on_start, on_progress = AsyncMock(), AsyncMock()
+
+    async def embed(*_args: Any, **_kwargs: Any) -> MagicMock:
+        """핵심 여덟 단계의 실제 경과를 모의한다."""
+        clock[0] = 10.0
+        return MagicMock()
+
+    async def compile_wiki(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        """장시간 부가 처리를 실제 모델 호출 없이 대기시킨다."""
+        started.set()
+        await release.wait()
+        clock[0] = 130.0
+        if wiki_fails:
+            raise ValueError("검수 저장 실패")
+        return {"status": "completed"}
+
+    patches = _patched_pipeline(pipeline, wav)
+    for item in patches:
+        item.start()
+    task = None
+    try:
+        pipeline._run_step_embed.side_effect = embed
+        with (
+            patch("core.pipeline.time", SimpleNamespace(monotonic=lambda: clock[0])),
+            patch("steps.wiki_compiler.WikiCompiler.run", side_effect=compile_wiki),
+            caplog.at_level(logging.INFO, logger="core.pipeline"),
+        ):
+            task = asyncio.create_task(
+                pipeline.run(
+                    audio,
+                    meeting_id="wiki_visible",
+                    on_step_start=on_start,
+                    on_step_progress=on_progress,
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            running = pipeline.get_status("wiki_visible")
+            assert running is not None
+            assert running.status == "running"
+            assert running.current_step == "wiki_compile"
+            assert running.completed_steps == [step.value for step in PIPELINE_STEPS]
+            assert (
+                meeting_progress("embedding", running.to_dict())["status_label"]
+                == "전사·요약·검색 완료 · Wiki 정리 중"
+            )
+            assert on_start.await_args.args == ("wiki_compile",)
+            assert on_progress.await_args.args[0] == {
+                "phase": "start",
+                "step": "wiki_compile",
+            }
+            release.set()
+            result = await task
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            await task
+        for item in patches:
+            item.stop()
+
+    assert result.status == "completed"
+    assert result.current_step == ""
+    assert "wiki_compile" not in result.completed_steps
+    assert result.step_results[-1]["success"] is not wiki_fails
+    assert on_progress.await_args.args[0] == {
+        "phase": "complete",
+        "step": "wiki_compile",
+        "elapsed": 120.0,
+        "success": not wiki_fails,
+    }
+    assert "총 소요 시간: 130.0초" in caplog.text
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.wiki.models import Citation, PageType
+from core.wiki.person_identity import is_named_person_identity
 
 if TYPE_CHECKING:
     from config import WikiDigestConfig
@@ -48,6 +49,54 @@ class OpenAction:
     due_date: str | None
     raw_line: str  # 파싱 손실 방지를 위한 원본(누락 0 보증)
 
+    @property
+    def assigned_meeting_id(self) -> str | None:
+        """보존된 인용이 한 회의로만 한정될 때 그 회의 범위를 반환한다."""
+        if not self.citations or any(_CITATION_RE.fullmatch(c) is None for c in self.citations):
+            return None
+        meetings = {c.removeprefix("[meeting:").partition("@")[0] for c in self.citations}
+        return next(iter(meetings)) if len(meetings) == 1 else None
+
+
+@dataclass(frozen=True)
+class ActionOwnerScope:
+    """익명 담당자 표시 범위이며 회의 간 동일 인물이라는 뜻이 아니다."""
+
+    owner: str
+    meeting_id: str | None
+    unresolved_item: int | None = None
+
+
+def owner_group_sort_key(owner: str | ActionOwnerScope) -> tuple[str, str, int]:
+    """기존 실명 정렬은 유지하고 익명 그룹은 회의·항목 범위로 정렬한다."""
+    if isinstance(owner, ActionOwnerScope):
+        return owner.owner, owner.meeting_id or "", owner.unresolved_item or 0
+    return owner, "", 0
+
+
+def owner_group_label(owner: str | ActionOwnerScope) -> str:
+    """파생 Markdown에서도 회의별 화자를 전역 담당자로 오인하지 않게 표시한다."""
+    if not isinstance(owner, ActionOwnerScope):
+        return owner
+    context = owner.meeting_id or "담당 회의 확인 필요"
+    if owner.unresolved_item is not None:
+        context += f" · 담당자 확인 필요 · 항목 {owner.unresolved_item}"
+    return f"{owner.owner} · {context}"
+
+
+def _owner_group(action: OpenAction, item_number: int) -> str | ActionOwnerScope:
+    """실명은 기존대로, 임시 화자 번호는 단일 회의 안에서만 묶는다."""
+    owner = action.owner
+    numbered = re.fullmatch(r"(?:SPEAKER[_ -]?\d+|참석자\s*\d+|화자\s*\d+)", owner, re.I)
+    if (
+        numbered is None
+        and owner not in {"미지정", "미정", "미확인", "참석자 ?", "화자 ?"}
+        and is_named_person_identity(owner)
+    ):
+        return owner
+    meeting_id = action.assigned_meeting_id
+    return ActionOwnerScope(owner, meeting_id, None if numbered and meeting_id else item_number)
+
 
 @dataclass(frozen=True)
 class RecentDecision:
@@ -76,7 +125,7 @@ class ProjectStatus:
 class WikiDigest:
     """현황 다이제스트 집계 결과."""
 
-    open_actions_by_owner: dict[str, list[OpenAction]]
+    open_actions_by_owner: dict[str | ActionOwnerScope, list[OpenAction]]
     recent_decisions: list[RecentDecision]
     project_status: list[ProjectStatus]
     total_open_actions: int
@@ -114,6 +163,9 @@ def parse_open_actions(action_items_content: str) -> list[OpenAction]:
 
     for raw in action_items_content.splitlines():
         line = raw.rstrip()
+        if re.match(r"^\s*<!-- action-identity", line):
+            # 원문 파서는 전용 주석을 엄격히 검증한다. 현황 집계에는 노출하지 않는다.
+            continue
         if _SECTION_RE.match(line):
             _flush()
             in_open = bool(_OPEN_SECTION_RE.match(line))
@@ -210,6 +262,12 @@ def _projects_of(frontmatter: dict[str, Any]) -> list[str]:
     return [text] if text else []
 
 
+def _is_current_decision(frontmatter: dict[str, Any]) -> bool:
+    """검토·거부·대체된 기록을 현재 확정 결정으로 오인하지 않게 한다."""
+    status = _fm_str(frontmatter, "status").lower()
+    return status in {"decided", "confirmed"} and not _fm_str(frontmatter, "superseded_by")
+
+
 def collect_recent_decisions(
     store: WikiStore, *, now: date, recent_days: int, max_recent: int
 ) -> list[RecentDecision]:
@@ -222,6 +280,8 @@ def collect_recent_decisions(
     recent: list[RecentDecision] = []
     for page in _iter_decision_pages(store):
         fm = page.frontmatter or {}
+        if not _is_current_decision(fm):
+            continue
         date_str = _fm_str(fm, "decision_date", "date")
         parsed = _parse_iso_date(date_str)
         if parsed is None or parsed < cutoff or parsed > now:
@@ -242,7 +302,7 @@ def collect_recent_decisions(
 
 
 def collect_project_status(store: WikiStore) -> list[ProjectStatus]:
-    """프로젝트별로 가장 최근(decision_date 최댓값) 결정을 현재 상태로 집계한다.
+    """프로젝트별로 가장 최근의 유효한 확정 결정을 현재 상태로 집계한다.
 
     project frontmatter 가 없는 결정은 제외한다. 결정이 여러 프로젝트에 속하면
     각 프로젝트 모두에 계상한다. 반환은 프로젝트명 오름차순.
@@ -250,7 +310,11 @@ def collect_project_status(store: WikiStore) -> list[ProjectStatus]:
     latest: dict[str, ProjectStatus] = {}
     for page in _iter_decision_pages(store):
         fm = page.frontmatter or {}
+        if not _is_current_decision(fm):
+            continue
         date_str = _fm_str(fm, "decision_date", "date")
+        if _parse_iso_date(date_str) is None:
+            continue
         title = _fm_str(fm, "title") or "(제목 없음)"
         status = _fm_str(fm, "status")
         page_path = str(page.path)
@@ -283,9 +347,9 @@ def build_digest(store: WikiStore, *, digest_config: WikiDigestConfig, now: date
         집계 결과. 액션/결정이 없어도 빈 다이제스트를 graceful 하게 반환.
     """
     open_actions = _read_open_actions(store)
-    by_owner: dict[str, list[OpenAction]] = {}
-    for action in open_actions:
-        by_owner.setdefault(action.owner, []).append(action)
+    by_owner: dict[str | ActionOwnerScope, list[OpenAction]] = {}
+    for item_number, action in enumerate(open_actions, 1):
+        by_owner.setdefault(_owner_group(action, item_number), []).append(action)
     # owner당 표시 상한 적용(총 카운트는 전체를 보존 — 누락 사실을 숨기지 않음).
     capped = {owner: items[: digest_config.max_per_owner] for owner, items in by_owner.items()}
 
@@ -340,9 +404,9 @@ def render_digest_markdown(digest: WikiDigest) -> str:
         parts.append("_(없음)_")
         parts.append("")
     else:
-        for owner in sorted(digest.open_actions_by_owner):
+        for owner in sorted(digest.open_actions_by_owner, key=owner_group_sort_key):
             items = digest.open_actions_by_owner[owner]
-            parts.append(f"### {owner} ({len(items)})")
+            parts.append(f"### {owner_group_label(owner)} ({len(items)})")
             for action in items:
                 due = f" (due: {action.due_date})" if action.due_date else ""
                 cit = (" " + " ".join(action.citations)) if action.citations else ""

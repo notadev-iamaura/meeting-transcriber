@@ -509,7 +509,15 @@
             // 답변 버블
             var bubble = document.createElement("div");
             bubble.className = "message-bubble";
-            bubble.innerHTML = App.renderMarkdown(data.answer);
+            var literalQuotes = (data.references || []).some(function (ref) { return Boolean(ref.quote); });
+            if (literalQuotes) {
+                // 원문 속 마크다운·가짜 인용은 표시만 하고 소스 링크로 해석하지 않는다.
+                bubble.textContent = String(data.answer || "")
+                    .replace(/&#(\d+);/g, function (_, n) { return String.fromCodePoint(Number(n)); })
+                    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+            } else {
+                bubble.innerHTML = App.renderMarkdown(data.answer);
+            }
 
             body.appendChild(bubble);
 
@@ -647,12 +655,14 @@
                 refsSection.appendChild(refsTitle);
 
                 data.references.forEach(function (ref, index) {
+                    var quote = ref.quote || null;
                     var card = document.createElement("a");
                     card.className = "ref-card";
                     // SPA 내비게이션으로 뷰어 이동
                     var refPath = "/app/viewer/" + encodeURIComponent(ref.meeting_id);
-                    if (ref.start_time != null) {
-                        refPath += "?t=" + encodeURIComponent(ref.start_time);
+                    var jumpTime = quote ? quote.start_time : ref.start_time;
+                    if (jumpTime != null) {
+                        refPath += "?t=" + encodeURIComponent(jumpTime);
                     }
                     card.href = refPath;
                     card.addEventListener("click", function (e) {
@@ -686,22 +696,22 @@
                     dateSpan.textContent = ref.date || "";
 
                     var speakersSpan = document.createElement("span");
-                    speakersSpan.textContent = (ref.speakers || []).map(function (speaker) {
+                    speakersSpan.textContent = (quote ? [quote.speaker] : ref.speakers || []).map(function (speaker) {
                         return App.speakerLabel(speaker, ref.speaker_labels);
                     }).join(", ");
 
                     var timeSpan = document.createElement("span");
-                    timeSpan.textContent = App.formatTime(ref.start_time) + "~" + App.formatTime(ref.end_time);
+                    timeSpan.textContent = App.formatTime(quote ? quote.start_time : ref.start_time) + "~" + App.formatTime(quote ? quote.end_time : ref.end_time);
 
                     meta.appendChild(meetingSpan);
                     if (ref.date) meta.appendChild(dateSpan);
-                    if (ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
+                    if (quote || ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
                     meta.appendChild(timeSpan);
 
                     // 미리보기
                     var preview = document.createElement("div");
                     preview.className = "ref-card-preview";
-                    preview.textContent = ref.text_preview || "";
+                    preview.textContent = quote ? quote.text : ref.text_preview || "";
 
                     bodyEl.appendChild(meta);
                     bodyEl.appendChild(preview);
@@ -728,7 +738,7 @@
             copyBtn.innerHTML = Icons.copy + ' 복사';
             copyBtn.setAttribute("aria-label", "답변 복사");
             copyBtn.addEventListener("click", function () {
-                var textToCopy = data.answer || bubble.textContent;
+                var textToCopy = literalQuotes ? bubble.textContent : data.answer || bubble.textContent;
                 App.copyToClipboard(textToCopy).then(function (ok) {
                     if (ok) {
                         copyBtn.innerHTML = Icons.check + ' 복사됨';

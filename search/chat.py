@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import re
 import threading
 import unicodedata
 from collections.abc import AsyncGenerator
@@ -26,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from config import AppConfig, ChatConfig, get_config
+from core.chat_scope import ChatSourceScope
 from core.llm_backend import (
     LLMBackend,
     LLMConnectionError,
@@ -36,8 +38,49 @@ from core.model_manager import ModelLoadManager, await_native_inference, get_mod
 from core.user_settings import build_chat_system_prompt
 from search.hybrid_search import (
     HybridSearchEngine,
+    SearchError,
     SearchResponse,
     SearchResult,
+)
+from search.source_answers import (
+    COVERAGE_PROMPT,
+    FACET_REFINE_PROMPT,
+    FACET_SELECTOR_PROMPT,
+    FOCUSED_SELECTOR_PROMPT,
+    FORMAT_RESELECT_PROMPT,
+    SELECTOR_PROMPT,
+    SourceCandidate,
+    SourcePlan,
+    SourceQuote,
+    allocate_focus_ids,
+    bound_source_answer,
+    build_source_candidates,
+    candidate_context_costs,
+    candidate_context_members,
+    coverage_payload,
+    facet_refinement_payload,
+    focus_selector_prompt,
+    focused_selector_payload,
+    followup_user_hint,
+    literal_eligible_candidates,
+    needs_coverage_selection,
+    publish_uptake_context,
+    question_focuses,
+    question_items,
+    rank_source_candidates,
+    render_source_answer,
+    select_facet_plan,
+    select_ids,
+    selected_with_replies,
+    selector_payload,
+    source_bound_question,
+    speech_act_candidates,
+)
+from search.source_query import (
+    cross_meeting_comparison,
+    focused_source_query,
+    resolve_source_scope,
+    topic_context_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +95,10 @@ class ChatError(Exception):
 
 class EmptyQueryError(ChatError):
     """질문이 비어있을 때 발생한다."""
+
+
+class _SourceChangedError(ChatError):
+    """선택 도중 확인한 원문 변경은 생성 오류 복구와 분리해 답변 전체를 막는다."""
 
 
 # === 데이터 클래스 ===
@@ -102,6 +149,7 @@ class ChatReference:
     text_preview: str
     score: float
     speaker_labels: dict[str, str] = field(default_factory=dict)
+    quote: SourceQuote | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -288,7 +336,11 @@ def _build_user_prompt(query: str, context_text: str) -> str:
             f"다음은 관련 회의 내용입니다:\n\n"
             f"{context_text}\n\n"
             f"위 회의 내용을 참고하여 다음 질문에 답변해주세요:\n"
-            f"{query}"
+            f"{query}\n\n"
+            "근거를 해석할 때 질문·요청과 확정된 응답을 구분하세요. "
+            "결정을 묻는 질문에 원문의 확인 질문만 인용하고 끝내지 마세요. "
+            "같은 참조의 바로 이어진 응답을 함께 확인하고, 확인할 수 없으면 "
+            "그 질문만으로 결정·담당자·완료를 확정할 수 없다고 밝혀 주세요."
         )
     return (
         f"관련 회의 내용을 찾을 수 없습니다. "
@@ -377,6 +429,65 @@ def _estimate_korean_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, int(len(text) / 1.5))
+
+
+def _question_only_answer_context(query: str, answer: str, results: list[SearchResult]) -> str:
+    """결정 질문에 확인 질문만 인용한 경우 같은 청크의 직후 발언을 덧붙인다.
+
+    영문·한글 주제의 문자 일치로 의미를 판정하지 않는다. 이미 충실한 답변과
+    질문 자체를 찾는 요청은 바꾸지 않으며, 출처 밖의 발언을 가져오지 않는다.
+    반환값은 기존 답변에 내용을 더하기만 하므로 스트리밍에도 같은 처리를 쓴다.
+    """
+    if not re.search(r"결정|결론|확정|담당|완료|하기로", query):
+        return answer
+    if re.search(
+        r"(?:어떤|무슨|했던|한)\s*질문|질문.*?(?:인용|찾|보여)|(?:어떻게|뭐라고).*?질문",
+        query,
+    ):
+        return answer
+    match = re.fullmatch(r'\s*["“](.+?)["”]\s*\[참조\s*(\d+)\]\s*', answer, flags=re.DOTALL)
+    if match is None or not match.group(1).rstrip().endswith(("?", "？")):
+        return answer
+    reference_index = int(match.group(2)) - 1
+    if not 0 <= reference_index < len(results):
+        return answer
+    quote = " ".join(match.group(1).split())
+    result = results[reference_index]
+    turns: list[tuple[str, str]] = []
+    for item in re.finditer(
+        r"^\[([^\]\r\n]+)\]\s*(.*?)(?=^\[[^\]\r\n]+\]|\Z)",
+        result.text,
+        flags=re.MULTILINE | re.DOTALL,
+    ):
+        speaker, text = item.group(1), " ".join(item.group(2).split())
+        if turns and turns[-1][0] == speaker:
+            turns[-1] = (speaker, f"{turns[-1][1]} {text}")
+        else:
+            turns.append((speaker, text))
+    occurrences = [index for index, (_, text) in enumerate(turns) if quote in text]
+    if len(occurrences) != 1:
+        # 인용이 실제 청크의 연속 발화인지 확인할 수 없으면 내용을 새로 연결하지 않는다.
+        return (
+            f"{answer}\n\n인용문을 검색 구간의 동일 화자 발언으로 확인하지 못해, "
+            "이 인용만으로 결정·담당자·완료를 확정할 수 없습니다."
+        )
+    index = occurrences[0]
+    if turns[index][1].count(quote) != 1:
+        return f"{answer}\n\n같은 질문이 반복되어 어느 응답과 연결되는지 확인하지 못했습니다."
+    explanation = (
+        "인용된 내용은 확인 질문이므로, 이 질문만으로 결정·담당자·완료를 확정할 수 없습니다."
+    )
+    if index + 1 >= len(turns):
+        return f"{answer}\n\n{explanation}\n같은 인용 구간에서 이어진 응답은 확인하지 못했습니다."
+    speaker, following = turns[index + 1]
+    neutral = re.sub(r"[\W_]+", "", following)
+    if following.endswith(("?", "？")) or neutral in {"네", "예", "알겠습니다", "감사합니다"}:
+        return f"{answer}\n\n{explanation}\n이어진 발언도 질문이나 맞장구여서 확정 응답으로 삼지 않았습니다."
+    return (
+        f"{answer}\n\n{explanation}\n"
+        f'같은 인용 구간에서 바로 이어진 발언 ({speaker}): "{following}" [참조 {reference_index + 1}]\n'
+        "이 발언이 확인하는 범위를 넘어 전체 업무나 정책이 확정·완료됐다고 확대하지 않습니다."
+    )
 
 
 # === 메인 클래스 ===
@@ -545,6 +656,630 @@ class ChatEngine:
         except LLMGenerationError as e:
             raise ChatError(str(e)) from e
 
+    async def _select_source_focuses(
+        self,
+        query: str,
+        candidates: list[SourceCandidate],
+        results: list[SearchResult],
+        max_chars: int,
+        previous_user_question: str | None,
+        epoch: int,
+        source_scope: ChatSourceScope | None,
+        *,
+        speaker_filter: str | None = None,
+    ) -> tuple[list[int], list[SourceCandidate], list[SourceCandidate], bool, bool]:
+        """복합 질문의 초점을 같은 모델 lease에서 독립 선택하고 코드가 전체 예산을 배분한다."""
+        tasks = question_focuses(question_items(query), self._chat_config.source_focus_max_calls)
+        fallback_limited = any(
+            speech_act_candidates(query, focus, candidates)[1] for focus in tasks
+        )
+        prepared = [
+            focused_selector_payload(
+                query,
+                focus,
+                candidates,
+                min(
+                    self._chat_config.source_focus_max_items,
+                    self._chat_config.source_answer_max_items,
+                ),
+                max_chars,
+                previous_user_question=previous_user_question,
+                max_units=(
+                    self._chat_config.source_answer_max_items
+                    * self._chat_config.source_focus_max_items
+                ),
+            )
+            for focus in tasks
+        ]
+        packed_by_id = {c.id: c for _, packed, _ in prepared for c in packed}
+        shown_by_id = {c.id: c for _, _, shown in prepared for c in shown}
+        selections: list[list[int] | None] = [None for _ in prepared]
+        called = False
+
+        async def check_current(shown: list[SourceCandidate]) -> None:
+            """실제로 보여줄 모든 원문을 매 호출 전후의 현재 원문과 대조한다."""
+            current = await asyncio.to_thread(
+                build_source_candidates, self._config, results, speaker_filter=speaker_filter
+            )
+            identities = {
+                (c.parent_index, c.source_index, c.meeting_id, c.quote, c.display_speaker)
+                for c in current
+            }
+            if epoch != self._transcript_epoch or any(
+                (c.parent_index, c.source_index, c.meeting_id, c.quote, c.display_speaker)
+                not in identities
+                for c in shown
+            ):
+                raise _SourceChangedError("질문 항목 확인 중 원문이 변경되었습니다.")
+
+        if any(packed for _, packed, _ in prepared):
+            try:
+                async with self._model_manager.acquire("exaone", self._create_backend) as backend:
+                    for index, (payload, packed, shown) in enumerate(prepared):
+                        if not packed:
+                            continue
+                        await check_current(shown)
+                        called = True
+                        raw = await await_native_inference(
+                            self._call_llm_chat,
+                            backend,
+                            [
+                                {"role": "system", "content": focus_selector_prompt(tasks[index])},
+                                {"role": "user", "content": payload},
+                            ],
+                        )
+                        await check_current(list(shown_by_id.values()))
+                        selections[index] = select_ids(
+                            raw,
+                            packed,
+                            min(
+                                self._chat_config.source_focus_max_items,
+                                self._chat_config.source_answer_max_items,
+                            ),
+                            max_chars,
+                        )
+                        source_indices = [
+                            candidate.source_index
+                            for selected_id in selections[index] or []
+                            for candidate in packed
+                            if candidate.id == selected_id
+                        ]
+                        logger.info(
+                            f"원문 초점 선택: index={index}, valid={selections[index] is not None}, selected={len(selections[index] or [])}, source_indices={source_indices}"
+                        )
+            except _SourceChangedError:
+                raise
+            except (LLMConnectionError, LLMGenerationError, ChatError) as exc:
+                logger.warning(f"원문 초점 선택 중단: {type(exc).__name__}")
+        packed = list(packed_by_id.values())
+        ids, limited = allocate_focus_ids(
+            selections,
+            packed,
+            candidates,
+            self._chat_config.source_answer_max_items,
+            max_chars,
+            source_scope=source_scope,
+            query=query,
+            focuses=tasks,
+        )
+        logger.info(
+            f"원문 초점 배분: source_indices={[candidate.source_index for selected_id in ids for candidate in packed if candidate.id == selected_id]}, limited={limited}"
+        )
+        return ids, packed, list(shown_by_id.values()), called, limited or fallback_limited
+
+    async def _source_bound_chat(
+        self,
+        query: str,
+        session_id: str | None,
+        meeting_id_filter: str | None,
+        date_filter: str | None,
+        speaker_filter: str | None,
+        *,
+        store_history: bool = True,
+        source_scope: ChatSourceScope | None = None,
+    ) -> ChatResponse:
+        """현재 원문 ID만 선택하고 복합 질문은 같은 lease에서 누락·형식을 한 번 보완한다."""
+        from search.source_recall import supplement_results
+
+        epoch = self._transcript_epoch
+        called = False
+        results: list[SearchResult] = []
+        try:
+            items = question_items(query) if needs_coverage_selection(query) else []
+            focused_mode = bool(
+                items
+                and self._chat_config.source_coverage_passes
+                and self._chat_config.source_focus_max_calls > 1
+            )
+            focus_systems = (
+                [
+                    focus_selector_prompt(focus)
+                    for focus in question_focuses(items, self._chat_config.source_focus_max_calls)
+                ]
+                if focused_mode
+                else []
+            )
+            system = (
+                max(focus_systems, key=_estimate_korean_tokens, default=FOCUSED_SELECTOR_PROMPT)
+                if focused_mode
+                else f"{SELECTOR_PROMPT.partition('출력은 다음 JSON')[0]}\n{FACET_SELECTOR_PROMPT}"
+                if items
+                else SELECTOR_PROMPT
+            )
+            coverage_system = (
+                system
+                if focused_mode
+                else f"{system}\n\n{FACET_REFINE_PROMPT if items else COVERAGE_PROMPT}"
+            )
+            format_system = (
+                system
+                if focused_mode
+                else f"{system}\n\n직전 출력이 필수 형식을 통과하지 못했습니다. 같은 후보에서 전체 facets 형식으로 다시 선택하십시오."
+                if items
+                else f"{system}\n\n{FORMAT_RESELECT_PROMPT}"
+            )
+            coverage_enabled = bool(
+                self._chat_config.source_coverage_passes and needs_coverage_selection(query)
+            )
+            max_chars = max(
+                0,
+                int(
+                    (
+                        self._max_context_tokens
+                        - self._config.llm.chat_max_tokens
+                        - max(
+                            _estimate_korean_tokens(s)
+                            for s in (
+                                (system, coverage_system, format_system)
+                                if coverage_enabled
+                                else (system,)
+                            )
+                        )
+                    )
+                    * 1.5
+                ),
+            )
+            hint = followup_user_hint(
+                query,
+                self.get_session(session_id).history,
+                explicit_scope=any((meeting_id_filter, date_filter, speaker_filter)),
+                max_chars=max_chars,
+            )
+            retrieval_query = f"{hint}\n후속 질문: {query}" if hint else query
+            scope = await asyncio.to_thread(
+                resolve_source_scope, self._config, retrieval_query, meeting_id_filter, date_filter
+            )
+            if scope.blocked:
+                raise ChatError("명시한 회의를 현재 색인·원문과 고유하게 연결하지 못했습니다.")
+            response = await self._search_engine.search(
+                query=retrieval_query,
+                meeting_id_filter=scope.meeting_id,
+                date_filter=scope.date_filter,
+                speaker_filter=speaker_filter,
+                top_k=self._top_k,
+            )
+            errors = getattr(response, "source_errors", {})
+            if isinstance(errors, dict) and errors:
+                raise ChatError("회의 검색을 확인하지 못했습니다.")
+            focused = []
+            focus = focused_source_query(
+                retrieval_query, self._chat_config.source_context_max_chunks
+            )
+            if focus and " ".join(focus.casefold().split()) != " ".join(
+                retrieval_query.casefold().split()
+            ):
+                supplement = await self._search_engine.search(
+                    query=focus,
+                    meeting_id_filter=scope.meeting_id,
+                    date_filter=scope.date_filter,
+                    speaker_filter=speaker_filter,
+                    top_k=self._top_k,
+                )
+                errors = getattr(supplement, "source_errors", {})
+                if isinstance(errors, dict) and errors:
+                    raise ChatError(
+                        "주제 검색을 확인하지 못해 다른 범위의 근거를 섞지 않았습니다."
+                    )
+                focused = supplement.results
+            contextual = await asyncio.to_thread(
+                topic_context_results,
+                retrieval_query,
+                response.results,
+                focused,
+                scope,
+                self._chat_config.source_context_max_chunks,
+                config=self._config,
+            )
+            results = await supplement_results(
+                self._config,
+                retrieval_query,
+                contextual,
+                meeting_id_filter=scope.meeting_id,
+                date_filter=scope.date_filter,
+                speaker_filter=speaker_filter,
+                max_chunks=self._chat_config.source_context_max_chunks,
+                neighbor_window=self._chat_config.source_neighbor_window,
+            )
+            candidates = await asyncio.to_thread(
+                build_source_candidates, self._config, results, speaker_filter=speaker_filter
+            )
+            candidates = literal_eligible_candidates(
+                query, candidates, results, contextual, self._chat_config.source_neighbor_window
+            )
+            candidates = rank_source_candidates(retrieval_query, candidates)
+            contexts = candidate_context_members(candidates) if items else {}
+            costs = candidate_context_costs(candidates, contexts=contexts) if items else {}
+            payload, packed = selector_payload(
+                query,
+                candidates,
+                self._chat_config.source_answer_max_items,
+                max_chars,
+                previous_user_question=hint,
+                reserve_coverage=coverage_enabled,
+                items=items,
+                costs=costs,
+                contexts=contexts,
+            )
+            shown_ids = {i for c in packed for i in contexts.get(c.id, (c.id,))}
+            shown_candidates = [c for c in candidates if c.id in shown_ids]
+            ids: list[int] | None = None
+            plan: SourcePlan | None = None
+            focus_limited = False
+            if focused_mode:
+                (
+                    ids,
+                    packed,
+                    shown_candidates,
+                    called,
+                    focus_limited,
+                ) = await self._select_source_focuses(
+                    query,
+                    candidates,
+                    results,
+                    max_chars,
+                    hint,
+                    epoch,
+                    source_scope,
+                    speaker_filter=speaker_filter,
+                )
+            if packed and not focused_mode:
+                if epoch != self._transcript_epoch:
+                    raise _SourceChangedError(
+                        "질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요."
+                    )
+                called = True
+                try:
+                    async with self._model_manager.acquire(
+                        "exaone", self._create_backend
+                    ) as backend:
+                        raw = await await_native_inference(
+                            self._call_llm_chat,
+                            backend,
+                            [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": payload},
+                            ],
+                        )
+                        if items:
+                            plan = select_facet_plan(
+                                raw,
+                                packed,
+                                items,
+                                candidates,
+                                self._chat_config.source_answer_max_items,
+                                max_chars,
+                            )
+                            ids = plan.ids if plan is not None else None
+                        else:
+                            ids = select_ids(
+                                raw, packed, self._chat_config.source_answer_max_items, max_chars
+                            )
+                        if epoch != self._transcript_epoch:
+                            raise _SourceChangedError(
+                                "질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요."
+                            )
+                        if coverage_enabled and (
+                            items
+                            or ids is None
+                            or len(ids) < self._chat_config.source_answer_max_items
+                        ):
+                            format_reselection = ids is None
+                            prior_ids = ids or []
+                            if items:
+                                coverage, fits = facet_refinement_payload(
+                                    query,
+                                    packed,
+                                    items,
+                                    plan,
+                                    costs,
+                                    candidates,
+                                    self._chat_config.source_answer_max_items,
+                                    max_chars,
+                                    previous_user_question=hint,
+                                    contexts=contexts,
+                                )
+                                remaining = packed if fits else []
+                            else:
+                                coverage, remaining = coverage_payload(
+                                    query,
+                                    packed,
+                                    prior_ids,
+                                    self._chat_config.source_answer_max_items - len(prior_ids),
+                                    max_chars,
+                                    previous_user_question=hint,
+                                )
+                            if remaining:
+                                current = await asyncio.to_thread(
+                                    build_source_candidates,
+                                    self._config,
+                                    results,
+                                    speaker_filter=speaker_filter,
+                                )
+                                identities = {
+                                    (
+                                        c.parent_index,
+                                        c.source_index,
+                                        c.meeting_id,
+                                        c.quote,
+                                        c.display_speaker,
+                                    )
+                                    for c in current
+                                }
+                                if epoch != self._transcript_epoch or any(
+                                    (
+                                        c.parent_index,
+                                        c.source_index,
+                                        c.meeting_id,
+                                        c.quote,
+                                        c.display_speaker,
+                                    )
+                                    not in identities
+                                    for c in shown_candidates
+                                ):
+                                    raise _SourceChangedError(
+                                        "누락 근거 확인 전에 원문이 변경되었습니다."
+                                    )
+                                extra_raw = await await_native_inference(
+                                    self._call_llm_chat,
+                                    backend,
+                                    [
+                                        {
+                                            "role": "system",
+                                            "content": format_system
+                                            if format_reselection
+                                            else coverage_system,
+                                        },
+                                        {"role": "user", "content": coverage},
+                                    ],
+                                )
+                                if epoch != self._transcript_epoch:
+                                    raise _SourceChangedError(
+                                        "누락 근거 확인 중 전사문이 수정되었습니다."
+                                    )
+                                current = await asyncio.to_thread(
+                                    build_source_candidates,
+                                    self._config,
+                                    results,
+                                    speaker_filter=speaker_filter,
+                                )
+                                identities = {
+                                    (
+                                        c.parent_index,
+                                        c.source_index,
+                                        c.meeting_id,
+                                        c.quote,
+                                        c.display_speaker,
+                                    )
+                                    for c in current
+                                }
+                                if epoch != self._transcript_epoch or any(
+                                    (
+                                        c.parent_index,
+                                        c.source_index,
+                                        c.meeting_id,
+                                        c.quote,
+                                        c.display_speaker,
+                                    )
+                                    not in identities
+                                    for c in shown_candidates
+                                ):
+                                    raise _SourceChangedError(
+                                        "누락 근거 확인 중 원문 후보가 변경되었습니다."
+                                    )
+                                if items:
+                                    refined = select_facet_plan(
+                                        extra_raw,
+                                        packed,
+                                        items,
+                                        candidates,
+                                        self._chat_config.source_answer_max_items,
+                                        max_chars,
+                                    )
+                                    additional = refined.ids if refined is not None else None
+                                    accepted = refined is not None and (
+                                        plan is None
+                                        or sum(bool(ids) for _, ids in refined.facets)
+                                        >= sum(bool(ids) for _, ids in plan.facets)
+                                    )
+                                    if accepted and refined is not None:
+                                        plan, ids = refined, refined.ids
+                                else:
+                                    additional = select_ids(
+                                        extra_raw,
+                                        packed,
+                                        self._chat_config.source_answer_max_items,
+                                        max_chars,
+                                    )
+                                    accepted = additional is not None
+                                room = self._chat_config.source_answer_max_items - len(prior_ids)
+                                added = (
+                                    [i for i in additional or [] if i not in prior_ids][:room]
+                                    if accepted
+                                    else []
+                                )
+                                if additional is not None and not items:
+                                    ids = [*prior_ids, *added]
+                                purpose = (
+                                    (
+                                        "plan_format_reselection"
+                                        if format_reselection
+                                        else "plan_refinement"
+                                    )
+                                    if items
+                                    else (
+                                        "format_reselection" if format_reselection else "coverage"
+                                    )
+                                )
+                                logger.info(
+                                    f"원문 추가 선택: purpose={purpose}, valid={additional is not None}, accepted={accepted}, added={len(added)}"
+                                )
+                except _SourceChangedError:
+                    raise
+                except (LLMConnectionError, LLMGenerationError, ChatError) as exc:
+                    logger.warning(f"원문 번호 선택 실패: {type(exc).__name__}")
+            if epoch != self._transcript_epoch:
+                raise ChatError("질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요.")
+            state = (
+                "not_called"
+                if not called
+                else "invalid_selection"
+                if ids is None
+                else "empty_selection"
+                if not ids
+                else "selected"
+            )
+            logger.info(
+                f"원문 번호 선택: state={state}, candidates={len(packed)}, selected={len(ids or [])}"
+            )
+            limited = not ids or focus_limited
+            reply_context = bool(items) or bool(
+                re.search(r"결정|확정|담당|완료|상태|후속|공유|회신|원인|조치", query)
+            )
+            selected = selected_with_replies(
+                ids or [],
+                packed,
+                self._chat_config.source_answer_max_items,
+                include_replies=reply_context,
+                context_candidates=candidates,
+                max_chars=None if focused_mode else max_chars,
+            )
+            if not selected and packed and not focused_mode:
+                selected = selected_with_replies(
+                    [packed[0].id],
+                    packed,
+                    self._chat_config.source_answer_max_items,
+                    include_replies=reply_context,
+                    context_candidates=candidates,
+                    max_chars=max_chars,
+                )
+            selected, limited, atomic_units = publish_uptake_context(
+                selected,
+                ids or [],
+                candidates,
+                self._chat_config.source_answer_max_items,
+                max_chars,
+                enabled=bool(items),
+                include_replies=reply_context,
+                limited=limited,
+                source_scope=source_scope,
+            )
+            if ids and not any(c.id in ids and not c.is_context for c in selected):
+                limited = True
+            if cross_meeting_comparison(retrieval_query) and not scope.meeting_id:
+                expected_meetings = {row.meeting_id for row in results}
+                if len(expected_meetings) < 2 or expected_meetings - {
+                    candidate.meeting_id for candidate in selected
+                }:
+                    limited = True
+            selected, limited = bound_source_answer(
+                selected,
+                max_chars,
+                limited=limited,
+                source_scope=source_scope,
+                contexts=contexts,
+                atomic_units=atomic_units,
+            )
+            # 모델 처리 동안 source/revision이 바뀐 경우 옛 parent/시각의 인용을 내보내지 않는다.
+            fresh = await asyncio.to_thread(
+                build_source_candidates, self._config, results, speaker_filter=speaker_filter
+            )
+            identities = {
+                (c.parent_index, c.source_index, c.meeting_id, c.quote, c.display_speaker)
+                for c in fresh
+            }
+            if epoch != self._transcript_epoch or any(
+                (c.parent_index, c.source_index, c.meeting_id, c.quote, c.display_speaker)
+                not in identities
+                for c in [*shown_candidates, *selected]
+            ):
+                raise ChatError(
+                    "원문이 변경되어 이전 근거로 답변하지 않았습니다. 다시 질문해 주세요."
+                )
+            parent_refs = _build_references(results)
+            references = []
+            for candidate in selected:
+                parent = parent_refs[candidate.parent_index]
+                references.append(
+                    ChatReference(
+                        parent.chunk_id,
+                        parent.meeting_id,
+                        parent.date,
+                        list(parent.speakers),
+                        parent.start_time,
+                        parent.end_time,
+                        parent.text_preview,
+                        parent.score,
+                        {
+                            **parent.speaker_labels,
+                            candidate.quote.speaker: candidate.display_speaker,
+                        },
+                        candidate.quote,
+                    )
+                )
+            remaining_model_anchors = {
+                c.id for c in selected if not c.is_context and c.id in (ids or [])
+            }
+            answer = render_source_answer(
+                selected,
+                limited=limited,
+                source_scope=source_scope,
+                contexts=contexts,
+            )
+            if store_history and selected and epoch == self._transcript_epoch:
+                self.get_session(session_id).add_exchange(query, answer)
+            return ChatResponse(
+                answer,
+                references,
+                query,
+                has_context=bool(selected),
+                llm_used=bool(remaining_model_anchors),
+                llm_called=called,
+                grounding_status="grounded" if selected else "no_results",
+            )
+        except (
+            LLMConnectionError,
+            LLMGenerationError,
+            ChatError,
+            SearchError,
+            OSError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            KeyError,
+        ) as exc:
+            if epoch != self._transcript_epoch:
+                results = []
+            return ChatResponse(
+                "현재 원문 근거를 확인하지 못해 답변을 확정하지 않았습니다. 다시 질문해 주세요.",
+                [],
+                query,
+                has_context=False,
+                llm_used=False,
+                llm_called=called,
+                grounding_status="search_error",
+                error_message=str(exc),
+            )
+
     def _truncate_context(
         self,
         system_prompt: str,
@@ -639,6 +1374,8 @@ class ChatEngine:
         meeting_id_filter: str | None = None,
         date_filter: str | None = None,
         speaker_filter: str | None = None,
+        *,
+        source_scope: ChatSourceScope | None = None,
     ) -> ChatResponse:
         """RAG 기반 AI Chat을 수행한다.
 
@@ -666,6 +1403,16 @@ class ChatEngine:
             raise EmptyQueryError("질문이 비어있습니다.")
 
         query = unicodedata.normalize("NFC", query)
+
+        if self._chat_config.source_bound_answers and source_bound_question(query):
+            return await self._source_bound_chat(
+                query,
+                session_id,
+                meeting_id_filter,
+                date_filter,
+                speaker_filter,
+                source_scope=source_scope,
+            )
 
         logger.info(f"Chat 시작: query='{query}', session={session_id or 'default'}")
         transcript_epoch = self._transcript_epoch
@@ -763,6 +1510,7 @@ class ChatEngine:
 
             # NFC 정규화 적용
             answer = unicodedata.normalize("NFC", answer.strip())
+            answer = _question_only_answer_context(query, answer, search_results)
 
             # 대화 이력에 추가
             session.add_exchange(query, answer)
@@ -822,6 +1570,8 @@ class ChatEngine:
         meeting_id_filter: str | None = None,
         date_filter: str | None = None,
         speaker_filter: str | None = None,
+        *,
+        source_scope: ChatSourceScope | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """스트리밍 방식으로 RAG Chat 응답을 생성한다.
 
@@ -851,6 +1601,52 @@ class ChatEngine:
             raise EmptyQueryError("질문이 비어있습니다.")
 
         query = unicodedata.normalize("NFC", query)
+
+        if self._chat_config.source_bound_answers and source_bound_question(query):
+            epoch = self._transcript_epoch
+            response = await self._source_bound_chat(
+                query,
+                session_id,
+                meeting_id_filter,
+                date_filter,
+                speaker_filter,
+                store_history=False,
+                source_scope=source_scope,
+            )
+            yield {"type": "references", "data": [r.to_dict() for r in response.references]}
+            if epoch != self._transcript_epoch:
+                yield {
+                    "type": "error",
+                    "data": {"message": "원문이 변경되었습니다. 다시 질문해 주세요."},
+                }
+                return
+            yield {
+                "type": "grounding",
+                "data": {
+                    "status": response.grounding_status,
+                    "llm_called": response.llm_called,
+                    "repair_actions": response.repair_actions,
+                    "error_message": response.error_message,
+                },
+            }
+            yield {"type": "token", "data": response.answer}
+            if epoch != self._transcript_epoch:
+                yield {
+                    "type": "error",
+                    "data": {"message": "원문이 변경되어 답변을 이력에 저장하지 않았습니다."},
+                }
+                return
+            if response.has_context:
+                self.get_session(session_id).add_exchange(query, response.answer)
+            yield {
+                "type": "done",
+                "data": {
+                    "answer": response.answer,
+                    "grounding_status": response.grounding_status,
+                    "llm_called": response.llm_called,
+                },
+            }
+            return
 
         logger.info(f"스트리밍 Chat 시작: query='{query}'")
         transcript_epoch = self._transcript_epoch
@@ -1060,6 +1856,12 @@ class ChatEngine:
                 raise ChatError("질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요.")
             full_answer = "".join(full_answer_parts)
             full_answer = unicodedata.normalize("NFC", full_answer.strip())
+            completed_answer = _question_only_answer_context(query, full_answer, search_results)
+            if completed_answer != full_answer:
+                yield {"type": "token", "data": completed_answer[len(full_answer) :]}
+                full_answer = completed_answer
+            if transcript_epoch != self._transcript_epoch:
+                raise ChatError("질문 처리 중 전사문이 수정되었습니다. 다시 질문해 주세요.")
 
             # 대화 이력에 추가
             session.add_exchange(query, full_answer)

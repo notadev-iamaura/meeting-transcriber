@@ -54,6 +54,10 @@ class _FakeSemantic:
     def count(self) -> int:
         return len(self._ranked)
 
+    def get_indexed_hashes(self) -> dict[str, str]:
+        """미수정 fixture의 벡터에는 아직 본문 해시가 없는 상태를 모사한다."""
+        return {}
+
 
 def _build_index(tmp_path: Path) -> WikiSearchIndex:
     """a.md(예산 매칭), b.md(예산 비매칭) 로 BM25 인덱스를 만든다."""

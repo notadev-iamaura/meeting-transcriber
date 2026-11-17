@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -45,6 +46,19 @@ def _store_with_pages(tmp_path: Path) -> WikiStore:
     )
     store.write_page(
         Path("decisions/b.md"), _md("결정 B", "일정 합의 [meeting:1234abcd@00:02:00]")
+    )
+    checkpoint = tmp_path / "checkpoints" / "1234abcd" / "correct.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "utterances": [
+                    {"speaker": "민수", "text": "예산을 합의했습니다.", "start": 80, "end": 85},
+                    {"speaker": "민수", "text": "일정을 합의했습니다.", "start": 120, "end": 125},
+                ]
+            }
+        ),
+        encoding="utf-8",
     )
     return store
 

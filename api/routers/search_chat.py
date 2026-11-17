@@ -102,6 +102,15 @@ class ChatRequest(BaseModel):
     speaker_filter: str | None = None
 
 
+class ChatQuoteItem(BaseModel):
+    """parent 청크 메타데이터와 구분한 실제 인용 발화의 표시·이동 정보."""
+
+    text: str
+    speaker: str
+    start_time: float = Field(ge=0)
+    end_time: float = Field(ge=0)
+
+
 class ChatReferenceItem(BaseModel):
     """Chat 참조 출처 스키마.
 
@@ -125,6 +134,7 @@ class ChatReferenceItem(BaseModel):
     text_preview: str = ""
     score: float = 0.0
     speaker_labels: dict[str, str] = Field(default_factory=dict)
+    quote: ChatQuoteItem | None = None
 
 
 class ChatResponse(BaseModel):
@@ -290,6 +300,8 @@ def _build_chat_references(
     Returns:
         Pydantic 변환된 ChatReferenceItem 리스트.
     """
+    from search.source_answers import SourceQuote
+
     return [
         ChatReferenceItem(
             chunk_id=r.chunk_id,
@@ -302,6 +314,16 @@ def _build_chat_references(
             score=r.score,
             speaker_labels=(
                 r.speaker_labels if isinstance(getattr(r, "speaker_labels", None), dict) else {}
+            ),
+            quote=(
+                ChatQuoteItem(
+                    text=r.quote.text,
+                    speaker=r.quote.speaker,
+                    start_time=r.quote.start_time,
+                    end_time=r.quote.end_time,
+                )
+                if isinstance(getattr(r, "quote", None), SourceQuote)
+                else None
             ),
         )
         for r in references
@@ -421,11 +443,11 @@ def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
     wiki_llm: Any = None
     if config.wiki.router_llm_fallback:
         try:
+            from api.dependencies import get_model_manager  # noqa: PLC0415
             from core.wiki.llm_client import MlxWikiClient  # noqa: PLC0415
 
-            model_manager = getattr(request.app.state, "model_manager", None)
-            if model_manager is not None:
-                wiki_llm = MlxWikiClient(config=config, model_manager=model_manager)
+            model_manager = get_model_manager(request)
+            wiki_llm = MlxWikiClient(config=config, model_manager=model_manager)
         except Exception as exc:  # noqa: BLE001 — LLM 폴백은 옵션
             logger.warning("MlxWikiClient 초기화 실패, LLM 폴백 비활성: %s", exc)
             wiki_llm = None

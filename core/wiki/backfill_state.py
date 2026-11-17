@@ -26,6 +26,11 @@ class DurableBackfillJob:
     succeeded: int = 0
     skipped: int = 0
     failed: int = 0
+    pending: int = 0
+    empty: int = 0
+    published_pages: int = 0
+    pending_pages: int = 0
+    rejected_pages: int = 0
     errors: list[dict[str, str]] = field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
@@ -112,6 +117,7 @@ class WikiBackfillStateStore:
                 UPDATE wiki_backfill_jobs
                 SET status = ?, processed = ?, total = ?, current_meeting_id = NULL,
                     succeeded = ?, skipped = ?, failed = ?, errors_json = ?,
+                    pending = ?, empty = ?, published_pages = ?, pending_pages = ?, rejected_pages = ?,
                     finished_at = ?, duration_seconds = ?
                 WHERE job_id = ?
                 """,
@@ -119,12 +125,18 @@ class WikiBackfillStateStore:
                     status,
                     int(getattr(result, "succeeded", 0))
                     + int(getattr(result, "skipped", 0))
-                    + int(getattr(result, "failed", 0)),
+                    + int(getattr(result, "failed", 0))
+                    + int(getattr(result, "pending", 0)),
                     int(getattr(result, "total", 0)),
                     int(getattr(result, "succeeded", 0)),
                     int(getattr(result, "skipped", 0)),
                     int(getattr(result, "failed", 0)),
                     json.dumps(errors, ensure_ascii=False),
+                    int(getattr(result, "pending", 0)),
+                    int(getattr(result, "empty", 0)),
+                    int(getattr(result, "published_pages", 0)),
+                    int(getattr(result, "pending_pages", 0)),
+                    int(getattr(result, "rejected_pages", 0)),
                     finished_at,
                     getattr(result, "duration_seconds", None),
                     job_id,
@@ -213,6 +225,12 @@ class WikiBackfillStateStore:
             )
             """
         )
+        existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(wiki_backfill_jobs)")}
+        for column in ("pending", "empty", "published_pages", "pending_pages", "rejected_pages"):
+            if column not in existing:
+                conn.execute(
+                    f"ALTER TABLE wiki_backfill_jobs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
         conn.commit()
 
     @staticmethod
@@ -233,6 +251,11 @@ class WikiBackfillStateStore:
             succeeded=int(row["succeeded"] or 0),
             skipped=int(row["skipped"] or 0),
             failed=int(row["failed"] or 0),
+            pending=int(row["pending"] or 0),
+            empty=int(row["empty"] or 0),
+            published_pages=int(row["published_pages"] or 0),
+            pending_pages=int(row["pending_pages"] or 0),
+            rejected_pages=int(row["rejected_pages"] or 0),
             errors=errors if isinstance(errors, list) else [],
             started_at=row["started_at"],
             finished_at=row["finished_at"],

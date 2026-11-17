@@ -606,6 +606,13 @@ class ChatConfig(BaseModel):
     """AI Chat 설정"""
 
     max_history_pairs: int = Field(default=3, ge=1, le=10)
+    source_bound_answers: bool = True
+    source_answer_max_items: int = Field(default=8, ge=1, le=16)
+    source_context_max_chunks: int = Field(default=15, ge=1, le=40)
+    source_neighbor_window: int = Field(default=1, ge=0, le=2)
+    source_coverage_passes: int = Field(default=1, ge=0, le=1, strict=True)
+    source_focus_max_calls: int = Field(default=4, ge=1, le=4, strict=True)
+    source_focus_max_items: int = Field(default=3, ge=1, le=16, strict=True)
     system_prompt: str = (
         "당신은 회의 내용을 기반으로 질문에 답변하는 AI 어시스턴트입니다.\n"
         "제공된 회의 전사문을 참고하여 정확하게 답변하세요.\n"
@@ -1033,6 +1040,19 @@ class WikiDigestConfig(BaseModel):
     max_per_owner: int = Field(default=50, ge=1)
 
 
+class WikiGroundingConfig(BaseModel):
+    """Wiki 주장과 인용 발화를 대조하는 로컬 검수의 실행 예산."""
+
+    enabled: bool = True
+    batch_size: int = Field(default=6, ge=1, le=16)
+    max_claims: int = Field(default=48, ge=1, le=256)
+    max_input_chars: int = Field(default=24000, ge=1000, le=64000)
+    max_item_chars: int = Field(default=6000, ge=100, le=8000)
+    max_output_tokens: int = Field(default=2048, ge=128, le=8192)
+    max_reference_repairs: int = Field(default=1, ge=0, le=1, strict=True)
+    timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+
+
 class WikiConfig(BaseModel):
     """LLM Wiki Phase 1 설정 (PRD §5.1, §9 Phase 1).
 
@@ -1068,6 +1088,8 @@ class WikiConfig(BaseModel):
     lint_interval: int = Field(default=5, ge=1)
     confidence_threshold: int = Field(default=7, ge=0, le=10)
     dry_run: bool = True
+    grounding: WikiGroundingConfig = Field(default_factory=WikiGroundingConfig)
+    """실제 발화와 주장 의미를 대조한다. 실패/불명확 결과는 검토 대상으로 보류한다."""
 
     # ─── Phase 5 신규 ─────────────────────────────────────────────────
     router_enabled: bool = False

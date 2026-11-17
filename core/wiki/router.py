@@ -126,9 +126,17 @@ _TIME_RANGE_KEYWORDS: re.Pattern[str] = re.compile(
 )
 
 
-# ─── WIKI 강시그널 (4종, confidence 9) ──────────────────────────────────────
+# ─── WIKI 강시그널 (5종, confidence 9) ──────────────────────────────────────
 
 _WIKI_SIGNALS: tuple[_Signal, ...] = (
+    # 현재 확정된 결정을 직접 요청한 경우 — 원문 발언 검색과 구분한다.
+    _Signal(
+        signal_id="current_confirmed_decisions",
+        pattern=re.compile(r"현재\s*확정된\s*결정", re.IGNORECASE),
+        decision=RouteDecision.WIKI,
+        confidence=9,
+        reason="현재 확정된 결정 질의",
+    ),
     # time_range_decisions: 시간 범위 + 결정/액션 동시 등장
     _Signal(
         signal_id="time_range_decisions",

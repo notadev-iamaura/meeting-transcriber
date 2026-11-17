@@ -32,6 +32,8 @@ from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
 from core.wiki.extractors.decision import ExtractedDecision, _strip_paren_latin
 from core.wiki.llm_client import WikiLLMClient, sanitize_utterance_text
 from core.wiki.models import Citation
+from core.wiki.person_identity import is_named_person_identity
+from core.wiki.store import WikiStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +264,7 @@ _EXTRACT_SYSTEM_PROMPT = """\
 
 규칙:
 1. SPEAKER_XX 화자라도 speaker_name_map 에 매핑이 있으면 한국어 이름 사용.
-2. 매핑 없고 한국어 이름 추론도 불확실하면 추출하지 않음.
+2. 매핑이 없는 SPEAKER_XX·UNKNOWN 등의 익명 화자는 추출하지 않음. 이름 추측 금지.
 3. 한국어 고유명사 외국어 병기 금지.
 4. 식별 불가하면 빈 배열 [].
 5. citation_ts 는 반드시 발화 목록에 있는 실제 시각을 사용.
@@ -335,26 +337,38 @@ class PersonExtractor:
         if not utterances:
             return []
 
-        # 환각 방지용 화자 집합 — action_item.py 의 _resolve_owner 와 동일 패턴
-        raw_speakers: set[str] = {getattr(u, "speaker", "") for u in utterances}
-        # speaker_name_map 의 값(한국어이름)도 허용 집합에 포함
-        allowed_names: set[str] = set(raw_speakers)
-        if speaker_name_map:
-            allowed_names.update(speaker_name_map.values())
+        # 화자 번호는 회의마다 재사용되므로 여러 회의의 인물 식별자가 아니다.
+        raw_speakers = {
+            value.strip()
+            for utterance in utterances
+            if isinstance(value := getattr(utterance, "speaker", None), str) and value.strip()
+        }
+        valid_name_map = {
+            key: value.strip()
+            for key, value in (speaker_name_map or {}).items()
+            if key in raw_speakers and is_named_person_identity(value)
+        }
+        allowed_names = {name for name in raw_speakers if is_named_person_identity(name)}
+        allowed_names.update(valid_name_map.values())
+        if not allowed_names:
+            return []
 
         # utterances 직렬화
         lines: list[str] = []
         for utt in utterances:
-            text = sanitize_utterance_text(getattr(utt, "text", ""))
             speaker = getattr(utt, "speaker", "UNKNOWN")
+            speaker = speaker.strip() if isinstance(speaker, str) else "UNKNOWN"
+            if speaker not in valid_name_map and not is_named_person_identity(speaker):
+                continue
+            text = sanitize_utterance_text(getattr(utt, "text", ""))
             start = getattr(utt, "start", 0.0)
             ts_str = self._seconds_to_hhmmss(float(start))
             lines.append(f"[{ts_str}] {speaker}: {text}")
 
         # speaker_name_map 컨텍스트 직렬화
         map_text = ""
-        if speaker_name_map:
-            pairs = ", ".join(f"{k}={v}" for k, v in speaker_name_map.items())
+        if valid_name_map:
+            pairs = ", ".join(f"{k}={v}" for k, v in valid_name_map.items())
             map_text = f"## 화자 이름 매핑\n{pairs}\n\n"
 
         user_prompt = (
@@ -401,7 +415,7 @@ class PersonExtractor:
                     item,
                     meeting_id=meeting_id,
                     meeting_date=meeting_date,
-                    speaker_name_map=speaker_name_map,
+                    speaker_name_map=valid_name_map,
                     allowed_names=allowed_names,
                 )
             except Exception as exc:  # noqa: BLE001 — 항목별 실패는 skip
@@ -443,13 +457,29 @@ class PersonExtractor:
         if not persons:
             return []
 
+        # 직접 호출도 익명·불일치 slug를 기존 인물 원장에 병합하지 못하게 한다.
+        identified_persons: list[ExtractedPerson] = []
+        for person in persons:
+            if not is_named_person_identity(person.name) or not is_named_person_identity(
+                person.name_normalized
+            ):
+                continue
+            try:
+                if person.name_normalized != self._normalize_person_slug(person.name):
+                    continue
+            except ValueError:
+                continue
+            identified_persons.append(person)
+        if not identified_persons:
+            return []
+
         # confidence 내림차순 정렬 + 상위 N건 cap
-        sorted_persons = sorted(persons, key=lambda p: p.confidence, reverse=True)
+        sorted_persons = sorted(identified_persons, key=lambda p: p.confidence, reverse=True)
         capped = sorted_persons[:_MAX_PERSONS_PER_MEETING]
-        if len(persons) > _MAX_PERSONS_PER_MEETING:
+        if len(identified_persons) > _MAX_PERSONS_PER_MEETING:
             logger.info(
                 "PersonExtractor.render_or_update_pages: %d건 중 상위 %d건만 처리 (R3 상한)",
-                len(persons),
+                len(identified_persons),
                 _MAX_PERSONS_PER_MEETING,
             )
 
@@ -461,9 +491,18 @@ class PersonExtractor:
 
             # 기존 페이지 확인
             existing_state: ExistingPersonState | None = None
-            existing_raw = self._read_existing(existing_store, rel_path)
+            try:
+                existing_raw = self._read_existing(existing_store, rel_path)
+            except (OSError, ValueError, WikiStoreError) as exc:
+                logger.warning(
+                    "인물 원장 읽기 실패 — 기존 페이지 보존: path=%s, error=%r", rel_path, exc
+                )
+                return None
             if existing_raw:
                 existing_state = self._parse_existing_person_state(existing_raw, Path(rel_path))
+                if existing_state is None:
+                    logger.warning("기존 인물 메타데이터 불명 — 보존: path=%s", rel_path)
+                    return None
 
             # LLM 호출 — role/topic 보강
             try:
@@ -500,9 +539,11 @@ class PersonExtractor:
                     role_update
                     and role_update.strip()
                     and role_update.strip() != (final_role or "")
+                    and meeting_date.isoformat() >= existing_state.last_seen_date
                 ):
                     final_role = role_update.strip()
-                final_first_seen = existing_state.first_seen_date
+                final_first_seen = min(existing_state.first_seen_date, meeting_date.isoformat())
+                final_last_seen = max(existing_state.last_seen_date, meeting_date.isoformat())
                 final_meetings_count = existing_state.meetings_count
                 if meeting_id not in existing_state.seen_meeting_ids:
                     final_meetings_count += 1
@@ -514,6 +555,7 @@ class PersonExtractor:
                     else person.role
                 )
                 final_first_seen = person.first_seen_date
+                final_last_seen = meeting_date.isoformat()
                 final_meetings_count = 1
                 existing_topics = frozenset()
 
@@ -563,7 +605,7 @@ class PersonExtractor:
                 name_normalized=person.name_normalized,
                 role=final_role,
                 first_seen_date=final_first_seen,
-                last_seen_date=meeting_date.isoformat(),
+                last_seen_date=final_last_seen,
                 meetings_count=final_meetings_count,
                 merged_topics=merged_topics,
                 recent_decisions_lines=recent_decisions_lines,
@@ -573,6 +615,11 @@ class PersonExtractor:
                 meeting_id=meeting_id,
             )
             content = _strip_paren_latin(content)
+            seen_ids = set(existing_state.seen_meeting_ids) if existing_state else set()
+            seen_ids.add(meeting_id)
+            content = self._inject_source_meetings(content, seen_ids)
+            if existing_raw:
+                content = self._preserve_topic_history(content, existing_raw)
 
             return (rel_path, content, person.confidence)
 
@@ -658,12 +705,29 @@ class PersonExtractor:
         try:
             meetings_count = int(str(fm.get("meetings_count", 0) or 0))
         except (TypeError, ValueError):
-            meetings_count = 0
+            return None
+        try:
+            if (
+                not name
+                or PersonExtractor._normalize_person_slug(name) != rel_path.stem
+                or meetings_count < 0
+                or date.fromisoformat(first_seen) > date.fromisoformat(last_seen)
+            ):
+                return None
+        except ValueError:
+            return None
 
         # 본문에서 등장한 meeting_id 집합
         seen_ids: set[str] = set()
         for match in _CITATION_PATTERN.finditer(body):
             seen_ids.add(match.group(1))
+        source_meetings = fm.get("source_meetings", [])
+        if isinstance(source_meetings, list):
+            seen_ids.update(
+                value.strip().strip("\"'")
+                for value in source_meetings
+                if isinstance(value, str) and value.strip()
+            )
 
         # "## 자주 언급하는 주제" 섹션 파싱
         existing_topics: set[str] = set()
@@ -699,20 +763,64 @@ class PersonExtractor:
 
     @staticmethod
     def _read_existing(store: Any, rel_path: str) -> str | None:
-        """existing_store.read_page 를 호출하여 기존 페이지 본문 반환.
-
-        store 가 KeyError / WikiStoreError / 기타 예외를 raise 하면 None 반환.
-        """
+        """frontmatter 포함 원문을 읽고 부재만 None으로 처리한다."""
         try:
+            raw_reader = getattr(store, "read_raw_page", None)
+            if callable(raw_reader):
+                raw = raw_reader(Path(rel_path))
+                if isinstance(raw, str):
+                    return raw
             result = store.read_page(rel_path)
-        except Exception as exc:  # noqa: BLE001 — 기존 페이지 없음 = None
-            logger.debug("기존 페이지 없음: %s (%r)", rel_path, exc)
+        except KeyError:
             return None
+        except WikiStoreError as exc:
+            if exc.reason == "page_not_found":
+                return None
+            raise
         if isinstance(result, str):
             return result
         if hasattr(result, "content"):
-            return getattr(result, "content", None)
+            content = getattr(result, "content", None)
+            metadata = getattr(result, "frontmatter", None)
+            if isinstance(content, str) and isinstance(metadata, dict) and metadata:
+                fields = [
+                    f"{key}: {json.dumps(value, ensure_ascii=False, default=str)}"
+                    for key, value in metadata.items()
+                ]
+                return "---\n" + "\n".join(fields) + "\n---\n\n" + content
+            return content if isinstance(content, str) else None
         return None
+
+    @staticmethod
+    def _inject_source_meetings(content: str, meetings: set[str]) -> str:
+        """같은 회의를 재처리해도 참석 횟수를 중복 증가시키지 않게 원장을 남긴다."""
+        lines = content.splitlines()
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                lines.insert(
+                    index, f"source_meetings: {json.dumps(sorted(meetings), ensure_ascii=False)}"
+                )
+                return "\n".join(lines) + "\n"
+        return content
+
+    @staticmethod
+    def _preserve_topic_history(content: str, previous: str) -> str:
+        """예전 주제의 원문 인용과 줄바꿈을 보존한 채 새 주제를 추가한다."""
+        pattern = re.compile(
+            r"^##\s*자주\s*언급하는\s*주제\s*\n(.*?)(?=^##\s|^<!--\s*confidence:|\Z)", re.M | re.S
+        )
+        old_match, new_match = pattern.search(previous), pattern.search(content)
+        if old_match is None or new_match is None:
+            return content
+        lines: list[str] = []
+        for part in (old_match.group(1), new_match.group(1)):
+            for line in part.splitlines():
+                if line.strip() and line.strip() != "_(없음)_" and line not in lines:
+                    lines.append(line)
+        if not lines:
+            return content
+        replacement = "## 자주 언급하는 주제\n\n" + "\n".join(lines) + "\n\n"
+        return content[: new_match.start()] + replacement + content[new_match.end() :]
 
     def _build_extracted_person(
         self,
@@ -745,6 +853,9 @@ class PersonExtractor:
             name = speaker_name_map[raw_name]
         else:
             name = raw_name
+
+        if not is_named_person_identity(name):
+            return None
 
         # 환각 방지 — name 이 허용된 화자 집합에 없으면 skip (R1/R9 게이트)
         # action_item.py 의 _resolve_owner 와 동일 정책 적용

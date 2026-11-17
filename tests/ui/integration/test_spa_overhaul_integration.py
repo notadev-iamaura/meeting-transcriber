@@ -1949,6 +1949,8 @@ def test_settings_wiki_backfill_panel_calls_start_cancel_resume_retry(
                         "processed": 1,
                         "total": 2,
                         "succeeded": 1,
+                        "published": 0,
+                        "pending": 1,
                         "failed": 1,
                         "errors": [
                             {
@@ -1985,6 +1987,8 @@ def test_settings_wiki_backfill_panel_calls_start_cancel_resume_retry(
         assert "start" in calls
         assert "status" in calls
         assert "실패 1" in page.locator("#wikiBackfillProgressText").inner_text()
+        assert "게시 0" in page.locator("#wikiBackfillProgressText").inner_text()
+        assert "검토 필요 1" in page.locator("#wikiBackfillProgressText").inner_text()
         assert "deadbeef" in page.locator("#wikiBackfillErrors").inner_text()
 
         page.locator("#wikiBackfillCancelBtn").click()

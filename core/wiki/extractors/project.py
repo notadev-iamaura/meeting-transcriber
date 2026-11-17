@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -27,8 +28,11 @@ from typing import Any, Protocol
 
 from core.wiki.extractors.action_item import NewActionItem, OpenActionItem
 from core.wiki.extractors.decision import ExtractedDecision, _strip_paren_latin
+from core.wiki.generated_document import normalize_generated_document
 from core.wiki.llm_client import WikiLLMClient, sanitize_utterance_text
 from core.wiki.models import Citation
+from core.wiki.person_identity import is_named_person_identity
+from core.wiki.store import WikiStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +143,16 @@ class ExistingProject:
     existing_issues: tuple[str, ...]
     seen_meeting_ids: frozenset[str]
     raw_content: str
+    current_status_lines: tuple[str, ...] = ()
+
+
+class StatusTransitions(dict[str, str]):
+    """기존 dict 계약을 유지하며 각 전환을 뒷받침하는 인용을 함께 전달한다."""
+
+    def __init__(self) -> None:
+        """전환 목록과 검증된 인용 목록을 초기화한다."""
+        super().__init__()
+        self.citations: dict[str, Citation] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -152,6 +166,15 @@ _CITATION_PATTERN: re.Pattern[str] = re.compile(
 )
 
 
+def _utterance_value(utterance: Any, key: str, default: Any) -> Any:
+    """객체·체크포인트 dict 양쪽 발화의 필드를 읽는다."""
+    return (
+        utterance.get(key, default)
+        if isinstance(utterance, Mapping)
+        else getattr(utterance, key, default)
+    )
+
+
 def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     """HH:MM:SS → Citation 변환."""
     if not ts_str:
@@ -162,6 +185,8 @@ def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     try:
         h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
     except ValueError:
+        return None
+    if h < 0 or not 0 <= m < 60 or not 0 <= s < 60:
         return None
     return Citation(
         meeting_id=meeting_id,
@@ -325,6 +350,10 @@ last_updated: YYYY-MM-DD
 6. 기존 페이지가 있으면 created_at + 기존 타임라인 항목 보존, 새 항목만 추가.
 7. status 전환 시 옛 status 는 ~~취소선~~ + 인용 유지.
 8. 마지막 줄에 confidence 마커 필수.
+9. owner/started/target은 추출 정보 또는 기존 페이지에 제공된 값만 사용하고, 미제공 필드는
+   생략한다. 회의 날짜를 착수일·목표일로 추정하거나 익명 화자 라벨을 담당자 이름으로 쓰지 않는다.
+10. 질문·제안·조건부 발언을 합의나 확정 사실로 바꾸지 않는다. 질문에 대한 명시적 확답이
+    있어야 확정으로 쓰고, 질문과 확답이 모두 근거이면 양쪽의 정확한 인용 마커를 함께 복사한다.
 """
 
 
@@ -343,6 +372,35 @@ class ProjectExtractor:
             llm: WikiLLMClient (실구현 또는 mock).
         """
         self._llm: WikiLLMClient = llm
+
+    @classmethod
+    def load_existing_projects(
+        cls,
+        store: Any,
+        projects: list[ExtractedProject],
+        *,
+        meeting_date: date,
+    ) -> list[ExistingProject]:
+        """현재 회의에 언급된 프로젝트의 실제 이전 상태만 안전하게 읽는다."""
+        existing: list[ExistingProject] = []
+        seen: set[str] = set()
+        for project in projects:
+            if project.slug in seen:
+                continue
+            seen.add(project.slug)
+            path = Path("projects") / f"{project.slug}.md"
+            try:
+                raw = cls._read_existing(store, str(path))
+                state = cls._parse_existing_project_state(raw, path) if raw else None
+            except (OSError, WikiStoreError, ValueError) as exc:
+                logger.warning("프로젝트 기존 상태 읽기 실패: path=%s, error=%r", path, exc)
+                continue
+            if state is None:
+                continue
+            previous_date = _parse_iso_date((state.last_updated or "").split("T", 1)[0])
+            if previous_date is not None and previous_date <= meeting_date:
+                existing.append(state)
+        return existing
 
     async def extract_projects(
         self,
@@ -369,9 +427,9 @@ class ProjectExtractor:
         # utterances 직렬화
         lines: list[str] = []
         for utt in utterances:
-            text = sanitize_utterance_text(getattr(utt, "text", ""))
-            speaker = getattr(utt, "speaker", "UNKNOWN")
-            start = getattr(utt, "start", 0.0)
+            text = sanitize_utterance_text(_utterance_value(utt, "text", ""))
+            speaker = _utterance_value(utt, "speaker", "UNKNOWN")
+            start = _utterance_value(utt, "start", 0.0)
             ts_str = self._seconds_to_hhmmss(float(start))
             lines.append(f"[{ts_str}] {speaker}: {text}")
 
@@ -469,9 +527,9 @@ class ProjectExtractor:
 
         utt_lines: list[str] = []
         for utt in utterances:
-            text = sanitize_utterance_text(getattr(utt, "text", ""))
-            speaker = getattr(utt, "speaker", "UNKNOWN")
-            start = getattr(utt, "start", 0.0)
+            text = sanitize_utterance_text(_utterance_value(utt, "text", ""))
+            speaker = _utterance_value(utt, "speaker", "UNKNOWN")
+            start = _utterance_value(utt, "start", 0.0)
             ts_str = self._seconds_to_hhmmss(float(start))
             utt_lines.append(f"[{ts_str}] {speaker}: {text}")
 
@@ -496,7 +554,7 @@ class ProjectExtractor:
             return {}
 
         existing_slug_set = {p.slug for p in existing_projects}
-        transitions: dict[str, str] = {}
+        transitions = StatusTransitions()
 
         for item in parsed:
             if not isinstance(item, dict):
@@ -521,7 +579,27 @@ class ProjectExtractor:
                     new_status,
                 )
                 continue
+            citation = _citation_from_ts(meeting_id, str(item.get("reason_citation_ts", "")))
+            if citation is None:
+                continue
+            has_source = False
+            for utterance in utterances:
+                try:
+                    start = int(float(_utterance_value(utterance, "start", None)))
+                    end = int(float(_utterance_value(utterance, "end", None)))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    start <= citation.timestamp_seconds <= end
+                    and str(_utterance_value(utterance, "text", "")).strip()
+                ):
+                    has_source = True
+                    break
+            if not has_source:
+                logger.warning("프로젝트 상태 전환 인용 부재 — 보존: slug=%s", slug)
+                continue
             transitions[slug] = new_status
+            transitions.citations[slug] = citation
 
         return transitions
 
@@ -574,12 +652,34 @@ class ProjectExtractor:
 
             # 기존 페이지 확인
             existing_state: ExistingProject | None = None
-            existing_raw = self._read_existing(existing_store, rel_path)
+            try:
+                existing_raw = self._read_existing(existing_store, rel_path)
+            except (OSError, WikiStoreError, ValueError) as exc:
+                logger.warning("프로젝트 원장 읽기 실패 — 보존: path=%s, error=%r", rel_path, exc)
+                return None
             if existing_raw:
                 existing_state = self._parse_existing_project_state(existing_raw, Path(rel_path))
+                if existing_state is None:
+                    logger.warning("기존 프로젝트 메타데이터 불명 — 보존: path=%s", rel_path)
+                    return None
+                previous_date = _parse_iso_date(
+                    (existing_state.last_updated or "").split("T", 1)[0]
+                )
+                if previous_date is None or previous_date > meeting_date:
+                    logger.info("과거·날짜불명 프로젝트 갱신 보류: path=%s", rel_path)
+                    return None
 
-            # status 결정 — transitions 우선, 없으면 project.status, 신규면 그대로
-            final_status = status_transitions.get(project.slug, project.status)
+            # 기존 상태는 별도 전환 검사를 통과한 경우만 바꾼다.
+            fallback_status = existing_state.status if existing_state else project.status
+            citations = getattr(status_transitions, "citations", {})
+            transition_citation = citations.get(project.slug)
+            if not isinstance(transition_citation, Citation):
+                transition_citation = None
+            final_status = (
+                status_transitions.get(project.slug, fallback_status)
+                if transition_citation is not None
+                else fallback_status
+            )
             try:
                 self._validate_status(final_status)
             except ValueError as exc:
@@ -613,17 +713,81 @@ class ProjectExtractor:
                 )
                 return None
 
+            # 전체 문서 wrapper를 먼저 벗겨 아래 상태·날짜·기존 원장 보존을 적용한다.
+            try:
+                normalized_response = normalize_generated_document(raw_response)
+            except ValueError:
+                logger.warning(
+                    "프로젝트 문서 wrapper 거부 — 기존 원장 보존: reason=malformed_document"
+                )
+                return None
+
             # 후처리 — 한국어 고유명사 영문 병기 제거
-            content = _strip_paren_latin(raw_response)
+            content = _strip_paren_latin(normalized_response)
 
             # 검증된 final_status 강제 주입 — LLM 이 임의 status 를 쓰는 환각 차단 (R9)
             content = self._inject_frontmatter_field(content, "status", final_status)
+            content = self._inject_frontmatter_field(
+                content, "last_updated", meeting_date.isoformat()
+            )
 
-            # 기존 created_at / started 보존 (LLM 이 누락했을 경우 강제 주입)
-            if existing_state is not None and existing_state.started:
-                content = self._inject_frontmatter_field(
-                    content, "started", existing_state.started
+            # 렌더 모델의 추정을 버리고 구조화된 입력·검증된 기존 값만 반영한다.
+            owner = project.owner if is_named_person_identity(project.owner) else None
+            if owner is None and existing_state is not None:
+                owner = existing_state.owner
+            started = existing_state.started if existing_state is not None else None
+            if started is None and project.started is not None:
+                started = project.started.isoformat()
+            target = project.target.isoformat() if project.target is not None else None
+            if target is None and existing_state is not None:
+                target = existing_state.target
+            for key, value in (("owner", owner), ("started", started), ("target", target)):
+                content = self._set_optional_frontmatter_field(content, key, value)
+
+            # 프롬프트만으로는 누적 원장이 유실될 수 있으므로 프로그램으로 보존한다.
+            if existing_state is not None:
+                if transition_citation is not None:
+                    label = {
+                        "in-progress": "진행 중",
+                        "blocked": "진행 차단",
+                        "shipped": "출시 완료",
+                        "cancelled": "취소",
+                    }[final_status]
+                    content = self._replace_section(
+                        content,
+                        "현재 상태",
+                        [
+                            f"프로젝트 상태: {label} ({final_status}). "
+                            f"[meeting:{transition_citation.meeting_id}@{transition_citation.timestamp_str}]"
+                        ],
+                    )
+                elif existing_state.current_status_lines:
+                    content = self._replace_section(
+                        content, "현재 상태", list(existing_state.current_status_lines)
+                    )
+                prior_metadata, _ = self._parse_frontmatter(existing_raw or "")
+                if prior_metadata.get("created_at"):
+                    content = self._inject_frontmatter_field(
+                        content, "created_at", str(prior_metadata["created_at"])
+                    )
+                entry = project.timeline_entry
+                if entry is not None and not entry.entry_date:
+                    entry = TimelineEntry(
+                        meeting_date.isoformat(), entry.description, entry.citation
+                    )
+                content = self._replace_section(
+                    content,
+                    "진행 타임라인",
+                    self._merge_timeline(existing_state.existing_timeline, entry),
                 )
+                issues = list(existing_state.existing_issues)
+                for description, citation in project.unresolved_issues:
+                    line = (
+                        f"- {description} [meeting:{citation.meeting_id}@{citation.timestamp_str}]"
+                    )
+                    if line not in issues:
+                        issues.append(line)
+                content = self._replace_section(content, "미해결 이슈", issues)
 
             return (rel_path, content, project.confidence)
 
@@ -708,18 +872,57 @@ class ProjectExtractor:
     def _read_existing(store: Any, rel_path: str) -> str | None:
         """existing_store.read_page 결과를 안전하게 반환.
 
-        store 가 KeyError / WikiStoreError / 기타 예외를 raise 하면 None 반환.
+        실제 파일은 frontmatter를 포함한 원문으로 읽으며, 부재와 읽기 실패를 구분한다.
         """
         try:
-            result = store.read_page(rel_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("기존 프로젝트 페이지 없음: %s (%r)", rel_path, exc)
+            raw_reader = getattr(store, "read_raw_page", None)
+            if callable(raw_reader):
+                raw = raw_reader(Path(rel_path))
+                if isinstance(raw, str):
+                    return raw
+            result = store.read_page(Path(rel_path))
+        except KeyError:
             return None
+        except WikiStoreError as exc:
+            if exc.reason == "page_not_found":
+                return None
+            raise
         if isinstance(result, str):
             return result
         if hasattr(result, "content"):
-            return getattr(result, "content", None)
+            content = getattr(result, "content", None)
+            metadata = getattr(result, "frontmatter", None)
+            if isinstance(content, str) and isinstance(metadata, dict) and metadata:
+                fields = [
+                    f"{key}: {json.dumps(value, ensure_ascii=False, default=str)}"
+                    for key, value in metadata.items()
+                ]
+                return "---\n" + "\n".join(fields) + "\n---\n\n" + content
+            return content if isinstance(content, str) else None
         return None
+
+    @staticmethod
+    def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+        """저장소와 같은 스키마로 원문 메타데이터를 읽는다."""
+        from core.wiki.store import _parse_frontmatter
+
+        metadata, body = _parse_frontmatter(content)
+        return metadata, body
+
+    @staticmethod
+    def _replace_section(content: str, title: str, lines: list[str]) -> str:
+        """다른 섹션을 보존하면서 누적 섹션을 원장 라인으로 대체한다."""
+        block = f"## {title}\n\n" + "\n".join(lines) + "\n"
+        pattern = re.compile(
+            rf"^##\s+{re.escape(title)}\s*\n.*?(?=^##\s|^<!--\s*confidence:|\Z)",
+            re.M | re.S,
+        )
+        match = pattern.search(content)
+        if match:
+            return content[: match.start()] + block + "\n" + content[match.end() :]
+        confidence = re.search(r"^<!--\s*confidence:", content, re.M)
+        insert_at = confidence.start() if confidence else len(content)
+        return content[:insert_at].rstrip() + "\n\n" + block + "\n" + content[insert_at:]
 
     @staticmethod
     def _parse_existing_project_state(page_content: str, rel_path: Path) -> ExistingProject | None:
@@ -744,13 +947,15 @@ class ProjectExtractor:
             return None
 
         slug = str(fm.get("slug", "") or "")
-        status = str(fm.get("status", "in-progress") or "in-progress")
+        status = str(fm.get("status", "") or "")
+        if not slug or slug != rel_path.stem or status not in _VALID_STATUSES:
+            return None
         owner_raw = fm.get("owner")
-        owner: str | None = (
-            str(owner_raw) if owner_raw is not None and str(owner_raw).strip() else None
-        )
-        started = str(fm.get("started", "") or "") or None
-        target = str(fm.get("target", "") or "") or None
+        owner: str | None = str(owner_raw).strip() if is_named_person_identity(owner_raw) else None
+        started_date = _parse_iso_date(fm.get("started"))
+        target_date = _parse_iso_date(fm.get("target"))
+        started = started_date.isoformat() if started_date is not None else None
+        target = target_date.isoformat() if target_date is not None else None
         last_updated = str(fm.get("last_updated", "") or "") or None
 
         # 본문 첫 H1 — "# 표시이름 (slug)"
@@ -767,28 +972,36 @@ class ProjectExtractor:
 
         # "## 진행 타임라인" 섹션 파싱
         timeline_lines: list[str] = []
-        timeline_section_re = re.compile(r"##\s*진행\s*타임라인\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL)
+        timeline_section_re = re.compile(
+            r"##\s*진행\s*타임라인\s*\n(.*?)(?=\n##\s|\n<!--\s*confidence:|\Z)", re.DOTALL
+        )
         m = timeline_section_re.search(body)
         if m:
             for line in m.group(1).splitlines():
-                line = line.strip()
-                if line.startswith("-"):
-                    timeline_lines.append(line)
+                if line.strip():
+                    timeline_lines.append(line.rstrip())
 
         # "## 미해결 이슈" 섹션 파싱
         issue_lines: list[str] = []
-        issue_section_re = re.compile(r"##\s*미해결\s*이슈\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL)
+        issue_section_re = re.compile(
+            r"##\s*미해결\s*이슈\s*\n(.*?)(?=\n##\s|\n<!--\s*confidence:|\Z)", re.DOTALL
+        )
         m2 = issue_section_re.search(body)
         if m2:
             for line in m2.group(1).splitlines():
-                line = line.strip()
-                if line.startswith("-"):
-                    issue_lines.append(line)
+                if line.strip():
+                    issue_lines.append(line.rstrip())
 
         # 본문 등장 meeting_id 집합
         seen_ids: set[str] = set()
         for match in _CITATION_PATTERN.finditer(body):
             seen_ids.add(match.group(1))
+
+        current_status = re.search(
+            r"##\s*현재\s*상태\s*\n(.*?)(?=\n##\s|\n<!--\s*confidence:|\Z)",
+            body,
+            re.DOTALL,
+        )
 
         return ExistingProject(
             rel_path=rel_path,
@@ -803,6 +1016,11 @@ class ProjectExtractor:
             existing_issues=tuple(issue_lines),
             seen_meeting_ids=frozenset(seen_ids),
             raw_content=page_content,
+            current_status_lines=tuple(
+                line.rstrip() for line in current_status.group(1).splitlines() if line.strip()
+            )
+            if current_status
+            else (),
         )
 
     def _build_extracted_project(
@@ -844,9 +1062,9 @@ class ProjectExtractor:
 
         owner_raw = item.get("owner")
         owner: str | None = None
-        if owner_raw is not None:
+        if is_named_person_identity(owner_raw):
             owner_str = str(owner_raw).strip()
-            owner = owner_str if owner_str and owner_str.lower() != "null" else None
+            owner = owner_str
 
         started = _parse_iso_date(item.get("started"))
         target = _parse_iso_date(item.get("target"))
@@ -930,7 +1148,7 @@ class ProjectExtractor:
         parts.append(f"name: {project.name}")
         parts.append(f"slug: {project.slug}")
         parts.append(f"status (최종): {final_status}")
-        if project.owner:
+        if is_named_person_identity(project.owner):
             parts.append(f"owner: {project.owner}")
         if project.started:
             parts.append(f"started: {project.started.isoformat()}")
@@ -977,6 +1195,24 @@ class ProjectExtractor:
             "위 정보를 바탕으로 PRD §4.2 projects 템플릿에 맞춰 마크다운 페이지를 작성하세요."
         )
         return "\n".join(parts)
+
+    @staticmethod
+    def _set_optional_frontmatter_field(content: str, key: str, value: str | None) -> str:
+        """frontmatter 안의 추정값·중복 필드를 제거하고 확인된 값만 한 번 기록한다."""
+        lines = content.splitlines(keepends=True)
+        if not lines or lines[0].rstrip("\r\n") != "---":
+            return content
+        end_idx = next(
+            (idx for idx in range(1, len(lines)) if lines[idx].rstrip("\r\n") == "---"),
+            None,
+        )
+        if end_idx is None:
+            return content
+        fields = [line for line in lines[1:end_idx] if line.partition(":")[0].strip() != key]
+        if value is not None:
+            newline = "\r\n" if lines[0].endswith("\r\n") else "\n"
+            fields.append(f"{key}: {value}{newline}")
+        return "".join([lines[0], *fields, *lines[end_idx:]])
 
     @staticmethod
     def _inject_frontmatter_field(content: str, key: str, value: str) -> str:

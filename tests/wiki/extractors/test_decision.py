@@ -22,9 +22,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import fields
 from datetime import date
+from typing import Any
+
+import pytest
 
 # ──────────────────────────────────────────────────────────────────────────────
 # [TDD Red] core/wiki/extractors/decision.py 가 없으므로
@@ -59,6 +63,7 @@ class MockDecisionLLM:
         self._responses: list[str] = list(responses)
         self.call_count: int = 0
         self.last_prompt: str | None = None
+        self.last_system_prompt: str | None = None
 
     async def generate(
         self,
@@ -80,6 +85,7 @@ class MockDecisionLLM:
             미리 설정된 응답 문자열.
         """
         self.last_prompt = user_prompt
+        self.last_system_prompt = system_prompt
         self.call_count += 1
         if not self._responses:
             return "[]"
@@ -255,8 +261,8 @@ async def test_extract_명확한_결정_1건_반환():
     assert "5월" in results[0].title or "출시" in results[0].title
 
 
-async def test_extract_citation_없는_decision은_첫_발화_시각으로_fallback한다():
-    """LLM 이 citation 을 전부 누락해도 silent skip 대신 첫 실제 발화 citation 을 붙인다."""
+async def test_extract_citation_없는_decision은_원문을_유지하고_미해결로_남긴다():
+    """복구 응답도 없으면 첫 발화를 붙이지 않고 원래 주장·배경을 보존한다."""
     raw = (
         '[{"title": "API 비용 모니터링 도입",'
         '"decision_text": "API 비용 모니터링을 도입한다.",'
@@ -282,14 +288,16 @@ async def test_extract_citation_없는_decision은_첫_발화_시각으로_fallb
     )
 
     assert len(results) == 1
-    assert results[0].citations
-    assert results[0].citations[0].timestamp_str == "00:00:12"
-    assert "[meeting:meeting_20260522_172005@00:00:12]" in results[0].decision_text
-    assert "[meeting:meeting_20260522_172005@00:00:12]" in results[0].background
+    assert results[0].citations == []
+    assert results[0].decision_text == "API 비용 모니터링을 도입한다."
+    assert results[0].background == "현재 비용 추적이 어렵다."
+    assert results[0].citation_unresolved
+    assert set(results[0].unresolved_citation_fields) == {"decision_text", "background"}
+    assert mock_llm.call_count == 2
 
 
-async def test_extract_fallback은_첫_발화가_0초면_00시_인용을_허용한다():
-    """첫 실제 발화가 0초에 시작한 회의의 fallback 00:00:00 은 정상 citation 이다."""
+async def test_extract_첫_발화가_0초라도_누락된_인용을_추정하지_않는다():
+    """실제 0초 발화가 있어도 모델이 연결하지 않은 주장의 근거로 간주하지 않는다."""
     raw = (
         '[{"title": "A/B 테스트 환경 구축 결정",'
         '"decision_text": "A/B 테스트 환경을 구축한다.",'
@@ -316,9 +324,10 @@ async def test_extract_fallback은_첫_발화가_0초면_00시_인용을_허용�
     )
 
     assert len(results) == 1
-    assert results[0].citations[0].timestamp_str == "00:00:00"
-    assert "[meeting:meeting_20260528_100000@00:00:00]" in results[0].decision_text
-    assert "[meeting:meeting_20260528_100000@00:00:00]" in results[0].background
+    assert results[0].citations == []
+    assert results[0].citation_unresolved
+    assert results[0].decision_text == "A/B 테스트 환경을 구축한다."
+    assert results[0].background == "실험 환경이 필요하다."
 
 
 async def test_extract_결정_없는_회의_빈_리스트_반환():
@@ -902,3 +911,142 @@ def test_strip_paren_latin_영영_병기는_보존():
     assert "(Application Programming Interface)" in result, (
         f"영영 병기가 잘못 제거되었다: {result}"
     )
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+async def test_extract_provides_copyable_real_meeting_markers_for_each_utterance(
+    as_dict: bool,
+) -> None:
+    """객체·dict 발화에 실제 회의 ID와 floor(start) 시각의 전체 마커를 제공한다."""
+    meeting_id = "meeting_20261104_090000"
+    rows = [
+        {"text": "안건을 검토합시다.", "speaker": "S1", "start": 12.95, "end": 17.0},
+        {"text": "다음 주 출시로 확정합니다.", "speaker": "S2", "start": 3723.99, "end": 3730.0},
+    ]
+    utterances = rows if as_dict else [_SimpleUtterance(**row) for row in rows]
+    llm = MockDecisionLLM(["[]"])
+    await DecisionExtractor(llm).extract(
+        meeting_id=meeting_id,
+        meeting_date=date(2026, 11, 4),
+        summary="안건 검토",
+        utterances=utterances,
+    )
+    prompt = llm.last_prompt or ""
+    assert f"[meeting:{meeting_id}@00:00:12] S1: 안건을 검토합시다." in prompt
+    assert f"[meeting:{meeting_id}@01:02:03] S2: 다음 주 출시로 확정합니다." in prompt
+    assert len(CITATION_PATTERN.findall(prompt)) == 2
+    assert "@00:00:00]" not in prompt
+    assert "마커 전체를 그대로 복사" in (llm.last_system_prompt or "")
+
+
+async def test_extract_copies_later_evidence_marker_without_first_utterance_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """뒤쪽 근거 줄의 마커를 그대로 복사한 출력이 첫 발화로 바뀌지 않는다."""
+    meeting_id = "actual_meeting_20261104"
+
+    class CopyEvidenceLLM:
+        """입력에 이미 제공된 근거 줄의 마커만 출력하는 모델 대역."""
+
+        model_name = "copy-evidence-only"
+
+        async def generate(self, *, system_prompt: str, user_prompt: str, **_kwargs: Any) -> str:
+            """출시를 확정하는 실제 발화의 전체 인용을 직접 복사한다."""
+            source_line = next(
+                line for line in user_prompt.splitlines() if "출시를 7월로 확정합니다" in line
+            )
+            match = CITATION_PATTERN.search(source_line)
+            assert match is not None
+            return json.dumps(
+                [
+                    {
+                        "title": "출시 일정",
+                        "decision_text": f"출시를 7월로 확정했다. {match.group(0)}",
+                        "background": "",
+                        "confidence": 9,
+                    }
+                ],
+                ensure_ascii=False,
+            )
+
+    rows = [
+        _SimpleUtterance("회의를 시작합시다.", "S1", 12.4, 14.0),
+        _SimpleUtterance("출시를 7월로 확정합니다.", "S2", 65.8, 70.0),
+    ]
+    decisions = await DecisionExtractor(CopyEvidenceLLM()).extract(
+        meeting_id=meeting_id, meeting_date=date(2026, 11, 4), summary="출시 논의", utterances=rows
+    )
+    assert len(decisions) == 1
+    assert decisions[0].citations[0].meeting_id == meeting_id
+    assert decisions[0].citations[0].timestamp_seconds == 65
+    assert f"[meeting:{meeting_id}@00:01:05]" in decisions[0].decision_text
+    assert "fallback 적용" not in caplog.text
+
+
+async def test_extract_never_fabricates_zero_time_for_invalid_utterances() -> None:
+    """누락·음수·비유한 시각을 0초로 바꿔 출처처럼 제공하지 않는다."""
+    rows = [
+        {"text": "시각 없음", "speaker": "S1", "end": 10.0},
+        {"text": "음수 시각", "speaker": "S1", "start": -1.0, "end": 10.0},
+        {"text": "NaN 시각", "speaker": "S1", "start": float("nan"), "end": 10.0},
+        {"text": "무한 시각", "speaker": "S1", "start": 1.0, "end": float("inf")},
+        {"text": "역전 구간", "speaker": "S1", "start": 12.0, "end": 11.0},
+        {"text": "bool 시각", "speaker": "S1", "start": True, "end": 10.0},
+    ]
+    llm = MockDecisionLLM(["[]"])
+    assert (
+        await DecisionExtractor(llm).extract(
+            meeting_id="valid_id", meeting_date=date(2026, 11, 4), summary="", utterances=rows
+        )
+        == []
+    )
+    assert llm.call_count == 0
+    rows.append({"text": "실제 첫 발화", "speaker": "S2", "start": 0.75, "end": 3.0})
+    await DecisionExtractor(llm).extract(
+        meeting_id="valid_id", meeting_date=date(2026, 11, 4), summary="", utterances=rows
+    )
+    prompt = llm.last_prompt or ""
+    assert "[meeting:valid_id@00:00:00] S2: 실제 첫 발화" in prompt
+    assert len(CITATION_PATTERN.findall(prompt)) == 1
+    assert "시각 없음" not in prompt
+
+
+@pytest.mark.parametrize("explicit_answer", [False, True])
+async def test_question_and_explicit_answer_output_preserves_multiple_inline_citations(
+    explicit_answer: bool,
+) -> None:
+    """모델의 질문 제외 응답과 명시 답변의 복수 인용·조건 표현을 그대로 파싱한다."""
+    mid = "fictional_question_answer"
+    question = f"[meeting:{mid}@00:00:10]"
+    answer = f"[meeting:{mid}@00:00:30]"
+    response = (
+        json.dumps(
+            [
+                {
+                    "title": "가상 행사 장소",
+                    "decision_text": f"비가 오면 실내에서 진행하기로 정했다. {question} {answer}",
+                    "background": "",
+                    "confidence": 9,
+                }
+            ],
+            ensure_ascii=False,
+        )
+        if explicit_answer
+        else "[]"
+    )
+    rows = [_SimpleUtterance("가상 행사는 어디에서 진행할까요?", "질문자", 10.0, 15.0)]
+    if explicit_answer:
+        rows.append(
+            _SimpleUtterance("비가 오면 실내에서 진행하기로 정합시다.", "응답자", 30.0, 35.0)
+        )
+    llm = MockDecisionLLM([response])
+    result = await DecisionExtractor(llm).extract(
+        meeting_id=mid, meeting_date=date(2026, 1, 1), summary="가상 행사 논의", utterances=rows
+    )
+    if not explicit_answer:
+        assert result == []
+    else:
+        assert len(result) == 1
+        assert result[0].decision_text.startswith("비가 오면")
+        assert question in result[0].decision_text and answer in result[0].decision_text
+        assert {citation.timestamp_seconds for citation in result[0].citations} == {10, 30}

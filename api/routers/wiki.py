@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -282,6 +283,28 @@ class WikiPageDetail(BaseModel):
     content: str
     frontmatter: dict[str, Any] = Field(default_factory=dict)
     citations: list[WikiCitationItem] = Field(default_factory=list)
+    revision: str = ""
+    editable_content: str = ""
+    human_edited: bool = False
+    human_reviewed: bool = False
+    related_pages: list[dict[str, str]] = Field(default_factory=list)
+    saved: bool = False
+    index_status: str = "unchanged"
+
+
+class WikiPageEditRequest(BaseModel):
+    """수정할 본문과 사용자가 읽은 원문 버전을 받는다."""
+
+    content: str = Field(min_length=1, max_length=500_000)
+    expected_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reviewed: bool = False
+
+
+class WikiPageRestoreRequest(BaseModel):
+    """복원 대상 버전과 현재 원문 버전을 받는다."""
+
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class WikiSearchResult(BaseModel):
@@ -336,6 +359,8 @@ class DigestOwnerGroup(BaseModel):
 
     owner: str
     items: list[DigestActionItem]
+    meeting_id: str | None = None
+    identity_scope: str = "named"
 
 
 class DigestDecisionItem(BaseModel):
@@ -498,16 +523,15 @@ async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> W
 
     # ── 4. 페이지 read — slug 끝에 .md 가 없으면 자동 부착 ─────────
     # core.wiki 는 wiki 활성 시에만 lazy import (RAG 경로 import 부담 0).
-    from core.wiki.store import WikiStore, WikiStoreError  # noqa: PLC0415
+    from core.wiki.store import WikiStoreError  # noqa: PLC0415
 
     rel_path_str = slug if slug.endswith(".md") else f"{slug}.md"
     rel_path = (
         Path("pending") / rel_path_str if dirname == "pending" else Path(dirname) / rel_path_str
     )
 
-    store = WikiStore(wiki_root)
     try:
-        page = store.read_page(rel_path)
+        return await asyncio.to_thread(_load_wiki_detail, wiki_root, rel_path, dirname)
     except WikiStoreError as exc:
         # WikiStore 가 path_traversal / invalid_path 를 추가로 감지할 수 있다.
         if exc.reason in {"path_traversal", "invalid_path"}:
@@ -521,27 +545,151 @@ async def get_wiki_page_detail(request: Request, page_type: str, slug: str) -> W
             detail=exc.detail or f"페이지를 찾을 수 없습니다: {rel_path}",
         ) from exc
 
-    # ── 5. citations 직렬화 ────────────────────────────────────────
-    citation_items: list[WikiCitationItem] = [
-        WikiCitationItem(
-            meeting_id=c.meeting_id,
-            timestamp=c.timestamp_str,
-            timestamp_seconds=c.timestamp_seconds,
+
+def _load_wiki_detail(root: Path, rel_path: Path, dirname: str) -> WikiPageDetail:
+    """동일 버전의 본문·메타데이터·연결 정보를 서버 루프 밖에서 읽는다."""
+    from core.wiki.editing import editable_wiki_content, page_revision, related_pages
+    from core.wiki.store import WikiStore, WikiStoreError, _metadata_flag
+
+    store = WikiStore(root)
+    with store.mutation_lock:
+        page = store.read_page(rel_path)
+        revision = page_revision(store.read_raw_page(rel_path))
+        try:
+            related = related_pages(store, rel_path)
+        except (WikiStoreError, OSError, ValueError) as exc:
+            logger.warning("Wiki 연결 목록 조회를 보류합니다: %r", exc)
+            related = []
+        return WikiPageDetail(
+            path=str(rel_path),
+            type=dirname,
+            title=_extract_title_from_markdown(page.frontmatter, page.content),
+            content=page.content,
+            frontmatter=dict(page.frontmatter),
+            citations=[
+                WikiCitationItem(
+                    meeting_id=c.meeting_id,
+                    timestamp=c.timestamp_str,
+                    timestamp_seconds=c.timestamp_seconds,
+                )
+                for c in page.citations
+            ],
+            revision=revision,
+            editable_content=editable_wiki_content(page.content),
+            human_edited=_metadata_flag(page.frontmatter.get("human_edited")),
+            human_reviewed=_metadata_flag(page.frontmatter.get("human_reviewed")),
+            related_pages=related,
         )
-        for c in page.citations
-    ]
 
-    # ── 6. title 결정 (frontmatter > 첫 H1) ────────────────────────
-    title = _extract_title_from_markdown(page.frontmatter, page.content)
 
-    return WikiPageDetail(
-        path=str(rel_path),
-        type=dirname,  # 응답은 항상 복수형(디렉토리명) 으로 통일
-        title=title,
-        content=page.content,
-        frontmatter=dict(page.frontmatter),
-        citations=citation_items,
+def _edit_path(request: Request, page_type: str, slug: str) -> tuple[Path, Path]:
+    """수동 편집에 허용된 로컬 Wiki 페이지 경로를 검증한다."""
+    from api.routers.transcription_models import require_loopback_server
+    from core.wiki.store import WikiStoreError, _validate_relative_path
+
+    require_loopback_server(_get_config(request), request, feature_label="Wiki 수정")
+    root = _resolve_wiki_root(request)
+    if root is None:
+        raise HTTPException(status_code=404, detail="위키가 활성화되어 있지 않습니다.")
+    dirname = _WIKI_PAGE_TYPE_TO_DIRNAME.get(page_type)
+    if dirname is None or not slug:
+        raise HTTPException(status_code=400, detail="유효하지 않은 Wiki 페이지입니다.")
+    rel = Path(dirname) / (slug if slug.endswith(".md") else f"{slug}.md")
+    try:
+        _validate_relative_path(rel)
+        if any(part.startswith(".") for part in rel.parts) or "\\" in str(rel):
+            raise WikiStoreError("invalid_path")
+    except WikiStoreError as exc:
+        raise HTTPException(status_code=400, detail="유효하지 않은 Wiki 경로입니다.") from exc
+    return root, rel
+
+
+def _edit_error(exc: Exception) -> HTTPException:
+    """수동 수정 실패를 일관된 HTTP 상태로 변환한다."""
+    reason = getattr(exc, "reason", "save_failed")
+    code = (
+        409
+        if reason == "revision_conflict"
+        else 404
+        if reason in {"page_not_found", "version_not_found"}
+        else 400
     )
+    return HTTPException(
+        status_code=code, detail=getattr(exc, "detail", None) or "Wiki 수정에 실패했습니다."
+    )
+
+
+def _save_wiki_edit(
+    root: Path, rel: Path, body: WikiPageEditRequest | WikiPageRestoreRequest
+) -> WikiPageDetail:
+    """이력·본문 게시 뒤 키워드 색인을 갱신하고 저장 결과를 반환한다."""
+    from core.wiki.editing import WikiEditor
+    from core.wiki.search_index import WikiSearchIndex
+    from core.wiki.store import WikiStore
+
+    store = WikiStore(root)
+    with store.mutation_lock:
+        editor = WikiEditor(store)
+        if isinstance(body, WikiPageEditRequest):
+            editor.save(
+                rel,
+                content=body.content,
+                expected_revision=body.expected_revision,
+                reviewed=body.reviewed,
+            )
+        else:
+            editor.restore(rel, revision=body.revision, expected_revision=body.expected_revision)
+        index_status = "keyword_ready_semantic_pending"
+        try:
+            WikiSearchIndex(root).upsert_page(store.read_page(rel))
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            logger.warning("Wiki 본문은 저장됐으나 키워드 색인 갱신을 보류합니다: %r", exc)
+            index_status = "keyword_rebuild_needed"
+        # 응답도 같은 잠금 안에서 읽어 실제 저장한 버전과 대응시킨다.
+        result = _load_wiki_detail(root, rel, rel.parts[0])
+        return result.model_copy(update={"saved": True, "index_status": index_status})
+
+
+@router.put("/wiki/pages/{page_type}/{slug:path}", response_model=WikiPageDetail)
+async def edit_wiki_page(
+    request: Request, page_type: str, slug: str, body: WikiPageEditRequest
+) -> WikiPageDetail:
+    """원문 버전이 일치할 때만 수동 수정하며 사람의 수정본을 보호한다."""
+    from core.wiki.store import WikiStoreError
+
+    root, rel = _edit_path(request, page_type, slug)
+    try:
+        return await asyncio.to_thread(_save_wiki_edit, root, rel, body)
+    except WikiStoreError as exc:
+        raise _edit_error(exc) from exc
+
+
+@router.get("/wiki/history/{page_type}/{slug:path}")
+async def wiki_page_history(request: Request, page_type: str, slug: str) -> dict[str, Any]:
+    """현재와 과거 Wiki 본문을 버전별로 반환한다."""
+    from core.wiki.editing import WikiEditor
+    from core.wiki.store import WikiStore, WikiStoreError
+
+    root, rel = _edit_path(request, page_type, slug)
+    try:
+        revisions = await asyncio.to_thread(WikiEditor(WikiStore(root)).history, rel)
+    except WikiStoreError as exc:
+        raise _edit_error(exc) from exc
+    return {"revisions": revisions}
+
+
+@router.post("/wiki/restore/{page_type}/{slug:path}", response_model=WikiPageDetail)
+async def restore_wiki_page(
+    request: Request, page_type: str, slug: str, body: WikiPageRestoreRequest
+) -> WikiPageDetail:
+    """과거 본문을 새 수동 수정본으로 복원하고 원본과 이력을 보존한다."""
+    from core.wiki.store import WikiStoreError
+
+    root, rel = _edit_path(request, page_type, slug)
+    try:
+        return await asyncio.to_thread(_save_wiki_edit, root, rel, body)
+    except WikiStoreError as exc:
+        raise _edit_error(exc) from exc
 
 
 @router.get(
@@ -704,7 +852,11 @@ async def get_wiki_digest(request: Request) -> WikiDigestResponse:
 
     from datetime import date  # noqa: PLC0415
 
-    from core.wiki.digest import build_digest  # noqa: PLC0415
+    from core.wiki.digest import (  # noqa: PLC0415
+        ActionOwnerScope,
+        build_digest,
+        owner_group_sort_key,
+    )
     from core.wiki.store import WikiStore  # noqa: PLC0415
 
     config = _get_config(request)
@@ -721,7 +873,11 @@ async def get_wiki_digest(request: Request) -> WikiDigestResponse:
         total_open_actions=digest.total_open_actions,
         open_actions=[
             DigestOwnerGroup(
-                owner=owner,
+                owner=owner.owner if isinstance(owner, ActionOwnerScope) else owner,
+                meeting_id=owner.meeting_id if isinstance(owner, ActionOwnerScope) else None,
+                identity_scope=("unresolved" if owner.unresolved_item is not None else "meeting")
+                if isinstance(owner, ActionOwnerScope)
+                else "named",
                 items=[
                     DigestActionItem(
                         description=a.description,
@@ -731,7 +887,7 @@ async def get_wiki_digest(request: Request) -> WikiDigestResponse:
                     for a in digest.open_actions_by_owner[owner]
                 ],
             )
-            for owner in sorted(digest.open_actions_by_owner)
+            for owner in sorted(digest.open_actions_by_owner, key=owner_group_sort_key)
         ],
         recent_decisions=[
             DigestDecisionItem(
@@ -816,6 +972,7 @@ class WikiBackfillStartedResponse(BaseModel):
     job_id: str
     started_at: str
     message: str
+    dry_run: bool = False
 
 
 class WikiBackfillErrorItem(BaseModel):
@@ -831,13 +988,16 @@ class WikiBackfillStatusResponse(BaseModel):
 
     Attributes:
         job_id: 작업 식별자.
-        status: "running" | "completed" | "failed" | "cancelled".
+        status: running/completed/completed_with_issues/failed/cancelled/interrupted.
         processed: 현재까지 처리된 회의 수.
         total: 전체 대상 회의 수.
         current_meeting_id: 현재 처리 중인 회의 ID (없으면 None).
         succeeded: 성공한 회의 수.
         skipped: 건너뛴 회의 수.
         failed: 실패한 회의 수.
+        pending: 공개 페이지 없이 검토 후보만 생긴 회의 수.
+        empty: 공개·검토 결과가 모두 없는 회의 수(failed에 포함).
+        published: succeeded와 같은 공개 생성·갱신 회의 수(하위 호환 별칭).
         errors: 실패 항목 리스트.
         started_at: 시작 시각 (ISO8601).
         finished_at: 종료 시각 (ISO8601). 진행 중이면 None.
@@ -850,6 +1010,12 @@ class WikiBackfillStatusResponse(BaseModel):
     total: int = 0
     current_meeting_id: str | None = None
     succeeded: int = 0
+    published: int = 0
+    pending: int = 0
+    empty: int = 0
+    published_pages: int = 0
+    pending_pages: int = 0
+    rejected_pages: int = 0
     skipped: int = 0
     failed: int = 0
     errors: list[WikiBackfillErrorItem] = Field(default_factory=list)
@@ -908,6 +1074,21 @@ async def start_wiki_backfill(
 
     config = _get_config(request)
     raw_queue = _get_raw_job_queue(request)
+    effective_dry_run = body.dry_run or config.wiki.dry_run
+    if not effective_dry_run and not config.wiki.enabled:
+        raise HTTPException(status_code=400, detail="Wiki를 활성화한 후 재검증해 주세요.")
+    root_key = str(config.wiki.resolved_root)
+    with _wiki_backfill_lock:
+        for state in _wiki_backfill_jobs.values():
+            task = state.get("task")
+            if (
+                state.get("root") == root_key
+                and state.get("status") == "running"
+                and (task is None or not task.done())
+            ):
+                raise HTTPException(
+                    status_code=409, detail="이미 Wiki 재검증 작업이 진행 중입니다."
+                )
     from core.wiki.backfill_state import WikiBackfillStateStore  # noqa: PLC0415
 
     state_store = WikiBackfillStateStore(config.wiki.resolved_root)
@@ -931,6 +1112,8 @@ async def start_wiki_backfill(
                 status_code=400,
                 detail=f"until 형식 오류 (YYYY-MM-DD 사용): {body.until}",
             ) from exc
+    if since_date is not None and until_date is not None and since_date > until_date:
+        raise HTTPException(status_code=400, detail="시작일은 종료일보다 늦을 수 없습니다.")
 
     job_id = _uuid.uuid4().hex[:16]
     cancel_event = asyncio.Event()
@@ -940,6 +1123,7 @@ async def start_wiki_backfill(
 
     # 작업 상태 슬롯 등록.
     job_state: dict[str, Any] = {
+        "root": root_key,
         "status": "running",
         "result": None,
         "task": None,
@@ -959,7 +1143,7 @@ async def start_wiki_backfill(
             "since": body.since,
             "until": body.until,
             "meeting_ids": body.meeting_ids,
-            "dry_run": body.dry_run,
+            "dry_run": effective_dry_run,
         },
     )
 
@@ -979,6 +1163,8 @@ async def start_wiki_backfill(
     async def _run_backfill() -> None:
         """백그라운드에서 backfill 호출 후 결과를 job_state 에 저장."""
         try:
+            from api.dependencies import get_meeting_mutation_coordinator
+
             # _backfill_module.backfill 을 직접 호출 (테스트가 monkeypatch 가능).
             result = await _backfill_module.backfill(
                 config=config,
@@ -986,16 +1172,36 @@ async def start_wiki_backfill(
                 since=since_date,
                 until=until_date,
                 meeting_ids=body.meeting_ids,
-                dry_run=body.dry_run,
+                dry_run=effective_dry_run,
                 progress_callback=_progress_cb,
                 cancel_event=cancel_event,
+                meeting_mutation_coordinator=get_meeting_mutation_coordinator(request),
+                thermal_manager=getattr(request.app.state, "thermal_manager", None),
             )
             with _wiki_backfill_lock:
                 job_state["result"] = result
+                job_state["processed"] = (
+                    result.succeeded
+                    + result.skipped
+                    + result.failed
+                    + getattr(result, "pending", 0)
+                )
+                job_state["total"] = result.total
+                job_state["current_meeting_id"] = None
                 if cancel_event.is_set():
                     job_state["status"] = "cancelled"
-                elif result.failed > 0 and result.succeeded == 0 and result.total > 0:
+                elif (
+                    result.failed > 0
+                    and result.succeeded == 0
+                    and not getattr(result, "pending", 0)
+                ):
                     job_state["status"] = "failed"
+                elif (
+                    result.failed
+                    or getattr(result, "pending", 0)
+                    or getattr(result, "rejected_pages", 0)
+                ):
+                    job_state["status"] = "completed_with_issues"
                 else:
                     job_state["status"] = "completed"
                 job_state["finished_at"] = _dt.now().isoformat()
@@ -1027,8 +1233,10 @@ async def start_wiki_backfill(
         job_id=job_id,
         started_at=started_at,
         message=(
-            f"백필 작업을 시작했습니다. GET /api/wiki/backfill/{job_id} 로 진행을 확인하세요."
+            f"{'실행 없이 대상 확인' if effective_dry_run else 'Wiki 재검증'} 작업을 시작했습니다. "
+            f"GET /api/wiki/backfill/{job_id} 로 진행을 확인하세요."
         ),
+        dry_run=effective_dry_run,
     )
 
 
@@ -1075,6 +1283,12 @@ async def get_wiki_backfill_status(
             total=durable.total,
             current_meeting_id=durable.current_meeting_id,
             succeeded=durable.succeeded,
+            published=durable.succeeded,
+            pending=durable.pending,
+            empty=durable.empty,
+            published_pages=durable.published_pages,
+            pending_pages=durable.pending_pages,
+            rejected_pages=durable.rejected_pages,
             skipped=durable.skipped,
             failed=durable.failed,
             errors=[
@@ -1121,6 +1335,12 @@ async def get_wiki_backfill_status(
         total=total,
         current_meeting_id=snapshot.get("current_meeting_id"),
         succeeded=succeeded,
+        published=succeeded,
+        pending=getattr(result, "pending", 0) if result is not None else 0,
+        empty=getattr(result, "empty", 0) if result is not None else 0,
+        published_pages=getattr(result, "published_pages", 0) if result is not None else 0,
+        pending_pages=getattr(result, "pending_pages", 0) if result is not None else 0,
+        rejected_pages=getattr(result, "rejected_pages", 0) if result is not None else 0,
         skipped=skipped,
         failed=failed,
         errors=errors_serialized,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.wiki.search_index import (
@@ -174,6 +175,26 @@ def fuse_hybrid(
 
     if semantic.enabled and query_embedding is not None:
         vector_ranked = semantic_index.query(query_embedding, semantic.top_k_vector)
+        # 재임베딩 전에는 이전 본문의 벡터가 새 사실의 근거처럼 회상되지 않게 한다.
+        from core.wiki.semantic_index import _content_hash
+        from core.wiki.store import WikiStore, WikiStoreError, _metadata_flag
+
+        root = getattr(search_index, "wiki_root", None)
+        if isinstance(root, Path):
+            store = WikiStore(root)
+            hashes = semantic_index.get_indexed_hashes()
+            fresh_vectors: list[tuple[str, int]] = []
+            for path, rank in vector_ranked:
+                try:
+                    page = store.read_page(Path(path))
+                except WikiStoreError:
+                    continue
+                if _metadata_flag(page.frontmatter.get("human_edited")) and hashes.get(
+                    path
+                ) != _content_hash(page.content):
+                    continue
+                fresh_vectors.append((path, rank))
+            vector_ranked = fresh_vectors
     else:
         vector_ranked = []
 

@@ -28,7 +28,21 @@ from ui.launcher import (
 ValidationStatus = Literal["pass", "warn", "fail"]
 _FORBIDDEN_SECRET_MARKERS = ("HUGGINGFACE_TOKEN", "HF_TOKEN", "hf_")
 _HF_TOKEN_VALUE_RE = re.compile(r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9][A-Za-z0-9_-]{7,}")
-_BUNDLED_SOURCE_REQUIRED_FILES = ("main.py", "config.py", "config.yaml", "pyproject.toml")
+_BUNDLED_SOURCE_REQUIRED_FILES = (
+    "main.py",
+    "config.py",
+    "config.yaml",
+    "pyproject.toml",
+    "scripts/__init__.py",
+    "scripts/backfill_wiki.py",
+)
+_BUNDLED_RUNTIME_SCRIPT_FILES = frozenset(
+    {
+        "scripts/__init__.py",
+        "scripts/backfill_wiki.py",
+        "scripts/zoom_audio_activity.swift",
+    }
+)
 _BUNDLED_SOURCE_REQUIRED_DIRS = ("api", "core", "steps", "search", "security", "ui")
 _BUNDLED_SOURCE_EXCLUDED_NAMES = frozenset(
     {
@@ -688,6 +702,7 @@ def _check_source_bundle(app_path: Path) -> ValidationCheck:
     file_count = source_bundle.get("file_count")
     invalid_count = not isinstance(file_count, int) or file_count <= 0
     if not missing_items and not excluded_items and not secret_items and not invalid_count:
+        assert isinstance(file_count, int)
         return ValidationCheck(
             id="source_bundle",
             status="pass",
@@ -739,11 +754,16 @@ def _find_excluded_bundled_source_items(project_dir: Path) -> list[str]:
             for part in relative_parts
         )
         excluded_by_suffix = path.suffix in _BUNDLED_SOURCE_EXCLUDED_SUFFIXES
+        relative_name = path.relative_to(project_dir).as_posix()
+        excluded_script = relative_parts[0] == "scripts" and (
+            path.is_symlink()
+            or (relative_name != "scripts" and relative_name not in _BUNDLED_RUNTIME_SCRIPT_FILES)
+        )
         symlink_escape = False
         if path.is_symlink():
             resolved_path = path.resolve(strict=False)
             symlink_escape = not _is_relative_to(resolved_path, resolved_project_dir)
-        if excluded_by_name or excluded_by_suffix or symlink_escape:
+        if excluded_by_name or excluded_by_suffix or symlink_escape or excluded_script:
             excluded_items.append(str(path.relative_to(project_dir)))
             if len(excluded_items) >= 10:
                 break

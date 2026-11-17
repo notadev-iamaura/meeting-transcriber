@@ -497,7 +497,7 @@ async def test_detect_status_transitions_명시적_출시_전환_적용():
     # Arrange
     transition_json = (
         '[{"slug": "신규-온보딩", "new_status": "shipped",'
-        '"reason_citation_ts": "00:10:00", "confidence": 9}]'
+        '"reason_citation_ts": "00:00:00", "confidence": 9}]'
     )
     mock_llm = MockProjectLLM(responses=[transition_json])
     extractor = ProjectExtractor(llm=mock_llm)
@@ -669,16 +669,15 @@ async def test_detect_status_transitions_잘못된_status_enum_skip():
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-async def test_render_or_update_pages_신규_프로젝트_frontmatter_6필드_포함():
-    """신규 프로젝트 페이지 생성 시 PRD 필수 frontmatter 7필드가 모두 포함된다.
+async def test_render_or_update_pages_신규_프로젝트_미제공_날짜를_생략한다():
+    """신규 프로젝트는 확인된 필드만 포함하고 렌더가 만든 날짜는 제거한다.
 
-    PRD §4.2 projects 템플릿 frontmatter 필수 필드:
-      type, slug, status, owner, started, target, last_updated
+    frontmatter 필드 중 started/target은 구조화된 정보가 없으면 생략한다.
 
     Arrange: existing_store 에 프로젝트 페이지 없음 (신규).
              LLM 은 페이지 본문 생성 응답 반환.
     Act: render_or_update_pages() 호출.
-    Assert: frontmatter 에 7필드 모두 포함.
+    Assert: 확인된 필드는 포함하고 started/target 추정값은 제외.
     """
     # Arrange
     meeting_id = "abc12345"
@@ -751,11 +750,12 @@ async def test_render_or_update_pages_신규_프로젝트_frontmatter_6필드_�
     assert fm_match, f"frontmatter 블록(--- ... ---) 이 없습니다.\n내용:\n{content}"
     fm_text = fm_match.group(1)
 
-    # 7필드 모두 포함 확인
-    for field in ("type", "slug", "status", "owner", "started", "target", "last_updated"):
+    for field in ("type", "slug", "status", "owner", "last_updated"):
         assert field in fm_text, (
             f"frontmatter 에 '{field}' 필드가 없습니다.\nfrontmatter:\n{fm_text}"
         )
+    assert "started:" not in fm_text
+    assert "target:" not in fm_text
 
 
 async def test_render_or_update_pages_기존_프로젝트_타임라인_보존_및_신규_추가():

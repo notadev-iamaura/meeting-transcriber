@@ -106,6 +106,7 @@ def _make_config() -> AppConfig:
     return AppConfig(
         chat=ChatConfig(
             max_history_pairs=3,
+            source_bound_answers=False,
             system_prompt="당신은 회의 내용 기반 AI 어시스턴트입니다.",
         ),
         llm=LLMConfig(

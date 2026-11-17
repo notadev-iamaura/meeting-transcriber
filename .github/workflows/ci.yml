@@ -134,6 +134,15 @@ jobs:
         timeout-minutes: 8
         run: pytest -m ui tests/ui/visual/test_bulk_actions_visual.py -q
 
+      - name: UI Wiki 편집·처리 상태·원문 인용 게이트 실행
+        timeout-minutes: 10
+        run: >-
+          pytest -m ui -q
+          tests/ui/behavior/test_wiki_editing.py
+          tests/ui/behavior/test_wiki_owner_scope.py
+          tests/ui/behavior/test_wiki_pipeline_progress.py
+          tests/ui/behavior/test_speaker_labels.py
+
   swift-build:
     name: Swift 컴파일 검증 (Aggregate Device)
     runs-on: macos-latest

@@ -14,11 +14,12 @@ EXAONE 전사문 보정기 모듈 (Transcript Corrector Module)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,16 @@ _CHANGED_ONLY_SYSTEM_SUFFIX = """
 5. 문장 순서 변경, 줄 병합/분리, 옆 줄 내용 가져오기, 요약, 의미 추가는 절대 금지입니다.
 6. 설명, 요약, 코드블록, "수정 없음" 같은 부가 텍스트를 출력하지 마세요."""
 
+_RECOVERY_SYSTEM_SUFFIX = """
+
+이번 요청은 보류된 발화만 다시 확인하는 보수적 복구입니다.
+1. 명백한 오타·띄어쓰기·문장부호만 고치고 요약하거나 새 의미를 만들지 마세요.
+2. 숫자·단위·영문 약어·고유명사·부정·조건·시점·주어·강도 표현은 원문 그대로 보존하세요.
+3. 음성을 추측해 숫자나 인명·제품명·조직명·약어를 다른 값으로 바꾸지 마세요.
+4. 가능·필요·예정·요청·약속·확정을 서로 바꾸지 마세요.
+5. 불확실하면 원문을 그대로 출력하세요. 원문 유지는 올바른 처리입니다.
+6. 입력의 모든 줄을 같은 [번호] 형식으로 출력하고 설명·요약·옆 줄 내용은 넣지 마세요."""
+
 # 발화 번호 파싱 정규식
 _LINE_PATTERN = re.compile(r"\[(\d+)\]\s*(.*)")
 _GENERIC_SHORT_CORRECTIONS = {
@@ -78,6 +89,7 @@ _GENERIC_SHORT_CORRECTIONS = {
     "좋습니다",
     "그렇습니다",
     "감사합니다",
+    "알겠습니다",
 }
 
 
@@ -116,6 +128,15 @@ class CorrectedUtterance:
 
 
 @dataclass
+class CorrectionFailure:
+    """0부터 시작하는 실패 위치와 원문 결합 해시를 보존한다."""
+
+    index: int
+    reason: str
+    source_sha256: str
+
+
+@dataclass
 class CorrectedResult:
     """전체 보정 결과를 담는 데이터 클래스.
 
@@ -132,6 +153,21 @@ class CorrectedResult:
     audio_path: str
     total_corrected: int = 0
     total_failed: int = 0
+    correction_failures: list[CorrectionFailure] = field(default_factory=list)
+
+    @property
+    def failed_indices(self) -> list[int]:
+        """확인된 실패 발화의 위치만 반환하며 같은 텍스트에서 추정하지 않는다."""
+        return [failure.index for failure in self.correction_failures]
+
+    @property
+    def failure_tracking_complete(self) -> bool:
+        """실패 집계와 원문에 결합된 개별 기록이 모두 일치하는지 확인한다."""
+        try:
+            _validate_retry_failures(self, self.correction_failures)
+        except CorrectionError:
+            return False
+        return True
 
     @property
     def total_duration(self) -> float:
@@ -164,6 +200,8 @@ class CorrectedResult:
             "audio_path": self.audio_path,
             "total_corrected": self.total_corrected,
             "total_failed": self.total_failed,
+            "correction_failures": [asdict(item) for item in self.correction_failures],
+            "failure_tracking_complete": self.failure_tracking_complete,
         }
 
     def save_checkpoint(self, output_path: Path) -> None:
@@ -201,6 +239,9 @@ class CorrectedResult:
             audio_path=data.get("audio_path", ""),
             total_corrected=data.get("total_corrected", 0),
             total_failed=data.get("total_failed", 0),
+            correction_failures=[
+                CorrectionFailure(**item) for item in data.get("correction_failures", [])
+            ],
         )
 
 
@@ -213,6 +254,52 @@ class CorrectionError(Exception):
 
 class EmptyInputError(CorrectionError):
     """보정할 발화가 비어있을 때 발생한다."""
+
+
+def correction_source_sha256(utterance: MergedUtterance | CorrectedUtterance) -> str:
+    """원문·화자·시간을 함께 묶어 재시도 대상의 바뀜을 검사한다."""
+    text = utterance.original_text if isinstance(utterance, CorrectedUtterance) else utterance.text
+    payload = json.dumps(
+        [text, utterance.speaker, utterance.start, utterance.end],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _validate_retry_failures(
+    corrected: CorrectedResult, failures: list[CorrectionFailure]
+) -> None:
+    """명시된 실패만 재시도하며 이전 성공·수정본·위치 변경은 거부한다."""
+    if len(failures) != corrected.total_failed:
+        raise CorrectionError("개별 실패 기록과 실패 집계가 일치하지 않습니다.")
+    seen: set[int] = set()
+    for failure in failures:
+        if (
+            not isinstance(failure, CorrectionFailure)
+            or not isinstance(failure.index, int)
+            or isinstance(failure.index, bool)
+            or not 0 <= failure.index < len(corrected.utterances)
+            or failure.index in seen
+            or not isinstance(failure.reason, str)
+            or not re.fullmatch(
+                r"(?:backend_failure|missing_number|invalid_response|empty_candidate|"
+                r"destructive_shortening|destructive_length_ratio|generic_short_rewrite|"
+                r"unexpected_expansion|numeric_changed|negation_changed|semantic_review_hold|"
+                r"line_merge_with_\d+|line_shift_to_\d+)",
+                failure.reason,
+            )
+        ):
+            raise CorrectionError("개별 실패 기록이 올바르지 않습니다.")
+        seen.add(failure.index)
+        utterance = corrected.utterances[failure.index]
+        if (
+            utterance.was_corrected
+            or utterance.text != utterance.original_text
+            or correction_source_sha256(utterance) != failure.source_sha256
+        ):
+            raise CorrectionError("재시도할 원문이 변경되었거나 이미 수정되었습니다.")
 
 
 # === 유틸리티 함수 ===
@@ -287,13 +374,38 @@ def _similarity(left: str, right: str) -> float:
 
 def _is_generic_short_rewrite(candidate: str) -> bool:
     """일반적인 짧은 문구로 긴 원문을 덮은 결과인지 판단한다."""
-    stripped = candidate.strip()
-    stripped_without_punct = stripped.strip(" .,!?:;~…。！？")
-    if stripped in _GENERIC_SHORT_CORRECTIONS:
-        return True
-    if stripped_without_punct in _GENERIC_SHORT_CORRECTIONS:
-        return True
-    return any(stripped.startswith(value) for value in _GENERIC_SHORT_CORRECTIONS)
+    normalized = _normalize_for_similarity(candidate)
+    # 짧은 정형 응답만 검사한다. '네, 다음 주 일정을 ...'처럼 원문을 보존한
+    # 긴 문장을 인사말 접두사만으로 파괴적 재작성으로 취급하지 않는다.
+    phrases = sorted({_normalize_for_similarity(value) for value in _GENERIC_SHORT_CORRECTIONS})
+    pattern = "|".join(re.escape(value) for value in phrases)
+    return bool(re.fullmatch(rf"(?:{pattern})+", normalized))
+
+
+def _numeric_signature(text: str) -> list[str]:
+    """명확한 천 단위 쉼표만 정규화하고 수치·부호·소수·순서는 보존한다."""
+    normalized = re.sub(r"([0-9])\s*(?:퍼센트|프로)(?=\s|$|[.,!?])", r"\1%", text)
+    normalized = re.sub(
+        r"(?<![0-9])[0-9]{1,3}(?:,[0-9]{3})+(?![0-9])",
+        lambda match: match.group().replace(",", ""),
+        normalized,
+    )
+    return [
+        re.sub(r"\s+", "", token)
+        for token in re.findall(r"[+-]?\s*[0-9]+(?:\.[0-9]+)*(?:\s*%)?", normalized)
+    ]
+
+
+def _negation_signature(text: str) -> tuple[int, int]:
+    """없음과 부정 서술을 세되 안건·안내·안전 같은 단어는 제외한다."""
+    normalized = unicodedata.normalize("NFC", text)
+    short_negatives = re.findall(
+        r"(?<![가-힣A-Za-z0-9_])안(?:(?![가-힣A-Za-z0-9_])|\s*"
+        r"(?:되|돼|됩|된|될|하|해|했|합|할|보|봤|볼|가|갔|갈|오|왔|올|"
+        r"먹|받|읽|쓰|써|듣|들|주|줬|줄|나오|뜨|켜|맞|알|좋|싫|늦|빠))",
+        normalized,
+    )
+    return normalized.count("없"), normalized.count("않") + len(short_negatives)
 
 
 def _find_suspicious_correction_reason(
@@ -324,6 +436,11 @@ def _find_suspicious_correction_reason(
 
     if not candidate_normalized:
         return "empty_candidate"
+
+    if _numeric_signature(original) != _numeric_signature(candidate):
+        return "numeric_changed"
+    if _negation_signature(original) != _negation_signature(candidate):
+        return "negation_changed"
 
     if original_len >= 18 and candidate_len <= 6:
         return "destructive_shortening"
@@ -605,6 +722,7 @@ class Corrector:
         *,
         batch_failed: bool,
         used_mode: str,
+        failure_details: list[CorrectionFailure] | None = None,
     ) -> tuple[list[CorrectedUtterance], int, int, int]:
         """파싱된 LLM 응답을 보정 결과 객체로 변환한다."""
         results: list[CorrectedUtterance] = []
@@ -615,6 +733,7 @@ class Corrector:
         for i, utterance in enumerate(batch):
             idx = i + 1
             corrected_text = corrections.get(idx)
+            failure_reason: str | None = None
 
             if corrected_text:
                 # NFC 정규화 적용
@@ -630,17 +749,15 @@ class Corrector:
                     )
                     if suspicious_reason is not None:
                         logger.warning(
-                            "의심스러운 LLM 교정 결과 폐기: batch_idx=%d, reason=%s, "
-                            "original=%r, candidate=%r",
+                            "의심스러운 LLM 교정 결과 폐기: batch_idx=%d, reason=%s",
                             idx,
                             suspicious_reason,
-                            utterance.text,
-                            corrected_text,
                         )
                         corrected_text = utterance.text
                         was_corrected = False
                         failed_count += 1
                         rejected_count += 1
+                        failure_reason = suspicious_reason
                     else:
                         was_corrected = True
                         corrected_count += 1
@@ -652,9 +769,16 @@ class Corrector:
                 if batch_failed:
                     # 전체 배치가 실패한 경우
                     failed_count += 1
+                    failure_reason = "backend_failure"
                 elif used_mode == "full":
                     # 개별 발화가 파싱에서 누락된 경우
                     failed_count += 1
+                    failure_reason = "missing_number"
+
+            if failure_reason is not None and failure_details is not None:
+                failure_details.append(
+                    CorrectionFailure(i, failure_reason, correction_source_sha256(utterance))
+                )
 
             results.append(
                 CorrectedUtterance(
@@ -674,6 +798,8 @@ class Corrector:
         backend: LLMBackend,
         batch: list[MergedUtterance],
         system_prompt: str,
+        *,
+        failure_details: list[CorrectionFailure] | None = None,
     ) -> tuple[list[CorrectedUtterance], int, int]:
         """발화 배치를 보정한다.
 
@@ -716,11 +842,13 @@ class Corrector:
                 mode="full",
             )
 
+        issues: list[CorrectionFailure] = []
         results, corrected_count, failed_count, rejected_count = self._materialize_corrections(
             batch,
             corrections,
             batch_failed=batch_failed,
             used_mode=used_mode,
+            failure_details=issues,
         )
 
         guard_fallback_threshold = max(2, len(batch) // 4)
@@ -741,6 +869,7 @@ class Corrector:
                 system_prompt,
                 mode="full",
             )
+            full_issues: list[CorrectionFailure] = []
             (
                 full_results,
                 full_corrected_count,
@@ -751,6 +880,7 @@ class Corrector:
                 full_corrections,
                 batch_failed=full_failed,
                 used_mode=full_mode,
+                failure_details=full_issues,
             )
             if full_failed_count < failed_count or (
                 full_failed_count == failed_count and full_corrected_count > corrected_count
@@ -762,9 +892,152 @@ class Corrector:
                     failed_count,
                     full_failed_count,
                 )
+                if failure_details is not None:
+                    failure_details.extend(full_issues)
                 return full_results, full_corrected_count, full_failed_count
 
+        if failure_details is not None:
+            failure_details.extend(issues)
         return results, corrected_count, failed_count
+
+    def _build_system_prompt(self) -> str:
+        """한 실행 동안 보존할 교정 프롬프트 스냅샷을 만든다."""
+        try:
+            return str(build_corrector_snapshot().system_prompt)
+        except Exception:
+            logger.warning("교정 프롬프트 스냅샷을 읽지 못해 기본 프롬프트를 사용합니다.")
+            return _FALLBACK_SYSTEM_PROMPT
+
+    def _retry_known_failures(
+        self,
+        backend: LLMBackend,
+        corrected: CorrectedResult,
+        failures: list[CorrectionFailure],
+        system_prompt: str,
+        *,
+        guard_batch_size: int | None = None,
+    ) -> CorrectedResult:
+        """확인된 실패만 더 작은 배치로 한 번씩 재요청하고 나머지는 보존한다."""
+        _validate_retry_failures(corrected, failures)
+        utterances = [replace(item) for item in corrected.utterances]
+        unresolved = {item.index: item for item in failures}
+        source = [
+            MergedUtterance(
+                text=item.original_text,
+                speaker=item.speaker,
+                start=item.start,
+                end=item.end,
+            )
+            for item in corrected.utterances
+        ]
+        retry_size = max(1, self._base_batch_size // 2)
+        guard_size = guard_batch_size or self._resolve_batch_size(len(source))
+        ordered = sorted(failures, key=lambda item: item.index)
+        for offset in range(0, len(ordered), retry_size):
+            group = ordered[offset : offset + retry_size]
+            batch = [source[item.index] for item in group]
+            try:
+                response = self._chat_for_corrections(
+                    backend,
+                    batch,
+                    f"{system_prompt.rstrip()}{_RECOVERY_SYSTEM_SUFFIX}",
+                    mode="full",
+                )
+            except LLMConnectionError:
+                logger.warning("개별 교정 재시도 연결 실패로 남은 원문을 보존합니다.")
+                break
+            except (LLMGenerationError, CorrectionError):
+                logger.warning("개별 교정 재시도 생성 실패로 원문을 보존합니다.")
+                continue
+            corrections = _parse_correction_response(response, len(batch))
+            retry_issues: list[CorrectionFailure] = []
+            retried, _, _, _ = self._materialize_corrections(
+                batch,
+                corrections,
+                batch_failed=False,
+                used_mode="full",
+                failure_details=retry_issues,
+            )
+            rejected = {item.index: item for item in retry_issues}
+            for local, issue in enumerate(group):
+                if local in rejected:
+                    unresolved[issue.index] = replace(issue, reason=rejected[local].reason)
+                    continue
+                candidate = retried[local]
+                # 작은 요청에서도 원래 배치의 이웃 문장을 복사하거나 합치면 거절한다.
+                window_start = (issue.index // guard_size) * guard_size
+                window = source[window_start : window_start + guard_size]
+                reason = (
+                    _find_suspicious_correction_reason(
+                        window,
+                        idx=issue.index - window_start + 1,
+                        candidate=candidate.text,
+                    )
+                    if candidate.was_corrected
+                    else None
+                )
+                if reason is not None:
+                    unresolved[issue.index] = replace(issue, reason=reason)
+                    continue
+                utterances[issue.index] = candidate
+                del unresolved[issue.index]
+        return CorrectedResult(
+            utterances=utterances,
+            num_speakers=corrected.num_speakers,
+            audio_path=corrected.audio_path,
+            total_corrected=sum(item.was_corrected for item in utterances),
+            total_failed=len(unresolved),
+            correction_failures=[unresolved[index] for index in sorted(unresolved)],
+        )
+
+    def _correct_batch_with_retry(
+        self,
+        backend: LLMBackend,
+        batch: list[MergedUtterance],
+        system_prompt: str,
+    ) -> CorrectedResult:
+        """배치의 최종 선택 분기만 기록하고 개별 실패에 한정해 재시도한다."""
+        failures: list[CorrectionFailure] = []
+        utterances, count, failed = self._correct_batch(
+            backend, batch, system_prompt, failure_details=failures
+        )
+        result = CorrectedResult(
+            utterances=utterances,
+            num_speakers=len({item.speaker for item in batch}),
+            audio_path="",
+            total_corrected=count,
+            total_failed=failed,
+            correction_failures=failures,
+        )
+        if failures and any(item.reason != "backend_failure" for item in failures):
+            return self._retry_known_failures(
+                backend, result, failures, system_prompt, guard_batch_size=len(batch)
+            )
+        return result
+
+    async def retry_failed(
+        self,
+        corrected: CorrectedResult,
+        *,
+        failures: list[CorrectionFailure] | None = None,
+    ) -> CorrectedResult:
+        """원문 해시가 확인된 실패만 재검수한 새 결과를 반환하며 파일은 쓰지 않는다.
+
+        과거 체크포인트에 개별 기록이 없으면 호출자가 별도 감사로 복원한 실패를
+        명시해야 한다. 호출자는 저장 전에 원본 체크포인트 SHA와 사용자 편집 상태를
+        다시 검사하고 회의 mutation lease 안에서 후속 산출물과 색인을 갱신해야 한다.
+        """
+        selected = list(corrected.correction_failures if failures is None else failures)
+        _validate_retry_failures(corrected, selected)
+        if not selected:
+            return replace(corrected, utterances=[replace(item) for item in corrected.utterances])
+        prompt = self._build_system_prompt()
+        async with self._manager.acquire(
+            "exaone", self._create_backend, keep_loaded=True
+        ) as backend:
+            return await await_native_inference(
+                self._retry_known_failures, backend, corrected, selected, prompt
+            )
 
     async def correct(
         self,
@@ -802,16 +1075,7 @@ class Corrector:
         # 잡 단위 프롬프트 스냅샷: 회의 처리 시작 시점에 1회 빌드하여
         # 처리 도중 사용자가 설정을 수정해도 진행 중인 회의는 일관성을 유지한다.
         # 저장소 로드 실패 시 폴백 상수 사용 (graceful degradation).
-        try:
-            snapshot = build_corrector_snapshot()
-            system_prompt = snapshot.system_prompt
-            logger.info(
-                f"보정 스냅샷 빌드 완료: 프롬프트 {len(system_prompt)}자, "
-                f"활성 용어 {snapshot.vocab_term_count}개"
-            )
-        except Exception as e:
-            logger.warning(f"프롬프트 스냅샷 빌드 실패, 폴백 사용: {e}")
-            system_prompt = _FALLBACK_SYSTEM_PROMPT
+        system_prompt = self._build_system_prompt()
 
         # 배치 분할
         batches: list[list[MergedUtterance]] = []
@@ -823,6 +1087,7 @@ class Corrector:
         all_corrected: list[CorrectedUtterance] = []
         total_corrected = 0
         total_failed = 0
+        all_failures: list[CorrectionFailure] = []
 
         try:
             # PERF-001: 다음 단계(summarizer)에서도 exaone을 사용하므로
@@ -836,13 +1101,17 @@ class Corrector:
                     )
 
                     # 별도 스레드에서 실행 (동기 호출이 블로킹이므로)
-                    corrected, batch_corrected, batch_failed = await await_native_inference(
-                        self._correct_batch, backend, batch, system_prompt
+                    batch_result = await await_native_inference(
+                        self._correct_batch_with_retry, backend, batch, system_prompt
                     )
 
-                    total_corrected += batch_corrected
-                    total_failed += batch_failed
-                    all_corrected.extend(corrected)
+                    all_failures.extend(
+                        replace(item, index=item.index + len(all_corrected))
+                        for item in batch_result.correction_failures
+                    )
+                    total_corrected += batch_result.total_corrected
+                    total_failed += batch_result.total_failed
+                    all_corrected.extend(batch_result.utterances)
 
         except (LLMConnectionError, LLMGenerationError):
             raise
@@ -857,6 +1126,7 @@ class Corrector:
             audio_path=merged.audio_path,
             total_corrected=total_corrected,
             total_failed=total_failed,
+            correction_failures=all_failures,
         )
 
         logger.info(

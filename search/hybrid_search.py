@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sqlite3
 import sys
 import threading
@@ -213,6 +214,11 @@ def _combine_rrf(
     fts_weight: float,
     rrf_k: int,
     top_k: int,
+    *,
+    query: str | None = None,
+    meeting_id_filter: str | None = None,
+    date_filter: str | None = None,
+    speaker_filter: str | None = None,
 ) -> list[SearchResult]:
     """벡터 검색과 FTS 검색 결과를 RRF로 결합한다.
 
@@ -307,9 +313,66 @@ def _combine_rrf(
             )
         )
 
-    # 점수 내림차순 정렬 후 상위 top_k개 반환
+    # 점수는 그대로 두고, 명시한 검색어의 유일한 원문 근거가 잘리지 않게 한다.
     scored_results.sort(key=lambda r: r.score, reverse=True)
-    return scored_results[:top_k]
+    selected = scored_results[:top_k]
+    anchors = _lexical_anchors(query)
+    if not anchors or fts_weight <= 0 or top_k <= 0 or not selected:
+        return selected
+
+    def matches(result: SearchResult) -> bool:
+        """기존 필터 안의 본문이 모든 명시 검색어를 포함하는지 확인한다."""
+        if meeting_id_filter and result.meeting_id != meeting_id_filter:
+            return False
+        if date_filter and result.date != date_filter:
+            return False
+        if speaker_filter and speaker_filter not in result.speakers:
+            return False
+        return _contains_lexical_anchors(result.text, anchors)
+
+    if any(matches(result) for result in selected):
+        return selected
+    by_id = {result.chunk_id: result for result in scored_results}
+    for raw in fts_results:
+        candidate = by_id.get(raw["chunk_id"])
+        if candidate is None or not matches(candidate):
+            continue
+        if not _contains_lexical_anchors(raw.get("text", ""), anchors):
+            continue
+        selected[-1] = candidate
+        selected.sort(key=lambda result: result.score, reverse=True)
+        break
+    return selected
+
+
+def _contains_lexical_anchors(text: str, anchors: list[str]) -> bool:
+    """영문·숫자의 낱말 경계를 지키며 모든 검색어의 포함 여부를 확인한다."""
+    body = unicodedata.normalize("NFC", text).casefold()
+    return all(
+        bool(re.search(rf"(?<![a-z0-9]){re.escape(anchor)}(?![a-z0-9])", body))
+        if anchor.isascii()
+        else anchor in body
+        for anchor in anchors
+    )
+
+
+def _lexical_anchors(query: str | None) -> list[str]:
+    """따옴표 주제나 한두 검색어만 원문 포함 보장 대상으로 삼는다."""
+    if not query:
+        return []
+    quoted = re.findall(r"(?<!\w)'([^'\n]+)'", query)
+    if quoted:
+        if len(quoted) != 1 or any(char in quoted[0] for char in "{}"):
+            return []
+        topic = quoted[0]
+    else:
+        words = query.split()
+        if not 1 <= len(words) <= 2 or not all(word.isalnum() for word in words):
+            return []
+        topic = query
+    return list(
+        dict.fromkeys(re.findall(r"[^\W_]+", unicodedata.normalize("NFC", topic).casefold()))
+    )
 
 
 # === 벡터 검색 ===
@@ -925,6 +988,10 @@ class HybridSearchEngine:
             fts_weight=self._fts_weight,
             rrf_k=self._rrf_k,
             top_k=effective_top_k,
+            query=query,
+            meeting_id_filter=meeting_id_filter,
+            date_filter=date_filter,
+            speaker_filter=speaker_filter,
         )
 
         from core.speaker_labels import read_speaker_labels

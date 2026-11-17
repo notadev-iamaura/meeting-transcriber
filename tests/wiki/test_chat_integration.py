@@ -269,6 +269,7 @@ class TestHybridChatServiceWikiRouting:
             "---\n"
             "type: decision\n"
             "title: 출시일 확정\n"
+            "status: confirmed\n"
             "date: 2026-04-29\n"
             "---\n\n"
             "# 출시일 확정\n\n"

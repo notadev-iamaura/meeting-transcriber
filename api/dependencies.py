@@ -50,6 +50,21 @@ def get_job_queue(request: Request) -> Any:
     return require_state(request, "job_queue", "작업 큐가 초기화되지 않았습니다.")
 
 
+def get_model_manager(request: Request) -> Any:
+    """앱의 공유 매니저를 반환하며 오래된 수동 앱 구성도 같은 객체로 연결한다."""
+    state = request.app.state
+    manager = getattr(state, "model_manager", None)
+    if manager is None:
+        pipeline = getattr(state, "pipeline_manager", None)
+        manager = getattr(pipeline, "_model_manager", None)
+    if manager is None:
+        from core.model_manager import get_model_manager as get_shared_model_manager
+
+        manager = get_shared_model_manager()
+    state.model_manager = manager
+    return manager
+
+
 def get_search_engine(request: Request) -> Any:
     """HybridSearchEngine 을 반환하며, 필요하면 요청 시점에 초기화한다."""
     state = request.app.state
@@ -69,7 +84,9 @@ def get_search_engine(request: Request) -> Any:
         try:
             from search.hybrid_search import HybridSearchEngine
 
-            engine = HybridSearchEngine(config=get_config(request))
+            engine = HybridSearchEngine(
+                config=get_config(request), model_manager=get_model_manager(request)
+            )
             state.search_engine = engine
             logger.info("HybridSearchEngine 지연 초기화 완료")
             return engine
@@ -102,7 +119,9 @@ def get_chat_engine(request: Request) -> Any:
             from search.chat import ChatEngine
 
             engine = ChatEngine(
-                config=get_config(request), search_engine=get_search_engine(request)
+                config=get_config(request),
+                search_engine=get_search_engine(request),
+                model_manager=get_model_manager(request),
             )
             state.chat_engine = engine
             logger.info("ChatEngine 지연 초기화 완료")

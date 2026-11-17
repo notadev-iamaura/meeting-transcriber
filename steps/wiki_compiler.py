@@ -77,6 +77,7 @@ def _create_wiki_compiler_v2(
     from core.wiki.extractors.person import PersonExtractor
     from core.wiki.extractors.project import ProjectExtractor
     from core.wiki.extractors.topic import TopicExtractor
+    from core.wiki.grounding import LocalClaimGrounder
     from core.wiki.guard import WikiGuard
     from core.wiki.lint import WikiLinter
     from core.wiki.llm_client import MlxWikiClient
@@ -99,8 +100,13 @@ def _create_wiki_compiler_v2(
     guard = WikiGuard(
         verifier=verifier,
         confidence_threshold=config.wiki.confidence_threshold,
+        grounder=(
+            LocalClaimGrounder(llm, config.wiki.grounding)
+            if config.wiki.grounding.enabled
+            else None
+        ),
     )
-    decision_extractor = DecisionExtractor(llm)
+    decision_extractor = DecisionExtractor(llm, repair_config=config.wiki.grounding)
     action_item_extractor = ActionItemExtractor(llm)
     # Phase 3 — people / projects extractor
     person_extractor = PersonExtractor(llm)

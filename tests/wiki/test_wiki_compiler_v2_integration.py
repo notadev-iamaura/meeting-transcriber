@@ -29,6 +29,7 @@ class _SimpleUtterance:
         """시작/종료 시각을 저장한다."""
         self.start = start
         self.end = end
+        self.text = "실제 발화"
 
 
 class _DummyModelManager:
@@ -50,41 +51,23 @@ def _build_app_config(
     return AppConfig(wiki=wiki)
 
 
-def test_zero_timestamp_citation은_첫_실제_발화_시각으로_정규화된다() -> None:
-    """LLM 기본값 00:00:00 citation 은 D2 전에 첫 발화 시각으로 보정한다."""
-    from core.wiki.compiler import _first_utterance_timestamp, _normalize_zero_timestamp_citations
+def test_입력에_없는_zero_timestamp는_허용_마커가_아니다() -> None:
+    """첫 발화가 늦게 시작하면 0초를 실제 발화로 변환하거나 허용하지 않는다."""
+    from core.wiki.extractors.decision import source_citation_markers
 
     meeting_id = "meeting_20260522_172005"
-    replacement = _first_utterance_timestamp([_SimpleUtterance(17.0, 21.0)])
-    content = f"결정 내용 [meeting:{meeting_id}@00:00:00]"
-
-    normalized = _normalize_zero_timestamp_citations(
-        content,
-        meeting_id=meeting_id,
-        replacement_ts=replacement,
-    )
-
-    assert replacement == "00:00:17"
-    assert f"[meeting:{meeting_id}@00:00:17]" in normalized
-    assert "00:00:00" not in normalized
+    markers = source_citation_markers(meeting_id, [_SimpleUtterance(17.0, 21.0)])
+    assert markers == {f"[meeting:{meeting_id}@00:00:17]"}
+    assert f"[meeting:{meeting_id}@00:00:00]" not in markers
 
 
 def test_첫_발화가_0초이면_zero_timestamp_citation을_보존한다() -> None:
     """실제 첫 발화가 0초면 00:00:00 citation 은 기본값이 아니라 실재 citation 이다."""
-    from core.wiki.compiler import _first_utterance_timestamp, _normalize_zero_timestamp_citations
+    from core.wiki.extractors.decision import source_citation_markers
 
     meeting_id = "meeting_20260528_100000"
-    replacement = _first_utterance_timestamp([_SimpleUtterance(0.0, 4.0)])
-    content = f"결정 내용 [meeting:{meeting_id}@00:00:00]"
-
-    normalized = _normalize_zero_timestamp_citations(
-        content,
-        meeting_id=meeting_id,
-        replacement_ts=replacement,
-    )
-
-    assert replacement == "00:00:00"
-    assert normalized == content
+    markers = source_citation_markers(meeting_id, [_SimpleUtterance(0.0, 4.0)])
+    assert f"[meeting:{meeting_id}@00:00:00]" in markers
 
 
 def test_MT_WIKI_DISABLE_TOPIC이면_topic_extractor를_주입하지_않는다(
@@ -110,25 +93,19 @@ def test_MT_WIKI_DISABLE_TOPIC이면_topic_extractor를_주입하지_않는다(
 
     assert compiler._topic_extractor is None
     assert isinstance(compiler._guard._verifier, CheckpointCitationVerifier)
+    assert compiler._decision_extractor._repair_config is cfg.wiki.grounding
 
 
 @pytest.mark.asyncio
-async def test_zero_timestamp_정규화된_citation은_D2_verifier를_통과한다() -> None:
-    """00:00:00 보정 결과가 실제 utterance verifier 에서도 phantom 이 아니어야 한다."""
+async def test_입력에_없는_zero_timestamp는_D2에서도_실제_발화로_간주하지_않는다() -> None:
+    """실제 발화 17초를 보존하고 없는 0초의 근거를 만들어 주지 않는다."""
     from core.wiki.citation_verifier import UtterancesCitationVerifier
     from core.wiki.citations import parse_citation
-    from core.wiki.compiler import _first_utterance_timestamp, _normalize_zero_timestamp_citations
 
     meeting_id = "meeting_20260522_172005"
     utterances = [{"speaker": "SPEAKER_00", "text": "실제 발화", "start": 17.0, "end": 21.0}]
-    replacement = _first_utterance_timestamp(utterances)
     content = f"결정 내용 [meeting:{meeting_id}@00:00:00]"
-    normalized = _normalize_zero_timestamp_citations(
-        content,
-        meeting_id=meeting_id,
-        replacement_ts=replacement,
-    )
-    parsed = parse_citation(normalized)
+    parsed = parse_citation(content)
     assert parsed is not None
     parsed_mid, parsed_ts = parsed
     h, m, s = [int(part) for part in parsed_ts.split(":")]
@@ -139,7 +116,8 @@ async def test_zero_timestamp_정규화된_citation은_D2_verifier를_통과한�
     )
 
     assert parsed_mid == meeting_id
-    assert await verifier.verify_exists(parsed_mid, h * 3600 + m * 60 + s)
+    assert not await verifier.verify_exists(parsed_mid, h * 3600 + m * 60 + s)
+    assert await verifier.verify_exists(parsed_mid, 17)
 
 
 # ─────────────────────────────────────────────────────────────────────────

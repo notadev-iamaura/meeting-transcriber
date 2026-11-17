@@ -592,6 +592,56 @@ class TestCheckpointCitationVerifier:
 
         assert await verifier.verify_exists(MEETING_M1, 11) is False
 
+
+@pytest.mark.asyncio
+async def test_내림한_발화시작_인용은_직전_짧은응답이_아닌_해당발화를_반환한다() -> None:
+    """실제 raw STT 검토에서 확인한 중심점 거리의 잘못된 근거 선택을 막는다."""
+    verifier = UtterancesCitationVerifier(
+        {
+            MEETING_M1: [
+                {"start": 58.0, "end": 60.2, "text": "직전 짧은 응답"},
+                {"start": 60.2, "end": 68.9, "text": "예산을 1억원으로 확정했습니다."},
+            ],
+        }
+    )
+    assert await verifier.verify_exists(MEETING_M1, 60)
+    assert await verifier.fetch_utterance(MEETING_M1, 60) == "예산을 1억원으로 확정했습니다."
+
+
+@pytest.mark.asyncio
+async def test_같은_초에_시작한_여러발화는_그_초의_근거만_순서대로_포함한다() -> None:
+    """동일한 내림 시각은 임의의 한 발화로 축소하지 않고 해당 1초 문맥을 보존한다."""
+    verifier = UtterancesCitationVerifier(
+        {
+            MEETING_M1: [
+                {"start": 58.0, "end": 60.1, "text": "다른 초의 이전 발화"},
+                {"start": 60.1, "end": 60.3, "text": "네"},
+                {"start": 60.4, "end": 69.0, "text": "예산을 1억원으로 확정했습니다."},
+                {"start": 69.0, "end": 72.0, "text": "멀리 떨어진 무관한 발화"},
+            ],
+        }
+    )
+    result = await verifier.fetch_utterance(MEETING_M1, 60)
+    assert result == "네\n예산을 1억원으로 확정했습니다."
+
+
+@pytest.mark.asyncio
+async def test_발화중간_인용은_가까운_옆발화보다_실제_포함구간을_우선한다() -> None:
+    """정수 시작이 없을 때만 시각을 포함하는 구간을 근거로 사용한다."""
+    verifier = UtterancesCitationVerifier(
+        {
+            MEETING_M1: [
+                {"start": 10.0, "end": 30.0, "text": "해당 시각을 포함하는 긴 발화"},
+                {"start": 29.0, "end": 29.2, "text": "중심점만 가까운 다른 발화"},
+            ],
+        }
+    )
+    assert await verifier.fetch_utterance(MEETING_M1, 28) == "해당 시각을 포함하는 긴 발화"
+
+
+class TestCheckpointCitationSymlink:
+    """추가 시간 매칭 테스트와 별개로 symlink 보존 계약을 검증한다."""
+
     @pytest.mark.asyncio
     async def test_과거_checkpoint_symlink는_target을_따르지_않고_false를_반환한다(
         self,

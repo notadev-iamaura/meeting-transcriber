@@ -20,12 +20,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+from config import WikiGroundingConfig
 from core.wiki.decision_record import DecisionRecord
 from core.wiki.llm_client import WikiLLMClient, sanitize_utterance_text
 from core.wiki.models import Citation
@@ -56,7 +58,7 @@ class ActionItemRef:
 
     owner: str
     description: str
-    citation: Citation
+    citation: Citation | None
 
 
 @dataclass
@@ -69,7 +71,7 @@ class ExtractedDecision:
         decision_text: "## 결정 내용" 섹션 본문 (인용 포함).
         background: "## 배경" 섹션 본문 (인용 포함).
         follow_ups: 후속 액션 메모.
-        participants: 참여 화자 이름 목록.
+        participants: 입력 회의 원문의 전체 화자 라벨. 개별 결정 동의자나 실명 확인을 뜻하지 않는다.
         projects: 관련 프로젝트 slug 목록.
         citations: 본 결정에 포함된 모든 Citation 평탄화 목록.
         confidence: LLM 자체 평가 0~10 정수.
@@ -84,6 +86,8 @@ class ExtractedDecision:
     projects: list[str] = field(default_factory=list)
     citations: list[Citation] = field(default_factory=list)
     confidence: int = 0
+    citation_unresolved: bool = False
+    unresolved_citation_fields: tuple[str, ...] = ()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -122,6 +126,7 @@ _FOREIGN_GLOSS_PATTERN: re.Pattern[str] = re.compile(
 _CITATION_PATTERN: re.Pattern[str] = re.compile(
     r"\[meeting:([A-Za-z0-9_]+)@(\d{2}):(\d{2}):(\d{2})\]"
 )
+_CITATION_LIKE_PATTERN = re.compile(r"\[meeting:[^\]\r\n]*\]")
 
 # slug 정규화 — 한국어/공백을 제거하고 영문/숫자/하이픈만 남김
 _SLUG_INVALID: re.Pattern[str] = re.compile(r"[^a-z0-9\-_]+")
@@ -197,36 +202,192 @@ def _citation_from_ts(meeting_id: str, ts_str: str) -> Citation | None:
     )
 
 
-def _first_utterance_citation(meeting_id: str, utterances: list[Any]) -> Citation | None:
-    """첫 번째 정상 발화의 시작 시각을 fallback citation 으로 반환한다."""
-    best_seconds: float | None = None
-    for utt in utterances:
-        try:
-            if isinstance(utt, dict):
-                raw_start = utt.get("start")
-                raw_end = utt.get("end")
-            else:
-                raw_start = utt.start
-                raw_end = utt.end
-            start = float(raw_start)  # type: ignore[arg-type]  # None/이상치는 아래 except 에서 skip
-            end = float(raw_end)  # type: ignore[arg-type]
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if start < 0 or end < start:
-            continue
-        if best_seconds is None or start < best_seconds:
-            best_seconds = start
-    if best_seconds is None:
+def _utterance_time_range(utterance: Any) -> tuple[float, float] | None:
+    """실제 발화의 유효한 시작·종료 시각만 반환하며 누락 시 0초를 만들지 않는다."""
+    try:
+        if isinstance(utterance, dict):
+            raw_start, raw_end = utterance.get("start"), utterance.get("end")
+        else:
+            raw_start, raw_end = utterance.start, utterance.end
+        if (
+            raw_start is None
+            or raw_end is None
+            or isinstance(raw_start, bool)
+            or isinstance(raw_end, bool)
+        ):
+            return None
+        start, end = float(raw_start), float(raw_end)
+    except (TypeError, ValueError, AttributeError, OverflowError):
         return None
-    total = int(best_seconds)
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    return Citation(
-        meeting_id=meeting_id,
-        timestamp_str=f"{h:02d}:{m:02d}:{s:02d}",
-        timestamp_seconds=total,
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+        return None
+    return start, end
+
+
+def source_citation_markers(meeting_id: str, utterances: list[Any]) -> set[str]:
+    """유효한 실제 입력 발화의 시작 시각으로 제공할 수 있는 마커만 반환한다."""
+    if re.fullmatch(r"[A-Za-z0-9_]+", meeting_id) is None:
+        return set()
+    markers: set[str] = set()
+    for utt in utterances:
+        time_range = _utterance_time_range(utt)
+        if time_range is None:
+            continue
+        text = utt.get("text") if isinstance(utt, dict) else getattr(utt, "text", None)
+        if not isinstance(text, str) or not sanitize_utterance_text(text):
+            continue
+        total = int(time_range[0])
+        timestamp = f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+        markers.add(f"[meeting:{meeting_id}@{timestamp}]")
+    return markers
+
+
+def _is_claim_line(line: str) -> bool:
+    """빈 줄과 명시적인 빈 값 표기를 제외한 주장 줄인지 확인한다."""
+    text = line.strip().lstrip("- ").strip()
+    return bool(text) and text not in {"없음", "없음.", "_(없음)_", "N/A", "n/a"}
+
+
+def _line_has_input_citations(line: str, allowed: set[str]) -> bool:
+    """주장 줄의 모든 마커가 실제 입력에 제공된 정확한 마커인지 검사한다."""
+    markers = _CITATION_LIKE_PATTERN.findall(line)
+    return (
+        bool(markers)
+        and line.count("[meeting:") == len(markers)
+        and all(marker in allowed for marker in markers)
     )
+
+
+def _decision_field_texts(decision: ExtractedDecision) -> dict[str, str]:
+    """다른 필드의 인용을 빌리지 않고 각 주장 필드의 원문을 읽는다."""
+    fields = {"decision_text": decision.decision_text, "background": decision.background}
+    for index, follow_up in enumerate(decision.follow_ups):
+        text = follow_up.description
+        if follow_up.citation is not None:
+            marker = (
+                f"[meeting:{follow_up.citation.meeting_id}@{follow_up.citation.timestamp_str}]"
+            )
+            if marker not in text:
+                text = f"{text} {marker}"
+        fields[f"follow_ups.{index}"] = text
+    return fields
+
+
+def _repair_terms(text: str) -> set[str]:
+    """인용 표기를 제외한 한글·영문 토큰과 문자 ngram으로 관련 발화를 찾는다."""
+    text = _CITATION_LIKE_PATTERN.sub("", text).lower()
+    words = re.findall(r"[가-힣a-z0-9]+", text)
+    terms = {f"word:{word}" for word in words if len(word) > 1}
+    for word in words:
+        for width in (2, 3):
+            terms.update(
+                f"gram:{word[index : index + width]}" for index in range(len(word) - width + 1)
+            )
+    return terms
+
+
+def _select_repair_evidence(
+    lines: list[str], claims: list[dict[str, Any]], config: WikiGroundingConfig
+) -> list[str]:
+    """예산 안에서 주장별 관련 턴과 바로 앞뒤 턴을 원래 순서로 고르게 선택한다."""
+    full_prompt = json.dumps({"utterances": lines, "claims": claims}, ensure_ascii=False)
+    if len(full_prompt) <= config.max_input_chars and all(
+        len(line) <= config.max_item_chars for line in lines
+    ):
+        return lines
+    base_size = len(json.dumps({"utterances": [], "claims": claims}, ensure_ascii=False))
+    available = config.max_input_chars - base_size
+    if available <= 0:
+        return []
+    costs = {
+        index: len(json.dumps(line, ensure_ascii=False)) + 2
+        for index, line in enumerate(lines)
+        if len(line) <= config.max_item_chars
+    }
+    source_terms = {
+        index: _repair_terms(line.partition("]")[2].partition(":")[2])
+        for index, line in enumerate(lines)
+        if index in costs
+    }
+    rankings: list[list[int]] = []
+    for claim in claims:
+        terms = _repair_terms(str(claim["text"]))
+        scored = [
+            (len(terms & other) / len(terms | other), index)
+            for index, other in source_terms.items()
+            if terms & other
+        ]
+        rankings.append(
+            [index for _score, index in sorted(scored, key=lambda item: (-item[0], item[1]))]
+        )
+    selected: set[int] = set()
+    anchors: list[list[int]] = [[] for _ in claims]
+    spent = 0
+
+    def add(index: int, *, limit: int | None = None) -> bool:
+        """완전한 발화만 추가하고 JSON 전체의 예산을 유지한다."""
+        nonlocal spent
+        if index in selected:
+            return True
+        cost = costs.get(index)
+        if cost is None or spent + cost > available or (limit is not None and cost > limit):
+            return False
+        selected.add(index)
+        spent += cost
+        return True
+
+    # 한 주장에 예산을 먼저 소진하지 않도록 첫 근거는 같은 몫으로 우선 배정한다.
+    active = sum(bool(ranking) for ranking in rankings)
+    share = available // active if active else 0
+    for index, ranking in enumerate(rankings):
+        anchor = next((item for item in ranking if add(item, limit=share)), None)
+        if anchor is not None:
+            anchors[index].append(anchor)
+    # 긴 턴 때문에 첫 몫에 들어가지 못한 주장도 남은 예산에서 한 번씩 기회를 준다.
+    for index, ranking in enumerate(rankings):
+        if not anchors[index]:
+            anchor = next((item for item in ranking if add(item)), None)
+            if anchor is not None:
+                anchors[index].append(anchor)
+
+    def add_neighbors(round_anchors: list[int]) -> None:
+        """선정한 발화의 질문·확답 문맥을 완전한 이웃 턴으로 보존한다."""
+        for direction in (-1, 1):
+            for anchor in round_anchors:
+                add(anchor + direction)
+
+    add_neighbors([items[0] for items in anchors if items])
+    # 남는 공간은 다음 관련 발화를 주장별 순환으로 추가한다.
+    for rank in range(max((len(items) for items in rankings), default=0)):
+        round_anchors = []
+        for index, ranking in enumerate(rankings):
+            if rank < len(ranking):
+                anchor = ranking[rank]
+                if anchor not in anchors[index] and add(anchor):
+                    anchors[index].append(anchor)
+                    round_anchors.append(anchor)
+        add_neighbors(round_anchors)
+    return [lines[index] for index in sorted(selected)]
+
+
+def _update_citation_state(decision: ExtractedDecision, allowed: set[str]) -> None:
+    """필드별 누락·잘못된 인용과 실제 본문 인용 목록을 갱신한다."""
+    fields = _decision_field_texts(decision)
+    unresolved = tuple(
+        key
+        for key, text in fields.items()
+        if any(
+            _is_claim_line(line) and not _line_has_input_citations(line, allowed)
+            for line in text.splitlines()
+        )
+    )
+    if not _is_claim_line(decision.decision_text) and "decision_text" not in unresolved:
+        unresolved = ("decision_text", *unresolved)
+    decision.unresolved_citation_fields = unresolved
+    decision.citation_unresolved = bool(unresolved)
+    decision.citations = [
+        citation for text in fields.values() for citation in _extract_citations_from_text(text)
+    ]
 
 
 def _extract_citations_from_text(text: str) -> list[Citation]:
@@ -295,14 +456,12 @@ def _extract_json_array(text: str) -> list[Any] | None:
 def _build_extracted_decision(
     item: dict[str, Any],
     meeting_id: str,
-    fallback_citation: Citation | None = None,
 ) -> ExtractedDecision:
     """LLM 응답의 dict 항목을 ExtractedDecision 으로 변환한다.
 
     Args:
         item: LLM JSON 배열 단일 항목.
         meeting_id: 회의 ID (Citation 변환 시 사용).
-        fallback_citation: LLM 이 citation 을 누락했을 때 사용할 첫 실제 발화 시각.
 
     Returns:
         ExtractedDecision 인스턴스.
@@ -326,27 +485,14 @@ def _build_extracted_decision(
         desc = str(fu.get("description", "") or "")
         ts = str(fu.get("citation_ts", "") or "")
         cit = _citation_from_ts(meeting_id, ts)
-        if owner and desc and cit is not None:
+        if owner and desc:
             follow_ups.append(ActionItemRef(owner=owner, description=desc, citation=cit))
 
     # citations: decision_text + background 에서 평탄화 추출
     flat_citations = _extract_citations_from_text(decision_text) + _extract_citations_from_text(
         background
     )
-    flat_citations.extend(fu.citation for fu in follow_ups)
-
-    if not flat_citations and fallback_citation is not None:
-        marker = f"[meeting:{fallback_citation.meeting_id}@{fallback_citation.timestamp_str}]"
-        if decision_text:
-            decision_text = f"{decision_text} {marker}"
-        if background:
-            background = f"{background} {marker}"
-        flat_citations.append(fallback_citation)
-        logger.warning(
-            "DecisionExtractor: citation 없는 decision fallback 적용: title=%r, ts=%s",
-            title[:120],
-            fallback_citation.timestamp_str,
-        )
+    flat_citations.extend(fu.citation for fu in follow_ups if fu.citation is not None)
 
     # slug: title 기반 정규화. 비-ASCII 만 있으면 hex 해시로 폴백
     slug = _normalize_slug(title)
@@ -388,9 +534,9 @@ _EXTRACT_SYSTEM_PROMPT = """\
 규칙:
 1. 결정사항이 없으면 빈 배열 [] 만 출력.
 2. 한국어 고유명사에 영어/중국어 병기 절대 금지.
-3. 모든 사실 진술에 인용 마커 부착.
-4. citation_ts 와 인용 마커의 HH:MM:SS 는 반드시 발화 목록에 있는 실제 시각을 사용.
-5. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
+3. 모든 사실 진술에 근거 발화 줄 맨 앞의 인용 마커 전체를 그대로 복사해 부착한다.
+4. decision_text와 background에는 [meeting:실제회의ID@HH:MM:SS] 전체를 직접 복사한다. 회의 ID나 시간을 새로 조합·추정하지 않는다. follow_ups의 citation_ts는 해당 마커의 HH:MM:SS 부분만 그대로 복사한다.
+5. 00:00:00은 발화 목록에 그 시각의 인용 마커가 실제로 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것. 요약만 있고 근거 발화가 없는 내용은 추출하지 않는다.
 6. 배경은 발화에서 직접 근거를 찾을 수 있을 때만 작성하고, 추론만 가능하면 빈 문자열로 둘 것.
 7. 결정사항은 회의에서 **확정된 구체적 결론**만 추출한다. 다음은 결정이 아니므로 제외:
    - 결정 자체를 미루는 경우("나중에 정하자", "추후에 결론내자", "다음 회의로 넘기자", "자료를 더 모아 다시 논의하자")
@@ -398,52 +544,20 @@ _EXTRACT_SYSTEM_PROMPT = """\
    ※ 단, "출시를 보류하기로 함", "채용을 동결하기로 함"처럼 행동 방침 자체가 확정된 경우는 결정이다.
 8. 하나의 안건에서 나온 결론은 1건의 결정으로 묶고, 세부 업무 분담은 별도 결정이 아니라 follow_ups 로 넣는다(과분할 금지).
 9. 결정인지 애매하면 제외하라(과추출보다 누락이 낫다).
+10. 상태·가능성·동의를 묻는 질문만으로 결정이나 합의가 있었다고 추론하지 않는다. 짧은 질문을 인용하고 그 답을 확정된 사실처럼 작성하지 않는다. 대상과 결론을 밝힌 명시적인 답변이나 확정 발언이 필요하다.
+11. 조건부 계획은 조건을 유지하고, 가능성·검토·예정이라는 말의 강도를 확정·실행·합의로 높이지 않는다. 기존 방식에 대한 설명도 새 합의가 아니다. 조건을 붙인 방침 자체를 명시적으로 정한 경우에만 그 조건을 빠짐없이 포함한다.
+12. 질문과 명시적인 답변을 함께 읽어야 결론을 알 수 있으면 decision_text의 해당 문장에 양쪽 발화의 전체 인용 마커를 모두 복사한다. 한 문장에 복수 인용을 붙일 수 있다. 질문 인용 하나로 답변 내용을 대신하지 말고, 모호한 단답만 있으면 제외한다.
 """
 
-_RENDER_SYSTEM_PROMPT = """\
-당신은 회의 결정사항을 마크다운 위키 페이지로 변환하는 작성자입니다.
-
-페이지 형식:
----
-type: decision
-date: YYYY-MM-DD
-meeting_id: {제공된 회의 ID 그대로}
-status: confirmed | superseded
-participants: [이름, ...]
-projects: [slug, ...]
-confidence: 0~10
-created_at: ISO8601
-updated_at: ISO8601
----
-
-# {title}
-
-## 결정 내용
-...
-
-## 배경
-...
-
-## 후속 액션
-- [ ] 담당자: 작업 [meeting:{제공된 회의 ID}@HH:MM:SS]
-
-## 참고 회의
-- [{제공된 회의 ID}](../../../app/viewer/{제공된 회의 ID})
-
-<!-- confidence: N -->
-
-규칙:
-1. 모든 사실 진술에 인용 마커 부착.
-2. 인용 마커의 meeting_id 는 입력에 제공된 회의 ID 문자열을 절대 변경하지 말고 그대로 사용.
-3. "## 결정 내용" 본문 줄에는 인용 마커를 반드시 포함.
-4. "## 배경" 은 선택 섹션이다. 직접 인용 가능한 근거가 없으면 `없음` 만 쓰고 추론 문장을 만들지 말 것.
-5. 00:00:00 은 발화 목록에 실제로 [00:00:00] 줄이 있을 때만 사용하고, 추정 기본값으로 쓰지 말 것.
-6. "## 참고 회의" 의 링크 줄은 메타데이터이므로 인용 마커를 추가하지 말 것.
-7. 한국어 고유명사 외국어 병기 금지.
-8. 기존 페이지가 있으면 frontmatter 의 created_at 보존.
-9. 마지막 줄에 confidence 마커 필수.
+_REPAIR_CITATION_SYSTEM_PROMPT = """\
+주어진 주장에 대응하는 실제 발화의 인용 마커만 연결하세요.
+주장·조건·담당자·날짜·요약을 수정하거나 새 내용을 만들지 마세요.
+근거가 있는 경우에만 입력 발화 줄 앞의 완전한 [meeting:ID@HH:MM:SS] 마커를 복사하세요.
+질문과 명시적인 답변이 함께 필요하면 양쪽 마커를 모두 포함하세요.
+가장 첫 발화나 가까운 시각을 근거 없이 선택하지 마세요. 근거가 불충분하면 citations: []로 두세요.
+출력은 JSON 배열만 허용합니다. 각 항목은 {"id": 입력 주장 id, "citations": [전체 마커, ...]}입니다.
+다른 필드나 주장의 본문을 출력하지 마세요.
 """
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # 3.4 추출기
@@ -453,13 +567,107 @@ updated_at: ISO8601
 class DecisionExtractor:
     """회의 컨텍스트에서 결정사항을 LLM 으로 추출하고 페이지 후보를 렌더링한다."""
 
-    def __init__(self, llm: WikiLLMClient) -> None:
-        """LLM 추상화 1개만 받는다.
+    def __init__(
+        self, llm: WikiLLMClient, *, repair_config: WikiGroundingConfig | None = None
+    ) -> None:
+        """LLM과 기존 근거 검수 예산을 받아 인용 복구를 제한한다.
 
         Args:
             llm: WikiLLMClient (실구현 또는 mock).
         """
         self._llm: WikiLLMClient = llm
+        self._repair_config = repair_config or WikiGroundingConfig()
+
+    async def _repair_missing_citations(
+        self, decisions: list[ExtractedDecision], lines: list[str], allowed: set[str]
+    ) -> None:
+        """누락된 주장들을 한 번만 묶어 대조하고 본문 변경 없이 마커만 부착한다."""
+        targets: list[tuple[int, str, int]] = []
+        field_lines: dict[tuple[int, str], list[str]] = {}
+        claims: list[dict[str, Any]] = []
+        for decision_index, decision in enumerate(decisions):
+            _update_citation_state(decision, allowed)
+            for key, text in _decision_field_texts(decision).items():
+                values = text.splitlines(keepends=True)
+                field_lines[(decision_index, key)] = values
+                for line_index, line in enumerate(values):
+                    if not _is_claim_line(line) or _line_has_input_citations(line, allowed):
+                        continue
+                    claims.append(
+                        {"id": len(targets), "text": _CITATION_LIKE_PATTERN.sub("", line).strip()}
+                    )
+                    targets.append((decision_index, key, line_index))
+        if not targets:
+            return
+        config = self._repair_config
+        if len(targets) > config.max_claims or any(
+            len(str(claim["text"])) > config.max_item_chars for claim in claims
+        ):
+            logger.warning("Decision citation 복구 보류: reason=item_or_claim_limit")
+            return
+        evidence_lines = _select_repair_evidence(lines, claims, config)
+        prompt = json.dumps({"utterances": evidence_lines, "claims": claims}, ensure_ascii=False)
+        if not evidence_lines or len(prompt) > config.max_input_chars:
+            logger.warning("Decision citation 복구 보류: reason=input_limit")
+            return
+        repair_markers = {line.partition(" ")[0] for line in evidence_lines}
+        try:
+            raw = await asyncio.wait_for(
+                self._llm.generate(
+                    system_prompt=_REPAIR_CITATION_SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    max_tokens=config.max_output_tokens,
+                    temperature=0.0,
+                ),
+                timeout=config.timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning("Decision citation 복구 보류: reason=timeout")
+            return
+        except Exception as exc:  # noqa: BLE001 — 취소는 전파하고 복구 실패는 원문을 보존한다.
+            logger.warning("Decision citation 복구 보류: reason=%s", type(exc).__name__)
+            return
+        if not isinstance(raw, str) or len(raw) > config.max_input_chars:
+            return
+        rows = _extract_json_array(raw)
+        if rows is None:
+            return
+        mappings: dict[int, list[str]] = {}
+        seen: set[int] = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {"id", "citations"}:
+                return
+            index, markers = row["id"], row["citations"]
+            if type(index) is not int or not 0 <= index < len(targets) or index in seen:
+                return
+            seen.add(index)
+            if not isinstance(markers, list) or any(
+                not isinstance(marker, str) or marker not in repair_markers for marker in markers
+            ):
+                return
+            if markers:
+                mappings[index] = list(dict.fromkeys(markers))
+        changed: set[tuple[int, str]] = set()
+        for index, markers in mappings.items():
+            decision_index, key, line_index = targets[index]
+            values = field_lines[(decision_index, key)]
+            original = values[line_index]
+            ending = original[len(original.rstrip("\r\n")) :]
+            text = _CITATION_LIKE_PATTERN.sub("", original.rstrip("\r\n")).rstrip()
+            values[line_index] = f"{text} {' '.join(markers)}{ending}"
+            changed.add((decision_index, key))
+        for decision_index, key in changed:
+            decision = decisions[decision_index]
+            text = "".join(field_lines[(decision_index, key)])
+            if key in {"decision_text", "background"}:
+                setattr(decision, key, text)
+            else:
+                follow_up_index = int(key.partition(".")[2])
+                decision.follow_ups[follow_up_index] = replace(
+                    decision.follow_ups[follow_up_index], description=text, citation=None
+                )
+        for decision in decisions:
+            _update_citation_state(decision, allowed)
 
     async def extract(
         self,
@@ -473,16 +681,16 @@ class DecisionExtractor:
 
         흐름:
             1. utterances 가 비면 LLM 호출 없이 빈 리스트 반환.
-            2. utterances 를 "[HH:MM:SS] 화자: text" 라인으로 직렬화 (sanitize 적용).
+            2. 유효한 발화를 "[meeting:{실제ID}@HH:MM:SS] 화자: text"로 직렬화한다.
             3. system_prompt + user_prompt 조립.
             4. llm.generate() 호출. JSON 파싱 — 실패 시 1회 재시도.
-            5. 항목별로 ExtractedDecision 변환.
+            5. 항목별로 ExtractedDecision 변환. 화자 목록은 모델 응답 대신 입력에서 정한다.
 
         Args:
             meeting_id: 회의 ID.
             meeting_date: 회의 날짜.
             summary: 8단계 결과 마크다운.
-            utterances: 5단계 corrector 출력 (CorrectedUtterance 호환).
+            utterances: 5단계 corrector 출력 (CorrectedUtterance 또는 dict 호환).
 
         Returns:
             ExtractedDecision 리스트. 결정사항이 없거나 파싱 실패 시 빈 리스트.
@@ -490,22 +698,41 @@ class DecisionExtractor:
         # 빈 utterances → LLM 호출 없이 즉시 빈 리스트
         if not utterances:
             return []
+        if re.fullmatch(r"[A-Za-z0-9_]+", meeting_id) is None:
+            logger.warning("DecisionExtractor: 유효하지 않은 회의 ID로 추출을 건너뜁니다.")
+            return []
 
         # utterances 직렬화
         lines: list[str] = []
+        source_participants: set[str] = set()
         for utt in utterances:
-            text = sanitize_utterance_text(getattr(utt, "text", ""))
-            speaker = getattr(utt, "speaker", "UNKNOWN")
-            start = getattr(utt, "start", 0.0)
-            ts_str = self._seconds_to_hhmmss(float(start))
-            lines.append(f"[{ts_str}] {speaker}: {text}")
+            raw_speaker = (
+                utt.get("speaker") if isinstance(utt, dict) else getattr(utt, "speaker", None)
+            )
+            if isinstance(raw_speaker, str) and raw_speaker.strip():
+                source_participants.add(raw_speaker.strip())
+            time_range = _utterance_time_range(utt)
+            if time_range is None:
+                continue
+            raw_text = utt.get("text", "") if isinstance(utt, dict) else getattr(utt, "text", "")
+            if not isinstance(raw_text, str):
+                continue
+            text = sanitize_utterance_text(raw_text)
+            if not text:
+                continue
+            speaker = sanitize_utterance_text(str(raw_speaker or "UNKNOWN"))
+            ts_str = self._seconds_to_hhmmss(time_range[0])
+            lines.append(f"[meeting:{meeting_id}@{ts_str}] {speaker}: {text}")
+        if not lines:
+            return []
 
         user_prompt = (
             f"회의 ID: {meeting_id}\n"
             f"회의 날짜: {meeting_date.isoformat()}\n\n"
             f"## 8단계 요약\n{summary}\n\n"
             f"## 발화 목록\n" + "\n".join(lines) + "\n\n"
-            "위 컨텍스트에서 결정사항을 JSON 배열로 추출하세요."
+            "근거 발화 줄 맨 앞의 완전한 인용 마커를 결정 문장에 그대로 복사하세요. "
+            "근거가 없으면 결정사항으로 만들지 마세요. 위 컨텍스트에서 결정사항을 JSON 배열로 추출하세요."
         )
 
         # 1차 호출
@@ -536,17 +763,22 @@ class DecisionExtractor:
         if parsed is None:
             return []
 
-        fallback_citation = _first_utterance_citation(meeting_id, utterances)
         results: list[ExtractedDecision] = []
+        participants = sorted(source_participants)
         for item in parsed:
             if not isinstance(item, dict):
                 continue
             try:
-                results.append(_build_extracted_decision(item, meeting_id, fallback_citation))
+                results.append(
+                    _build_extracted_decision({**item, "participants": participants}, meeting_id)
+                )
             except Exception as exc:  # noqa: BLE001 — 항목별 실패는 skip
                 logger.warning("DecisionExtractor: 항목 변환 실패 — skip: %r", exc)
                 continue
 
+        await self._repair_missing_citations(
+            results, lines, source_citation_markers(meeting_id, utterances)
+        )
         return results
 
     async def render_pages(
@@ -559,10 +791,10 @@ class DecisionExtractor:
     ) -> list[tuple[str, str]]:
         """ExtractedDecision 목록을 디스크 쓰기 후보 [(rel_path, content)] 로 변환.
 
-        Phase 2.E 변경:
+        결정적 렌더링:
             - confidence 내림차순 정렬 후 상위 _MAX_PAGES_PER_MEETING(=8) 건만 처리.
-            - 페이지 단위 LLM 호출을 asyncio.gather 로 병렬화 — 회의당 시간 단축.
-            - 페이지별 실패는 skip 하되 다른 페이지 생성에는 영향 없음.
+            - 추출 결과를 canonical DecisionRecord로 변환하며 모델을 다시 호출하지 않는다.
+            - 인용이 없는 후보는 skip 하되 다른 페이지 생성에는 영향 없음.
 
         흐름 (각 decision 별):
             1. rel_path 결정 — `decisions/{YYYY-MM-DD}-{slug}.md`.
@@ -597,8 +829,8 @@ class DecisionExtractor:
                 _MAX_PAGES_PER_MEETING,
             )
 
-        # ── 1. 단일 decision 처리 코루틴 정의 ──────────────────────────
-        async def _render_one(
+        # ── 1. 추출된 구조체를 고정 스키마로 렌더한다 ──────────────────
+        def _render_one(
             decision: ExtractedDecision,
         ) -> tuple[str, str] | None:
             """한 decision 을 (rel_path, content) 로 변환. 실패 시 None."""
@@ -647,48 +879,24 @@ class DecisionExtractor:
                 record_id=record_id,
                 source_meetings=source_meetings,
             )
-            if not record.has_verified_candidate_citation:
-                logger.warning(
-                    "DecisionExtractor.render_pages citation 없는 decision skip: "
-                    "path=%s title=%r decision_text=%r background=%r",
-                    rel_path,
-                    decision.title[:120],
-                    decision.decision_text[:200],
-                    decision.background[:200],
-                )
+            if not record.has_verified_candidate_citation and not record.citation_unresolved:
+                logger.warning("DecisionExtractor.render_pages 빈 인용 후보를 건너뜁니다.")
                 return None
 
-            render_prompt = self._build_render_prompt(
-                decision=decision,
-                meeting_id=meeting_id,
-                meeting_date=meeting_date,
-                existing_content=existing_content,
-                rel_path=rel_path,
-            )
-            try:
-                await self._llm.generate(
-                    system_prompt=_RENDER_SYSTEM_PROMPT,
-                    user_prompt=render_prompt,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "DecisionExtractor.render_pages LLM render 호출 실패, canonical render 사용: %s (%r)",
-                    rel_path,
-                    exc,
-                )
+            # 미해결 원문은 검토를 위해 보존하고, 정상 후보에만 기존 병기 정리를 적용한다.
+            content = record.to_markdown()
+            if not record.citation_unresolved:
+                content = _strip_paren_latin(content)
 
-            # 후처리: 한국어 고유명사 영문 병기 제거
-            content = _strip_paren_latin(record.to_markdown())
-
-            # 기존 created_at 보존 (LLM 이 누락했을 경우 강제 주입)
+            # 기존 created_at 보존
             if existing_created_at and existing_created_at not in content:
                 content = self._inject_created_at(content, existing_created_at)
 
             return (rel_path, content)
 
-        # ── 2. asyncio.gather 로 병렬 실행 ─────────────────────────────
-        # 예외는 _render_one 내부에서 catch → None 반환되므로 gather 가 raise 하지 않음.
-        rendered = await asyncio.gather(*[_render_one(d) for d in capped])
+        # 모델 응답을 사용하지 않던 페이지별 추론을 제거한다. 최종 결과는 이전과
+        # 동일한 canonical markdown이며, 출력 경로·정렬·인용·created_at을 보존한다.
+        rendered = [_render_one(decision) for decision in capped]
 
         # ── 3. None 제거 (실패한 페이지) ────────────────────────────────
         results: list[tuple[str, str]] = [r for r in rendered if r is not None]
@@ -815,33 +1023,3 @@ class DecisionExtractor:
                 lines.insert(idx, f"created_at: {created_at}\n")
                 return "".join(lines)
         return content
-
-    @staticmethod
-    def _build_render_prompt(
-        *,
-        decision: ExtractedDecision,
-        meeting_id: str,
-        meeting_date: date,
-        existing_content: str | None,
-        rel_path: str,
-    ) -> str:
-        """render_pages() 의 user_prompt 를 조립한다."""
-        parts: list[str] = []
-        parts.append(f"파일 경로: {rel_path}")
-        parts.append(f"회의 ID: {meeting_id}")
-        parts.append(f"회의 날짜: {meeting_date.isoformat()}")
-        parts.append("")
-        parts.append("## 추출된 결정사항")
-        parts.append(f"제목: {decision.title}")
-        parts.append(f"결정 내용: {decision.decision_text}")
-        parts.append(f"배경: {decision.background}")
-        parts.append(f"참여자: {decision.participants}")
-        parts.append(f"프로젝트: {decision.projects}")
-        parts.append(f"신뢰도: {decision.confidence}")
-        parts.append("")
-        if existing_content:
-            parts.append("## 기존 페이지 (frontmatter 의 created_at 은 보존하세요)")
-            parts.append(existing_content)
-            parts.append("")
-        parts.append("위 정보를 바탕으로 마크다운 페이지를 작성하세요.")
-        return "\n".join(parts)

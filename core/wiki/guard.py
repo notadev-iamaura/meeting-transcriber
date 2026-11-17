@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from core.wiki.grounding import LocalClaimGrounder
 
 from core.wiki.citations import (
     CITATION_PATTERN,
@@ -117,6 +120,9 @@ class GuardVerdict(NamedTuple):
             - "phantom_citation": D2 매핑 실패 인용이 있음.
             - "uncited_overflow": D1 거부율 30% 초과.
             - "malformed_confidence": D3 confidence 마커 누락/비정수.
+            - "unsupported_claim": 실제 발화가 주장을 지지하지 않음.
+            - "grounding_unavailable": 근거/모델 판정을 확인할 수 없어 보류.
+            - "grounding_limit": 검수 예산 초과로 보류.
         confidence: 추출된 0~10 정수. 추출 실패 시 -1.
         rejected_citations: D2 phantom 으로 판정된 인용 raw 문자열 목록.
         cleaned_content: D1 후처리 결과. uncited_overflow 면 None.
@@ -186,6 +192,7 @@ class WikiGuard:
         *,
         confidence_threshold: int = 7,
         d1_min_sample_size: int = 4,
+        grounder: LocalClaimGrounder | None = None,
     ) -> None:
         """검증자와 임계값을 받는다.
 
@@ -197,6 +204,7 @@ class WikiGuard:
         self._verifier: CitationVerifier = verifier
         self._confidence_threshold: int = confidence_threshold
         self._d1_min_sample_size: int = d1_min_sample_size
+        self._grounder = grounder
 
     async def verify(
         self,
@@ -303,10 +311,29 @@ class WikiGuard:
                 cleaned_content=cleaned_content,
             )
 
+        # 실재하는 인용이 의미까지 뒷받침하는지는 별도 로컬 검수로 판단한다.
+        # 직접 구성한 레거시/테스트 guard는 선택 주입이며, 운영 팩토리는 기본 주입한다.
+        if self._grounder is not None:
+            grounding = await self._grounder.verify(cleaned_content, self._verifier)
+            if not grounding.passed:
+                logger.info(
+                    "Wiki 내용 검수 보류: reason=%s diagnostic=%s",
+                    grounding.reason,
+                    grounding.diagnostic,
+                )
+                return GuardVerdict(
+                    passed=False,
+                    reason=grounding.reason,
+                    confidence=confidence,
+                    cleaned_content=cleaned_content,
+                    d1_dropped_lines=len(_rejected),
+                )
+
         # ── 모두 통과 ────────────────────────────────────────────────
         return GuardVerdict(
             passed=True,
             reason="passed",
             confidence=confidence,
             cleaned_content=cleaned_content,
+            d1_dropped_lines=len(_rejected),
         )

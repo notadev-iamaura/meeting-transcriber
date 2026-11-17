@@ -254,6 +254,9 @@
             self._destroyed = false;          // destroy 이후 async DOM write 방지
             self._activeTab = "overview";    // 현재 활성 탭 (overview | search)
             self._digestLoaded = false;       // digest fetch 중복 방지
+            self._pageData = null;
+            self._editing = false;
+            self._saving = false;
 
             self._render();
             self._bind();
@@ -318,7 +321,7 @@
                 '      <input type="search" id="wikiPersonFilter" class="wiki-filter-control" placeholder="관련자/담당자" aria-label="관련자 또는 담당자">',
                 '      <input type="date" id="wikiDateFromFilter" class="wiki-filter-control" aria-label="시작일">',
                 '      <input type="date" id="wikiDateToFilter" class="wiki-filter-control" aria-label="종료일">',
-                '      <input type="number" id="wikiConfidenceFilter" class="wiki-filter-control wiki-filter-control--small" min="0" max="10" step="1" placeholder="신뢰도" aria-label="최소 신뢰도">',
+                '      <input type="number" id="wikiConfidenceFilter" class="wiki-filter-control wiki-filter-control--small" min="0" max="10" step="1" placeholder="AI 점수" aria-label="최소 AI 자체 평가 점수" title="AI의 자체 평가이며 실제 정확도나 사용자 검토 결과가 아닙니다">',
                 '    </div>',
                 // 본문 (트리 + 미리보기)
                 '    <div class="wiki-body">',
@@ -478,6 +481,19 @@
 
             // 미리보기 위임 클릭 — 인용 마커
             var onPreviewClick = function (e) {
+                var action = e.target.closest("[data-wiki-action]");
+                if (action) {
+                    e.preventDefault();
+                    self._handlePageAction(action.getAttribute("data-wiki-action"), action);
+                    return;
+                }
+                var related = e.target.closest("[data-wiki-related]");
+                if (related) {
+                    e.preventDefault();
+                    var relatedPath = related.getAttribute("data-wiki-related");
+                    self._loadPage(relatedPath, relatedPath.split("/")[0]);
+                    return;
+                }
                 var emptyAction = e.target.closest("[data-wiki-empty-action]");
                 if (emptyAction) {
                     self._handleEmptyAction(emptyAction.getAttribute("data-wiki-empty-action"));
@@ -496,6 +512,14 @@
             };
             els.preview.addEventListener("click", onPreviewClick);
             self._listeners.push({ el: els.preview, type: "click", fn: onPreviewClick });
+            var onEditorKey = function (e) {
+                if (self._editing && (e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    self._savePage();
+                }
+            };
+            els.preview.addEventListener("keydown", onEditorKey);
+            self._listeners.push({ el: els.preview, type: "keydown", fn: onEditorKey });
 
             // 탭 클릭 — 현황/검색 전환
             var onTabClick = function (e) {
@@ -613,6 +637,7 @@
          */
         WikiView.prototype._activateTab = function (tab, updateUrl) {
             if (tab !== "overview" && tab !== "search") return;
+            if (tab !== this._activeTab && !this.canLeave()) return;
             this._activeTab = tab;
             var els = this._els;
             var isOverview = (tab === "overview");
@@ -768,6 +793,17 @@
             } else {
                 body = openActions.map(function (group) {
                     var owner = App.escapeHtml(group.owner || "미지정");
+                    var scope = "";
+                    if (group.identity_scope === "meeting" || group.identity_scope === "unresolved") {
+                        var meetingSeconds = group.meeting_id && group.meeting_id.match(/^meeting_\d{8}_\d{4}(\d{2})$/);
+                        scope = group.meeting_id
+                            ? "회의 " + App.extractMeetingTitle({ meeting_id: group.meeting_id }) + (meetingSeconds ? ":" + meetingSeconds[1] : "")
+                            : "담당 회의 확인 필요";
+                        if (group.identity_scope === "unresolved") scope += " · 담당자 확인 필요";
+                    }
+                    var scopeHtml = scope
+                        ? '<div class="wiki-ov-card__meta" title="' + App.escapeHtml(group.meeting_id || scope) + '">' + App.escapeHtml(scope) + '</div>'
+                        : "";
                     var items = group.items || [];
                     var itemsHtml = items.map(function (item) {
                         var desc = App.escapeHtml(item.description || "");
@@ -790,6 +826,7 @@
                         '    <span class="wiki-ov-card__owner">' + owner + "</span>",
                         '    <span class="wiki-ov-count">' + items.length + "건</span>",
                         "  </div>",
+                        scopeHtml,
                         '  <ul class="wiki-ov-item-list">' + itemsHtml + "</ul>",
                         "</div>",
                     ].join("");
@@ -1182,6 +1219,7 @@
         WikiView.prototype._loadPage = function (path, type) {
             var self = this;
             if (!path || !type) return;
+            if (!self.canLeave()) return;
 
             self._abortTransientRequests();
             self._activePagePath = path;
@@ -1203,11 +1241,11 @@
 
             App.apiRequest(endpoint, ctrl ? { signal: ctrl.signal } : {})
                 .then(function (data) {
-                    if (self._destroyed) return;
+                    if (self._destroyed || self._activePagePath !== path) return;
                     self._renderPage(data);
                 })
                 .catch(function (err) {
-                    if (self._destroyed || (err && err.name === "AbortError")) return;
+                    if (self._destroyed || self._activePagePath !== path || (err && err.name === "AbortError")) return;
                     self._els.preview.innerHTML =
                         '<div class="wiki-preview-empty">' +
                         '<p class="wiki-preview-empty-title">페이지를 불러오지 못했습니다</p>' +
@@ -1251,6 +1289,8 @@
                 this._renderPreviewEmpty();
                 return;
             }
+            this._pageData = data;
+            this._editing = false;
 
             // 제목 결정 — frontmatter.title > 응답 title > 첫 H1 > path slug
             var title = (data.frontmatter && data.frontmatter.title) ||
@@ -1259,9 +1299,15 @@
 
             // frontmatter 메타 박스 렌더 (title 은 헤더에서 따로 표시하므로 제외)
             var fmRows = [];
+            var reviewMetadataLabels = {
+                ai_reviewed_at: "AI 재검수 일시",
+                ai_review_result: "AI 재검수 결과",
+                review_detail: "검수 메모",
+            };
             if (data.frontmatter && typeof data.frontmatter === "object") {
                 Object.keys(data.frontmatter).forEach(function (k) {
                     if (k === "title") return; // 중복 제거
+                    if (k === "citation_unresolved" || k === "unresolved_citation_fields") return;
                     var v = data.frontmatter[k];
                     var vText;
                     if (Array.isArray(v)) {
@@ -1273,11 +1319,17 @@
                     } else {
                         vText = String(v);
                     }
+                    if (k === "review_reason") {
+                        vText = ({ citation_unresolved: "근거 발화의 인용 위치를 확인하지 못함 · 원문 검토 필요", unsupported_claim: "원문 근거가 불충분하거나 내용과 일치하지 않음", grounding_unavailable: "원문 근거 검사를 완료하지 못함", grounding_limit: "한 번에 검사할 수 있는 범위를 초과함", human_protected: "사용자 수정본과 다른 자동 생성 제안", low_confidence: "AI 자체 평가 점수가 기준 미만", source_incomplete: "전사 초안 기반 · 화자분리·교정·요약 완료 후 재검수 필요", identity_unresolved: "화자 이름 미확인 · 회의 간 같은 인물로 연결하지 않음" })[vText] || vText;
+                    }
+                    if (k === "ai_review_result") {
+                        vText = ({ held: "추가 근거 필요", verified: "근거 확인됨", historical: "과거 버전", identity_unresolved: "화자 이름 확인 필요" })[vText] || vText;
+                    }
                     if (!vText) return;
                     fmRows.push(
                         '<div class="wiki-preview-frontmatter-row">' +
                         '<span class="wiki-preview-frontmatter-key">' +
-                        App.escapeHtml(k) + "</span>" +
+                        App.escapeHtml(k === "confidence" ? "AI 자체 평가 (정확도 아님)" : k === "review_reason" ? "검토가 필요한 이유" : reviewMetadataLabels[k] || k) + "</span>" +
                         '<span class="wiki-preview-frontmatter-value">' +
                         App.escapeHtml(vText) + "</span></div>"
                     );
@@ -1295,15 +1347,170 @@
                     ? '    <div class="wiki-preview-page-path">' + App.escapeHtml(data.path) + "</div>"
                     : "",
                 "  </header>",
+                data.revision ? '<div class="wiki-page-tools">' +
+                    '<button type="button" class="btn btn-secondary" data-wiki-action="edit">수정</button>' +
+                    '<button type="button" class="btn btn-secondary" data-wiki-action="history">변경 이력</button>' +
+                    '<span class="wiki-page-review">' +
+                    (data.human_reviewed ? "사용자 검토 완료" : data.human_edited ? "사용자 수정본 · 자동 갱신 보호" : "자동 생성 · 내용 확인 필요") +
+                    '</span></div>' : "",
+                '<p class="wiki-page-message" role="status" aria-live="polite"></p>',
                 fmRows.length > 0
                     ? '  <div class="wiki-preview-frontmatter">' + fmRows.join("") + "</div>"
                     : "",
                 '  <div class="wiki-preview-markdown">' + bodyHtml + "</div>",
+                '<section class="wiki-page-workspace" aria-label="위키 편집 및 변경 이력"></section>',
+                this._relatedPagesHtml(data.related_pages || []),
                 "</article>",
             ].filter(Boolean).join("\n");
 
             this._els.preview.innerHTML = html;
             this._els.preview.scrollTop = 0;
+        };
+
+        /** 관련 페이지를 안전한 내부 탐색 버튼으로 표시한다. */
+        WikiView.prototype._relatedPagesHtml = function (pages) {
+            if (!pages.length) return "";
+            return '<section class="wiki-related"><h2>관련 기록</h2><ul>' + pages.map(function (p) {
+                return '<li><button type="button" class="wiki-related-link" data-wiki-related="' +
+                    App.escapeHtml(p.path) + '">' + App.escapeHtml(p.title || p.path) +
+                    '</button><span class="wiki-related-reason">' +
+                    App.escapeHtml(({ link: "연결한 기록", backlink: "이 문서를 참조한 기록", project: "같은 프로젝트" })[p.relation] || p.relation || "관련 기록") + '</span></li>';
+            }).join("") + '</ul></section>';
+        };
+
+        /** 편집 중 이동을 막아 저장되지 않은 입력을 보존한다. */
+        WikiView.prototype.canLeave = function () {
+            if (!this._editing && !this._saving) return true;
+            this._pageMessage(this._saving ? "저장 중입니다. 잠시 기다려 주세요." :
+                "수정 중인 내용이 있습니다. 저장하거나 취소한 뒤 이동해 주세요.", true);
+            var editor = this._els.preview.querySelector(".wiki-editor-input");
+            if (editor) editor.focus();
+            return false;
+        };
+
+        /** 상세 페이지의 현재 상태 메시지를 표시한다. */
+        WikiView.prototype._pageMessage = function (message, error) {
+            var el = this._els.preview.querySelector(".wiki-page-message");
+            if (!el) return;
+            el.textContent = message;
+            el.classList.toggle("wiki-page-message--error", !!error);
+        };
+
+        /** 페이지 경로를 서버의 상세·이력·복원 주소로 변환한다. */
+        WikiView.prototype._pageEndpoint = function (kind) {
+            var path = this._pageData.path;
+            return "/wiki/" + kind + "/" + encodeURIComponent(path.split("/")[0]) + "/" +
+                _wikiPagePathToSlug(path).split("/").map(encodeURIComponent).join("/");
+        };
+
+        /** 위임된 상세 도구 동작을 실행한다. */
+        WikiView.prototype._handlePageAction = function (action, button) {
+            if (!this._pageData || this._saving) return;
+            if (action === "save") { this._savePage(); return; }
+            if (action === "cancel") {
+                this._renderPage(this._pageData);
+                this._els.preview.querySelector('[data-wiki-action="edit"]').focus();
+                return;
+            }
+            if (this._editing) { this.canLeave(); return; }
+            if (action === "edit") this._openEditor();
+            if (action === "history") this._openHistory();
+            if (action === "restore") this._restorePage(button.getAttribute("data-revision"));
+        };
+
+        /** 본문과 출처를 함께 확인할 수 있는 편집기를 연다. */
+        WikiView.prototype._openEditor = function () {
+            this._editing = true;
+            var box = this._els.preview.querySelector(".wiki-page-workspace");
+            box.innerHTML = '<div class="wiki-editor"><label for="wikiEditorInput">위키 내용 수정</label>' +
+                '<p id="wikiEditorHelp">위의 원문 근거를 확인하며 수정하세요. 기존 출처 표시는 유지해야 합니다. ' +
+                '저장한 수정본은 이후 자동 생성으로 덮어쓰지 않습니다.</p>' +
+                '<div class="wiki-page-tools"><button type="button" class="btn btn-primary" data-wiki-action="save">저장 <kbd>⌘ Enter</kbd></button>' +
+                '<button type="button" class="btn btn-secondary" data-wiki-action="cancel">취소</button></div>' +
+                '<label class="wiki-review-checkbox"><input type="checkbox" class="wiki-editor-reviewed"> 원문과 비교해 내용을 검토했습니다</label>' +
+                '<textarea id="wikiEditorInput" class="wiki-editor-input" aria-describedby="wikiEditorHelp" rows="10"></textarea></div>';
+            var input = box.querySelector("textarea");
+            input.value = this._pageData.editable_content == null ? this._pageData.content : this._pageData.editable_content;
+            input.focus();
+            this._pageMessage("");
+        };
+
+        /** 낙관적 버전 검사를 사용해 수정본을 저장하고 실패 시 입력을 유지한다. */
+        WikiView.prototype._savePage = function () {
+            var self = this;
+            if (!self._editing || self._saving) return;
+            var content = self._els.preview.querySelector(".wiki-editor-input").value;
+            var reviewed = self._els.preview.querySelector(".wiki-editor-reviewed").checked;
+            self._saving = true;
+            self._pageMessage("저장 중…");
+            App.apiRequest(self._pageEndpoint("pages"), {
+                method: "PUT", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ content: content, expected_revision: self._pageData.revision, reviewed: reviewed })
+            }).then(function (data) {
+                if (self._destroyed) return;
+                self._saving = false;
+                self._renderPage(data);
+                self._pageMessage(data.index_status === "keyword_rebuild_needed" ?
+                    "수정본은 저장됐지만 검색 갱신에 실패했습니다. 검색 갱신이 필요합니다." :
+                    data.index_status === "keyword_ready_semantic_pending" ?
+                    "수정본을 저장했습니다. 키워드 검색에 반영했으며 의미 검색 갱신은 대기 중입니다." : "수정본을 저장했습니다.", data.index_status === "keyword_rebuild_needed");
+                self._digestLoaded = false;
+                self._loadDigest();
+                var edit = self._els.preview.querySelector('[data-wiki-action="edit"]');
+                if (edit) edit.focus();
+            }).catch(function (err) {
+                if (self._destroyed) return;
+                self._saving = false;
+                self._pageMessage(err.status === 409 ?
+                    "다른 곳에서 내용이 변경됐습니다. 입력한 내용은 유지했습니다. 복사해 둔 뒤 최신 페이지에서 다시 수정해 주세요." :
+                    (err.message || "저장하지 못했습니다. 입력한 내용은 유지했습니다."), true);
+            });
+        };
+
+        /** 이전 버전을 현재 내용 옆에 표시해 복원 전에 비교하도록 한다. */
+        WikiView.prototype._openHistory = function () {
+            var self = this;
+            var activePath = self._activePagePath;
+            self._pageMessage("변경 이력을 불러오는 중…");
+            App.apiRequest(self._pageEndpoint("history")).then(function (data) {
+                if (self._destroyed || self._editing || self._activePagePath !== activePath) return;
+                var revisions = data.revisions || [];
+                var box = self._els.preview.querySelector(".wiki-page-workspace");
+                box.innerHTML = '<section class="wiki-history"><h2>변경 이력</h2><p>현재 내용은 위에 표시됩니다. 이전 내용을 확인한 뒤 복원할 수 있습니다.</p>' +
+                    revisions.map(function (r) {
+                        return '<details class="wiki-history-version"><summary>' + App.escapeHtml(r.created_at || "이전 버전") +
+                            (r.current ? " · 현재 버전" : "") + (r.human_reviewed ? " · 사용자 검토 완료" : "") + '</summary><pre>' +
+                            App.escapeHtml(r.content || "") + '</pre>' + (r.current ? "" : '<button type="button" class="btn btn-secondary" ' +
+                            'data-wiki-action="restore" data-revision="' + App.escapeHtml(r.revision) +
+                            '">이 내용으로 복원</button>') + '</details>';
+                    }).join("") + (revisions.length ? "" : '<p>아직 저장된 변경 이력이 없습니다.</p>') + '</section>';
+                self._pageMessage("");
+            }).catch(function (err) {
+                if (!self._destroyed && self._activePagePath === activePath) self._pageMessage(err.message, true);
+            });
+        };
+
+        /** 과거 버전을 새 수정본으로 복원하며 최신 버전 충돌을 검사한다. */
+        WikiView.prototype._restorePage = function (revision) {
+            var self = this;
+            self._saving = true;
+            self._pageMessage("이전 내용을 복원하는 중…");
+            App.apiRequest(self._pageEndpoint("restore"), {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ revision: revision, expected_revision: self._pageData.revision })
+            }).then(function (data) {
+                if (self._destroyed) return;
+                self._saving = false;
+                self._renderPage(data);
+                self._pageMessage(data.index_status === "keyword_rebuild_needed" ? "복원은 저장됐지만 검색 갱신에 실패했습니다." : "이전 내용을 새 수정본으로 복원했습니다.", data.index_status === "keyword_rebuild_needed");
+                self._digestLoaded = false;
+                self._loadDigest();
+                self._els.preview.querySelector('[data-wiki-action="history"]').focus();
+            }).catch(function (err) {
+                if (self._destroyed) return;
+                self._saving = false;
+                self._pageMessage(err.message || "복원하지 못했습니다.", true);
+            });
         };
 
         /**

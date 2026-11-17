@@ -1,5 +1,26 @@
 /* Wiki view styles extracted from style.css. */
 
+.wiki-page-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.wiki-page-tools button, .wiki-history-version button { padding: 6px 12px; border: 0.5px solid var(--border); border-radius: var(--radius); color: var(--text-primary); background: var(--bg-card); font: inherit; cursor: pointer; }
+.wiki-page-tools .btn-primary { color: var(--text-on-accent, #fff); background: var(--accent); border-color: var(--accent); }
+.wiki-page-tools button:focus-visible, .wiki-history-version button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.wiki-page-review, .wiki-related-reason { color: var(--text-secondary); font-size: 12px; }
+.wiki-page-message { color: var(--text-secondary); line-height: 1.6; }
+.wiki-page-message:empty { display: none; }
+.wiki-page-message--error { color: var(--text-primary); padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-secondary); }
+.wiki-editor, .wiki-history, .wiki-related { margin-top: 20px; padding-top: 16px; border-top: 0.5px solid var(--border); }
+.wiki-editor label, .wiki-history h2, .wiki-related h2 { font-size: 13px; font-weight: 600; }
+.wiki-editor p, .wiki-history p { color: var(--text-secondary); line-height: 1.6; }
+.wiki-editor-input { display: block; box-sizing: border-box; width: 100%; min-height: 220px; max-height: 60vh; margin-top: 12px; resize: vertical; padding: 12px; border: 0.5px solid var(--border); border-radius: var(--radius); background: var(--bg-input); color: var(--text-primary); font: inherit; line-height: 1.75; }
+.wiki-editor-input:focus-visible, .wiki-related-link:focus-visible, .wiki-history summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.wiki-review-checkbox { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; }
+.wiki-history-version { padding: 10px 0; border-bottom: 0.5px solid var(--border); }
+.wiki-history-version summary { cursor: pointer; color: var(--text-secondary); }
+.wiki-history-version pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius); }
+.wiki-related ul { list-style: none; padding: 0; }
+.wiki-related li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 5px 0; }
+.wiki-related-link { padding: 0; border: 0; background: transparent; color: var(--accent); text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+
 /* =================================================================
  * LLM Wiki Phase 2.F — WikiView 스타일
  * 디자인 토큰만 사용 (var(--bg-*), var(--text-*), var(--accent), var(--border) 등)

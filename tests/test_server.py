@@ -202,6 +202,9 @@ class TestRuntimeProfile:
             assert app.state.zoom_detector is mocks["zoom"]
             assert app.state.folder_watcher is mocks["watcher"]
             assert app.state.job_processor is mocks["processor"]
+            assert (
+                mocks["pipeline_cls"].call_args.kwargs["model_manager"] is app.state.model_manager
+            )
 
         mocks["recorder_cls"].assert_called_once()
         mocks["zoom_cls"].assert_called_once()
@@ -730,8 +733,12 @@ class TestLifespanPartialFailure:
             assert get_chat_engine(request) is chat_engine
             assert app.state.search_engine is search_engine
             assert app.state.chat_engine is chat_engine
-            search_cls.assert_called_once_with(config=config)
-            chat_cls.assert_called_once_with(config=config, search_engine=search_engine)
+            search_cls.assert_called_once_with(
+                config=config, model_manager=app.state.model_manager
+            )
+            chat_cls.assert_called_once_with(
+                config=config, search_engine=search_engine, model_manager=app.state.model_manager
+            )
 
     def test_chat_engine_지연_초기화_실패는_503(self, tmp_path: Path) -> None:
         """ChatEngine 생성 실패는 Chat 의존성에서 503으로 드러난다."""
@@ -778,7 +785,7 @@ class TestLifespanPartialFailure:
             results = list(executor.map(get_search_engine, requests))
 
         assert results == [search_engine, search_engine, search_engine, search_engine]
-        search_cls.assert_called_once_with(config=config)
+        search_cls.assert_called_once_with(config=config, model_manager=app.state.model_manager)
 
 
 # === TestExceptionHandler ===
