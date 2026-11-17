@@ -43,6 +43,10 @@ def _make_bundle_project(tmp_path: Path) -> tuple[Path, Path]:
     web_dir = project_dir / "ui" / "web"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    scripts_dir = project_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "__init__.py").write_text("# runtime scripts\n", encoding="utf-8")
+    (scripts_dir / "backfill_wiki.py").write_text("# Wiki backfill\n", encoding="utf-8")
     return project_dir, python
 
 
@@ -331,6 +335,36 @@ def test_validate_launcher_app_detects_bundled_source_missing_required_file(
     assert report.status == "fail"
     assert checks["source_bundle"].status == "fail"
     assert "pyproject.toml" in checks["source_bundle"].details["missing_items"]
+
+
+@pytest.mark.parametrize("filename", ["scripts/__init__.py", "scripts/backfill_wiki.py"])
+def test_validate_launcher_app_detects_missing_wiki_runtime_script(
+    tmp_path: Path, filename: str
+) -> None:
+    """백필 import에 필요한 두 런타임 파일을 번들 필수 계약으로 검사한다."""
+    from scripts.validate_launcher_app import validate_launcher_app
+
+    result = _build_bundled_app(tmp_path)
+    assert result.bundled_project_path is not None
+    (result.bundled_project_path / filename).unlink()
+    report = validate_launcher_app(result.app_path, check_codesign=False)
+    checks = _checks_by_id(report)
+    assert report.status == "fail"
+    assert filename in checks["source_bundle"].details["missing_items"]
+
+
+def test_validate_launcher_app_rejects_extra_operational_script(tmp_path: Path) -> None:
+    """런타임 allowlist 확대가 설치·빌드 스크립트 전체 배포로 번지지 않게 한다."""
+    from scripts.validate_launcher_app import validate_launcher_app
+
+    result = _build_bundled_app(tmp_path)
+    assert result.bundled_project_path is not None
+    (result.bundled_project_path / "scripts/install.sh").write_text(
+        "#!/bin/sh\n", encoding="utf-8"
+    )
+    report = validate_launcher_app(result.app_path, check_codesign=False)
+    assert report.status == "fail"
+    assert "scripts/install.sh" in _checks_by_id(report)["source_bundle"].details["excluded_items"]
 
 
 def test_validate_launcher_app_detects_bundled_source_excluded_item(

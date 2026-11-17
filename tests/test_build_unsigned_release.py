@@ -40,6 +40,10 @@ def _make_bundle_project(tmp_path: Path) -> tuple[Path, Path]:
     web_dir = project_dir / "ui" / "web"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    scripts_dir = project_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "__init__.py").write_text("# runtime scripts\n", encoding="utf-8")
+    (scripts_dir / "backfill_wiki.py").write_text("# Wiki backfill\n", encoding="utf-8")
     return project_dir, python
 
 

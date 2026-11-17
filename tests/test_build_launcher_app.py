@@ -7,6 +7,7 @@ import plistlib
 import shlex
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,10 @@ def _make_bundle_project(tmp_path: Path) -> tuple[Path, Path]:
     web_dir = project_dir / "ui" / "web"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    scripts_dir = project_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "__init__.py").write_text("# runtime scripts\n", encoding="utf-8")
+    (scripts_dir / "backfill_wiki.py").write_text("# Wiki backfill\n", encoding="utf-8")
     return project_dir, python
 
 
@@ -222,6 +227,36 @@ def test_build_launcher_app_generated_executable_passes_bash_syntax(
     )
 
     assert syntax.returncode == 0, syntax.stderr
+
+
+def test_generated_launcher_disables_bytecode_before_python_and_inherits_to_child(
+    tmp_path: Path,
+) -> None:
+    """가짜 Python과 그 자식 셸에 캐시 금지 환경을 전달하며 실제 앱은 실행하지 않는다."""
+    from scripts.build_launcher_app import build_launcher_app
+
+    project_dir, python = _make_project(tmp_path)
+    python.write_text(
+        "#!/bin/sh\nexec /bin/sh -c 'printf %s \"${PYTHONDONTWRITEBYTECODE-unset}\"'\n",
+        encoding="utf-8",
+    )
+    result = build_launcher_app(
+        output_dir=tmp_path / "dist",
+        project_dir=project_dir,
+        python_executable=python,
+    )
+    process = subprocess.run(
+        ["/bin/bash", str(result.executable_path)],
+        env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "0"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert process.stdout == "1"
+    assert not list(project_dir.rglob("__pycache__"))
 
 
 def test_build_launcher_app_rejects_existing_bundle_without_force(tmp_path: Path) -> None:
@@ -565,6 +600,88 @@ def test_build_launcher_app_bundles_project_source_snapshot(tmp_path: Path) -> N
     assert str(project_dir.resolve()) not in executable
 
 
+def test_bundled_wiki_backfill_imports_without_checkout_or_editable_install(
+    tmp_path: Path,
+) -> None:
+    """실제 번들만으로 Wiki 백필 모듈을 import하며 개발 설치의 폴백을 차단한다."""
+    from scripts.build_launcher_app import build_launcher_app
+
+    project_dir = Path(__file__).resolve().parents[1]
+    result = build_launcher_app(
+        output_dir=tmp_path / "dist",
+        project_dir=project_dir,
+        python_executable=Path(sys.executable),
+        bundle_source=True,
+    )
+    bundled = result.bundled_project_path
+    assert bundled is not None
+    for name in ("__init__.py", "backfill_wiki.py"):
+        assert (bundled / "scripts" / name).read_bytes() == (
+            project_dir / "scripts" / name
+        ).read_bytes()
+    assert not (bundled / "scripts" / "install.sh").exists()
+    assert not (bundled / "scripts" / "build_launcher_app.py").exists()
+    isolated_cwd = tmp_path / "empty-cwd"
+    isolated_cwd.mkdir()
+    process = subprocess.run(
+        [
+            str(sys.executable),
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            "import sys; from pathlib import Path; root=Path(sys.argv[1]); "
+            "sys.path.insert(0,str(root)); import scripts; import scripts.backfill_wiki as backfill; "
+            "assert Path(scripts.__file__).resolve()==root/'scripts/__init__.py'; "
+            "assert Path(backfill.__file__).resolve()==root/'scripts/backfill_wiki.py'; "
+            "assert callable(backfill.backfill)",
+            str(bundled.resolve()),
+        ],
+        cwd=isolated_cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr
+
+
+@pytest.mark.parametrize("filename", ["scripts/__init__.py", "scripts/backfill_wiki.py"])
+def test_bundle_rejects_missing_runtime_backfill_file(tmp_path: Path, filename: str) -> None:
+    """API가 사용하는 런타임 파일 누락을 앱 실행 전 빌드에서 차단한다."""
+    from scripts.build_launcher_app import build_launcher_app
+
+    project_dir, python = _make_bundle_project(tmp_path)
+    (project_dir / filename).unlink()
+    with pytest.raises(ValueError, match="required bundled runtime source"):
+        build_launcher_app(
+            output_dir=tmp_path / "dist",
+            project_dir=project_dir,
+            python_executable=python,
+            bundle_source=True,
+        )
+    assert not (tmp_path / "dist" / "Recap.app").exists()
+
+
+def test_bundle_rejects_runtime_backfill_symlink(tmp_path: Path) -> None:
+    """런타임 백필의 symlink 파일을 통한 외부 소스 유입을 차단한다."""
+    from scripts.build_launcher_app import build_launcher_app
+
+    project_dir, python = _make_bundle_project(tmp_path)
+    runtime_file = project_dir / "scripts/backfill_wiki.py"
+    runtime_file.unlink()
+    outside = tmp_path / "outside.py"
+    outside.write_text("# external\n", encoding="utf-8")
+    runtime_file.symlink_to(outside)
+    with pytest.raises(ValueError, match="required bundled runtime source"):
+        build_launcher_app(
+            output_dir=tmp_path / "dist",
+            project_dir=project_dir,
+            python_executable=python,
+            bundle_source=True,
+        )
+
+
 def test_build_launcher_app_bundle_source_excludes_local_state_and_secret_files(
     tmp_path: Path,
 ) -> None:
@@ -586,7 +703,7 @@ def test_build_launcher_app_bundle_source_excludes_local_state_and_secret_files(
         excluded_dir.mkdir()
         (excluded_dir / "marker.txt").write_text("do not copy\n", encoding="utf-8")
     scripts_extra = project_dir / "scripts" / "benchmark_stt.py"
-    scripts_extra.parent.mkdir()
+    scripts_extra.parent.mkdir(exist_ok=True)
     scripts_extra.write_text("# benchmark should not be bundled\n", encoding="utf-8")
     zoom_helper = scripts_extra.parent / "zoom_audio_activity.swift"
     zoom_helper.write_text("// runtime CoreAudio helper\n", encoding="utf-8")
@@ -619,6 +736,8 @@ def test_build_launcher_app_bundle_source_excludes_local_state_and_secret_files(
     assert "dist/Recap.app" not in "\n".join(bundled_files)
     assert "scripts/install.sh" not in bundled_files
     assert "scripts/benchmark_stt.py" not in bundled_files
+    assert "scripts/__init__.py" in bundled_files
+    assert "scripts/backfill_wiki.py" in bundled_files
     assert (bundled / "scripts/zoom_audio_activity.swift").read_bytes() == zoom_helper.read_bytes()
     assert "core/weights.safetensors" not in bundled_files
     assert "hf_secret" not in combined

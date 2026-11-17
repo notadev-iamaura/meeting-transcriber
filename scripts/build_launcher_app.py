@@ -34,8 +34,11 @@ _BUNDLED_SOURCE_FILES = (
     "requirements.txt",
     "requirements-dev.txt",
     "LICENSE",
+    "scripts/__init__.py",
+    "scripts/backfill_wiki.py",
     "scripts/zoom_audio_activity.swift",
 )
+_REQUIRED_RUNTIME_SCRIPTS = ("scripts/__init__.py", "scripts/backfill_wiki.py")
 _EXCLUDED_SOURCE_NAMES = frozenset(
     {
         ".DS_Store",
@@ -331,11 +334,17 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _copy_project_source(*, source_dir: Path, target_dir: Path) -> int:
     """런타임에 필요한 프로젝트 소스 스냅샷을 복사한다."""
+    # Wiki API는 이 모듈을 지연 import한다. 개발 checkout의 editable 설치가
+    # 누락을 가리지 않도록 번들 자체에 필수 런타임 파일을 보장한다.
+    for name in _REQUIRED_RUNTIME_SCRIPTS:
+        source_path = source_dir / name
+        if not source_path.is_file() or not _source_components_allowed(source_path, source_dir):
+            raise ValueError(f"required bundled runtime source missing or unsafe: {name}")
     copied_files = 0
     target_dir.mkdir(parents=True)
     for name in _BUNDLED_SOURCE_FILES:
         source_path = source_dir / name
-        if source_path.is_file() and _is_allowed_source_path(source_path):
+        if source_path.is_file() and _source_components_allowed(source_path, source_dir):
             destination = target_dir / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             _copy_source_file(source_path, destination)
@@ -347,6 +356,17 @@ def _copy_project_source(*, source_dir: Path, target_dir: Path) -> int:
             copied_files += _copy_tree_filtered(source_path, target_dir / name)
 
     return copied_files
+
+
+def _source_components_allowed(path: Path, source_dir: Path) -> bool:
+    """allowlist 파일과 그 부모가 symlink·제외 경로를 통과하지 않는지 확인한다."""
+    relative = path.relative_to(source_dir)
+    cursor = source_dir
+    for part in relative.parts:
+        cursor = cursor / part
+        if not _is_allowed_source_path(cursor):
+            return False
+    return True
 
 
 def _copy_tree_filtered(source_dir: Path, target_dir: Path) -> int:
@@ -518,6 +538,7 @@ if [[ -x /usr/bin/arch ]] && /usr/bin/arch -arm64 /usr/bin/true >/dev/null 2>&1;
   PYTHON_LAUNCH=(/usr/bin/arch -arm64 "${{PYTHON_BIN}}")
 fi
 
+export PYTHONDONTWRITEBYTECODE=1
 exec "${{PYTHON_LAUNCH[@]}}" - "${{PROJECT_DIR}}" "${{PYTHON_BIN}}" "${{SERVER_HOST}}" "${{SERVER_PORT}}" "${{LOG_FILE}}" "${{APP_NAME}}" <<'PY'
 from __future__ import annotations
 
