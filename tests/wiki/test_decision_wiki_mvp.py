@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -52,8 +52,8 @@ Q3 출시일을 7월 15일로 확정했다. [meeting:1234abcd@00:01:20]
     )
 
 
-def test_decision_record는_verified_citation이_있는_decision만_canonical로_렌더한다() -> None:
-    """accepted decision 은 8자리 hex citation 을 frontmatter/body 에 보존한다."""
+def test_decision_record는_본문에_인용이_있어도_배경이_미인용이면_pending이다() -> None:
+    """본문·후속 인용이 미인용 배경의 근거를 대신하지 않으며 원문은 보존한다."""
     gold = _load_gold()
     citation = Citation(
         meeting_id=gold["meeting_id"],
@@ -83,9 +83,19 @@ def test_decision_record는_verified_citation이_있는_decision만_canonical로
     rendered = record.to_markdown()
     assert record.has_verified_candidate_citation is True
     assert "id: decision-2026-05-21-q3-launch-date" in rendered
-    assert "status: decided" in rendered
+    assert "status: pending" in rendered
+    assert "review_reason: citation_unresolved" in rendered
+    assert record.unresolved_citation_fields == ("background",)
+    assert decision.background in rendered
     assert "source_meetings: [1234abcd]" in rendered
     assert gold["expected_decisions"][0]["citation"] in rendered
+    complete = DecisionRecord.from_extracted(
+        decision=replace(decision, background=""),
+        meeting_id=gold["meeting_id"],
+        meeting_date=date(2026, 5, 21),
+    )
+    assert "status: decided" in complete.to_markdown()
+    assert not complete.citation_unresolved
 
 
 def test_wiki_search_bm25_recall_at_1과_필터를_검증한다(tmp_path: Path) -> None:

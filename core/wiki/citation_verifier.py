@@ -225,7 +225,15 @@ def _checkpoint_utterances(payload: object) -> list[dict[str, Any]] | None:
             return None
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
             return None
-        utterances.append({"text": text, "start": start, "end": end})
+        speaker = raw_utterance.get("speaker")
+        utterances.append(
+            {
+                "text": text,
+                "start": start,
+                "end": end,
+                "speaker": speaker if isinstance(speaker, str) and speaker.strip() else None,
+            }
+        )
     return utterances
 
 
@@ -353,8 +361,10 @@ class UtterancesCitationVerifier:
     ) -> str | None:
         """매핑된 발화 텍스트를 반환한다.
 
-        verify_exists 와 동일한 매칭 로직을 적용하되, 텍스트를 반환한다.
-        매칭 발화가 여러 건이면 ts 와 가장 가까운 발화의 text 를 반환.
+        앱이 발화 시작 시각을 정수 초로 내림하여 인용하므로 floor(start)가
+        같은 발화를 우선한다. 같은 정수 초에 시작한 발화가 여러 개면 그 1초
+        범위의 텍스트를 순서대로 반환한다(모델 입력 길이는 grounding이 제한).
+        그런 발화가 없을 때만 실제 포함 구간, 허용 오차 내 가까운 경계를 찾는다.
 
         Args:
             meeting_id: 실제 회의 ID 또는 하위 호환 8자리 hex.
@@ -363,32 +373,88 @@ class UtterancesCitationVerifier:
         Returns:
             매칭 발화의 text. 없으면 None.
         """
+        segments = self._select_evidence_segments(meeting_id, timestamp_seconds)
+        if not segments:
+            return None
+        return "\n".join(dict.fromkeys(segment["text"] for segment in segments))
+
+    async def fetch_evidence(
+        self,
+        meeting_id: str,
+        timestamp_seconds: int,
+    ) -> dict[str, Any] | None:
+        """인용의 원래 화자·시간 경계를 회의에 묶어 반환한다. 주변 발화는 추가하지 않는다."""
+        segments = self._select_evidence_segments(meeting_id, timestamp_seconds)
+        if not segments:
+            return None
+        return {
+            "meeting_id": meeting_id,
+            "text": "\n".join(dict.fromkeys(segment["text"] for segment in segments)),
+            "segments": segments,
+        }
+
+    def _select_evidence_segments(
+        self,
+        meeting_id: str,
+        timestamp_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """기존 인용 선택 순서를 유지하며 같은 정수 초의 발화도 개별 원장으로 보존한다."""
         utts = self._utterances_by_meeting.get(meeting_id)
         if not utts:
-            return None
+            return []
 
         tol = self._tolerance_seconds
         ts = timestamp_seconds
 
-        # 매칭되는 발화 중 ts 와 가장 가까운(거리 최소) 발화를 선택
-        best_text: str | None = None
-        best_distance: float = float("inf")
+        candidates: list[dict[str, Any]] = []
         for utt in utts:
             try:
                 start = _read_utterance_float(utt, "start")
                 end = _read_utterance_float(utt, "end")
-                text = str(_read_utterance_field(utt, "text"))
+                raw_text = _read_utterance_field(utt, "text")
             except (TypeError, ValueError, AttributeError):
                 continue
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end < start
+                or not isinstance(raw_text, str)
+                or not raw_text.strip()
+            ):
+                continue
             if start <= ts + tol and end >= ts - tol:
-                # 발화 구간 중심점과의 거리 계산
-                center = (start + end) / 2.0
-                distance = abs(center - ts)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_text = text
-
-        return best_text
+                try:
+                    speaker = _read_utterance_field(utt, "speaker")
+                except AttributeError:
+                    speaker = None
+                candidates.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "text": raw_text,
+                        "speaker_id": speaker
+                        if isinstance(speaker, str) and speaker.strip()
+                        else None,
+                    }
+                )
+        if not candidates:
+            return []
+        floor_matches = [item for item in candidates if math.floor(item["start"]) == ts]
+        if floor_matches:
+            return floor_matches
+        containing = [item for item in candidates if item["start"] <= ts < item["end"]]
+        if containing:
+            return [min(containing, key=lambda item: abs(item["start"] - ts))]
+        return [
+            min(
+                candidates,
+                key=lambda item: (
+                    min(abs(item["start"] - ts), abs(item["end"] - ts)),
+                    abs(item["start"] - ts),
+                ),
+            )
+        ]
 
 
 class CheckpointCitationVerifier(UtterancesCitationVerifier):
@@ -495,3 +561,12 @@ class CheckpointCitationVerifier(UtterancesCitationVerifier):
         """현재/과거 checkpoint 원장에서 citation에 대응하는 발화를 반환한다."""
         await self._load_historical_meeting(meeting_id)
         return await super().fetch_utterance(meeting_id, timestamp_seconds)
+
+    async def fetch_evidence(
+        self,
+        meeting_id: str,
+        timestamp_seconds: int,
+    ) -> dict[str, Any] | None:
+        """no-follow checkpoint 원장의 화자·시간 경계를 포함한 근거를 반환한다."""
+        await self._load_historical_meeting(meeting_id)
+        return await super().fetch_evidence(meeting_id, timestamp_seconds)

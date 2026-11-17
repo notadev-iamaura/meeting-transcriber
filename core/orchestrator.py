@@ -1271,28 +1271,34 @@ class JobProcessor:
               - input_size: 입력 크기 (단계별 단위)
               - elapsed: (complete 시) 실제 소요 시간
             """
-            if self._perf_stats is None:
-                return
+            phase = evt.get("phase", "")
+            step = evt.get("step", "")
+            model_id = self._resolve_step_model_id(
+                step,
+                stt_provider=queued_stt_provider,
+                stt_model=queued_stt_model,
+            )
+            payload: dict[str, Any] = {
+                "job_id": job_id,
+                "meeting_id": meeting_id,
+                "step": step,
+                "phase": phase,
+                "model_id": model_id,
+            }
+            if "input_size" in evt:
+                payload["input_size"] = float(evt.get("input_size") or 0.0)
+            if phase == "complete":
+                payload["elapsed_seconds"] = float(evt.get("elapsed") or 0.0)
+            if isinstance(evt.get("success"), bool):
+                payload["success"] = evt["success"]
+
+            # 단계 이벤트는 예측 통계의 유무·오류와 관계없이 전달한다.
+            # Wiki는 근거 검수 호출 수가 달라 기존 단계 EMA로 ETA를 만들지 않는다.
             try:
-                phase = evt.get("phase", "")
-                step = evt.get("step", "")
                 input_size = float(evt.get("input_size") or 0.0)
-                model_id = self._resolve_step_model_id(
-                    step,
-                    stt_provider=queued_stt_provider,
-                    stt_model=queued_stt_model,
-                )
-
-                payload: dict[str, Any] = {
-                    "job_id": job_id,
-                    "meeting_id": meeting_id,
-                    "step": step,
-                    "phase": phase,
-                    "input_size": input_size,
-                    "model_id": model_id,
-                }
-
-                if phase == "start":
+                if self._perf_stats is None or step == PipelineStep.WIKI_COMPILE.value:
+                    pass
+                elif phase == "start":
                     eta = self._perf_stats.predict(step, model_id=model_id, input_size=input_size)
                     payload["eta_seconds"] = eta
                     payload["anomaly"] = "normal"
@@ -1314,9 +1320,9 @@ class JobProcessor:
                         elapsed=elapsed, eta=eta
                     )
 
-                await self._broadcast_event("step_progress", payload)
             except Exception as e:
-                logger.debug(f"step_progress 처리 실패 (무시): {e}")
+                logger.debug(f"단계 예측 통계 처리 실패 (진행 이벤트 유지): {e}")
+            await self._broadcast_event("step_progress", payload)
 
         pipeline_completed = False
         completion_confirmed = False
@@ -1481,4 +1487,5 @@ STEP_TO_STATUS: dict[str, str] = {
     "merge": "merging",
     "correct": "embedding",
     "summarize": "embedding",
+    "wiki_compile": "embedding",
 }

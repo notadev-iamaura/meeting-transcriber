@@ -1311,6 +1311,7 @@ class TestStepToStatus:
         assert STEP_TO_STATUS["merge"] == "merging"
         assert STEP_TO_STATUS["correct"] == "embedding"
         assert STEP_TO_STATUS["summarize"] == "embedding"
+        assert STEP_TO_STATUS["wiki_compile"] == "embedding"
 
     async def test_on_step_start_콜백으로_상태_업데이트(
         self,
@@ -1368,6 +1369,59 @@ class TestStepToStatus:
         # pipeline_status 이벤트 확인
         event_types = [c[0][0].event_type for c in mock_ws_manager.broadcast_event.call_args_list]
         assert "pipeline_status" in event_types
+
+    @pytest.mark.parametrize("stats_mode", ["missing", "failing", "available"])
+    async def test_stage_events_survive_missing_or_failed_stats_without_wiki_eta(
+        self,
+        processor: JobProcessor,
+        mock_pipeline: AsyncMock,
+        mock_ws_manager: AsyncMock,
+        mock_job_queue: AsyncMock,
+        stats_mode: str,
+    ) -> None:
+        """단계 이벤트는 통계 오류와 분리하고 Wiki에는 실제 경과·성공 여부만 보낸다."""
+        stats = MagicMock()
+        stats.predict.return_value = 42.0
+        if stats_mode == "failing":
+            stats.predict.side_effect = OSError("통계 파일 오류")
+        processor._perf_stats = None if stats_mode == "missing" else stats
+
+        async def run(*_args: Any, **kwargs: Any) -> MagicMock:
+            """실제 모델 없이 단계 콜백 계약만 실행한다."""
+            start, progress = kwargs["on_step_start"], kwargs["on_step_progress"]
+            await progress({"phase": "start", "step": "correct", "input_size": 10})
+            await progress(
+                {"phase": "complete", "step": "correct", "input_size": 10, "elapsed": 4}
+            )
+            await start("wiki_compile")
+            await progress({"phase": "start", "step": "wiki_compile"})
+            await progress(
+                {"phase": "complete", "step": "wiki_compile", "elapsed": 120, "success": False}
+            )
+            return MagicMock(status="completed")
+
+        mock_pipeline.run.side_effect = run
+        await processor._process_job(_make_job())
+        events = [call.args[0] for call in mock_ws_manager.broadcast_event.call_args_list]
+        progress_events = [event.data for event in events if event.event_type == "step_progress"]
+        assert [(event["step"], event["phase"]) for event in progress_events] == [
+            ("correct", "start"),
+            ("correct", "complete"),
+            ("wiki_compile", "start"),
+            ("wiki_compile", "complete"),
+        ]
+        assert progress_events[1]["elapsed_seconds"] == 4.0
+        for event in progress_events[-2:]:
+            assert "eta_seconds" not in event
+            assert "input_size" not in event
+            assert "anomaly" not in event
+        assert progress_events[-1]["elapsed_seconds"] == 120.0
+        assert progress_events[-1]["success"] is False
+        assert any(
+            call.args[1] == "embedding" for call in mock_job_queue.update_status.call_args_list
+        )
+        if stats_mode != "missing":
+            assert all(call.args[0] != "wiki_compile" for call in stats.predict.call_args_list)
 
 
 # === Cycle 10: skip_llm_steps 전달 (config 존중 동작 검증) ===

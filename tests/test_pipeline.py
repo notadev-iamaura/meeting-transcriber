@@ -1673,6 +1673,115 @@ class TestPipelineResume:
         check_all.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("wiki_enabled", [False, True])
+    @pytest.mark.parametrize(
+        ("saved_status", "current_step", "terminal_success"),
+        [
+            ("running", "wiki_compile", None),
+            ("completed", "", None),
+            ("running", "", None),
+            ("running", "wiki_compile", True),
+            ("running", "wiki_compile", False),
+        ],
+    )
+    async def test_completed_prefix_resume_records_only_unfinished_wiki_without_model_calls(
+        self,
+        pipeline: PipelineManager,
+        mock_config: MagicMock,
+        mock_model_manager: MagicMock,
+        audio_file: Path,
+        wiki_enabled: bool,
+        saved_status: str,
+        current_step: str,
+        terminal_success: bool | None,
+    ) -> None:
+        """중단된 Wiki만 한 번 실패로 기록하고 완료 prefix·기존 결과·모델 무호출을 보존한다."""
+        from core.meeting_progress import meeting_progress
+
+        mock_config.wiki.enabled = wiki_enabled
+        mid = "completed_wiki_resume"
+        completed = [step.value for step in PIPELINE_STEPS]
+        results = (
+            [
+                StepResult(
+                    step="wiki_compile",
+                    success=terminal_success,
+                    elapsed_seconds=12.0,
+                ).to_dict()
+            ]
+            if terminal_success is not None
+            else []
+        )
+        state = PipelineState(
+            meeting_id=mid,
+            audio_path=str(audio_file),
+            status=saved_status,
+            current_step=current_step,
+            completed_steps=completed.copy(),
+            step_results=results.copy(),
+            warnings=["이전 경고 보존"],
+            stt_provider="local",
+            stt_model=mock_config.stt.model_name,
+        )
+        pipeline._save_state(state, pipeline._get_state_path(mid))
+        original_audio = audio_file.read_bytes()
+        mock_model_manager.reset_mock()
+        on_start, on_progress = AsyncMock(), AsyncMock()
+        with (
+            patch.object(pipeline, "_run_step_wiki_compile", new_callable=AsyncMock) as wiki,
+            patch.object(
+                pipeline, "_restore_intermediate_results", new_callable=AsyncMock
+            ) as restore,
+            patch.object(
+                pipeline._resource_guard,
+                "check_all",
+                side_effect=AssertionError("완료 prefix는 자원·모델 admission이 필요 없음"),
+            ) as check_all,
+        ):
+            result = await pipeline.run(
+                audio_file,
+                meeting_id=mid,
+                on_step_start=on_start,
+                on_step_progress=on_progress,
+            )
+            expected_interruption = (
+                saved_status == "running"
+                and current_step == "wiki_compile"
+                and terminal_success is None
+            )
+            if expected_interruption:
+                assert result.step_results[-1]["step"] == "wiki_compile"
+                assert result.step_results[-1]["success"] is False
+                assert result.step_results[-1]["elapsed_known"] is False
+                assert result.step_results[-1]["elapsed_seconds"] == 0.0
+                assert "중단" in result.step_results[-1]["error_message"]
+                assert "자동으로 다시 실행하지 않았습니다" in result.warnings[-1]
+                assert "확인할 수 없습니다" in result.warnings[-1]
+                assert len(result.warnings) == 2
+                assert (
+                    meeting_progress("completed", result.to_dict())["status_label"]
+                    == "전사·요약·검색 완료 · Wiki 정리 실패"
+                )
+            else:
+                assert result.step_results == results
+                assert result.warnings == ["이전 경고 보존"]
+            assert result.status == "completed"
+            assert result.current_step == ""
+            assert result.completed_steps == completed
+            assert result.warnings[0] == "이전 경고 보존"
+            repeated = await pipeline.resume(mid)
+            assert repeated.step_results == result.step_results
+            assert repeated.warnings == result.warnings
+            assert repeated.completed_steps == completed
+            wiki.assert_not_awaited()
+            restore.assert_not_awaited()
+            check_all.assert_not_called()
+        on_start.assert_not_awaited()
+        on_progress.assert_not_awaited()
+        assert mock_model_manager.mock_calls == []
+        assert audio_file.read_bytes() == original_audio
+
+    @pytest.mark.asyncio
     async def test_text_only_resume는_삭제된_원본을_gate하지_않는다(
         self,
         pipeline: PipelineManager,

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -32,6 +34,93 @@ from core.chat_scope import ChatSourceScope
 from core.wiki.router import QueryRouter, RouteDecision, RouterVerdict
 
 logger = logging.getLogger(__name__)
+
+_QUOTED_TOPIC = re.compile(
+    r"(?<!\w)(?:'([^'\r\n]+)'|\"([^\"\r\n]+)\"|‘([^’\r\n]+)’|“([^”\r\n]+)”)",
+)
+_TOPIC_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+@dataclass(frozen=True)
+class _WikiStatement:
+    """게시 문장의 내용과 그 문장에 원래 붙어 있던 원문 인용을 묶는다."""
+
+    text: str
+    primary: str
+    citations: tuple[str, ...]
+    witness: str = ""
+    context: tuple[str, ...] = ()
+
+
+def _evidence_tokens(text: str) -> set[str]:
+    """조사·띄어쓰기 차이를 완화한 토큰을 만든다. 인용 순위에만 사용한다."""
+    normalized = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", text).casefold())
+    return {normalized[index : index + 2] for index in range(len(normalized) - 1)}
+
+
+def _statement_text(text: str) -> str:
+    """내용을 바꾸지 않는 목록·공백·문장 끝 표기만 정규화한다.
+
+    소수점·음수·비교 연산자 같은 내용상의 기호는 보존한다. 의역의 의미를
+    문자열로 추정하지 않으며, 확인할 수 없으면 게시 문장으로 돌아간다.
+    """
+    plain = re.sub(r"^\s*[-*]\s+", "", text).strip().rstrip(".。!")
+    return re.sub(r"\s+", "", plain)
+
+
+def _filler_utterance(text: str) -> bool:
+    """내용 없는 맞장구·군말을 단독 사실 근거에서 제외한다."""
+    normalized = re.sub(r"[\W_]+", "", text)
+    return bool(re.fullmatch(r"(?:네|예|음|어|아|응)+", normalized)) or normalized in {
+        "네",
+        "예",
+        "음",
+        "어",
+        "아",
+        "그뭐지",
+        "그뭐지요",
+        "알겠습니다",
+        "감사합니다",
+        "맞아요",
+        "맞습니다",
+        "그렇죠",
+        "그렇습니다",
+    }
+
+
+def _question_utterance(text: str) -> bool:
+    """확인 질문은 맥락으로 보존하되 확정 진술의 주 인용으로 고르지 않는다."""
+    return text.rstrip(" \t\r\n\"'”’").endswith(("?", "？"))
+
+
+def _matches_quoted_topic(query: str, title: str, content: str) -> bool:
+    """명시한 따옴표 주제의 단어가 실제 게시 본문에 있는지 확인한다.
+
+    일반 질문의 의미 검색은 유지한다. 따옴표 주제가 있으면 검색 의도어만
+    일치한 다른 결정을 합성하지 않으며, 색인 snippet과 숨김 메타데이터는
+    주제 일치의 근거로 삼지 않는다.
+    """
+    from core.wiki.citations import CITATION_PATTERN
+
+    topics = [
+        next(group for group in match.groups() if group) for match in _QUOTED_TOPIC.finditer(query)
+    ]
+    if len(topics) != 1:
+        # 여러 주제를 비교하는 질문은 서로 다른 문서를 함께 검색할 수 있다.
+        return True
+    tokens = _TOPIC_TOKEN.findall(unicodedata.normalize("NFKC", " ".join(topics)).casefold())
+    if not tokens:
+        return True
+    visible = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+    visible = CITATION_PATTERN.sub("", visible)
+    actual = unicodedata.normalize("NFKC", f"{title}\n{visible}").casefold()
+    for token in tokens:
+        if token.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", actual) is None:
+                return False
+        elif token not in actual:
+            return False
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -350,7 +439,14 @@ class HybridChatService:
         if self._wiki_store is None:
             raise RuntimeError("wiki_store_not_provided")
 
+        from config import WikiRankingConfig  # noqa: PLC0415
         from core.wiki.search_index import WikiSearchIndex  # noqa: PLC0415
+
+        # 검색 UI는 검토 중/과거 결정을 모두 보여주지만, 답변 근거는 게시된
+        # 현재 결정만 쓴다. 먼저 기존 후보 풀 크기만큼 제한해서 가져와야 상위
+        # 초안 5개가 실제 게시된 결정을 모두 가리는 일을 피할 수 있다.
+        source_limit = 5
+        candidate_limit = max(source_limit, WikiRankingConfig().candidate_pool)
 
         try:
             index = WikiSearchIndex(self._wiki_store.root)
@@ -372,11 +468,13 @@ class HybridChatService:
                     search_index=index,
                     semantic_index=semantic_index,
                     config=cfg,
-                    top_k=5,
+                    top_k=candidate_limit,
                     page_types=["decision"],
                 )
             else:
-                search_results = index.search(query, top_k=5, page_types=["decision"])
+                search_results = index.search(
+                    query, top_k=candidate_limit, page_types=["decision"]
+                )
         except Exception as exc:  # noqa: BLE001 — 검색 실패는 호출자에서 폴백
             raise RuntimeError(f"wiki_search_failed: {exc}") from exc
 
@@ -385,42 +483,90 @@ class HybridChatService:
 
         sources: list[WikiAnswerSource] = []
         body_parts: list[str] = []
+        statements: list[_WikiStatement] = []
+        verifier: Any | None = None
+        if self._config is not None:
+            from core.wiki.citation_verifier import CheckpointCitationVerifier
+
+            verifier = CheckpointCitationVerifier(
+                checkpoints_dir=self._config.paths.resolved_checkpoints_dir
+            )
 
         for result in search_results:
             rel_path = Path(result.page_path)
+            if (
+                rel_path.is_absolute()
+                or not rel_path.parts
+                or rel_path.parts[0] != "decisions"
+                or ".." in rel_path.parts
+                or rel_path.suffix != ".md"
+            ):
+                continue
             try:
                 page = self._wiki_store.read_page(rel_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("wiki 페이지 읽기 실패: %s (%s)", rel_path, exc)
                 continue
 
+            # 색인 메타데이터는 오래되거나 잘못될 수 있으므로 방금 읽은 원본
+            # 페이지의 게시 상태를 최종 판정한다. legacy confirmed도 인정한다.
+            metadata = page.frontmatter
+            status = metadata.get("status")
+            superseded_by = metadata.get("superseded_by")
+            if (
+                metadata.get("type") != "decision"
+                or not isinstance(status, str)
+                or status.strip().lower() not in {"decided", "confirmed"}
+                or (
+                    superseded_by is not None
+                    and not (isinstance(superseded_by, str) and not superseded_by.strip())
+                )
+                or not page.citations
+            ):
+                continue
+
             title = self._extract_title(page, rel_path)
+            if not _matches_quoted_topic(query, title, page.content):
+                continue
             if self._config is not None:
                 from core.search_revision import source_was_edited
 
                 if any(source_was_edited(self._config, c.meeting_id) for c in page.citations):
                     # 편집 전 원문에서 합성한 페이지를 최신 결정으로 답하지 않는다.
                     continue
-            snippet = result.snippet or self._make_snippet(page.content, max_chars=200)
-            citation_strs = result.citations or [
-                f"[meeting:{c.meeting_id}@{c.timestamp_str}]" for c in page.citations
-            ]
+            page_statements = await self._prepare_statements(page.content, verifier)
+            if not page_statements:
+                continue
+            # fallback과 출처에도 낡은 색인 snippet/citation을 재사용하지 않는다.
+            snippet = self._make_snippet(page_statements[0].text, max_chars=200)
+            citation_strs = list(
+                dict.fromkeys(marker for item in page_statements for marker in item.citations)
+            )
 
             sources.append(
                 WikiAnswerSource(
-                    page_path=result.page_path,
-                    page_type=result.page_type,
+                    page_path=str(rel_path),
+                    page_type="decision",
                     title=title,
                     snippet=snippet,
                     citations=citation_strs,
                 )
             )
-            body_parts.append(f"## {title}\n\n{page.content.strip()}\n")
+            evidence_parts = []
+            for item in page_statements:
+                evidence_parts.append(
+                    f"게시된 사실: {item.text}\n주 인용: {item.primary}\n"
+                    f"직접 원문: {item.witness}\n" + "\n".join(item.context)
+                )
+            body_parts.append(f"## {title}\n\n" + "\n\n".join(evidence_parts))
+            statements.extend(page_statements)
+            if len(sources) >= source_limit:
+                break
 
         if not body_parts:
             raise RuntimeError("wiki_no_readable_search_results")
 
-        fallback_answer = self._build_search_fallback_answer(query, sources)
+        fallback_answer = self._build_search_fallback_answer(query, sources, statements)
 
         # answer 합성 — wiki_llm 이 있으면 합성, 없으면 raw 결합
         if self._wiki_llm is not None:
@@ -432,11 +578,132 @@ class HybridChatService:
         else:
             answer = fallback_answer
 
-        if not self._answer_preserves_any_citation(answer, sources):
-            logger.info("LLM 위키 답변에 citation 이 없어 검색 결과 fallback 사용")
+        if not self._answer_has_statement_citations(answer, sources, statements):
+            logger.info("LLM 위키 답변의 문장별 인용이 불완전해 게시 문장 fallback 사용")
             answer = fallback_answer
 
         return answer, sources
+
+    @staticmethod
+    async def _prepare_statements(content: str, verifier: Any | None) -> list[_WikiStatement]:
+        """문장에 딸린 기존 인용만 정리하고 직접 발화를 앞에 둔 읽기 전용 입력을 만든다.
+
+        토큰 겹침은 이미 같은 문장에 인용된 원문들의 순위를 정하는 용도다.
+        이것을 의미 검수나 새로운 인용의 근거로 사용하지 않는다. 확인 질문은
+        후속 약속의 범위를 설명할 수 있으므로 보조 문맥으로 보존한다.
+        """
+        from core.wiki.citations import CITATION_PATTERN, is_factual_statement
+
+        prepared = []
+        evidence_cache: dict[str, list[str]] = {}
+        for line in content.splitlines():
+            matches = list(CITATION_PATTERN.finditer(line))
+            if not matches:
+                continue
+            text = re.sub(r"^\s*[-*]\s+", "", line[: matches[0].start()]).strip()
+            if not text or not is_factual_statement(text):
+                continue
+            markers = list(dict.fromkeys(match.group(0) for match in matches))
+            if verifier is None:
+                # config가 없는 독립 사용자는 게시 문장의 기존 인용만 보존한다.
+                prepared.append(_WikiStatement(text, markers[0], tuple(markers)))
+                continue
+            direct: list[tuple[str, str]] = []
+            contexts: list[tuple[str, str]] = []
+            for match in matches:
+                marker = match.group(0)
+                if marker not in evidence_cache:
+                    seconds = int(match[2]) * 3600 + int(match[3]) * 60 + int(match[4])
+                    evidence = await verifier.fetch_evidence(match[1], seconds)
+                    segments = evidence.get("segments", []) if isinstance(evidence, dict) else []
+                    evidence_cache[marker] = [
+                        f"[{segment.get('speaker_id') or '화자 미확인'}] {segment['text']}"
+                        for segment in segments
+                        if isinstance(segment, dict)
+                        and isinstance(segment.get("text"), str)
+                        and not _filler_utterance(segment["text"])
+                    ]
+                for source_text in evidence_cache[marker]:
+                    item = (marker, source_text)
+                    if item in contexts:
+                        continue
+                    contexts.append(item)
+                    if not _question_utterance(source_text):
+                        direct.append(item)
+            if not direct:
+                # 질문만으로 게시 사실을 확인했다고 답하지 않는다.
+                continue
+            claim_tokens = _evidence_tokens(text)
+            primary, witness = max(
+                direct, key=lambda item: len(claim_tokens & _evidence_tokens(item[1]))
+            )
+            citations = tuple(dict.fromkeys([primary, *(marker for marker, _ in contexts)]))
+            supporting = tuple(
+                f"{'확인 질문 문맥' if _question_utterance(source_text) else '보조 원문'}: "
+                f"{source_text} {marker}"
+                for marker, source_text in contexts
+                if (marker, source_text) != (primary, witness)
+            )
+            prepared.append(_WikiStatement(text, primary, citations, witness, supporting))
+        return prepared
+
+    @staticmethod
+    def _answer_has_statement_citations(
+        answer: str, sources: list[WikiAnswerSource], statements: list[_WikiStatement]
+    ) -> bool:
+        """모든 사실 줄이 허용된 직접 원문 인용을 갖는지 검사한다. 의미 증명은 아니다."""
+        from core.wiki.citations import CITATION_PATTERN
+
+        allowed = {marker for source in sources for marker in source.citations}
+        primaries = {statement.primary for statement in statements}
+        titles = {source.title for source in sources}
+        if "<!--" in answer:
+            return False
+        if any(match.group(0) not in allowed for match in CITATION_PATTERN.finditer(answer)):
+            return False
+        factual_lines = 0
+        for line in answer.splitlines():
+            if line.strip().startswith("#"):
+                if line.strip().lstrip("#").strip() not in titles:
+                    return False
+                continue
+            if not line.strip():
+                continue
+            matches = list(CITATION_PATTERN.finditer(line))
+            if not CITATION_PATTERN.sub("", line).strip(" -*:，,."):
+                continue
+            if not matches:
+                return False
+            groups: list[tuple[str, list[str]]] = []
+            last_end = 0
+            for match in matches:
+                fragment = re.sub(r"^\s*[-*]\s+", "", line[last_end : match.start()]).strip()
+                if re.search(r"\w", fragment):
+                    groups.append((fragment, []))
+                if not groups:
+                    return False
+                groups[-1][1].append(match.group(0))
+                last_end = match.end()
+            if line[last_end:].strip(" -*:，,.!?"):
+                return False
+            for text, markers in groups:
+                if _question_utterance(text):
+                    return False
+                if re.search(r"[.!?](?:\s+\S|[가-힣A-Z])", text):
+                    # 한 인용 뒤에 여러 사실 문장을 묶어 근거를 상속하지 않는다.
+                    return False
+                if not any(marker in primaries for marker in markers):
+                    return False
+                if not any(
+                    _statement_text(text) == _statement_text(item.text)
+                    and item.primary in markers
+                    and set(markers).issubset(item.citations)
+                    for item in statements
+                ):
+                    # 유효한 인용의 존재를 새 주장이나 다른 문장의 지지로 간주하지 않는다.
+                    return False
+            factual_lines += 1
+        return factual_lines > 0
 
     @staticmethod
     def _answer_preserves_any_citation(answer: str, sources: list[WikiAnswerSource]) -> bool:
@@ -447,8 +714,16 @@ class HybridChatService:
         return any(marker in answer for marker in citation_markers)
 
     @staticmethod
-    def _build_search_fallback_answer(query: str, sources: list[WikiAnswerSource]) -> str:
+    def _build_search_fallback_answer(
+        query: str,
+        sources: list[WikiAnswerSource],
+        statements: list[_WikiStatement] | None = None,
+    ) -> str:
         """LLM 이 citation 을 잃을 때 쓰는 검색 결과 기반 답변을 만든다."""
+        if statements:
+            return "공개 Wiki에 기록된 내용입니다.\n\n" + "\n".join(
+                f"- {item.text} {' '.join(item.citations)}" for item in statements
+            )
         lines: list[str] = [f"질문과 관련된 Decision Wiki 검색 결과입니다: {query}"]
         for idx, source in enumerate(sources, start=1):
             citations = ", ".join(source.citations[:3])
@@ -476,7 +751,10 @@ class HybridChatService:
         system_prompt = (
             "당신은 회의 위키 검색 도우미다. "
             "주어진 위키 페이지 발췌를 근거로 사용자 질문에 한국어로 답하라. "
-            "인용 마커 [meeting:{회의 ID}@HH:MM:SS] 는 그대로 유지하라."
+            "인용 마커 [meeting:{회의 ID}@HH:MM:SS] 는 그대로 유지하라. "
+            "한 줄에 하나의 사실 문장만 쓰고, 각 문장 끝에 그 사실의 주 인용을 붙여라. "
+            "확인 질문 문맥은 약속의 대상이나 조건을 설명할 수 있지만 그 자체를 확정으로 바꾸지 마라. "
+            "게시된 사실의 범위·담당자·기한을 새로 만들거나 강화하지 마라."
         )
         user_prompt = f"질문: {query}\n\n위키 페이지 발췌:\n\n" + "\n\n---\n\n".join(body_parts)
         wiki_llm = self._wiki_llm

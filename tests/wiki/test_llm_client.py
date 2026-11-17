@@ -101,6 +101,7 @@ class _FakeBackend:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
         """호출 인자를 기록하고 미리 설정된 응답을 반환한다."""
@@ -109,6 +110,7 @@ class _FakeBackend:
                 "messages": messages,
                 "temperature": temperature,
                 "num_ctx": num_ctx,
+                "max_tokens": max_tokens,
                 "timeout": timeout,
             }
         )
@@ -128,6 +130,7 @@ class _RaisingBackend(_FakeBackend):
         messages: list[dict[str, str]],
         temperature: float | None = None,
         num_ctx: int | None = None,
+        max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
         """always raise — generation_failed 시뮬레이션."""
@@ -342,7 +345,7 @@ async def test_generate_default_temperature_passed_to_backend(
 async def test_generate_custom_temperature_overrides_default(
     fake_app_config: _FakeAppConfig, fake_model_manager: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """호출 측이 temperature 를 명시하면 그 값이 backend 까지 전달."""
+    """호출 측의 온도와 출력 토큰 제한을 실제 백엔드까지 전달한다."""
     backend = _FakeBackend()
     monkeypatch.setattr(
         "core.wiki.llm_client._create_exaone_backend",
@@ -357,9 +360,11 @@ async def test_generate_custom_temperature_overrides_default(
         system_prompt="sys",
         user_prompt="usr",
         temperature=0.55,
+        max_tokens=96,
     )
 
     assert backend.calls[0]["temperature"] == 0.55
+    assert backend.calls[0]["max_tokens"] == 96
 
 
 # ─────────────────────────────────────────────────────────────────────────

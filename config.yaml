@@ -101,6 +101,17 @@ search:
 # wiki.enabled / root / dry_run 등은 코드 기본값(config.py WikiConfig) 사용.
 # 아래는 위키 검색(BM25) 후처리 다중신호 재랭킹 가중치 (Memorable Wiki C1).
 wiki:
+  # 실제 인용 발화가 생성 주장을 뒷받침하는지 기존 로컬 LLM으로 재검수한다.
+  # 실패·모호·예산 초과는 게시하지 않고 검토 필요로 보류한다.
+  grounding:
+    enabled: true
+    batch_size: 6
+    max_claims: 48
+    max_input_chars: 24000
+    max_item_chars: 6000
+    max_output_tokens: 2048
+    max_reference_repairs: 1                  # 잘못된 근거 번호만 문서당 한 번 다시 선택 (판정 재시도 아님)
+    timeout_seconds: 120
   ranking:
     enabled: true                            # 다중신호 재랭킹 on/off (false=순수 BM25 정렬)
     candidate_pool: 50                       # 재랭킹 입력 후보 풀(BM25 상위 N). 광매칭 쿼리 많으면 상향 (C4 측정)

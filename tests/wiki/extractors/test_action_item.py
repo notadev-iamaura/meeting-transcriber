@@ -397,6 +397,41 @@ class TestDetectClosed:
     """ActionItemExtractor.detect_closed() 의 동작을 검증한다."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("answer_kind", ["absent", "ambiguous", "explicit"])
+    async def test_question_answer_output_uses_actual_completion_reporter(
+        self, answer_kind: str
+    ) -> None:
+        """빈 모델 응답을 유지하고 명시 완료 응답의 시각은 질문자가 아닌 보고자에 연결한다."""
+        rows = [("가상 체크리스트 정리가 끝났나요?", "질문자", 10.0)]
+        if answer_kind != "absent":
+            rows.append(
+                (
+                    "가상 체크리스트 정리를 완료했습니다" if answer_kind == "explicit" else "예",
+                    "응답자",
+                    30.0,
+                )
+            )
+        response = (
+            '[{"item_index":0,"closed_reason":"completed",'
+            '"closed_citation_ts":"00:00:30","confidence":9}]'
+            if answer_kind == "explicit"
+            else "[]"
+        )
+        llm = MockActionLLM([_MockResponse(body=response)])
+        result = await ActionItemExtractor(llm).detect_closed(
+            existing_open=[_make_open_item(description="가상 체크리스트 정리", owner="응답자")],
+            meeting_id=FAKE_MEETING_ID,
+            utterances=_make_utterances(rows),
+        )
+        if answer_kind == "explicit":
+            assert len(result) == 1
+            assert result[0].closed_by_speaker == "응답자"
+            assert result[0].closed_citation.timestamp_seconds == 30
+            assert result[0].closed_reason == "completed"
+        else:
+            assert result == []
+
+    @pytest.mark.asyncio
     async def test_detect_closed_explicit_completion(self):
         """명시적 완료: existing_open 에 'MVP 데모 자료 작성', utterances 에 '완료했습니다' → ClosedActionItem 1건."""
         existing_open = [

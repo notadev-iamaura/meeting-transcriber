@@ -26,7 +26,7 @@
         failed: "실패",
     };
 
-    // 파이프라인 6단계 정의 (순서 보장, 한국어 레이블 포함)
+    // 처리 로그 단계 정의 (관찰된 단계만 표시, 선택적 Wiki 정리 포함)
     var PIPELINE_STEPS = [
         { key: "convert",    label: "변환",  labelFull: "오디오 변환" },
         { key: "transcribe", label: "전사",  labelFull: "음성 인식" },
@@ -34,6 +34,9 @@
         { key: "merge",      label: "병합",  labelFull: "결과 병합" },
         { key: "correct",    label: "보정",  labelFull: "텍스트 보정" },
         { key: "summarize",  label: "요약",  labelFull: "회의록 생성" },
+        { key: "chunk",      label: "검색 준비", labelFull: "검색 청크 생성" },
+        { key: "embed",      label: "검색 반영", labelFull: "검색 인덱스 저장" },
+        { key: "wiki_compile", label: "Wiki 정리", labelFull: "Wiki 정리" },
     ];
 
     // 화자별 CSS 변수 색상 매핑 (최대 10명)
@@ -296,6 +299,11 @@
 
         lines.forEach(function (line) {
             var trimmed = line.trim();
+
+            // 할 일의 저장용 식별 정보는 읽기 화면에 표시하지 않는다.
+            if (/^<!-- action-identity-v1: [A-Za-z0-9+/=]+ -->$/.test(trimmed)) return;
+            // 생성기의 내부 점수 마커를 일반 본문으로 보여주지 않는다.
+            if (/^<!--\s*confidence:\s*\d+\s*-->$/.test(trimmed)) return;
 
             // 빈 줄
             if (!trimmed) {

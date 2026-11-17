@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -200,6 +201,7 @@ def _seed_wiki_page(
     content = (
         "---\n"
         "type: decision\n"
+        "status: confirmed\n"
         f"title: {title}\n"
         "date: 2026-04-29\n"
         "---\n\n"
@@ -208,6 +210,14 @@ def _seed_wiki_page(
         "<!-- confidence: 8 -->\n"
     )
     abs_path.write_text(content, encoding="utf-8")
+    checkpoint = wiki_root.parent / "checkpoints" / "abc12345" / "correct.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(
+        json.dumps(
+            {"utterances": [{"speaker": "SPEAKER_01", "text": body, "start": 60, "end": 65}]}
+        ),
+        encoding="utf-8",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────

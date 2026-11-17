@@ -26,12 +26,24 @@ import asyncio
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from config import AppConfig, PathsConfig, ServerConfig, WikiConfig
+
+
+@pytest.fixture(autouse=True)
+def _no_real_thermal_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """백필 단위 테스트에서 실제 온도 probe와 3분 쿨다운을 실행하지 않는다."""
+    fake = MagicMock()
+    fake.wait_if_needed = AsyncMock()
+    fake.notify_job_started = AsyncMock()
+    fake.notify_job_completed = AsyncMock()
+    monkeypatch.setattr("core.thermal_manager.ThermalManager", lambda _config: fake)
+
 
 # ─── 헬퍼 ───────────────────────────────────────────────────────────────
 
@@ -65,6 +77,7 @@ def _seed_meeting_outputs(
     *,
     with_summary: bool = True,
     with_corrected: bool = True,
+    meeting_date: str = "2026-04-29",
 ) -> None:
     """회의 outputs / checkpoints 디렉토리에 가짜 데이터 시드.
 
@@ -78,6 +91,9 @@ def _seed_meeting_outputs(
     """
     outputs_dir = config.paths.resolved_outputs_dir / meeting_id
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = config.paths.resolved_checkpoints_dir / meeting_id
+    checkpoint.mkdir(parents=True, exist_ok=True)
+    (checkpoint / "meeting_date.json").write_text(json.dumps({"date": meeting_date}))
 
     if with_summary:
         (outputs_dir / "summary.md").write_text(
@@ -294,7 +310,7 @@ class TestBackfillFailureIsolated:
                 raise RuntimeError("의도된 컴파일 실패 — 격리 검증")
             return MagicMock(
                 meeting_id=mid,
-                pages_created=[],
+                pages_created=["decisions/test.md"],
                 pages_updated=[],
                 pages_pending=[],
                 pages_rejected=[],
@@ -352,7 +368,7 @@ class TestBackfillCancel:
                 cancel_event.set()
             return MagicMock(
                 meeting_id=mid,
-                pages_created=[],
+                pages_created=["decisions/test.md"],
                 pages_updated=[],
                 pages_pending=[],
                 pages_rejected=[],
@@ -425,7 +441,7 @@ class TestBackfillProgressCallback:
 
     @pytest.mark.asyncio
     async def test_backfill_progress_콜백_호출(self, tmp_path: Path) -> None:
-        """3건 회의 처리 시 progress_callback 이 정확히 3번 호출된다."""
+        """첫 추론 전 대상 수를 알리고 회의가 끝날 때마다 진행을 갱신한다."""
         from scripts.backfill_wiki import backfill
 
         config = _make_test_config(tmp_path)
@@ -444,6 +460,7 @@ class TestBackfillProgressCallback:
             progress_log.append((processed, total, current))
 
         async def fake_compile(**kwargs: Any) -> Any:
+            assert progress_log[0] == (0, 3, meeting_ids[0])
             return MagicMock(
                 meeting_id=kwargs["meeting_id"],
                 pages_created=[],
@@ -462,12 +479,11 @@ class TestBackfillProgressCallback:
                 progress_callback=progress_cb,
             )
 
-        assert len(progress_log) == 3
-        # 처리 카운트가 1, 2, 3 으로 증가해야 한다.
-        assert [p[0] for p in progress_log] == [1, 2, 3]
+        assert len(progress_log) == 4
+        assert [p[0] for p in progress_log] == [0, 1, 2, 3]
         assert all(p[1] == 3 for p in progress_log)
         # current_meeting_id 가 순서대로 전달.
-        assert [p[2] for p in progress_log] == meeting_ids
+        assert [p[2] for p in progress_log] == [meeting_ids[0], *meeting_ids]
 
 
 # ─── 시나리오 7: duration_seconds ───────────────────────────────────────
@@ -512,7 +528,7 @@ class TestBackfillDateFilter:
             job.status = "completed"
             job.created_at = f"2026-04-{day:02d}T10:00:00"
             jobs.append(job)
-            _seed_meeting_outputs(config, job.meeting_id)
+            _seed_meeting_outputs(config, job.meeting_id, meeting_date=f"2026-04-{day:02d}")
 
         fake_queue = MagicMock()
         fake_queue.get_all_jobs = MagicMock(return_value=jobs)
@@ -611,3 +627,204 @@ class TestLoadUtterancesNormalization:
         assert utterances[0].text == "merge 폴백 발화"
         assert utterances[0].original_text == "merge 폴백 발화"
         assert utterances[0].speaker == "SPEAKER_01"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "published,pending,expected", [(0, 0, "empty"), (0, 1, "pending"), (1, 1, "published")]
+)
+async def test_백필은_공개_검토_빈결과를_구분한다(
+    tmp_path: Path, published: int, pending: int, expected: str
+) -> None:
+    """모델 호출 0회나 검토 후보만 있는 결과도 공개 성공으로 부풀리지 않는다."""
+    from scripts.backfill_wiki import backfill
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    queue = SimpleNamespace(get_all_jobs=lambda: [_make_fake_job("sample")])
+    compile_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            pages_created=["decisions/a.md"] * published,
+            pages_updated=[],
+            pages_pending=["decisions/b.md"] * pending,
+            pages_rejected=[],
+            llm_call_count=0,
+        )
+    )
+    with patch("scripts.backfill_wiki._compile_single_meeting", compile_mock):
+        result = await backfill(config=config, job_queue=queue)
+    assert result.succeeded == int(expected == "published")
+    assert result.pending == int(expected == "pending")
+    assert result.empty == int(expected == "empty")
+    assert result.failed == int(expected == "empty")
+    assert result.published_pages == published
+    assert result.pending_pages == pending
+
+
+@pytest.mark.asyncio
+async def test_목록조회_실패가_빈목록_완료로_숨겨지지_않는다(tmp_path: Path) -> None:
+    """DB 오류는 대상 0건의 정상 완료와 구별한다."""
+    from scripts.backfill_wiki import backfill
+
+    queue = SimpleNamespace(get_all_jobs=MagicMock(side_effect=OSError("DB unavailable")))
+    result = await backfill(config=_make_test_config(tmp_path), job_queue=queue)
+    assert result.succeeded == 0 and result.failed == 1
+    assert result.errors[0].error_type == "job_list_failed"
+
+
+@pytest.mark.asyncio
+async def test_등록순서가_아닌_보존된_회의일_오름차순으로_처리한다(tmp_path: Path) -> None:
+    """오래된 회의부터 현재로 누적하고 생성일은 회의 날짜로 사용하지 않는다."""
+    from scripts.backfill_wiki import backfill
+
+    config = _make_test_config(tmp_path)
+    for mid, day in (("new", "2026-06-02"), ("old", "2026-05-01")):
+        _seed_meeting_outputs(config, mid, meeting_date=day)
+    queue = SimpleNamespace(get_all_jobs=lambda: [_make_fake_job("new"), _make_fake_job("old")])
+    calls: list[tuple[str, date]] = []
+
+    async def compile_one(**kwargs: Any) -> Any:
+        """실행 날짜와 순서만 기록한다."""
+        calls.append((kwargs["meeting_id"], kwargs["meeting_date"]))
+        return SimpleNamespace(
+            pages_created=["decisions/a.md"], pages_updated=[], pages_pending=[], pages_rejected=[]
+        )
+
+    with patch(
+        "scripts.backfill_wiki._compile_single_meeting", AsyncMock(side_effect=compile_one)
+    ):
+        result = await backfill(config=config, job_queue=queue)
+    assert result.succeeded == 2
+    assert calls == [("old", date(2026, 5, 1)), ("new", date(2026, 6, 2))]
+
+
+@pytest.mark.asyncio
+async def test_날짜불명은_오늘날짜로_추측해_공개하지_않는다(tmp_path: Path) -> None:
+    """보존 날짜·파일명·검증 가능한 원본 시각이 모두 없으면 명시적으로 거부한다."""
+    from scripts.backfill_wiki import backfill
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    (config.paths.resolved_checkpoints_dir / "sample" / "meeting_date.json").unlink()
+    queue = SimpleNamespace(get_all_jobs=lambda: [_make_fake_job("sample")])
+    compile_mock = AsyncMock()
+    with patch("scripts.backfill_wiki._compile_single_meeting", compile_mock):
+        result = await backfill(config=config, job_queue=queue)
+    assert result.failed == 1 and result.succeeded == 0
+    assert result.errors[0].error_type == "meeting_date_unknown"
+    compile_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["disabled", "dry_run", "recorded"])
+async def test_설정과_회의상태가_실제_추론_진입을_통제한다(tmp_path: Path, mode: str) -> None:
+    """Wiki 비활성·미리보기·미완료 회의는 모델을 실행하지 않는다."""
+    from scripts.backfill_wiki import backfill
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    if mode == "disabled":
+        config.wiki.enabled = False
+    if mode == "dry_run":
+        config.wiki.dry_run = True
+    job = _make_fake_job("sample", status="recorded" if mode == "recorded" else "completed")
+    queue = SimpleNamespace(get_all_jobs=lambda: [job])
+    compile_mock = AsyncMock()
+    with patch("scripts.backfill_wiki._compile_single_meeting", compile_mock):
+        result = await backfill(config=config, job_queue=queue)
+    assert result.succeeded == 0
+    compile_mock.assert_not_awaited()
+    assert result.failed == int(mode != "dry_run")
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), -1, True, None])
+def test_발화_시각이_불명확하면_일부만_골라_공개하지_않는다(
+    tmp_path: Path, bad_value: Any
+) -> None:
+    """유효한 merge 폴백이 있어도 잘못된 최신 교정본을 몰래 우회하지 않는다."""
+    from scripts.backfill_wiki import _load_utterances
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    path = config.paths.resolved_outputs_dir / "sample" / "corrected.json"
+    path.write_text(
+        json.dumps(
+            {"utterances": [{"text": "내용", "speaker": "S1", "start": bad_value, "end": 3.0}]}
+        )
+    )
+    with pytest.raises(ValueError):
+        _load_utterances(config, "sample")
+
+
+def test_백필_원문_또는_요약의_symlink를_따라가지_않는다(tmp_path: Path) -> None:
+    """일반 파일 대신 바깥 파일을 가리키면 보존한 채 읽기를 차단한다."""
+    from scripts.backfill_wiki import _load_summary, _load_utterances
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    folder = config.paths.resolved_outputs_dir / "sample"
+    original = folder / "corrected.json"
+    outside = tmp_path / "outside.json"
+    original.rename(outside)
+    original.symlink_to(outside)
+    with pytest.raises(OSError):
+        _load_utterances(config, "sample")
+    summary = folder / "summary.md"
+    outside_summary = tmp_path / "outside.md"
+    summary.rename(outside_summary)
+    summary.symlink_to(outside_summary)
+    with pytest.raises(OSError):
+        _load_summary(config, "sample")
+    assert outside.exists() and outside_summary.exists()
+
+
+@pytest.mark.asyncio
+async def test_공유_회의lease가_원문조회부터_컴파일까지_유지된다(tmp_path: Path) -> None:
+    """API·파이프라인과 같은 coordinator를 쓰며 대기 후 상태를 다시 확인한다."""
+    from core.meeting_mutation import MeetingMutationCoordinator
+    from scripts.backfill_wiki import backfill
+
+    config = _make_test_config(tmp_path)
+    _seed_meeting_outputs(config, "sample")
+    job = _make_fake_job("sample")
+    coordinator = MeetingMutationCoordinator()
+    queue = SimpleNamespace(get_all_jobs=lambda: [job], get_job_by_meeting_id=lambda mid: job)
+
+    async def compile_one(**kwargs: Any) -> Any:
+        """현재 task의 lease 소유를 확인한다."""
+        assert coordinator.owned_by_current_task(kwargs["meeting_id"])
+        return SimpleNamespace(
+            pages_created=["decisions/a.md"], pages_updated=[], pages_pending=[], pages_rejected=[]
+        )
+
+    with patch(
+        "scripts.backfill_wiki._compile_single_meeting", AsyncMock(side_effect=compile_one)
+    ):
+        result = await backfill(
+            config=config, job_queue=queue, meeting_mutation_coordinator=coordinator
+        )
+    assert result.succeeded == 1
+    assert not coordinator.locked("sample")
+
+
+@pytest.mark.asyncio
+async def test_컴파일_실패에도_해당_Wiki모델을_언로드한다(tmp_path: Path) -> None:
+    """부분 페이지 생성이나 예외 이후 다음 회의에 모델이 남지 않게 한다."""
+    from core.wiki.llm_client import WIKI_LLM_MODEL_NAME
+    from scripts.backfill_wiki import _compile_single_meeting
+
+    manager = SimpleNamespace(unload_if_current=AsyncMock())
+    compiler = SimpleNamespace(compile_meeting=AsyncMock(side_effect=RuntimeError("failed")))
+    with (
+        patch("core.model_manager.get_model_manager", return_value=manager),
+        patch("steps.wiki_compiler._create_wiki_compiler_v2", return_value=compiler),
+        pytest.raises(RuntimeError),
+    ):
+        await _compile_single_meeting(
+            config=_make_test_config(tmp_path),
+            meeting_id="sample",
+            meeting_date=date(2026, 4, 29),
+            summary="요약",
+            utterances=[],
+        )
+    manager.unload_if_current.assert_awaited_once_with(WIKI_LLM_MODEL_NAME)

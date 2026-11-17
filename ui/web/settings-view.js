@@ -464,10 +464,10 @@
             this._host.innerHTML = [
                 '<div class="reindex-panel">',
                 '  <section class="settings-section">',
-                '    <h3 class="settings-section-title">Decision Wiki 백필</h3>',
-                '    <p class="settings-section-desc">기존 회의의 요약과 보정 발화를 다시 읽어 verified citation 기반 decision page를 생성합니다.</p>',
+                '    <h3 class="settings-section-title">기존 회의 Wiki 재검수</h3>',
+                '    <p class="settings-section-desc">전사·교정·요약이 완료된 회의를 원문 근거와 대조합니다. 게시된 결과와 검토가 필요한 후보를 따로 표시하며, 준비되지 않은 회의는 사유를 안내합니다.</p>',
                 '    <div class="reindex-batch-controls">',
-                '      <button type="button" class="btn btn-primary" id="wikiBackfillStartBtn">전체 백필 시작</button>',
+                '      <button type="button" class="btn btn-primary" id="wikiBackfillStartBtn">기존 회의 검수</button>',
                 '      <button type="button" class="btn btn-secondary" id="wikiBackfillCancelBtn" disabled>취소</button>',
                 '      <button type="button" class="btn btn-secondary" id="wikiBackfillResumeBtn" disabled>재개</button>',
                 '      <button type="button" class="btn btn-secondary" id="wikiBackfillRetryBtn" disabled>실패 재시도</button>',
@@ -480,8 +480,8 @@
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
-                '    <h3 class="settings-section-title">실패 내역</h3>',
-                '    <div class="reindex-missing-list" id="wikiBackfillErrors"><div class="reindex-missing-empty">표시할 실패 내역이 없습니다.</div></div>',
+                '    <h3 class="settings-section-title">검토·오류 내역</h3>',
+                '    <div class="reindex-missing-list" id="wikiBackfillErrors"><div class="reindex-missing-empty">표시할 검토·오류 내역이 없습니다.</div></div>',
                 '  </section>',
                 '</div>',
             ].join("\n");
@@ -556,10 +556,15 @@
             var text = document.getElementById("wikiBackfillProgressText");
             var fill = document.getElementById("wikiBackfillProgressFill");
             if (text) {
-                text.textContent = data.status + " · " + processed + " / " + total +
-                    " · 성공 " + (data.succeeded || 0) + " · 실패 " + (data.failed || 0);
+                var statusLabel = ({ running: "검수 중", completed: "완료", completed_with_issues: "완료 · 검토 필요 항목 있음", failed: "실패", cancelled: "취소", interrupted: "중단" })[data.status] || data.status;
+                var published = data.published == null ? data.succeeded || 0 : data.published;
+                text.textContent = statusLabel + " · " + processed + " / " + total +
+                    " · 게시 " + published + " · 검토 필요 " + (data.pending || 0) +
+                    " · 실패 " + (data.failed || 0) +
+                    (data.empty ? " (산출물 없음 " + data.empty + ")" : "");
             }
             if (fill) fill.style.width = ratio + "%";
+            if (fill && fill.parentElement) fill.parentElement.setAttribute("aria-valuenow", String(ratio));
 
             document.getElementById("wikiBackfillCancelBtn").disabled = data.status !== "running";
             document.getElementById("wikiBackfillResumeBtn").disabled = data.status !== "interrupted" && data.status !== "cancelled";
@@ -569,7 +574,7 @@
             var errors = data.errors || [];
             if (!errorsEl) return;
             if (errors.length === 0) {
-                errorsEl.innerHTML = '<div class="reindex-missing-empty">표시할 실패 내역이 없습니다.</div>';
+                errorsEl.innerHTML = '<div class="reindex-missing-empty">표시할 검토·오류 내역이 없습니다.</div>';
                 return;
             }
             errorsEl.innerHTML = errors.map(function (err) {

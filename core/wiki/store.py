@@ -23,12 +23,23 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
+from _thread import RLock as RLockType
 from collections.abc import Iterator
 from pathlib import Path
 
+from core.io_utils import atomic_write_text_pinned, ensure_directory_no_follow, read_text_no_follow
 from core.wiki.models import Citation, PageType, WikiPage
 
 logger = logging.getLogger(__name__)
+
+_ROOT_LOCKS: dict[str, RLockType] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def _metadata_flag(value: object) -> bool:
+    """문자열 기반 과거 frontmatter와 실제 bool의 참 값을 일관되게 읽는다."""
+    return value is True or str(value).strip("\"' ").lower() in {"true", "1", "yes"}
 
 
 # 단일 파일로 wiki 루트 직속에 위치하는 특수 페이지 (디렉토리 스캔에서 제외).
@@ -265,6 +276,24 @@ class WikiStore:
         if not isinstance(root, Path):
             raise TypeError(f"WikiStore.root 는 Path 타입이어야 합니다: {type(root).__name__}")
         self._root: Path = root
+        key = str(root.expanduser().absolute())
+        with _ROOT_LOCKS_GUARD:
+            self._mutation_lock = _ROOT_LOCKS.setdefault(key, threading.RLock())
+
+    @property
+    def mutation_lock(self) -> RLockType:
+        """같은 루트의 짧은 동기 게시·수동 편집 구간을 직렬화하는 잠금을 반환한다."""
+        return self._mutation_lock
+
+    def read_raw_page(self, rel_path: Path) -> str:
+        """frontmatter를 포함한 원문을 symlink를 따르지 않고 읽는다."""
+        _validate_relative_path(rel_path)
+        try:
+            return read_text_no_follow(self._root / rel_path)
+        except (OSError, UnicodeError) as exc:
+            raise WikiStoreError(
+                "page_not_found", f"페이지를 안전하게 읽을 수 없습니다: {rel_path}"
+            ) from exc
 
     @property
     def root(self) -> Path:
@@ -306,9 +335,9 @@ class WikiStore:
         """
         # ── 1. 디렉토리 생성 (권한 오류 → permission_denied) ──────────
         try:
-            self._root.mkdir(parents=True, exist_ok=True)
+            ensure_directory_no_follow(self._root)
             for subdir in _REQUIRED_SUBDIRS:
-                (self._root / subdir).mkdir(parents=True, exist_ok=True)
+                ensure_directory_no_follow(self._root / subdir)
         except PermissionError as exc:
             logger.error("wiki 루트 생성 권한 없음: %s", self._root)
             raise WikiStoreError(
@@ -458,20 +487,7 @@ class WikiStore:
         """
         _validate_relative_path(rel_path)
 
-        abs_path = self._root / rel_path
-        if not abs_path.exists():
-            raise WikiStoreError(
-                "page_not_found",
-                f"페이지를 찾을 수 없습니다: {rel_path}",
-            )
-
-        try:
-            text = abs_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise WikiStoreError(
-                "page_not_found",
-                f"페이지 읽기 실패: {rel_path} ({exc})",
-            ) from exc
+        text = self.read_raw_page(rel_path)
 
         # frontmatter 파싱 — 실패해도 빈 dict 로 폴백 (경고만)
         try:
@@ -518,17 +534,27 @@ class WikiStore:
         """
         _validate_relative_path(rel_path)
 
-        abs_path = self._root / rel_path
-        # 부모 디렉토리 자동 생성 (decisions/, people/ 등)
-        try:
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise WikiStoreError(
-                "permission_denied",
-                f"부모 디렉토리 생성 실패: {abs_path.parent} ({exc})",
-            ) from exc
-
-        self._atomic_write(abs_path, content)
+        with self.mutation_lock:
+            abs_path = self._root / rel_path
+            try:
+                previous = read_text_no_follow(abs_path)
+            except FileNotFoundError:
+                previous = None
+            except (OSError, UnicodeError) as exc:
+                raise WikiStoreError(
+                    "invalid_path", "안전하지 않은 Wiki 저장 경로입니다."
+                ) from exc
+            if previous is not None:
+                frontmatter, _body = _parse_frontmatter(previous)
+                if any(
+                    _metadata_flag(frontmatter.get(key))
+                    for key in ("human_edited", "human_reviewed")
+                ):
+                    raise WikiStoreError(
+                        "human_protected",
+                        "사용자가 수정·확인한 Wiki는 자동으로 덮어쓰지 않습니다.",
+                    )
+            self._atomic_write(abs_path, content)
 
     def delete_page(self, rel_path: Path) -> None:
         """rel_path 의 페이지를 삭제한다. 존재하지 않으면 no-op.
@@ -580,6 +606,8 @@ class WikiStore:
                 continue
             # 숨김 디렉토리/파일 제외
             if any(part.startswith(".") for part in rel.parts):
+                continue
+            if abs_path.is_symlink() or not abs_path.is_file():
                 continue
             # 특수 파일 제외 (단, 디렉토리 내부의 동명 파일은 허용)
             if len(rel.parts) == 1 and rel.name in SPECIAL_FILES:
@@ -681,10 +709,8 @@ class WikiStore:
         Raises:
             WikiStoreError("permission_denied"): 디스크 쓰기 실패.
         """
-        tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
         try:
-            tmp_path.write_text(content, encoding="utf-8")
-            tmp_path.replace(abs_path)
+            atomic_write_text_pinned(abs_path, content)
         except OSError as exc:
             raise WikiStoreError(
                 "permission_denied",

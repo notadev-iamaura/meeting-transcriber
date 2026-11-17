@@ -50,14 +50,18 @@ def extract_citation_markers(text: str) -> list[str]:
     return [match.group(0) for match in _CITATION_PATTERN.finditer(text)]
 
 
-def _append_marker_if_missing(text: str, marker: str) -> str:
-    """본문 줄에 인용 마커가 없으면 fallback marker 를 덧붙인다."""
-    cleaned = str(text or "").strip()
-    if not cleaned or not marker or extract_citation_markers(cleaned):
-        return cleaned
-    if cleaned in {"없음", "- 없음", "_(없음)_", "N/A", "n/a"}:
-        return cleaned
-    return f"{cleaned} {marker}"
+def _has_uncited_factual_text(text: str) -> bool:
+    """기존 D1 분류기로 미인용 사실을 찾되 입력 본문은 변경하지 않는다."""
+    from core.wiki.citations import is_factual_statement
+
+    in_code_block = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if not in_code_block and is_factual_statement(line) and not extract_citation_markers(line):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -72,7 +76,7 @@ class DecisionRecord:
         decision_text: accepted decision body.
         background: rationale/background body.
         project: primary project name/slug.
-        participants: speakers or people involved.
+        participants: 입력 회의 원문의 화자 라벨 목록. 개별 결정 동의자나 실명 확인을 뜻하지 않는다.
         owners: action owners.
         confidence: extractor confidence 0..10.
         source_meetings: meeting ids backing this decision.
@@ -82,6 +86,8 @@ class DecisionRecord:
         superseded_by: later decision id.
         created_at: first record creation timestamp.
         last_updated: latest update timestamp.
+        citation_unresolved: 필드별 근거 인용이 아직 해결되지 않았는지 여부.
+        unresolved_citation_fields: 미인용 사실을 보존한 필드 이름 목록.
     """
 
     id: str
@@ -101,12 +107,27 @@ class DecisionRecord:
     superseded_by: str | None = None
     created_at: str = ""
     last_updated: str = ""
+    citation_unresolved: bool = False
+    unresolved_citation_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """상태와 타임스탬프를 보수적으로 정규화한다."""
         status = self.status if self.status in _STATUS_VALUES else "decided"
+        missing = [
+            name
+            for name, text in (
+                ("decision_text", self.decision_text),
+                ("background", self.background),
+                *[(f"follow_ups.{index}", text) for index, text in enumerate(self.follow_ups)],
+            )
+            if _has_uncited_factual_text(text)
+        ]
+        unresolved_fields = tuple(_unique_sorted(list(self.unresolved_citation_fields) + missing))
+        unresolved = self.citation_unresolved is True or bool(unresolved_fields)
         now = datetime.now().isoformat(timespec="seconds")
-        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "status", "pending" if unresolved else status)
+        object.__setattr__(self, "citation_unresolved", unresolved)
+        object.__setattr__(self, "unresolved_citation_fields", unresolved_fields)
         object.__setattr__(self, "participants", _unique_sorted(self.participants))
         object.__setattr__(self, "owners", _unique_sorted(self.owners))
         object.__setattr__(self, "source_meetings", _unique_sorted(self.source_meetings))
@@ -121,13 +142,22 @@ class DecisionRecord:
         return bool(self.citations)
 
     def to_markdown(self) -> str:
-        """DecisionRecord 를 canonical Markdown page 로 렌더링한다."""
+        """결정 페이지를 렌더링하며 비어 있는 배경·후속은 미확인으로 표시한다."""
         frontmatter = [
             "---",
             "type: decision",
             f"id: {_escape_scalar(self.id)}",
             f"title: {_escape_scalar(self.title)}",
             f"status: {_escape_scalar(self.status)}",
+            *(
+                [
+                    "citation_unresolved: true",
+                    "review_reason: citation_unresolved",
+                    f"unresolved_citation_fields: {_yaml_inline_list(list(self.unresolved_citation_fields))}",
+                ]
+                if self.citation_unresolved
+                else []
+            ),
             f"decision_date: {self.decision_date.isoformat()}",
             # Legacy fields kept for existing readers/tests during migration.
             f"date: {self.decision_date.isoformat()}",
@@ -145,7 +175,7 @@ class DecisionRecord:
             f"updated_at: {self.last_updated}",
             "---",
         ]
-        follow_ups = self.follow_ups or ["없음"]
+        follow_ups = self.follow_ups or ["미확인"]
         citations = self.citations or []
         citation_lines = [f"- {marker}" for marker in citations] or ["- 없음"]
         source_lines = [
@@ -160,7 +190,7 @@ class DecisionRecord:
             self.decision_text or "없음",
             "",
             "## 배경",
-            self.background or "없음",
+            self.background or "미확인",
             "",
             "## 후속 액션",
             *[f"- {line}" if not line.startswith("-") else line for line in follow_ups],
@@ -189,18 +219,7 @@ class DecisionRecord:
         """ExtractedDecision 호환 객체에서 DecisionRecord 를 만든다."""
         decision_text = str(getattr(decision, "decision_text", "") or "")
         background = str(getattr(decision, "background", "") or "")
-        citations = extract_citation_markers(
-            "\n".join(
-                [
-                    decision_text,
-                    background,
-                    "\n".join(
-                        str(getattr(getattr(fu, "citation", ""), "marker", "") or "")
-                        for fu in getattr(decision, "follow_ups", []) or []
-                    ),
-                ]
-            )
-        )
+        citations = extract_citation_markers(f"{decision_text}\n{background}")
         follow_ups: list[str] = []
         owners: list[str] = []
         for fu in getattr(decision, "follow_ups", []) or []:
@@ -209,19 +228,18 @@ class DecisionRecord:
             citation = getattr(fu, "citation", None)
             marker = ""
             if citation is not None:
-                marker = (
-                    f"[meeting:{getattr(citation, 'meeting_id', meeting_id)}@"
-                    f"{getattr(citation, 'timestamp_str', '00:00:00')}]"
-                )
-                citations.append(marker)
+                source_id = getattr(citation, "meeting_id", "")
+                timestamp = getattr(citation, "timestamp_str", "")
+                candidate = f"[meeting:{source_id}@{timestamp}]"
+                if _CITATION_PATTERN.fullmatch(candidate):
+                    marker = candidate
+                    citations.append(marker)
+            citations.extend(extract_citation_markers(desc))
             if owner:
                 owners.append(owner)
-            if owner and desc:
-                follow_ups.append(f"{owner}: {desc} {marker}".strip())
-
-        primary_marker = citations[0] if citations else ""
-        decision_text = _append_marker_if_missing(decision_text, primary_marker)
-        background = _append_marker_if_missing(background, primary_marker)
+            if desc:
+                text = f"{owner}: {desc}" if owner else desc
+                follow_ups.append(f"{text} {marker}".strip())
 
         projects = list(getattr(decision, "projects", []) or [])
         project = str(projects[0]) if projects else ""
@@ -242,4 +260,8 @@ class DecisionRecord:
             citations=citations,
             follow_ups=follow_ups,
             created_at=created_at or "",
+            citation_unresolved=getattr(decision, "citation_unresolved", False) is True,
+            unresolved_citation_fields=tuple(
+                getattr(decision, "unresolved_citation_fields", ()) or ()
+            ),
         )

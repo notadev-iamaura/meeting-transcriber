@@ -205,3 +205,36 @@ def test_progress_does_not_treat_skipped_or_stale_steps_as_success() -> None:
         meeting_progress("failed", dict(completed_steps=None, skipped_steps=None))["status_label"]
         == "처리 실패"
     )
+
+
+@pytest.mark.parametrize("db_status", ["embedding", "completed"])
+def test_progress_keeps_wiki_running_after_transcript_summary_search_are_ready(
+    db_status: str,
+) -> None:
+    """DB 완료 복구 경로에서도 실제 실행 중인 Wiki를 전체 완료로 보이지 않는다."""
+    state = dict(
+        status="running",
+        current_step="wiki_compile",
+        completed_steps=["merge", "correct", "summarize", "chunk", "embed"],
+    )
+    progress = meeting_progress(db_status, state)
+    assert progress["status_label"] == "전사·요약·검색 완료 · Wiki 정리 중"
+    assert progress["current_step"] == "wiki_compile"
+    assert progress["failed_step"] == ""
+
+
+def test_progress_keeps_nonfatal_wiki_failure_separate_from_meeting_success() -> None:
+    """Wiki 실패 경고는 최신 결과로 표시하고 회의 본문·검색 완료를 보존한다."""
+    state = dict(
+        status="completed",
+        current_step="",
+        completed_steps=["merge", "summarize", "embed"],
+        step_results=[{"step": "wiki_compile", "success": False}],
+    )
+    progress = meeting_progress("completed", state)
+    assert progress["status_label"] == "전사·요약·검색 완료 · Wiki 정리 실패"
+    assert progress["failed_step"] == ""
+    assert progress["transcript_available"] is True
+    state["step_results"].append({"step": "wiki_compile", "success": True})
+    assert meeting_progress("completed", state)["status_label"] == "완료"
+    assert meeting_progress("queued", state)["status_label"] == "대기열 등록"

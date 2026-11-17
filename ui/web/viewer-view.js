@@ -2601,7 +2601,7 @@
          *   {
          *     meeting_id, job_id, step,
          *     phase: "start" | "complete",
-         *     input_size, eta_seconds, elapsed_seconds, anomaly
+         *     input_size, eta_seconds, elapsed_seconds, anomaly, success
          *   }
          */
         ViewerView.prototype._handleStepProgress = function (detail) {
@@ -2612,15 +2612,15 @@
             if (detail.phase === "start") {
                 entry.status = "running";
                 entry.startedAt = Date.now();
-                entry.eta = Number(detail.eta_seconds) || 0;
+                entry.eta = step === "wiki_compile" ? 0 : Number(detail.eta_seconds) || 0;
                 entry.anomaly = "normal";
                 entry.elapsed = 0;
                 entry.inputSize = Number(detail.input_size) || 0;
                 // 이전에 완료됐다가 재시도되는 경우도 있으므로 성공 플래그 초기화
             } else if (detail.phase === "complete") {
-                entry.status = "completed";
+                entry.status = detail.success === false ? "failed" : "completed";
                 entry.elapsed = Number(detail.elapsed_seconds) || entry.elapsed || 0;
-                entry.eta = Number(detail.eta_seconds) || entry.eta || 0;
+                entry.eta = step === "wiki_compile" ? 0 : Number(detail.eta_seconds) || entry.eta || 0;
                 entry.anomaly = detail.anomaly || "normal";
             }
             this._liveLog[step] = entry;
@@ -2678,6 +2678,7 @@
 
                 // 진행 중이면 wall-clock 기반으로 현재 경과 시간 재계산
                 var elapsed = entry.elapsed || 0;
+                var hasElapsed = entry.elapsed != null || Boolean(entry.startedAt);
                 if (entry.status === "running" && entry.startedAt) {
                     elapsed = (Date.now() - entry.startedAt) / 1000;
                 }
@@ -2704,8 +2705,9 @@
                 }
 
                 // 예상 대비 경과 비율 → 이상 탐지 색상 (실시간 판단)
-                var anomaly = entry.anomaly || "normal";
-                if (entry.status === "running" && entry.eta > 0) {
+                var hasEstimate = key !== "wiki_compile" && entry.eta > 0;
+                var anomaly = key === "wiki_compile" ? "normal" : entry.anomaly || "normal";
+                if (entry.status === "running" && hasEstimate) {
                     var ratio = elapsed / entry.eta;
                     if (ratio >= 2.5) anomaly = "danger";
                     else if (ratio >= 1.5) anomaly = "warning";
@@ -2714,7 +2716,7 @@
 
                 // 진행률 바 (ETA가 있을 때만)
                 var progressBar = "";
-                if (entry.eta > 0 && entry.status === "running") {
+                if (hasEstimate && entry.status === "running") {
                     var pct = Math.min(100, Math.round((elapsed / entry.eta) * 100));
                     progressBar =
                         '<div class="log-progress-bar"><div class="log-progress-fill" ' +
@@ -2723,7 +2725,7 @@
 
                 // ETA 텍스트
                 var etaText = "";
-                if (entry.eta > 0) {
+                if (hasEstimate) {
                     if (entry.status === "running") {
                         var remain = Math.max(0, entry.eta - elapsed);
                         etaText = '<span class="log-eta">남은 ~' + self._formatElapsed(remain) + '</span>';
@@ -2737,7 +2739,8 @@
                     '  <div class="log-step">' + App.escapeHtml(labelMap[key] || key) + '</div>',
                     '  <div class="log-progress">',
                          progressBar,
-                    '    <div class="log-elapsed">' + self._formatElapsed(elapsed) + '</div>',
+                    '    <div class="log-elapsed">' + (hasElapsed ? self._formatElapsed(elapsed) :
+                        (entry.status === "failed" ? "경과 미확정" : "진행 중")) + '</div>',
                          etaText,
                     '  </div>',
                     '  <div class="log-status ' + statusClass + '">' + statusText + '</div>',
@@ -2782,10 +2785,11 @@
                 steps.forEach(function (s) {
                     var existing = self._liveLog[s.step];
                     // 라이브 상태가 running 이면 덮어쓰지 않음 (최신이 우선)
-                    if (existing && existing.status === "running") return;
+                    if (existing && existing.status === "running" &&
+                        (s.step !== "wiki_compile" || data.current_step === "wiki_compile")) return;
                     self._liveLog[s.step] = {
                         status: s.success ? "completed" : "failed",
-                        elapsed: Number(s.elapsed_seconds) || 0,
+                        elapsed: s.elapsed_known === false ? null : Number(s.elapsed_seconds) || 0,
                         eta: existing ? existing.eta : 0,
                         anomaly: "normal",
                     };
@@ -2793,6 +2797,13 @@
                 (data.skipped_steps || []).forEach(function (k) {
                     self._liveLog[k] = { status: "skipped", elapsed: 0, eta: 0, anomaly: "normal" };
                 });
+                if (data.status === "running" && data.current_step === "wiki_compile") {
+                    var wikiEntry = self._liveLog.wiki_compile;
+                    if (!wikiEntry || wikiEntry.status !== "running") {
+                        // 재진입 시 시작 이벤트 시각을 알 수 없으므로 경과 시간은 추정하지 않는다.
+                        self._liveLog.wiki_compile = { status: "running", elapsed: null, eta: 0, anomaly: "normal" };
+                    }
+                }
                 // 라이브 렌더러가 있으면 그걸로 통일
                 self._renderLiveLog();
                 return;
@@ -2954,7 +2965,9 @@
             } else if (self._transcriptReadonly) {
                 parts.push("읽기 전용");
             }
-            if (processingLabels[status]) {
+            if (self._lastMeetingData && self._lastMeetingData.current_step === "wiki_compile") {
+                parts.push("Wiki 정리 중");
+            } else if (processingLabels[status]) {
                 parts.push(processingLabels[status] + " 진행 중");
             }
 
@@ -3176,8 +3189,7 @@
 
             self._stopPipelinePolling();
 
-            // 산출물 기준 진행 단계. 내부 CHUNK/EMBED/WIKI_COMPILE은 사용자에게
-            // "검색/결정사항 준비"로 묶어 보여준다.
+            // Wiki는 실제 진행이 관찰된 회의에만 추가한다.
             var pipelineSteps = [
                 { key: "convert", label: "오디오 준비" },
                 { key: "transcribe", label: "전사" },
@@ -3204,9 +3216,15 @@
             };
 
             function renderProgress(currentStep, completedSteps) {
+                var visibleSteps = pipelineSteps;
+                if (currentStep === "wiki_compile" ||
+                    (completedSteps && completedSteps.indexOf("wiki_compile") >= 0) ||
+                    self._liveLog.wiki_compile) {
+                    visibleSteps = pipelineSteps.concat([{ key: "wiki_compile", label: "Wiki 정리" }]);
+                }
                 var html = "";
-                for (var i = 0; i < pipelineSteps.length; i++) {
-                    var step = pipelineSteps[i];
+                for (var i = 0; i < visibleSteps.length; i++) {
+                    var step = visibleSteps[i];
                     var state = "pending";
                     if (completedSteps && completedSteps.indexOf(step.key) >= 0) {
                         state = "done";
@@ -3217,7 +3235,7 @@
                     html += '<div class="pipeline-step-dot"></div>';
                     html += '<div class="pipeline-step-label">' + App.escapeHtml(step.label) + '</div>';
                     html += '</div>';
-                    if (i < pipelineSteps.length - 1) {
+                    if (i < visibleSteps.length - 1) {
                         html += '<div class="pipeline-step-line ' + (state === "done" ? "done" : "") + '"></div>';
                     }
                 }
@@ -3270,6 +3288,8 @@
                         return;
                     }
 
+                    self._lastMeetingData = meeting;
+                    self._renderTranscriptSourceStatus();
                     await self._loadTranscript({ silent: true });
 
                     // 처리 중: 단계 업데이트
@@ -3284,7 +3304,9 @@
                             break;
                         }
                     }
-                    App.safeText(els.pipelineStatus, stepLabel ? stepLabel + " 진행 중..." : App.getStatusLabel(status));
+                    App.safeText(els.pipelineStatus, meeting.status_label ||
+                        (currentStep === "wiki_compile" ? "Wiki 정리 중" :
+                            (stepLabel ? stepLabel + " 진행 중..." : App.getStatusLabel(meeting))));
 
                 } catch (e) {
                     // 네트워크 오류 등 → 무시하고 계속 폴링

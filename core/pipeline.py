@@ -2964,6 +2964,32 @@ class PipelineManager:
         if resume_idx is None:
             logger.info("모든 단계가 이미 완료되었습니다.")
             if (
+                state.status == "running"
+                and state.current_step == PipelineStep.WIKI_COMPILE.value
+                and not any(
+                    result.get("step") == PipelineStep.WIKI_COMPILE.value
+                    for result in state.step_results
+                    if isinstance(result, dict)
+                )
+            ):
+                # 여덟 단계 뒤 중단된 부가 Wiki를 조용히 성공으로 바꾸지 않는다.
+                # 모델을 재실행하지 않으며, 경과 미확정의 0.0은 기존 결과 계약을 따른다.
+                warning = (
+                    "Wiki 정리가 중단되었습니다. 기존에 완료된 회의 처리 결과는 보존하며 "
+                    "Wiki를 자동으로 다시 실행하지 않았습니다. "
+                    "중단 전 경과 시간은 확인할 수 없습니다."
+                )
+                state.warnings.append(warning)
+                interrupted_result = StepResult(
+                    step=PipelineStep.WIKI_COMPILE.value,
+                    success=False,
+                    elapsed_seconds=0.0,
+                    error_message=warning,
+                ).to_dict()
+                interrupted_result["elapsed_known"] = False
+                state.step_results.append(interrupted_result)
+                logger.warning(warning)
+            if (
                 state.status != "completed"
                 or state.current_step
                 or state.error_message
@@ -3426,22 +3452,33 @@ class PipelineManager:
             logger.info(f"일괄 단계 저장 완료: meeting_id={meeting_id}, step={stop_after}")
             return state
 
-        # 전체 완료
-        pipeline_elapsed = time.monotonic() - pipeline_start
-        state.status = "completed"
-        state.current_step = ""
-        state.error_message = ""
-        self._save_state(state, state_path)
-
         # ── Step 9 (Phase 1): Wiki Compile (dry-run) ─────────────────────
         # PRD §5.1 호출 위치 + §9 Phase 1: 요약 단계 직후 영구 위키 컴파일 트리거.
         # 9단계는 **non-fatal** — Wiki 실패가 메인 RAG 파이프라인을 중단시키지 않으며,
-        # 단계 결과는 state.step_results 에 기록되지만 status="completed" 는 유지된다.
+        # 단계 결과는 state.step_results 에 기록하고 실패해도 최종 status="completed"로 끝낸다.
         # config.wiki.enabled=False 가 기본값이라 활성화 전까지는 즉시 no-op.
         # `is True` 명시 비교는 MagicMock 등 Truthy 객체가 우회 진입하는 것을 차단
         # (기존 mock_config 기반 단위 테스트가 9단계를 실수로 실행하지 않도록).
         wiki_cfg = getattr(self._config, "wiki", None)
         if wiki_cfg is not None and getattr(wiki_cfg, "enabled", False) is True:
+            # 회의록·검색은 준비됐지만 Wiki가 실행 중이면 전체 완료로 게시하지 않는다.
+            # Wiki는 재개 prefix인 completed_steps에는 추가하지 않고 별도 결과로 남긴다.
+            state.status = "running"
+            state.current_step = PipelineStep.WIKI_COMPILE.value
+            state.error_message = ""
+            self._save_state(state, state_path)
+            if on_step_start is not None:
+                try:
+                    await on_step_start(PipelineStep.WIKI_COMPILE.value)
+                except Exception as e:
+                    logger.warning(f"Wiki 단계 시작 콜백 예외 (무시): {e}")
+            if on_step_progress is not None:
+                try:
+                    await on_step_progress(
+                        {"phase": "start", "step": PipelineStep.WIKI_COMPILE.value}
+                    )
+                except Exception as e:
+                    logger.warning(f"Wiki 진행 콜백 예외 (start, 무시): {e}")
             meeting_date = self._derive_meeting_date(meeting_id, audio_path)
             await self._run_step_wiki_compile(
                 meeting_id=meeting_id,
@@ -3451,6 +3488,26 @@ class PipelineManager:
                 state=state,
                 state_path=state_path,
             )
+            if on_step_progress is not None:
+                wiki_step = state.step_results[-1]
+                try:
+                    await on_step_progress(
+                        {
+                            "phase": "complete",
+                            "step": PipelineStep.WIKI_COMPILE.value,
+                            "elapsed": wiki_step["elapsed_seconds"],
+                            "success": wiki_step["success"],
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Wiki 진행 콜백 예외 (complete, 무시): {e}")
+
+        # 부가 Wiki의 non-fatal 결과까지 저장한 뒤 전체 완료를 게시한다.
+        state.status = "completed"
+        state.current_step = ""
+        state.error_message = ""
+        self._save_state(state, state_path)
+        pipeline_elapsed = time.monotonic() - pipeline_start
 
         # PERF: 파이프라인 성능 프로파일 — 각 단계별 소요 시간 요약 로그
         step_timing_parts: list[str] = []

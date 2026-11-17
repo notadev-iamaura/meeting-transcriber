@@ -371,8 +371,7 @@ class MlxWikiClient:
         Args:
             system_prompt: 역할/지시 본문.
             user_prompt: 회의 컨텍스트.
-            max_tokens: 응답 토큰 상한 (현재 backend.chat 에서는 무시되지만
-                인터페이스 호환을 위해 받음).
+            max_tokens: backend.chat 에 전달하는 응답 토큰 상한.
             temperature: 디코딩 temperature.
 
         Returns:
@@ -407,6 +406,7 @@ class MlxWikiClient:
                             {"role": "user", "content": user_prompt},
                         ],
                         temperature=temperature,
+                        max_tokens=max_tokens,
                     )
                 except WikiLLMError:
                     raise

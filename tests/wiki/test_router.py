@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 # ─── Phase 5 대상 모듈 (아직 미구현 → ImportError Red) ─────────────────────
 from core.wiki.router import (  # type: ignore[import]  # noqa: E402
     QueryRouter,
@@ -88,6 +90,49 @@ class MockRouterLLM:
 
 class TestWikiHeuristicSignals:
     """WIKI 강시그널 4종이 올바르게 WIKI 결정을 반환하는지 검증한다."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "현재 확정된 결정은 무엇인가요?",
+            "'보안 검토'에 대해 현재 확정된 결정은 무엇인가요? 공개된 결정 문서의 근거를 인용해 알려 주세요.",
+            "현재확정된결정사항 알려줘",
+        ],
+    )
+    async def test_현재_확정된_결정을_요청하면_llm없이_wiki로_라우팅한다(self, query: str) -> None:
+        """명시적으로 현재 게시된 결정을 묻는 질문을 원문 검색으로 놓치지 않는다."""
+        llm = MockRouterLLM("사용되지 않아야 하는 응답")
+        verdict = await QueryRouter(llm=llm, enable_llm_fallback=True).classify(query)
+        assert verdict.decision == RouteDecision.WIKI
+        assert verdict.matched_signals == ["current_confirmed_decisions"]
+        assert verdict.used_llm is False
+        assert llm.call_count == 0
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "현재 확정되지 않은 결정은 무엇인가요?",
+            "현재 검토 중인 결정은 무엇인가요?",
+            "현재 확정될 결정은 무엇인가요?",
+        ],
+    )
+    async def test_미확정_검토중_미래표현을_현재확정_시그널로_인식하지_않는다(
+        self, query: str
+    ) -> None:
+        """현재·확정·결정 단어가 따로 있다는 이유만으로 게시 의도를 만들지 않는다."""
+        verdict = await QueryRouter(enable_llm_fallback=False).classify(query)
+        assert verdict.decision == RouteDecision.RAG
+        assert "current_confirmed_decisions" not in verdict.matched_signals
+
+    async def test_현재확정결정과_정확한_발언을_함께_요청하면_기존_both_우선순위를_유지한다(
+        self,
+    ) -> None:
+        """Wiki와 정확 인용 시그널이 겹칠 때는 기존 두 경로 응답 계약을 따른다."""
+        verdict = await QueryRouter(enable_llm_fallback=False).classify(
+            "현재 확정된 결정은 무엇이며 정확히 누가 말했나요?"
+        )
+        assert verdict.decision == RouteDecision.BOTH
+        assert set(verdict.matched_signals) == {"current_confirmed_decisions", "exact_quote"}
 
     async def test_시간_범위_결정사항_질의는_wiki로_라우팅된다(self) -> None:
         """WIKI: '지난주 결정사항 정리해줘' → WIKI, confidence ≥ 7, time_range_decisions 시그널.

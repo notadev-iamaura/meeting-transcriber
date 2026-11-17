@@ -75,6 +75,62 @@ def _make_test_app(config: AppConfig) -> Any:
     return app
 
 
+def test_pending_only_결과가_공개성공과_구별되어_상태와_DB에_보존된다(tmp_path: Path) -> None:
+    """검토 후보만 생긴 작업은 공개 성공 0건, 검토 1건으로 노출한다."""
+    from scripts.backfill_wiki import BackfillResult
+
+    config = _make_test_config(tmp_path)
+    app = _make_test_app(config)
+    fake = AsyncMock(return_value=BackfillResult(total=1, pending=1, pending_pages=2))
+    with patch("scripts.backfill_wiki.backfill", fake), TestClient(app) as client:
+        started = client.post("/api/wiki/backfill", json={}).json()
+        snapshot = client.get(f"/api/wiki/backfill/{started['job_id']}").json()
+    assert snapshot["published"] == snapshot["succeeded"] == 0
+    assert snapshot["pending"] == 1 and snapshot["pending_pages"] == 2
+    assert snapshot["processed"] == 1
+    assert snapshot["status"] == "completed_with_issues"
+    from core.wiki.backfill_state import WikiBackfillStateStore
+
+    stored = WikiBackfillStateStore(config.wiki.resolved_root).get_job(started["job_id"])
+    assert stored is not None and stored.pending == 1 and stored.pending_pages == 2
+
+
+def test_같은_Wiki의_백필을_중복으로_실행하지_않는다(tmp_path: Path) -> None:
+    """한 작업의 모델·누적 쓰기가 끝나기 전 같은 원장의 새 작업을 거부한다."""
+    from scripts.backfill_wiki import BackfillResult
+
+    async def wait_for_cancel(**kwargs: Any) -> BackfillResult:
+        """중복 검사 동안 작업을 실행 상태로 유지한다."""
+        await kwargs["cancel_event"].wait()
+        return BackfillResult()
+
+    app = _make_test_app(_make_test_config(tmp_path))
+    with (
+        patch("scripts.backfill_wiki.backfill", AsyncMock(side_effect=wait_for_cancel)),
+        TestClient(app) as client,
+    ):
+        first = client.post("/api/wiki/backfill", json={})
+        assert first.status_code == 202
+        assert client.post("/api/wiki/backfill", json={}).status_code == 409
+        client.post(f"/api/wiki/backfill/{first.json()['job_id']}/cancel")
+
+
+def test_config_dry_run을_API에서_우회해_실행할수없다(tmp_path: Path) -> None:
+    """요청 dry_run=false라도 설정이 미리보기이면 실제 모델을 호출하지 않는다."""
+    from scripts.backfill_wiki import BackfillResult
+
+    config = _make_test_config(tmp_path)
+    config.wiki.dry_run = True
+    app = _make_test_app(config)
+    fake = AsyncMock(return_value=BackfillResult())
+    with patch("scripts.backfill_wiki.backfill", fake), TestClient(app) as client:
+        response = client.post("/api/wiki/backfill", json={"dry_run": False})
+        assert response.status_code == 202
+        assert response.json()["dry_run"] is True
+        client.get(f"/api/wiki/backfill/{response.json()['job_id']}")
+        assert fake.call_args.kwargs["dry_run"] is True
+
+
 # ─── 시나리오 1: POST /wiki/backfill 시작 ──────────────────────────────
 
 
