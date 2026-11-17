@@ -33,6 +33,7 @@ class RecordingStatusResponse(BaseModel):
     meeting_id: str | None = None
     device: str | None = None
     is_system_audio: bool = False
+    audio_levels: dict[str, float] | None = None
 
 
 class AudioDeviceItem(BaseModel):

@@ -12,8 +12,10 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +76,47 @@ class ZoomAudioActivityChecker:
 
     async def _check_coreaudio(self) -> ZoomActivityResult:
         """CoreAudio helper를 실행해 Zoom 오디오 I/O 상태를 확인한다."""
+        payload = await self._run_helper()
+        processes = payload.get("processes", [])
+        process_count = len(processes) if isinstance(processes, list) else 0
+        return ZoomActivityResult(
+            active=bool(payload.get("active", False)),
+            source="coreaudio",
+            process_count=process_count,
+        )
+
+    async def aggregate_mic_channel(self, device_name: str) -> int | None:
+        """검증된 Aggregate의 마이크 위치를 읽고, 모호한 구성은 구분하지 않는다."""
+        if sys.platform != "darwin":
+            return None
+        try:
+            payload = await self._run_helper("--aggregate-layout", device_name)
+        except ZoomActivityError as exc:
+            logger.warning(f"Aggregate 입력 채널을 확인할 수 없습니다: {exc}")
+            return None
+        channel = payload.get("mic_channel")
+        return channel if type(channel) is int and channel in (0, 2) else None
+
+    def split_recording_command(
+        self, device_name: str, output: Path, sample_rate: int
+    ) -> list[str]:
+        """구성을 확인한 CoreAudio helper에서만 분리 녹음을 시작한다."""
+        return [
+            str(self._helper_binary),
+            "--record-split",
+            device_name,
+            str(output),
+            str(sample_rate),
+        ]
+
+    async def _run_helper(self, *args: str) -> dict[str, Any]:
+        """CoreAudio helper를 실행해 성공 JSON만 반환한다."""
         await self._ensure_helper_compiled()
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(self._helper_binary),
+                *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -97,16 +135,11 @@ class ZoomAudioActivityChecker:
         except json.JSONDecodeError as e:
             raise ZoomActivityError("CoreAudio helper JSON 파싱 실패") from e
 
-        if not isinstance(payload, dict) or not payload.get("ok", False):
+        if not isinstance(payload, dict):
+            raise ZoomActivityError("CoreAudio helper JSON 형식이 유효하지 않습니다")
+        if not payload.get("ok", False):
             raise ZoomActivityError(str(payload.get("error", "CoreAudio helper 실패")))
-
-        processes = payload.get("processes", [])
-        process_count = len(processes) if isinstance(processes, list) else 0
-        return ZoomActivityResult(
-            active=bool(payload.get("active", False)),
-            source="coreaudio",
-            process_count=process_count,
-        )
+        return payload
 
     async def _ensure_helper_compiled(self) -> None:
         """Swift helper 바이너리가 없거나 오래되었으면 컴파일한다."""

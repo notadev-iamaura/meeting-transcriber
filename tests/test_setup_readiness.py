@@ -537,6 +537,7 @@ def test_hf_cli_blank_cache_is_not_launchagent_ready(
     token_path.chmod(0o600)
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hf-cache"))
     monkeypatch.setattr(
         "security.setup_readiness.inspect_huggingface_cli_token_cache",
         lambda: inspect_huggingface_cli_token_cache(token_path),

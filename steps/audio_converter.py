@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import AppConfig
+from core.recording_channels import RECORDING_TRACK_COMMENT
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class AudioInfo:
     channels: int
     codec: str
     duration: float
+    separate_mic_track: bool = False
 
 
 class AudioConvertError(Exception):
@@ -124,6 +126,7 @@ class AudioConverter:
             "-print_format",
             "json",
             "-show_streams",
+            "-show_format",
             "-select_streams",
             "a:0",
             str(input_path),
@@ -155,18 +158,27 @@ class AudioConverter:
                 return None
 
             stream = streams[0]
+            file_format = data.get("format", {})
+            codec = stream.get("codec_name", "unknown")
+            channels = int(stream.get("channels", 0))
             return AudioInfo(
                 sample_rate=int(stream.get("sample_rate", 0)),
-                channels=int(stream.get("channels", 0)),
-                codec=stream.get("codec_name", "unknown"),
+                channels=channels,
+                codec=codec,
                 duration=float(stream.get("duration", 0.0)),
+                separate_mic_track=(
+                    file_format.get("format_name") == "wav"
+                    and channels == 2
+                    and codec == "pcm_s16le"
+                    and file_format.get("tags", {}).get("comment") == RECORDING_TRACK_COMMENT
+                ),
             )
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"ffprobe 출력 파싱 실패: {e}")
             return None
 
-    def _is_already_target_format(self, info: AudioInfo) -> bool:
-        """이미 목표 포맷(16kHz 모노 PCM WAV)인지 확인한다.
+    def _is_already_target_format(self, info: AudioInfo, *, channels: int | None = None) -> bool:
+        """이미 목표 PCM WAV 포맷인지 확인한다.
 
         Args:
             info: ffprobe로 조회한 오디오 메타정보
@@ -176,7 +188,7 @@ class AudioConverter:
         """
         return (
             info.sample_rate == self._target_sample_rate
-            and info.channels == self._target_channels
+            and info.channels == (self._target_channels if channels is None else channels)
             and info.codec in ("pcm_s16le", "pcm_s16be")
         )
 
@@ -185,6 +197,8 @@ class AudioConverter:
         input_path: Path,
         output_dir: Path,
         output_filename: str | None = None,
+        *,
+        preserve_recording_tracks: bool = False,
     ) -> Path:
         """오디오 파일을 16kHz 모노 WAV로 변환한다.
 
@@ -211,7 +225,8 @@ class AudioConverter:
         # PERF: WAV 파일일 때만 ffprobe로 포맷 확인 (변환 스킵 판단용)
         # 비-WAV 포맷(mp3, m4a 등)은 항상 변환이 필요하므로 ffprobe 생략
         ext = input_path.suffix.lower().lstrip(".")
-        info = None
+        target_channels = self._target_channels
+        separate_mic_track = False
         if ext == "wav":
             info = self.probe(input_path)
             if info is not None:
@@ -220,8 +235,11 @@ class AudioConverter:
                     f"{info.sample_rate}Hz, {info.channels}ch, "
                     f"{info.duration:.1f}초"
                 )
+                if info.separate_mic_track:
+                    separate_mic_track = preserve_recording_tracks
+                    target_channels = 2 if separate_mic_track else 1
                 # 이미 목표 포맷이면 변환 스킵
-                if self._is_already_target_format(info):
+                if self._is_already_target_format(info, channels=target_channels):
                     logger.info(f"이미 목표 포맷입니다. 변환을 건너뜁니다: {input_path}")
                     return input_path
         else:
@@ -248,7 +266,7 @@ class AudioConverter:
             "-ar",
             str(self._target_sample_rate),  # 샘플레이트
             "-ac",
-            str(self._target_channels),  # 채널 수
+            str(target_channels),  # 채널 수
             str(output_path),
         ]
 
@@ -299,6 +317,7 @@ class AudioConverter:
             )
 
         # ffprobe로 변환 결과 무결성 검증 (best-effort — 실패해도 계속 진행)
+        output_info = None
         try:
             output_info = self.probe(output_path)
             if output_info is not None and output_info.duration <= 0.0:
@@ -307,6 +326,8 @@ class AudioConverter:
                 )
         except Exception as probe_err:
             logger.debug(f"변환 후 ffprobe 검증 실패 (무시): {probe_err}")
+        if separate_mic_track and (output_info is None or not output_info.separate_mic_track):
+            raise ConversionFailedError(f"녹음 채널 정보가 변환 중 유실되었습니다: {output_path}")
 
         logger.info(f"오디오 변환 완료: {output_path} ({output_size / 1024:.1f}KB)")
         return output_path
@@ -387,6 +408,8 @@ class AudioConverter:
         input_path: Path,
         output_dir: Path,
         output_filename: str | None = None,
+        *,
+        preserve_recording_tracks: bool = False,
     ) -> Path:
         """오디오 변환의 비동기 래퍼.
 
@@ -401,4 +424,10 @@ class AudioConverter:
         Returns:
             변환된 WAV 파일 경로 (Path)
         """
-        return await asyncio.to_thread(self.convert, input_path, output_dir, output_filename)
+        return await asyncio.to_thread(
+            self.convert,
+            input_path,
+            output_dir,
+            output_filename,
+            preserve_recording_tracks=preserve_recording_tracks,
+        )

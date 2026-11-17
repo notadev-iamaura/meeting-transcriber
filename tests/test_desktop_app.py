@@ -68,7 +68,8 @@ def test_closing_window_gracefully_stops_owned_server(spec: LauncherSpec) -> Non
 
 @pytest.mark.parametrize("failure", [OSError("window unavailable"), None])
 def test_window_failure_cleans_up_owned_server(
-    spec: LauncherSpec, failure: OSError | None,
+    spec: LauncherSpec,
+    failure: OSError | None,
 ) -> None:
     """창 생성 실패와 비정상 종료 모두 직접 시작한 서버를 정리한다."""
     server = _process(running=True)

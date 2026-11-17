@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from contextlib import AbstractAsyncContextManager, nullcontext
 from contextvars import ContextVar, Token, copy_context
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, Union, cast
@@ -937,12 +938,19 @@ class ModelLoadManager:
             residency=residency,
         )
 
-    def residency_scope(self, name: str, *, reuse_key: str) -> _ModelResidencyContext:
+    def residency_scope(
+        self, name: str, *, reuse_key: str, inherit_active: bool = False
+    ) -> AbstractAsyncContextManager[_ModelResidencyContext]:
         """유한 작업 묶음 안에서 같은 모델을 유지하고 종료 시 자기 모델만 정리한다.
 
         scope 자체는 모델 잠금을 보유하지 않는다. 각 acquire가 기존 admission과
         native lease를 사용하며, 다른 작업은 필요하면 현재 모델을 교체할 수 있다.
+        이미 같은 모델 선택을 고정한 일괄 처리에서는 바깥 scope가 정리를 맡는다.
         """
+        if inherit_active:
+            for scope in reversed(_active_model_residencies.get()):
+                if scope._manager is self and scope._name == name and scope._token is not None:
+                    return nullcontext(scope)
         return _ModelResidencyContext(self, name, reuse_key)
 
     def get_status(self) -> dict[str, Any]:

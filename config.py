@@ -806,6 +806,19 @@ class SecurityConfig(BaseModel):
     timemachine_exclusion_timeout_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
 
 
+class SplitTrackProcessingConfig(BaseModel):
+    """녹음 출처가 확인된 두 채널의 로컬 전처리 설정."""
+
+    native_capture: bool = True
+    echo_suppression: bool = True
+    echo_max_delay_ms: int = Field(default=280, ge=40, le=500)
+    speech_floor_dbfs: float = Field(default=-67.0, ge=-80, le=-45)
+    max_gain_db: float = Field(default=32.0, ge=0, le=42)
+    silence_gap_seconds: float = Field(default=5.0, ge=1, le=45)
+    speech_verification: bool = True
+    speech_threshold: float = Field(default=0.20, ge=0.05, le=0.5)
+
+
 class RecordingConfig(BaseModel):
     """오디오 녹음 설정 (Zoom 자동 녹음 포함)"""
 
@@ -821,6 +834,10 @@ class RecordingConfig(BaseModel):
     min_duration_seconds: int = Field(default=30, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
+    separate_mic_track: bool = True  # 검증된 Aggregate를 마이크 L / 시스템 R로 저장
+    split_track_processing: SplitTrackProcessingConfig = Field(
+        default_factory=SplitTrackProcessingConfig
+    )
     silence_threshold_rms: float = Field(default=0.001, ge=0.0, le=1.0)  # 무음 판정 RMS 임계값
     # Aggregate Device(3채널: 마이크 + BlackHole L/R) 를 모노로 다운믹스할 때
     # 단순 평균(-ac 1) 을 쓰면 마이크 채널이 1/3 로 희석되어 본인 목소리가 약 10dB

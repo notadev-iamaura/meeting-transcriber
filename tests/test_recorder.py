@@ -40,7 +40,7 @@ def _mock_ffmpeg_process(*, pid: int = 12345) -> AsyncMock:
     mock_process.stdin = MagicMock()
     mock_process.stdin.write = MagicMock()
     mock_process.stdin.drain = AsyncMock()
-    mock_process.wait = AsyncMock()
+    mock_process.wait = AsyncMock(return_value=0)
     mock_process.terminate = MagicMock()
     mock_process.kill = MagicMock()
     stdout = MagicMock()
@@ -63,6 +63,7 @@ from steps.recorder import (
     RecordingResult,
     RecordingState,
 )
+from steps.zoom_activity import ZoomAudioActivityChecker
 
 # === 테스트 헬퍼 ===
 
@@ -633,6 +634,7 @@ class TestStartRecording:
         with (
             patch.object(recorder, "_select_audio_device", return_value=agg_device),
             patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
+            patch.object(ZoomAudioActivityChecker, "aggregate_mic_channel", return_value=None),
         ):
             await recorder.start_recording(meeting_id="agg_test")
 
@@ -657,6 +659,7 @@ class TestStartRecording:
                 enabled=True,
                 prefer_system_audio=True,
                 aggregate_mic_boost=False,
+                separate_mic_track=False,
             ),
         )
         recorder = AudioRecorder(config=config)
@@ -779,7 +782,7 @@ class TestStopRecording:
         mock_process.stdin = MagicMock()
         mock_process.stdin.write = MagicMock()
         mock_process.stdin.drain = AsyncMock()
-        mock_process.wait = AsyncMock()
+        mock_process.wait = AsyncMock(return_value=0)
         recorder._process = mock_process
 
         result = await recorder.stop_recording()
@@ -811,7 +814,7 @@ class TestStopRecording:
         mock_process.stdin = MagicMock()
         mock_process.stdin.write = MagicMock()
         mock_process.stdin.drain = AsyncMock()
-        mock_process.wait = AsyncMock()
+        mock_process.wait = AsyncMock(return_value=0)
         recorder._process = mock_process
 
         result = await recorder.stop_recording()
@@ -846,6 +849,108 @@ class TestStopRecording:
         assert recorder.state == RecordingState.IDLE
         assert recorder._meeting_id is None
         assert recorder._process is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exit_code", [1, 2], ids=["ffmpeg-error", "native-error"])
+    @pytest.mark.parametrize("duration", [1.0, 31.0], ids=["short-partial", "long-partial"])
+    async def test_실제_프로세스_오류는_부분파일을_보존하고_완료로_게시하지_않는다(
+        self, tmp_path: Path, exit_code: int, duration: float
+    ) -> None:
+        """q를 받아 실패 종료한 캡처는 길이와 관계없이 삭제·전사 등록하지 않는다."""
+        import time
+
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._temp_dir.mkdir(parents=True, exist_ok=True)
+        partial = recorder._temp_dir / "partial.wav"
+        content = b"incomplete capture to preserve"
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(sys.argv[2].encode()); "
+            "print('ready', flush=True); sys.stdin.buffer.read(1); sys.exit(int(sys.argv[3]))",
+            str(partial),
+            content.decode(),
+            str(exit_code),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+        await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+        recorder._state = RecordingState.RECORDING
+        recorder._start_time = time.time() - duration
+        recorder._meeting_id = "partial"
+        recorder._current_file = partial
+        recorder._process = proc
+        recorder._start_pipe_drain(proc)
+        completed = AsyncMock()
+        recorder.on_recording_complete(completed)
+        with (
+            patch.object(recorder, "_broadcast_event", new=AsyncMock()) as event,
+            patch.object(recorder, "_check_audio_energy") as energy,
+        ):
+            try:
+                with pytest.raises(FFmpegRecordError, match=f"종료 코드 {exit_code}"):
+                    await recorder.stop_recording()
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+
+        assert partial.read_bytes() == content
+        assert not (tmp_path / "audio_input" / "partial.wav").exists()
+        energy.assert_not_called()
+        completed.assert_not_awaited()
+        event.assert_awaited_once()
+        assert event.await_args.args[0] == "recording_error"
+        assert event.await_args.args[1]["meeting_id"] == "partial"
+        assert "부분 파일" in event.await_args.args[1]["error"]
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._process is None
+        assert recorder._meeting_id is None
+        assert recorder._pipe_drain_tasks == []
+
+    @pytest.mark.asyncio
+    async def test_강제종료가_코드0을_반환해도_부분파일을_게시하지_않는다(
+        self, tmp_path: Path
+    ) -> None:
+        """종료 신호를 받아 0으로 끝나도 정상 q 완료와 구분해 파일을 보존한다."""
+        import time
+
+        recorder = AudioRecorder(config=_make_test_config(tmp_path))
+        recorder._temp_dir.mkdir(parents=True, exist_ok=True)
+        partial = recorder._temp_dir / "timeout.wav"
+        partial.write_bytes(b"unfinished capture")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import signal, sys, time; "
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+            "print('ready', flush=True); time.sleep(60)",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+        await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+        recorder._state = RecordingState.RECORDING
+        recorder._start_time = time.time() - 31
+        recorder._current_file = partial
+        recorder._process = proc
+        recorder._graceful_timeout = 0.01
+        recorder._start_pipe_drain(proc)
+        try:
+            with pytest.raises(FFmpegRecordError, match="정상 종료 시간 초과"):
+                await recorder.stop_recording()
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+        assert proc.returncode == 0
+        assert partial.read_bytes() == b"unfinished capture"
+        assert not (tmp_path / "audio_input" / "timeout.wav").exists()
+        assert recorder.state == RecordingState.IDLE
 
     @pytest.mark.asyncio
     async def test_정지_중_연속_취소돼도_정리가_끝난_뒤_상태를_초기화한다(
@@ -1354,10 +1459,10 @@ class TestMultiTrackRecording:
         }
 
         mock_proc1 = _mock_ffmpeg_process(pid=1001)
-        mock_proc1.wait = AsyncMock()
+        mock_proc1.wait = AsyncMock(return_value=0)
 
         mock_proc2 = _mock_ffmpeg_process(pid=1002)
-        mock_proc2.wait = AsyncMock()
+        mock_proc2.wait = AsyncMock(return_value=0)
 
         call_count = 0
 
@@ -1396,7 +1501,7 @@ class TestMultiTrackRecording:
         }
 
         mock_proc = _mock_ffmpeg_process(pid=999)
-        mock_proc.wait = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
 
         with (
             patch.object(recorder, "_select_devices_multitrack", return_value=devices),
@@ -1448,7 +1553,7 @@ class TestMultiTrackRecording:
         mock_proc.stdin = MagicMock()
         mock_proc.stdin.write = MagicMock()
         mock_proc.stdin.drain = AsyncMock()
-        mock_proc.wait = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
         recorder._processes = {"system": mock_proc, "mic": mock_proc}
 
         result = await recorder.stop_recording()
@@ -1461,6 +1566,38 @@ class TestMultiTrackRecording:
         assert (tmp_path / "audio_input" / "mt_system.wav").exists()
         assert (tmp_path / "audio_input" / "mt_mic.wav").exists()
         assert recorder.state == RecordingState.IDLE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_track", ["system", "mic"])
+    async def test_멀티트랙_한쪽만_실패해도_두파일_모두_보존한다(
+        self, tmp_path: Path, failed_track: str
+    ) -> None:
+        """트랙 처리 순서와 무관하게 실패 회의의 일부만 완료로 게시하지 않는다."""
+        import time
+
+        recorder = AudioRecorder(config=_make_multitrack_config(tmp_path))
+        recorder._state = RecordingState.RECORDING
+        recorder._start_time = time.time() - 31
+        recorder._temp_dir.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for track in ("system", "mic"):
+            files[track] = recorder._temp_dir / f"partial_{track}.wav"
+            files[track].write_bytes(track.encode())
+            proc = _mock_ffmpeg_process()
+            proc.wait.return_value = 2 if track == failed_track else 0
+            recorder._processes[track] = proc
+        recorder._current_files = dict(files)
+        completed = AsyncMock()
+        recorder.on_recording_complete(completed)
+
+        with pytest.raises(FFmpegRecordError, match=f"{failed_track}: 종료 코드 2"):
+            await recorder.stop_recording()
+
+        assert all(path.read_bytes() == track.encode() for track, path in files.items())
+        assert not list((tmp_path / "audio_input").glob("*.wav"))
+        completed.assert_not_awaited()
+        assert recorder.state == RecordingState.IDLE
+        assert recorder._processes == {}
 
     @pytest.mark.asyncio
     async def test_싱글트랙_기존_동작_유지(self, tmp_path: Path) -> None:

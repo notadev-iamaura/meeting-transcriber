@@ -227,10 +227,8 @@ async def test_auto_processing_runner는_HF_offline_pyannote_cache_누락시_보
     audio.write_bytes(b"audio")
 
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(
-        "core.runtime_safety.missing_pyannote_offline_cache_files",
-        lambda _model_name: ["pyannote/speaker-diarization-community-1:config.yaml"],
-    )
+    # 개발 머신의 완전한 모델 캐시가 누락 시나리오를 성공으로 바꾸지 않게 한다.
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hf-cache"))
 
     now = datetime.now().isoformat()
     queue = _Queue([_Job("m1", str(audio), now, status="recorded")])

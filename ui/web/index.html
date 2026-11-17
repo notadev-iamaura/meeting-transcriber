@@ -257,10 +257,16 @@
       <div class="recording-wave" aria-hidden="true">
         <!-- 48 bars — spa.js 가 마운트 시점에 생성 -->
       </div>
+      <div id="recordingChannelLevels" class="recording-channel-levels" role="group" aria-label="채널별 입력 음량" hidden>
+        <label for="recordingMicLevel">내 마이크</label>
+        <meter id="recordingMicLevel" min="-72" max="0" low="-55" high="-8" optimum="-24" value="-72"></meter>
+        <label for="recordingSystemLevel">Zoom·시스템</label>
+        <meter id="recordingSystemLevel" min="-72" max="0" low="-55" high="-8" optimum="-24" value="-72"></meter>
+      </div>
       <div class="recording-meta">
         <span class="num" id="recordingOverlayMetaDuration">00:00:00</span>
         <span>·</span>
-        <span id="recordingOverlayMetaLevel">실시간 음성 감지</span>
+        <span id="recordingOverlayMetaLevel">녹음 진행 중</span>
       </div>
       <div class="recording-actions">
         <button type="button" class="rec-btn ghost" data-recording-action="minimize" aria-label="녹음 HUD 최소화">최소화</button>

@@ -43,7 +43,7 @@ _NORMALIZED_SAMPLE_RATE = 16_000
 _DEFAULT_DECODE_TIMEOUT_BASE_SECONDS = 60.0
 _DEFAULT_DECODE_TIMEOUT_FACTOR = 0.25
 _DEFAULT_DECODE_TIMEOUT_CAP_SECONDS = 900.0
-_AUDIO_QUALITY_ALGORITHM_VERSION = "s16-16khz-effective-duration-v2"
+_AUDIO_QUALITY_ALGORITHM_VERSION = "s16-16khz-effective-duration-v3"
 _ACCEPT_CACHE_MAX_ENTRIES = 128
 
 AudioFileIdentity: TypeAlias = tuple[int, int, int, int, int]
@@ -264,7 +264,35 @@ def validate_audio_quality(
             duration_seconds=duration_s,
         )
 
-    if mean_db < min_mean_db:
+    split_activity = False
+    if (
+        mean_db < min_mean_db
+        and probe_error is None
+        and expected_identity is not None
+        and audio_path.suffix.lower() == ".wav"
+    ):
+        from core.recording_channels import has_sustained_recording_signal
+        from steps.transcriber import AudioAdmissionError, EmptyAudioError
+
+        try:
+            # 확인된 분리 녹음은 유효 샘플이 있으면 음량 판단을 전처리에 맡긴다.
+            # 전체 평균이나 별도 dB 문턱으로 여기서 거절하면, 상대가 조용한 동안
+            # 나온 작은 본인 발화가 증폭·발화 검사에 도달하기 전에 격리된다.
+            # 길이·전체 디코딩·파일 정체성 검사는 그대로 적용한다.
+            split_activity = (
+                has_sustained_recording_signal(audio_path, 0.0, expected_identity) is True
+            )
+        except (AudioAdmissionError, EmptyAudioError, OSError) as exc:
+            return _measurement_error_result(
+                audio_path,
+                AudioMeasurementError(
+                    f"분리 녹음의 구간 음량을 확인할 수 없습니다: {exc}",
+                    failure_kind=getattr(exc, "failure_kind", AudioFailureKind.SOURCE_BUSY),
+                ),
+                duration_seconds=duration_s,
+            )
+
+    if mean_db < min_mean_db and not split_activity:
         _increment_stats("reject")
         return AudioQualityResult(
             status=AudioQualityStatus.REJECT,

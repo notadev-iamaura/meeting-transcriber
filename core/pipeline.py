@@ -24,10 +24,11 @@ import stat
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import psutil
@@ -50,6 +51,15 @@ from core.io_utils import (
 )
 from core.meeting_mutation import MeetingMutationCoordinator
 from core.model_manager import ModelLoadManager, get_model_manager
+from core.recording_channels import (
+    MIC_CHANNEL,
+    SELF_SPEAKER,
+    SYSTEM_CHANNEL,
+    PreparedRecordingTrack,
+    extract_recording_tracks,
+    has_separate_mic_track,
+    prepare_recording_track,
+)
 from core.retry_policy import should_retry
 from steps.transcriber import (
     AudioAdmissionError,
@@ -1516,8 +1526,10 @@ class PipelineManager:
         self,
         audio_path: Path,
         output_dir: Path,
+        *,
+        stt_provider: str = "local",
     ) -> Path:
-        """변환 단계: 오디오를 16kHz 모노 WAV로 변환한다.
+        """변환 단계: 로컬 분리 녹음을 제외한 오디오를 16kHz 모노 WAV로 변환한다.
 
         Args:
             audio_path: 입력 오디오 파일 경로
@@ -1529,7 +1541,11 @@ class PipelineManager:
         from steps.audio_converter import AudioConverter
 
         converter = AudioConverter(self._config)
-        wav_path = await converter.convert_async(audio_path, output_dir)
+        wav_path = await converter.convert_async(
+            audio_path,
+            output_dir,
+            preserve_recording_tracks=stt_provider == "local",
+        )
         wav_path = self._localize_converted_wav(audio_path, output_dir, wav_path)
         logger.info(f"변환 완료: {wav_path}")
         return wav_path
@@ -1673,7 +1689,7 @@ class PipelineManager:
         Returns:
             TranscriptResult 인스턴스
         """
-        from steps.transcriber import Transcriber, TranscriptResult
+        from steps.transcriber import TranscriptResult
 
         configured_provider = getattr(self._config.stt, "provider", "local")
         if configured_provider not in {"local", "openai"}:
@@ -1716,6 +1732,118 @@ class PipelineManager:
         wav_identity = self._validate_input(wav_path)
         await self._validate_audio_duration(wav_path, wav_identity)
 
+        if selected_provider == "local" and await asyncio.to_thread(
+            has_separate_mic_track, wav_path
+        ):
+            self._assert_input_identity(wav_path, wav_identity)
+            result = await self._transcribe_recording_tracks(
+                wav_path, wav_identity, selected_model=selected_model, should_cancel=should_cancel
+            )
+            if self._checkpoint_enabled:
+                self._save_result_checkpoint(result, checkpoint_path)
+            return result
+
+        return await self._transcribe_wav(
+            wav_path,
+            selected_provider=selected_provider,
+            selected_model=selected_model,
+            checkpoint_path=checkpoint_path,
+            expected_identity=wav_identity,
+            should_cancel=should_cancel,
+        )
+
+    async def _transcribe_recording_tracks(
+        self,
+        wav_path: Path,
+        wav_identity: AudioFileIdentity,
+        *,
+        selected_model: str,
+        should_cancel: Callable[[], bool] | None,
+    ) -> Any:
+        """마이크·시스템을 순서대로 전사하고 입력 출처를 보존한다."""
+        from steps.transcriber import (
+            EmptyTranscriptError,
+            LowVolumeAudioError,
+            TranscriptResult,
+            TranscriptSegment,
+        )
+
+        segments: list[TranscriptSegment] = []
+        language = self._config.stt.language
+        settings = self._config.recording.split_track_processing
+        quality = self._config.audio_quality
+        minimum_dbfs = (
+            quality.min_mean_volume_db if quality.enabled else settings.speech_floor_dbfs
+        )
+        with TemporaryDirectory(prefix=".recap-tracks-", dir=wav_path.parent) as directory:
+            tracks = await asyncio.to_thread(
+                extract_recording_tracks,
+                wav_path,
+                Path(directory),
+                (MIC_CHANNEL, SYSTEM_CHANNEL),
+                wav_identity,
+                echo_settings=settings,
+            )
+            prepared = {}
+            for channel, track_path in tracks.items():
+                if should_cancel is not None and should_cancel():
+                    raise asyncio.CancelledError("사용자가 전사를 취소했습니다.")
+                track = await asyncio.to_thread(
+                    prepare_recording_track, track_path, settings, minimum_dbfs
+                )
+                if track is not None:
+                    prepared[channel] = track
+                else:
+                    logger.info(f"전사할 활성 음성 구간 없음: 채널={channel}")
+            async with self._model_manager.residency_scope(
+                "whisper", reuse_key=selected_model, inherit_active=True
+            ):
+                for channel, track in prepared.items():
+                    if should_cancel is not None and should_cancel():
+                        raise asyncio.CancelledError("사용자가 전사를 취소했습니다.")
+                    try:
+                        result = await self._transcribe_wav(
+                            track.path,
+                            selected_provider="local",
+                            selected_model=selected_model,
+                            prepared_track=track,
+                        )
+                    except (LowVolumeAudioError, EmptyTranscriptError):
+                        logger.info(f"전사 가능한 발화가 없는 채널 건너뜀: {channel}")
+                        continue
+                    language = result.language
+                    speaker = SELF_SPEAKER if channel == MIC_CHANNEL else None
+                    segments.extend(
+                        replace(segment, speaker=speaker) for segment in result.segments
+                    )
+
+        if not segments:
+            raise EmptyTranscriptError("마이크와 시스템 오디오에서 전사할 발화를 찾지 못했습니다.")
+        segments.sort(key=lambda segment: (segment.start, segment.end))
+        return TranscriptResult(
+            segments=segments,
+            full_text=" ".join(segment.text for segment in segments).strip(),
+            language=language,
+            audio_path=str(wav_path),
+            provider="local",
+            model=selected_model,
+            separate_mic_track=True,
+        )
+
+    async def _transcribe_wav(
+        self,
+        wav_path: Path,
+        *,
+        selected_provider: str,
+        selected_model: str,
+        checkpoint_path: Path | None = None,
+        expected_identity: AudioFileIdentity | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        prepared_track: PreparedRecordingTrack | None = None,
+    ) -> Any:
+        """WAV 하나를 전사하고 일반 작업에만 기존 체크포인트를 작성한다."""
+        from steps.transcriber import Transcriber
+
         # VAD 전처리: 음성 구간 감지 (enabled=false이면 None 반환)
         vad_clip_timestamps: list[float] | None = None
         vad_config = getattr(self._config, "vad", None)
@@ -1726,7 +1854,10 @@ class PipelineManager:
             vad_enabled = bool(vad_enabled_flag) or (
                 isinstance(vad_mode, str) and vad_mode.lower() != "off"
             )
-        if vad_enabled and selected_provider == "local":
+        if prepared_track is not None:
+            assert prepared_track.path == wav_path and selected_provider == "local"
+            vad_clip_timestamps = list(prepared_track.clip_timestamps)
+        elif vad_enabled and selected_provider == "local":
             try:
                 from steps.vad_detector import VoiceActivityDetector
 
@@ -1756,6 +1887,15 @@ class PipelineManager:
                 update={"provider": "local", "model_name": selected_model}
             )
             execution_config = self._config.model_copy(update={"stt": stt_config})
+            if prepared_track is not None:
+                # 원본과 파생 WAV의 길이·디코딩 게이트는 그대로 둔다. 이 사본의
+                # 활성 구간·발화를 이미 검사했으므로 전체 평균 음량으로 다시 거절하지 않는다.
+                quality = execution_config.audio_quality
+                execution_config = execution_config.model_copy(
+                    update={
+                        "audio_quality": quality.model_copy(update={"min_mean_volume_db": -96.0})
+                    }
+                )
             transcriber = Transcriber(execution_config, self._model_manager)
 
         # 로컬 STT의 전체 단계 타임아웃만 오디오 길이에 비례해 계산한다.
@@ -1780,21 +1920,24 @@ class PipelineManager:
                 # duration 측정 실패 시 config 기본값으로 폴백 (전사는 계속 진행)
                 logger.warning(f"duration 측정 실패, 기본 타임아웃 사용: {e}")
 
-        openai_resume_dir = checkpoint_path.parent / ".openai-transcribe-parts"
+        openai_resume_dir = None
         if selected_provider == "openai":
+            assert checkpoint_path is not None and expected_identity is not None
+            openai_resume_dir = checkpoint_path.parent / ".openai-transcribe-parts"
             result = await transcriber.transcribe(
                 wav_path,
                 vad_clip_timestamps=vad_clip_timestamps,
                 timeout_override=None,
                 resume_dir=openai_resume_dir,
                 should_cancel=should_cancel,
-                expected_audio_identity=wav_identity,
+                expected_audio_identity=expected_identity,
             )
         else:
             result = await transcriber.transcribe(
                 wav_path,
                 vad_clip_timestamps=vad_clip_timestamps,
                 timeout_override=timeout_override,
+                **({"prepared_recording_track": True} if prepared_track is not None else {}),
             )
 
         # 환각 필터링 (hallucination_filter 설정에 따라)
@@ -1822,10 +1965,10 @@ class PipelineManager:
             logger.warning(f"텍스트 후처리 중 오류, 원본 유지: {e}")
 
         # 체크포인트 저장
-        if self._checkpoint_enabled:
+        if self._checkpoint_enabled and checkpoint_path is not None:
             self._save_result_checkpoint(result, checkpoint_path)
 
-        if selected_provider == "openai":
+        if openai_resume_dir is not None:
             try:
                 transcriber.cleanup_resume_cache(openai_resume_dir)
             except Exception as exc:  # noqa: BLE001 - 최종 체크포인트는 이미 안전하다.
@@ -1851,7 +1994,6 @@ class PipelineManager:
         from steps.diarizer import (
             DiarizationResult,
             DiarizationSegment,
-            Diarizer,
         )
 
         # 체크포인트 복원 시도
@@ -1887,9 +2029,62 @@ class PipelineManager:
             logger.info("OpenAI provider 화자 구간 사용: speakers=%d", len(speakers))
             return result
 
-        # 재개 경로에서도 pyannote 모델을 열기 전에 변환 WAV 전체를 검증한다.
+        # 재개 경로에서도 화자분리 모델을 열기 전에 변환 WAV 전체를 검증한다.
         wav_identity = self._validate_input(wav_path)
         await self._validate_audio_duration(wav_path, wav_identity)
+
+        if getattr(transcript_result, "separate_mic_track", False) is True:
+            mic_segments = [
+                DiarizationSegment(speaker=SELF_SPEAKER, start=segment.start, end=segment.end)
+                for segment in transcript_segments
+                if segment.speaker == SELF_SPEAKER
+            ]
+            if any(segment.speaker != SELF_SPEAKER for segment in transcript_segments):
+                with TemporaryDirectory(prefix=".recap-tracks-", dir=wav_path.parent) as directory:
+                    temp_dir = Path(directory)
+                    tracks = await asyncio.to_thread(
+                        extract_recording_tracks,
+                        wav_path,
+                        temp_dir,
+                        (SYSTEM_CHANNEL,),
+                        wav_identity,
+                    )
+                    if SYSTEM_CHANNEL not in tracks:
+                        raise PipelineError("전사 결과와 시스템 오디오 채널이 일치하지 않습니다.")
+                    result = await self._diarize_wav(
+                        tracks[SYSTEM_CHANNEL],
+                        temp_dir / "diarization_input.compressed.wav",
+                        system_track=True,
+                    )
+                all_segments = sorted(
+                    [*mic_segments, *result.segments], key=lambda segment: segment.start
+                )
+                result = replace(
+                    result,
+                    segments=all_segments,
+                    num_speakers=len({segment.speaker for segment in all_segments}),
+                    audio_path=str(wav_path),
+                )
+            else:
+                result = DiarizationResult(
+                    segments=mic_segments,
+                    num_speakers=int(bool(mic_segments)),
+                    audio_path=str(wav_path),
+                )
+        else:
+            result = await self._diarize_wav(
+                wav_path, checkpoint_path.with_name("diarization_input.compressed.wav")
+            )
+
+        if self._checkpoint_enabled:
+            self._save_result_checkpoint(result, checkpoint_path)
+        return result
+
+    async def _diarize_wav(
+        self, wav_path: Path, compressed_path: Path, *, system_track: bool = False
+    ) -> Any:
+        """WAV 하나에 화자분리를 실행하고 원래 시간축으로 결과를 돌려놓는다."""
+        from steps.diarizer import Diarizer
 
         diarization_audio_path = wav_path
         silence_plan: Any | None = None
@@ -1899,7 +2094,7 @@ class PipelineManager:
 
                 silence_plan = prepare_diarization_audio(
                     audio_path=wav_path,
-                    output_path=checkpoint_path.with_name("diarization_input.compressed.wav"),
+                    output_path=compressed_path,
                     diarization_config=self._config.diarization,
                 )
                 diarization_audio_path = silence_plan.audio_path
@@ -1909,7 +2104,19 @@ class PipelineManager:
         timeout_duration_seconds = (
             float(silence_plan.original_duration) if silence_plan is not None else None
         )
-        diarizer = Diarizer(self._config, self._model_manager)
+        execution_config = self._config
+        diarization = self._config.diarization
+        if (
+            system_track
+            and diarization.engine == "community-1"
+            and diarization.min_speakers is not None
+            and diarization.min_speakers > 1
+        ):
+            # 전체 회의의 화자 하한을 적용하면 상대방이 한 명일 때 둘로 쪼갤 수 있다.
+            execution_config = self._config.model_copy(
+                update={"diarization": diarization.model_copy(update={"min_speakers": 1})}
+            )
+        diarizer = Diarizer(execution_config, self._model_manager)
         if timeout_duration_seconds is None:
             result = await diarizer.diarize(diarization_audio_path)
         else:
@@ -1926,10 +2133,6 @@ class PipelineManager:
                 silence_plan,
                 original_audio_path=wav_path,
             )
-
-        # 체크포인트 저장
-        if self._checkpoint_enabled:
-            self._save_result_checkpoint(result, checkpoint_path)
 
         return result
 
@@ -3009,6 +3212,7 @@ class PipelineManager:
                         wav_path = await self._run_step_convert(
                             audio_path,
                             output_dir,
+                            stt_provider=state.stt_provider,
                         )
                         state.wav_path = str(wav_path)
 

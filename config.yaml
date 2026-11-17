@@ -228,6 +228,16 @@ recording:
   min_duration_seconds: 30                     # 최소 녹음 시간 (미달 시 파기)
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
   multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음
+  separate_mic_track: true                      # 확인된 Aggregate는 마이크/시스템을 한 WAV에 분리 저장
+  split_track_processing:
+    native_capture: true                       # 확인된 Aggregate에는 macOS CoreAudio 입력 큐 사용
+    echo_suppression: true                     # 검증된 스피커 누설만 마이크 전사용 사본에서 줄임
+    echo_max_delay_ms: 280
+    speech_floor_dbfs: -67.0                    # 짧은 유효 구간을 찾는 최소 음량
+    max_gain_db: 32.0
+    silence_gap_seconds: 5.0
+    speech_verification: true                  # 로컬 CPU 모델로 말소리 없는 잡음 제외
+    speech_threshold: 0.20                     # 작은 발화 보존을 위한 보수적인 문턱
   silence_threshold_rms: 0.001                   # 무음 판정 RMS 임계값 (0.0~1.0)
   # Aggregate Device(3ch) 다운믹스 시 마이크 채널(c0) 가중치를 0.5로 올려 본인 목소리 저하 방지.
   # 비정형 채널 수(2/4ch) Aggregate 에서 ffmpeg 에러가 나면 false 로 비활성화.

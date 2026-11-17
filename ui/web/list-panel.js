@@ -303,8 +303,23 @@
                     }
                 }
 
-                // 48-bar waveform 마운트 — 레퍼런스 RecordingOverlay.jsx 기준.
-                // 백엔드 실시간 audio-level 스트림이 없어 CSS keyframe 기반 시각 신호.
+                function _renderRecLevels(levels) {
+                    var panel = document.getElementById("recordingChannelLevels");
+                    if (!panel) return;
+                    var wave = document.querySelector("#recordingOverlay .recording-wave");
+                    var caption = document.getElementById("recordingOverlayMetaLevel");
+                    var valid = levels && Number.isFinite(levels.mic_dbfs)
+                        && Number.isFinite(levels.system_dbfs);
+                    panel.hidden = !valid;
+                    if (wave) wave.hidden = Boolean(valid);
+                    if (caption) App.safeText(caption, valid ? "채널별 입력 음량" : "녹음 진행 중");
+                    if (valid) {
+                        document.getElementById("recordingMicLevel").value = Math.max(-72, levels.mic_dbfs);
+                        document.getElementById("recordingSystemLevel").value = Math.max(-72, levels.system_dbfs);
+                    }
+                }
+
+                // 채널별 음량이 없는 녹음에서는 진행 표시를 사용한다.
                 (function mountRecordingWaveBars() {
                     var wave = document.querySelector("#recordingOverlay .recording-wave");
                     if (!wave || wave.childElementCount > 0) return;
@@ -320,6 +335,7 @@
                     // 새 녹음 → overlay 기본 표시
                     _showRecHUD("overlay");
                     _startRecTicker(0);
+                    _renderRecLevels(null);
                     // 버튼 disabled 초기화
                     var recStopBtn = document.getElementById("recordingStopBtn");
                     if (recStopBtn) recStopBtn.disabled = false;
@@ -332,11 +348,13 @@
                 document.addEventListener("ws:recording_stopped", function () {
                     _showRecHUD("none");
                     _stopRecTicker();
+                    _renderRecLevels(null);
                     loadMeetings();
                 });
                 document.addEventListener("ws:recording_duration", function (e) {
                     // 백엔드 싱크 포인트: 기준선을 갱신하고 즉시 렌더
                     var detail = e.detail || {};
+                    _renderRecLevels(detail.audio_levels);
                     var seconds = detail.duration_seconds || 0;
                     _recBaseSeconds = seconds;
                     _recBaseWallClock = Date.now();
@@ -722,6 +740,7 @@
                             // 사용자가 pill 의 확장 버튼을 눌러 overlay 로 볼 수 있음.
                             _showRecHUD("pill");
                             _startRecTicker(rec.duration_seconds || 0);
+                            _renderRecLevels(rec.audio_levels);
                             // 새로고침으로 새 DOM 이 로드된 상태라 버튼은 기본 활성이지만,
                             // 브라우저 form state 자동 복원에 대비해 명시적으로 리셋.
                             var recStopBtn = document.getElementById("recordingStopBtn");
