@@ -637,6 +637,10 @@ bash scripts/setup_audio.sh
 - ⚠️ Zoom 마이크를 `Meeting Transcriber Aggregate` 로 잡으면 **하울링** 발생합니다
 - 본인이 상대방 목소리를 듣지 못하는 문제가 있다면 Multi-Output Device 로 BlackHole + 이어폰 동시 출력 구성 권장
 
+물리 마이크 1채널과 BlackHole 2ch로 구성된 Aggregate를 확인하면 앱은 새 녹음 한 파일에
+마이크(L)와 시스템 출력(R)을 따로 저장합니다. 로컬 전사에서 두 채널을 같은 시간 기준으로
+처리하며, 마이크 발화에는 `나`를 붙이고 시스템 출력에서만 상대방 화자를 나눕니다.
+
 #### BlackHole 만 수동 설치 (단순 시스템 오디오 캡처)
 
 본인 목소리 없이 시스템 오디오만 녹음하면 충분한 경우:
@@ -758,6 +762,7 @@ bash scripts/setup_launchagent.sh
 | `recording.enabled` | 녹음 기능 활성화 | `true` |
 | `recording.auto_record_on_zoom` | Zoom 자동 녹음 | `true` |
 | `recording.prefer_system_audio` | BlackHole 우선 사용 | `true` |
+| `recording.separate_mic_track` | 확인된 Aggregate의 마이크와 시스템 출력을 한 WAV의 별도 채널로 저장 | `true` |
 | `recording.sample_rate` | 샘플레이트 | `16000` |
 | `recording.max_duration_seconds` | 최대 녹음 시간 | `14400` (4시간) |
 | `recording.min_duration_seconds` | 앱 녹음 파일 조기 파기 기준 | `30`초 |

@@ -46,6 +46,7 @@
 
             // 상태 변수
             self._speakerColorMap = {};
+            self._speakerLabels = {};
             self._allUtterances = [];
             self._currentQuery = "";
             self._currentMatchIndex = -1;
@@ -571,14 +572,6 @@
             legendEl.innerHTML = "";
             if (!speakers || speakers.length === 0) return;
 
-            // 화자별 번호 매핑
-            var speakerNumbers = {};
-            var count = 0;
-            speakers.forEach(function (s) {
-                count++;
-                speakerNumbers[s] = count;
-            });
-
             speakers.forEach(function (speaker) {
                 var chip = document.createElement("span");
                 chip.className = "speaker-chip";
@@ -586,10 +579,11 @@
                 var badge = document.createElement("span");
                 badge.className = "speaker-badge";
                 badge.style.backgroundColor = self._getSpeakerColor(speaker);
-                badge.textContent = speakerNumbers[speaker] || "?";
+                var displayLabel = App.speakerLabel(speaker, self._speakerLabels);
+                badge.textContent = /^참석자 [\d?]+$/.test(displayLabel) ? displayLabel.slice(4) : displayLabel.slice(0, 1);
 
                 var label = document.createElement("span");
-                label.textContent = speaker === "UNKNOWN" ? "참석자 ?" : "참석자 " + (speakerNumbers[speaker] || "?");
+                label.textContent = displayLabel;
 
                 chip.appendChild(badge);
                 chip.appendChild(label);
@@ -610,35 +604,17 @@
             els.timeline.innerHTML = "";
             var matchCount = 0;
 
-            // 화자별 번호 매핑 (SPEAKER_00 → 1, SPEAKER_01 → 2, ...)
-            var speakerNumbers = {};
-            var speakerCount = 0;
-
-            utterances.forEach(function (u) {
-                if (!(u.speaker in speakerNumbers)) {
-                    speakerCount++;
-                    speakerNumbers[u.speaker] = speakerCount;
-                }
-            });
-
-            // 화자 표시명 변환 (SPEAKER_00 → 참석자 1)
-            function getSpeakerLabel(speaker) {
-                var num = speakerNumbers[speaker];
-                if (speaker === "UNKNOWN") return "참석자 ?";
-                return "참석자 " + (num || "?");
-            }
-
             utterances.forEach(function (u) {
                 var el = document.createElement("div");
                 el.className = "utterance";
                 var color = self._getSpeakerColor(u.speaker);
-                var num = speakerNumbers[u.speaker] || "?";
+                var displayLabel = App.speakerLabel(u.speaker, self._speakerLabels);
 
                 // 좌측 번호 배지 (원형)
                 var badge = document.createElement("div");
                 badge.className = "utterance-badge";
                 badge.style.backgroundColor = color;
-                badge.textContent = num;
+                badge.textContent = /^참석자 [\d?]+$/.test(displayLabel) ? displayLabel.slice(4) : displayLabel.slice(0, 1);
 
                 // 우측 콘텐츠 영역
                 var content = document.createElement("div");
@@ -650,7 +626,7 @@
 
                 var speakerEl = document.createElement("span");
                 speakerEl.className = "utterance-speaker";
-                speakerEl.textContent = getSpeakerLabel(u.speaker);
+                speakerEl.textContent = displayLabel;
                 speakerEl.style.color = color;
 
                 var timeEl = document.createElement("span");
@@ -1748,21 +1724,6 @@
                 return "";
             }
 
-            // 화자 → 참석자 N 매핑 (전사 뷰와 동일한 번호 부여)
-            var speakerNumbers = {};
-            var count = 0;
-            self._allUtterances.forEach(function (u) {
-                if (!(u.speaker in speakerNumbers)) {
-                    count++;
-                    speakerNumbers[u.speaker] = count;
-                }
-            });
-
-            function getLabel(speaker) {
-                if (speaker === "UNKNOWN") return "참석자 ?";
-                return "참석자 " + (speakerNumbers[speaker] || "?");
-            }
-
             var sourceLabels = {
                 transcribe: "전사 초안",
                 merge: "화자 병합본",
@@ -1771,7 +1732,7 @@
             };
             var speakerCountText = self._transcriptSourceStage === "transcribe"
                 ? "화자 구분 전"
-                : count + "명";
+                : Object.keys(self._speakerLabels).filter(function (s) { return s !== "UNKNOWN"; }).length + "명";
 
             // 헤더 + 본문
             var header = [
@@ -1785,7 +1746,7 @@
             ].join("\n");
 
             var lines = self._allUtterances.map(function (u) {
-                var label = getLabel(u.speaker);
+                var label = App.speakerLabel(u.speaker, self._speakerLabels);
                 var time = App.formatTime(u.start);
                 return "[" + label + "] " + time + "  " + (u.text || "");
             });
@@ -3039,6 +3000,10 @@
             self._transcriptReadonly = readonly;
             self._transcriptSignature = signature;
             self._allUtterances = utterances;
+            self._speakerLabels = Object.assign(
+                App.buildSpeakerLabels(self._allUtterances),
+                data.speaker_labels && typeof data.speaker_labels === "object" ? data.speaker_labels : {}
+            );
 
             if (self._allUtterances.length === 0) {
                 return false;

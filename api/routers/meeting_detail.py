@@ -58,6 +58,7 @@ from core.job_queue import (
     retranscribe_staging_paths,
     rollback_retranscribe_staging,
 )
+from core.recording_channels import SELF_SPEAKER
 from steps.embedder import IndexPurgeError, IndexPurgeResult, purge_meeting_index
 from steps.transcriber import (
     AudioAdmissionError,
@@ -1365,6 +1366,7 @@ class TranscriptResponse(BaseModel):
     meeting_id: str
     num_speakers: int = 0
     speakers: list[str] = Field(default_factory=list)
+    speaker_labels: dict[str, str] = Field(default_factory=dict)
     total_utterances: int = 0
     source_stage: str = "corrected"
     readonly: bool = False
@@ -2932,11 +2934,16 @@ async def get_transcript(
         assert data is not None
 
         if source_stage == "transcribe":
+            separate_mic_track = data.get("separate_mic_track") is True
             utterances = [
                 TranscriptUtteranceItem(
                     text=segment.get("text", ""),
                     original_text=segment.get("text", ""),
-                    speaker="UNKNOWN",
+                    speaker=(
+                        SELF_SPEAKER
+                        if separate_mic_track and segment.get("speaker") == SELF_SPEAKER
+                        else "UNKNOWN"
+                    ),
                     start=segment.get("start", 0.0),
                     end=segment.get("end", 0.0),
                     was_corrected=False,
@@ -2969,14 +2976,18 @@ async def get_transcript(
                 speakers.append(u.speaker)
 
         from core.search_revision import revision_status
+        from core.speaker_labels import build_speaker_labels
 
         return TranscriptResponse(
             utterances=utterances,
             meeting_id=meeting_id,
             num_speakers=(
-                0 if source_stage == "transcribe" else data.get("num_speakers", len(speakers))
+                len(speakers)
+                if source_stage == "transcribe"
+                else data.get("num_speakers", len(speakers))
             ),
             speakers=speakers,
+            speaker_labels=build_speaker_labels(utterances),
             total_utterances=len(utterances),
             source_stage=source_stage,
             readonly=readonly,

@@ -14,6 +14,49 @@ from typing import Any, cast
 logger = logging.getLogger(__name__)
 
 
+def _transcribe_recording_clips(
+    transcribe: Callable[..., dict[str, Any]],
+    audio: str,
+    clip_timestamps: list[float],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """지정한 WAV 구간만 추론하고 결과 시각을 원래 녹음으로 옮긴다."""
+    import soundfile as sf
+
+    texts: list[str] = []
+    segments: list[dict[str, Any]] = []
+    language = kwargs.get("language", "ko")
+    with sf.SoundFile(audio) as source:
+        if source.samplerate != 16000 or source.channels != 1:
+            return transcribe(
+                audio, clip_timestamps=[clip_timestamps[0], clip_timestamps[-1]], **kwargs
+            )
+        # mlx-whisper 0.4.x는 두 번째 clip부터 시작 시각까지의 무음을 읽을 수
+        # 있다. 필요한 PCM만 읽어 동일한 모델에서 독립적으로 추론한다.
+        for left, right in zip(clip_timestamps[::2], clip_timestamps[1::2], strict=True):
+            start = round(left * source.samplerate)
+            stop = min(source.frames, round(right * source.samplerate))
+            if stop <= start:
+                continue
+            source.seek(start)
+            data = source.read(stop - start, dtype="float32")
+            result = transcribe(data, **kwargs)
+            offset = start / source.samplerate
+            for segment in result.get("segments", []):
+                for timed in (segment, *(segment.get("words") or ())):
+                    for key in ("start", "end"):
+                        if key in timed:
+                            timed[key] = round(float(timed[key]) + offset, 4)
+                segments.append(segment)
+            texts.append(result.get("text", ""))
+            language = result.get("language", language)
+    return {
+        "text": " ".join(text.strip() for text in texts if text.strip()),
+        "segments": segments,
+        "language": language,
+    }
+
+
 class ThreadBoundWhisperBackend:
     """모듈 로딩부터 캐시 해제까지 같은 스레드에서 실행한다."""
 
@@ -35,7 +78,9 @@ class ThreadBoundWhisperBackend:
         except (AttributeError, TypeError, ValueError):
             return False
 
-    def transcribe(self, audio: str, **kwargs: Any) -> dict[str, Any]:
+    def transcribe(
+        self, audio: str, *, disjoint_recording_clips: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         """호출자 스레드와 무관하게 동일 worker에서 추론한다."""
         if self._closed:
             raise RuntimeError("Whisper backend가 이미 정리되었습니다")
@@ -43,6 +88,10 @@ class ThreadBoundWhisperBackend:
         def run() -> dict[str, Any]:
             logger.debug(f"Whisper 추론 thread={threading.get_ident()}")
             try:
+                if disjoint_recording_clips:
+                    return _transcribe_recording_clips(
+                        self._module.transcribe, audio, kwargs.pop("clip_timestamps"), **kwargs
+                    )
                 return cast(dict[str, Any], self._module.transcribe(audio, **kwargs))
             except NotImplementedError:
                 raise

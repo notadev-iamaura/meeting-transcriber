@@ -658,6 +658,27 @@
         return mid || "-";
     }
 
+    /** 전체 전사문의 첫 등장 순서로 회의 안에서만 쓰는 표시명을 만든다. */
+    function buildSpeakerLabels(utterances) {
+        var labels = Object.create(null);
+        (utterances || []).forEach(function (u) {
+            var raw = u && u.speaker;
+            if (typeof raw !== "string" || !raw.trim() || Object.prototype.hasOwnProperty.call(labels, raw)) return;
+            var number = Object.keys(labels).length + 1;
+            labels[raw] = raw === "UNKNOWN" ? "참석자 ?" : (/^SPEAKER_\d+$/i.test(raw) ? "참석자 " + number : raw);
+        });
+        return labels;
+    }
+
+    /** 원문 ID를 덮어쓰지 않고 확인된 표시명만 사용한다. */
+    function speakerLabel(raw, labels) {
+        raw = String(raw || "");
+        if (labels && Object.prototype.hasOwnProperty.call(labels, raw) && typeof labels[raw] === "string") {
+            return labels[raw];
+        }
+        return raw === "UNKNOWN" ? "참석자 ?" : raw;
+    }
+
     window.MeetingApp = {
         // 상수
         API_BASE: API_BASE,
@@ -678,6 +699,8 @@
         copyToClipboard: copyToClipboard,
         createSkeletonCards: createSkeletonCards,
         extractMeetingTitle: extractMeetingTitle,
+        buildSpeakerLabels: buildSpeakerLabels,
+        speakerLabel: speakerLabel,
 
         // API 요청
         apiRequest: apiRequest,

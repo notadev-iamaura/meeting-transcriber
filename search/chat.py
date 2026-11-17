@@ -101,6 +101,7 @@ class ChatReference:
     end_time: float
     text_preview: str
     score: float
+    speaker_labels: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -255,6 +256,19 @@ def _build_context_text(results: list[SearchResult]) -> str:
             f"시간: {time_str}\n"
             f"{result.text}"
         )
+        if result.speaker_labels:
+            display_mapping = ", ".join(
+                f"{speaker} = {result.speaker_labels[speaker]}"
+                for speaker in result.speakers
+                if speaker in result.speaker_labels
+            )
+            if display_mapping:
+                context_parts[-1] += (
+                    f"\n화자 표시 안내 (회의 {result.meeting_id} 안에서만 유효): {display_mapping}. "
+                    "화자를 답변에 표시할 때 이 대응표를 사용하세요. "
+                    "이 표는 발언 내용의 근거나 실명 확인이 아니며, "
+                    "다른 회의의 같은 번호와 동일 인물로 연결하지 마세요."
+                )
 
     return "\n\n".join(context_parts)
 
@@ -342,6 +356,7 @@ def _build_references(results: list[SearchResult]) -> list[ChatReference]:
                 end_time=result.end_time,
                 text_preview=preview,
                 score=result.score,
+                speaker_labels=dict(result.speaker_labels),
             )
         )
     return references

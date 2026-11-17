@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from core.io_utils import read_text_no_follow
+from core.recording_channels import SELF_SPEAKER
 from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
@@ -246,7 +247,7 @@ class Merger:
 
         if not diarization.segments:
             logger.warning(
-                "화자분리 세그먼트가 비어있습니다. 모든 발화에 UNKNOWN 화자가 할당됩니다."
+                "화자분리 세그먼트가 비어있습니다. 입력 출처가 없는 발화는 UNKNOWN으로 표시됩니다."
             )
 
     def _check_time_alignment(
@@ -294,7 +295,15 @@ class Merger:
             병합된 발화 목록 (시간순 정렬)
         """
         # 화자 세그먼트를 시간순으로 정렬 (이미 정렬되어 있어야 하지만 안전 장치)
-        sorted_dia_segments = sorted(diarization.segments, key=lambda s: s.start)
+        separate_mic_track = getattr(transcript, "separate_mic_track", False) is True
+        sorted_dia_segments = sorted(
+            (
+                segment
+                for segment in diarization.segments
+                if not separate_mic_track or segment.speaker != SELF_SPEAKER
+            ),
+            key=lambda segment: segment.start,
+        )
 
         # STT 세그먼트를 시간순으로 정렬
         sorted_stt_segments = sorted(transcript.segments, key=lambda s: s.start)
@@ -318,7 +327,10 @@ class Merger:
                 )
                 continue
 
-            speaker = _find_best_speaker(stt_seg, sorted_dia_segments)
+            if separate_mic_track and stt_seg.speaker == SELF_SPEAKER:
+                speaker = SELF_SPEAKER
+            else:
+                speaker = _find_best_speaker(stt_seg, sorted_dia_segments)
 
             utterances.append(
                 MergedUtterance(

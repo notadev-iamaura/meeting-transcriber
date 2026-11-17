@@ -320,6 +320,21 @@ async def test_same_name_different_reuse_key_loads_new_instance(manager: ModelLo
     await manager.unload_model()
 
 
+async def test_recording_scope_reuses_outer_bulk_model_until_outer_exit(
+    manager: ModelLoadManager,
+) -> None:
+    """분리 녹음이 바깥 일괄 처리의 모델을 조기에 해제하거나 다시 적재하지 않는다."""
+    async with manager.residency_scope("whisper", reuse_key="bulk-selection"):
+        async with manager.residency_scope("whisper", reuse_key="same-model", inherit_active=True):
+            async with manager.acquire("whisper", object) as first:
+                pass
+        assert manager.current_model is first
+        async with manager.acquire("whisper", object) as second:
+            assert second is first
+        assert manager.get_status()["model_load_count"] == 1
+    assert not manager.is_model_loaded
+
+
 async def test_residency_exit_keeps_other_tasks_replacement_instance(
     manager: ModelLoadManager,
 ) -> None:

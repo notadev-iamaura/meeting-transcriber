@@ -1073,6 +1073,7 @@ class TestLoadPipeline:
         mock_config,
         mock_manager,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ):
         """HF offline + pyannote 캐시 누락이면 모델 로드 전 명확히 실패한다."""
         mock_config.diarization.model_name = "pyannote/speaker-diarization-community-1"
@@ -1080,10 +1081,8 @@ class TestLoadPipeline:
         diarizer = Diarizer(config=mock_config, model_manager=manager)
 
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        monkeypatch.setattr(
-            "core.runtime_safety.missing_pyannote_offline_cache_files",
-            lambda _model_name: ["pyannote/speaker-diarization-community-1:config.yaml"],
-        )
+        # 로컬 캐시 유무와 무관하게 import 전 차단을 검증한다.
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hf-cache"))
 
         with pytest.raises(ModelNotAvailableError, match="오프라인 캐시가 불완전"):
             diarizer._load_pipeline()

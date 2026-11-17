@@ -686,7 +686,9 @@
                     dateSpan.textContent = ref.date || "";
 
                     var speakersSpan = document.createElement("span");
-                    speakersSpan.textContent = (ref.speakers || []).join(", ");
+                    speakersSpan.textContent = (ref.speakers || []).map(function (speaker) {
+                        return App.speakerLabel(speaker, ref.speaker_labels);
+                    }).join(", ");
 
                     var timeSpan = document.createElement("span");
                     timeSpan.textContent = App.formatTime(ref.start_time) + "~" + App.formatTime(ref.end_time);

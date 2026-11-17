@@ -41,12 +41,13 @@ def is_server_healthy(spec: LauncherSpec) -> bool:
             return None
 
     opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), LocalHealthHandler(),
+        urllib.request.ProxyHandler({}),
+        LocalHealthHandler(),
     )
     try:
         with opener.open(health_url, timeout=1) as response:
             payload = json.loads(response.read(4096))
-            return response.status == 200 and payload.get("status") == "ok"
+            return bool(response.status == 200 and payload.get("status") == "ok")
     except (urllib.error.URLError, OSError, ValueError, AttributeError):
         return False
 
@@ -119,8 +120,9 @@ def run_desktop_app(
 
 def launch_desktop_app(spec: LauncherSpec, *, app_name: str) -> int:
     """설정을 읽어 전용 앱을 시작하고 실패하면 macOS 알림으로 안내한다."""
-    from config import load_config
     from yaml import YAMLError
+
+    from config import load_config
 
     spec.log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=str(spec.log_file), level=logging.INFO)

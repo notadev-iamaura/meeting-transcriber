@@ -56,6 +56,20 @@ check_macos() {
     fi
 }
 
+# 입력을 열지 않는 FFmpeg 목록 조회는 장치가 표시돼도 비정상 종료한다.
+# 오디오 목록에 실제로 출력된 장치 이름을 기준으로 확인한다.
+has_audio_device() {
+    local listing
+    listing="$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 || true)"
+    awk '
+        /AVFoundation audio devices:/ { audio = 1; next }
+        audio && /^\[AVFoundation.*\] \[[0-9]+\] / {
+            sub(/^.*\] \[[0-9]+\] /, "")
+            print
+        }
+    ' <<< "${listing}" | grep -Fxi -- "$1" >/dev/null
+}
+
 # === BlackHole 설치 확인 ===
 check_blackhole() {
     if ! command -v ffmpeg >/dev/null 2>&1; then
@@ -63,7 +77,7 @@ check_blackhole() {
         exit 1
     fi
 
-    if ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -qi "blackhole"; then
+    if has_audio_device "BlackHole 2ch"; then
         log_ok "BlackHole 2ch 감지됨"
         return 0
     fi
@@ -84,8 +98,7 @@ check_blackhole() {
 
 # === Aggregate Device 존재 확인 ===
 aggregate_exists() {
-    ffmpeg -f avfoundation -list_devices true -i "" 2>&1 \
-        | grep -qi "${AGGREGATE_NAME}"
+    has_audio_device "${AGGREGATE_NAME}"
 }
 
 # === Swift 컴파일러 확인 ===
@@ -141,10 +154,7 @@ create_aggregate() {
 verify() {
     log_info "최종 검증: ffmpeg 장치 목록에 Aggregate 존재 여부 확인"
     if aggregate_exists; then
-        local line
-        line="$(ffmpeg -f avfoundation -list_devices true -i "" 2>&1 \
-            | grep -i "${AGGREGATE_NAME}" | head -1)"
-        log_ok "등록 확인: ${line// /}"
+        log_ok "등록 확인: ${AGGREGATE_NAME}"
         return 0
     fi
     log_err "생성 직후 ffmpeg 목록에서 Aggregate 를 찾을 수 없습니다."
@@ -176,8 +186,7 @@ case "${MODE}" in
     check)
         log_info "상태 점검 모드"
         rc=0
-        ffmpeg -f avfoundation -list_devices true -i "" 2>&1 \
-            | grep -qi "blackhole" \
+        has_audio_device "BlackHole 2ch" \
             && log_ok "BlackHole 2ch 감지됨" \
             || { log_warn "BlackHole 2ch 미감지"; rc=2; }
         aggregate_exists \

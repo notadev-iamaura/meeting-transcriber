@@ -1406,6 +1406,25 @@ class TestTranscriptEndpoint:
         assert first["end"] == 3.0
         assert first["was_corrected"] is False
 
+    def test_분리_녹음_초안에서_이미_확정된_마이크_화자만_보인다(self, tmp_path: Path) -> None:
+        """상대방 화자분리가 끝나기 전에도 마이크 발화는 출처를 표시한다."""
+        app = _make_test_app(tmp_path)
+        checkpoint = _create_transcribe_checkpoint(tmp_path / "checkpoints", "meeting_split")
+        draft = json.loads(checkpoint.read_text(encoding="utf-8"))
+        draft["separate_mic_track"] = True
+        draft["segments"][0]["speaker"] = "나"
+        draft["segments"].append({**draft["segments"][0], "speaker": None})
+        checkpoint.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+
+        with TestClient(app) as client:
+            response = client.get("/api/meetings/meeting_split/transcript")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [row["speaker"] for row in data["utterances"]] == ["나", "UNKNOWN"]
+        assert data["num_speakers"] == 1
+        assert data["speaker_labels"]["나"] == "나"
+
     def test_전사문_source_우선순위와_readonly(self, tmp_path: Path) -> None:
         """corrected > correct > merge > transcribe 우선순위와 readonly 계약을 검증한다."""
         app = _make_test_app(tmp_path)

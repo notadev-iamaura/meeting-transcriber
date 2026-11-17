@@ -95,6 +95,7 @@ class TranscriptResult:
     audio_path: str
     provider: str = "local"
     model: str = ""
+    separate_mic_track: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화/체크포인트 저장용).
@@ -109,6 +110,7 @@ class TranscriptResult:
             "audio_path": self.audio_path,
             "provider": self.provider,
             "model": self.model,
+            **({"separate_mic_track": True} if self.separate_mic_track else {}),
         }
 
     def save_checkpoint(self, output_path: Path) -> None:
@@ -149,6 +151,7 @@ class TranscriptResult:
             audio_path=data.get("audio_path", ""),
             provider=data.get("provider", "local"),
             model=data.get("model", ""),
+            separate_mic_track=data.get("separate_mic_track") is True,
         )
 
 
@@ -175,6 +178,14 @@ class ModelNotAvailableError(TranscriptionError):
 
 class EmptyAudioError(TranscriptionError):
     """오디오 파일이 비어있거나 전사 결과가 없을 때 발생한다."""
+
+
+class LowVolumeAudioError(AudioAdmissionError):
+    """디코딩과 길이 검사에 성공했지만 음량이 너무 낮은 경우의 입력 오류."""
+
+
+class EmptyTranscriptError(EmptyAudioError):
+    """유효한 오디오를 전사했지만 발화가 검출되지 않은 경우의 결과 오류."""
 
 
 AudioFileIdentity = tuple[int, int, int, int, int]
@@ -490,7 +501,12 @@ class Transcriber:
 
         failure_kind = result.failure_kind or AudioFailureKind.INFRA_UNAVAILABLE
         reason = result.reason or "오디오 품질 검증 비수락"
-        raise AudioAdmissionError(
+        error_type = (
+            LowVolumeAudioError
+            if result.status is AudioQualityStatus.REJECT and result.mean_volume_db is not None
+            else AudioAdmissionError
+        )
+        raise error_type(
             f"오디오 품질 검증 거부 ({failure_kind.name}): {reason}",
             failure_kind=failure_kind,
         )
@@ -674,6 +690,7 @@ class Transcriber:
         vad_clip_timestamps: list[float] | None = None,
         *,
         timeout_override: int | None = None,
+        prepared_recording_track: bool = False,
     ) -> TranscriptResult:
         """오디오 파일을 한국어로 전사한다.
 
@@ -686,6 +703,7 @@ class Transcriber:
             vad_clip_timestamps: VAD가 감지한 음성 구간 경계 타임스탬프 리스트.
                 [start1, end1, start2, end2, ...] 형식. None이면 전체 오디오 처리.
             timeout_override: 타임아웃 오버라이드 (초). None이면 config에서 읽는다.
+            prepared_recording_track: 앱이 만든 분리 녹음 전사용 사본인지 여부.
                 파이프라인에서 동적 타임아웃(오디오 길이 기반)을 주입할 때 사용.
 
         Returns:
@@ -722,12 +740,25 @@ class Transcriber:
                 # mlx-whisper가 경로를 열기 직전에 다시 확인한다.
                 self._assert_audio_identity(audio_path, audio_identity)
                 # 전사를 별도 스레드에서 실행 (CPU/GPU 집약 작업)
-                raw_result = await self._transcribe_with_fallback(
-                    whisper_module,
-                    audio_path,
-                    transcribe_timeout,
-                    vad_clip_timestamps,
-                )
+                if prepared_recording_track:
+                    # 앱의 분리 녹음은 Whisper가 지원하는 greedy로 바로 실행한다.
+                    kwargs = self._build_transcribe_kwargs(whisper_module, vad_clip_timestamps)
+                    raw_result = await asyncio.wait_for(
+                        await_native_inference(
+                            whisper_module.transcribe,
+                            str(audio_path),
+                            disjoint_recording_clips=len(vad_clip_timestamps or []) > 2,
+                            **kwargs,
+                        ),
+                        timeout=transcribe_timeout,
+                    )
+                else:
+                    raw_result = await self._transcribe_with_fallback(
+                        whisper_module,
+                        audio_path,
+                        transcribe_timeout,
+                        vad_clip_timestamps,
+                    )
         except TimeoutError as e:
             # Phase 1: 타임아웃은 NonRetryableError 로 변환 — 재시도가 MLX Metal
             # 상태 오염된 채 모델을 재로드하여 SIGSEGV 크래시를 유발하기 때문.
@@ -749,7 +780,7 @@ class Transcriber:
         segments = self._parse_segments(raw_result)
 
         if not segments:
-            raise EmptyAudioError(
+            raise EmptyTranscriptError(
                 f"전사 결과가 비어있습니다. 오디오에 음성이 없거나 인식 불가: {audio_path}"
             )
 

@@ -1,13 +1,13 @@
 # Aggregate Device 설정 가이드 (본인 + 상대방 양방향 녹음)
 
-> macOS 에서 회의 녹음 시 **본인 마이크 + 시스템 오디오(상대방 목소리)** 를 하나의 WAV 로 함께 녹음하기 위한 설정 안내입니다.
+> macOS에서 **본인 마이크와 시스템 오디오(상대방 목소리)** 를 한 WAV의 별도 채널에 녹음하기 위한 안내입니다.
 > 이 문서를 완료하면 Meeting Transcriber 앱이 자동으로 Aggregate Device 를 감지·선택합니다.
 
 ## 배경 — 왜 이 설정이 필요한가
 
 - **BlackHole 만 쓰면**: Zoom 등 앱의 출력(=상대방 목소리) 만 캡처되고 **본인 마이크 입력은 녹음 파일에 들어오지 않는다**.
 - **본인 마이크만 쓰면**: 상대방 목소리가 스피커를 통해 공기 중으로 새면서 에코/울림이 섞이고, 이어폰을 쓰면 아예 녹음 안 됨.
-- **해결**: macOS 의 **Aggregate Device** 기능으로 `MacBook 내장 마이크 + BlackHole 2ch` 를 하나의 합성 입력 장치로 묶는다. 한 번의 녹음에 두 소스가 모두 들어가 전사·화자분리 정확도가 올라간다.
+- **Aggregate Device**: `MacBook 내장 마이크 + BlackHole 2ch` 를 묶으면 두 입력을 같은 시간축으로 녹음할 수 있다.
 
 ---
 
@@ -50,7 +50,7 @@ ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -i aggregate
 
 ## 2. Zoom (및 다른 화상 앱) 설정
 
-Zoom 이 **자기 마이크 입력** 과 **자기 출력(상대방 목소리)** 을 모두 Aggregate 에 흘려보내도록 설정합니다.
+Zoom에서는 마이크와 스피커를 각각 지정합니다. 앱은 Aggregate에서 두 입력을 함께 받습니다.
 
 1. Zoom → **설정 → 오디오**
 2. **스피커**: `BlackHole 2ch` 선택 → 상대방 목소리가 BlackHole 로 흐릅니다.
@@ -63,7 +63,7 @@ Zoom 이 **자기 마이크 입력** 과 **자기 출력(상대방 목소리)** 
 BlackHole 2ch 만 스피커로 잡으면 본인은 상대방 목소리를 들을 수 없습니다. 모니터링이 필요하면:
 
 - **Multi-Output Device** 를 별도로 만들어 `BlackHole 2ch + 실제 스피커/이어폰` 을 동시 출력으로 구성한 뒤, macOS 시스템 출력 또는 Zoom 스피커를 이 Multi-Output 으로 지정.
-- 간단한 대안으로, Zoom 의 `설정 → 오디오 → 고급` 에서 스피커를 BlackHole 로 유지하되 macOS 시스템 출력은 이어폰으로 따로 잡는 조합도 가능.
+- Zoom 출력만 녹음하려면 Zoom 스피커에 Multi-Output을 지정하고 다른 앱은 이어폰 등 별도 장치로 재생합니다.
 
 ---
 
@@ -74,9 +74,50 @@ BlackHole 2ch 만 스피커로 잡으면 본인은 상대방 목소리를 들을
 앱이 기동될 때 자동으로 장치 목록을 감지하고 다음 우선순위로 선택합니다:
 
 1. `config.yaml` 의 `recording.preferred_device_name` 이 지정되어 있으면 그 이름 장치 (정확 매칭 → 부분 매칭)
-2. **Aggregate Device** (이름에 `aggregate` 포함)
+2. **Aggregate Device** (CoreAudio 속성 또는 이름으로 감지)
 3. BlackHole (Aggregate 없을 때 폴백)
 4. 물리 마이크
+
+`recording.separate_mic_track`의 기본값은 `true`입니다. CoreAudio가 물리 마이크 1채널과
+BlackHole 2ch의 구성을 확인하면 앱이 마이크는 왼쪽, BlackHole은 오른쪽에 담아 WAV 하나로
+저장합니다. 로컬 전사는 마이크 발화를 `나`로 표시하고, 오른쪽 채널에서만 화자분리를 실행합니다.
+두 사람이 동시에 말해도 각 채널의 발화를 같은 시간축에 남깁니다.
+
+녹음 표시줄을 펼치면 `내 마이크`와 `Zoom·시스템`의 실제 입력 음량을 따로 확인할 수
+있습니다. 각자 차례로 말해 보면 어느 입력이 들어오는지 쉽게 확인할 수 있습니다.
+확인된 Aggregate의 분리 녹음은 기본적으로 macOS의 CoreAudio 입력 큐를 사용합니다.
+기존 FFmpeg 녹음 방식이 필요한 경우 `recording.split_track_processing.native_capture: false`로
+전환할 수 있습니다. 일반 모노 녹음은 기존 FFmpeg 경로를 사용합니다.
+
+로컬 전사에서는 Zoom·시스템 출력이 스피커를 통해 마이크로 되돌아온 것으로 확인된
+성분만 전사용 사본에서 줄입니다. 지연과 파형이 여러 구간에서 일치하는지 확인하고,
+동시에 말하는 시간대를 잘라내지 않습니다. 원본 WAV에는 두 채널을 그대로 보존합니다.
+누설을 확실히 구별하기 어려운 환경에서는 일부 중복이 남을 수 있으므로 이어폰을 쓰면
+예방에 도움이 됩니다.
+
+마이크가 작게 들어오거나 잠깐만 말했을 때는 녹음 전체 평균 대신 신호가 있는 구간의
+음량을 보고 전사용 사본을 보정합니다. 두 트랙은 같은 Whisper 모델을 한 번 로드해
+차례로 전사합니다. 긴 무음을 건너뛰어 처리할 구간을 줄일 수 있을 때도 발화의 원래
+재생 시각을 유지합니다. `recording.split_track_processing`에서 누설 억제와 음량·무음
+검사 기준을 조정할 수 있으며 기본값은 `config.yaml`을 참고하세요.
+
+순간적으로 큰 잡음이 들어와도 그 피크 하나가 다른 시각의 작은 발화 전체를
+제외하지 않도록, 활성 구간의 대표 음량으로 보정하고 포화 제한은 해당 샘플에만
+적용합니다. 보정한 사본은 이미 설치된 Silero CPU 모델로 말소리 여부를 확인합니다.
+`speech_verification: true`, `speech_threshold: 0.20`이 기본이며 일반 전사의 VAD
+설정과 별개입니다. 모델을 새로 다운로드하거나 음성을 외부로 보내지 않습니다.
+검사한 구간 앞뒤 여유와 원래 재생 시각을 유지하고, 확인된 발화를 전체 평균 음량으로
+다시 제외하지 않습니다. 이 검사는 잡음 환각을 줄이지만 모든 환경의 인식 정확도를
+보장하지는 않습니다.
+
+녹음 프로세스가 오류로 끝나거나 종료 제한시간을 넘기면 성공으로 처리하지 않습니다.
+오류를 표시하고 부분 파일은 데이터 폴더의 `recordings_temp/`에 남깁니다.
+파일이 불완전할 수 있어 자동 전사 큐로 옮기지 않습니다. 정상 종료한 분리 녹음도
+유효 샘플이 있으면 작은 음량만을 이유로 원본을 삭제하지 않습니다.
+
+채널 구성을 확인할 수 없거나 분리 설정을 끈 경우 일반 녹음으로 처리합니다. 예전에 모노로
+녹음한 파일과 일반 스테레오 파일도 일반 전사 경로를 사용합니다. OpenAI 전사를 선택하면 기존
+단일 오디오 전사 방식을 사용합니다. `recording.multi_track`은 별도 파일을 만드는 이전 옵션입니다.
 
 ### (선택) 특정 장치를 명시 지정
 
@@ -96,6 +137,7 @@ recording:
 
 ```
 Aggregate 장치 선택 (본인 + 시스템 오디오 통합): [N] Meeting Transcriber Aggregate
+Aggregate 분리 녹음 (CoreAudio): 마이크(L), 시스템 오디오(R)
 ```
 
 ---
@@ -105,23 +147,19 @@ Aggregate 장치 선택 (본인 + 시스템 오디오 통합): [N] Meeting Trans
 실제 Zoom 회의 1 건을 녹음한 뒤, 두 채널 모두 소리가 들어갔는지 확인합니다.
 
 ```bash
-LATEST=$(ls -t ~/.meeting-transcriber/audio_input/*.wav | head -1)
+# 방금 녹음한 WAV 경로를 넣습니다.
+recording_wav="$HOME/.meeting-transcriber/audio_input/meeting_YYYYMMDD_HHMMSS.wav"
+ffprobe -v error -select_streams a:0 -show_entries 'stream=channels:format_tags=comment' "$recording_wav"
 
-# 전체 파일 볼륨
-ffmpeg -i "$LATEST" -af volumedetect -f null - 2>&1 | grep -E "mean_volume|max_volume"
-
-# 채널별 볼륨 (Aggregate 가 3채널일 때)
-ffmpeg -i "$LATEST" -filter_complex \
-  "channelsplit=channel_layout=2.1[c0][c1][c2]; \
-   [c0]volumedetect[v0]; [c1]volumedetect[v1]; [c2]volumedetect[v2]" \
-  -map '[v0]' -f null - -map '[v1]' -f null - -map '[v2]' -f null - 2>&1 \
-  | grep mean_volume
+# 왼쪽(마이크), 오른쪽(BlackHole) 순서로 평균 음량을 확인합니다.
+for channel in 0 1; do
+  ffmpeg -hide_banner -i "$recording_wav" -af "pan=mono|c0=c${channel},volumedetect" -f null - 2>&1 \
+    | rg mean_volume
+done
 ```
 
-**정상 범위**
-- 본인 마이크 채널: `mean ≈ -20 ~ -30 dB` (본인이 말했다면)
-- BlackHole 채널(좌/우): `mean ≈ -20 ~ -30 dB` (상대방이 말했다면)
-- 한쪽이 **`-91 dB`(완전 무음)** 이면 그 경로가 끊긴 것 — 1, 2 단계 설정 재확인.
+분리 녹음이면 `channels=2`, `TAG:comment=recap-microphone-system-v1`이 표시됩니다.
+각자 말을 했는데 해당 채널이 무음이면 Zoom 출력 장치와 Aggregate 구성을 다시 확인합니다.
 
 ---
 
@@ -129,9 +167,9 @@ ffmpeg -i "$LATEST" -filter_complex \
 
 | 항목 | 상태 | 해결 |
 |------|------|------|
-| 3채널 → 1채널 다운믹스 시 본인 목소리 약 10 dB 저하 | ✅ 해결 | `recording.aggregate_mic_boost: true` (기본) 로 `pan=mono|c0=0.5*c0+0.25*c1+0.25*c2` 자동 적용 |
+| 기존 모노 녹음에서 3채널을 합칠 때 마이크 음량 저하 | 보정 가능 | `recording.aggregate_mic_boost: true`로 마이크 가중치 적용 |
 | Aggregate Device 자동 생성 스크립트 | ✅ 해결 | `scripts/create_aggregate_device.swift` + `bash scripts/setup_audio.sh` |
-| 이름 키워드 대신 CoreAudio transportType 로 정확 판정 | 추적 중 | 별도 이슈 — 현재는 `preferred_device_name` 으로 명시 지정 권장 |
+| 물리 마이크 1채널 + BlackHole 2ch 이외의 Aggregate | 일반 녹음 | 오디오 채널 구성이 확인된 경우에만 `나` 자동 표시 |
 
 ### 5.1 aggregate_mic_boost 튜닝
 

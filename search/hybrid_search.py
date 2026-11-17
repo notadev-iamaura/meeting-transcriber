@@ -80,6 +80,7 @@ class SearchResult:
     end_time: float
     chunk_index: int = 0
     source: str = "both"
+    speaker_labels: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """딕셔너리로 변환한다 (JSON 직렬화용).
@@ -94,6 +95,7 @@ class SearchResult:
             "meeting_id": self.meeting_id,
             "date": self.date,
             "speakers": self.speakers,
+            "speaker_labels": self.speaker_labels,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "chunk_index": self.chunk_index,
@@ -924,6 +926,14 @@ class HybridSearchEngine:
             rrf_k=self._rrf_k,
             top_k=effective_top_k,
         )
+
+        from core.speaker_labels import read_speaker_labels
+
+        labels_by_meeting = await asyncio.to_thread(
+            read_speaker_labels, self._config, (item.meeting_id for item in combined)
+        )
+        for item in combined:
+            item.speaker_labels = dict(labels_by_meeting.get(item.meeting_id, {}))
 
         response = SearchResponse(
             results=combined,

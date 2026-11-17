@@ -60,6 +60,7 @@ class SearchResultItem(BaseModel):
     end_time: float = 0.0
     chunk_index: int = 0
     source: str = "both"
+    speaker_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
@@ -123,6 +124,7 @@ class ChatReferenceItem(BaseModel):
     end_time: float = 0.0
     text_preview: str = ""
     score: float = 0.0
+    speaker_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class ChatResponse(BaseModel):
@@ -208,6 +210,11 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                 end_time=r.end_time,
                 chunk_index=r.chunk_index,
                 source=r.source,
+                speaker_labels=(
+                    r.speaker_labels
+                    if isinstance(getattr(r, "speaker_labels", None), dict)
+                    else {}
+                ),
             )
             for r in result.results
         ]
@@ -293,6 +300,9 @@ def _build_chat_references(
             end_time=r.end_time,
             text_preview=r.text_preview,
             score=r.score,
+            speaker_labels=(
+                r.speaker_labels if isinstance(getattr(r, "speaker_labels", None), dict) else {}
+            ),
         )
         for r in references
     ]

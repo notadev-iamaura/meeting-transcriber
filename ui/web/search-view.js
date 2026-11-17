@@ -18,13 +18,6 @@
             throw new Error("MeetingSearchView requires App and Router");
         }
 
-        function _displaySpeakerLabel(label) {
-            var raw = String(label || "");
-            var match = raw.match(/^SPEAKER_(\d+)$/i);
-            if (!match) return raw;
-            return "화자 " + (Number(match[1]) + 1);
-        }
-
         function _normalizeIndexStatus(status) {
             if (!status || typeof status !== "object") return null;
             var total = Number(status.total);
@@ -488,7 +481,9 @@
             if (item.speakers && item.speakers.length > 0) {
                 var speakerItem = document.createElement("span");
                 speakerItem.className = "result-meta-item";
-                var speakerLabels = item.speakers.map(_displaySpeakerLabel);
+                var speakerLabels = item.speakers.map(function (speaker) {
+                    return App.speakerLabel(speaker, item.speaker_labels);
+                });
                 speakerItem.innerHTML = Icons.person + ' <span>' + App.escapeHtml(speakerLabels.join(", ")) + '</span>';
                 meta.appendChild(speakerItem);
             }

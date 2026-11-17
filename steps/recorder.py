@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import shutil
 import time
 from collections.abc import Callable, Coroutine
@@ -29,6 +30,8 @@ from typing import Any, Union, cast
 
 from config import AppConfig, get_config
 from core.coreaudio_helper import get_aggregate_device_names
+from core.recording_channels import RECORDING_TRACK_COMMENT, has_sustained_recording_signal
+from steps.zoom_activity import ZoomAudioActivityChecker
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +191,10 @@ class AudioRecorder:
         self._meeting_id: str | None = None
         self._max_duration_task: asyncio.Task[None] | None = None
         self._duration_broadcast_task: asyncio.Task[None] | None = None
+        self._split_level_meter = False
+        self._audio_levels: dict[str, float] | None = None
+        self._audio_levels_at = 0.0
+        self._first_audio_levels = asyncio.Event()
         # ffmpeg stdout/stderr를 아무도 읽지 않으면 OS 파이프 버퍼가 가득 차
         # write()가 블록되어 graceful 종료(stdin 'q')에도 응답하지 못하고
         # 결국 SIGKILL로만 죽어 WAV data 청크 크기가 갱신되지 않는다.
@@ -307,6 +314,11 @@ class AudioRecorder:
             return True  # 라이브러리 없으면 통과시킨다
 
         try:
+            # 분리 녹음의 작은 발화는 전사용 사본에서 보정·검사한다.
+            # 녹음 종료 시에는 평균 음량으로 복구할 수 없는 원본 삭제를 하지 않는다.
+            split_signal = has_sustained_recording_signal(file_path, 0.0)
+            if split_signal is not None:
+                return split_signal
             data, _ = sf.read(file_path, dtype="float32")
         except Exception as e:
             logger.warning(f"오디오 파일 읽기 실패 — 무음 감지를 건너뜁니다: {e}")
@@ -622,11 +634,50 @@ class AudioRecorder:
             # 막으면 안 되므로 로그만 남기고 조용히 끝낸다.
             logger.debug(f"ffmpeg 파이프 drain 중 종료: {e}")
 
-    def _start_pipe_drain(self, proc: asyncio.subprocess.Process) -> None:
+    async def _read_audio_levels(self, stream: asyncio.StreamReader) -> None:
+        """녹음기의 채널별 숫자만 읽고 최신 프레임을 메모리에 둔다."""
+        meters = {
+            b"lavfi.astats.1.RMS_level": "mic_dbfs",
+            b"lavfi.astats.2.RMS_level": "system_dbfs",
+        }
+        frame: dict[str, float] = {}
+        try:
+            while line := await stream.readline():
+                key, _, value = line.strip().partition(b"=")
+                if key.startswith(b"frame:"):
+                    frame.clear()
+                if key not in meters:
+                    continue
+                try:
+                    level = float(value)
+                except ValueError:
+                    continue
+                if math.isfinite(level) or level == -math.inf:
+                    frame[meters[key]] = round(min(0.0, max(-90.0, level)), 1)
+                if len(frame) == len(meters):
+                    self._audio_levels = frame.copy()
+                    self._audio_levels_at = time.monotonic()
+                    self._first_audio_levels.set()
+        except (ValueError, OSError):
+            await self._drain_pipe(stream)
+        finally:
+            self._first_audio_levels.set()
+
+    def _recent_audio_levels(self) -> dict[str, float] | None:
+        """정지했거나 수신이 끊긴 미터의 오래된 값은 반환하지 않는다."""
+        if self.is_recording and time.monotonic() - self._audio_levels_at <= 2:
+            return self._audio_levels
+        return None
+
+    def _start_pipe_drain(
+        self, proc: asyncio.subprocess.Process, *, split_meter: bool = False
+    ) -> None:
         """프로세스의 stdout/stderr를 백그라운드에서 drain하기 시작한다."""
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                self._pipe_drain_tasks.append(asyncio.create_task(self._drain_pipe(stream)))
+        if proc.stdout is not None:
+            reader = self._read_audio_levels if split_meter else self._drain_pipe
+            self._pipe_drain_tasks.append(asyncio.create_task(reader(proc.stdout)))
+        if proc.stderr is not None:
+            self._pipe_drain_tasks.append(asyncio.create_task(self._drain_pipe(proc.stderr)))
 
     async def _start_singletrack_recording(self, meeting_id: str) -> None:
         """싱글트랙 녹음을 시작한다 (기존 로직).
@@ -649,24 +700,47 @@ class AudioRecorder:
             f":{device.index}",
         ]
 
+        mic_channel = None
+        native_capture = False
+        if device.is_aggregate and self._recording_config.separate_mic_track:
+            checker = ZoomAudioActivityChecker(self._config.zoom.process_name)
+            mic_channel = await checker.aggregate_mic_channel(device.name)
+            if mic_channel is None:
+                logger.warning(
+                    f"Aggregate의 마이크/BlackHole 구성을 확인하지 못했습니다: {device.name}"
+                )
+            elif self._recording_config.split_track_processing.native_capture:
+                cmd = checker.split_recording_command(device.name, output_file, self._sample_rate)
+                native_capture = True
+
         # Aggregate Device 3채널 다운믹스 보정:
         # 기본 -ac 1 평균화는 마이크(c0) 를 1/3 로 희석해 본인 목소리가 약 10dB 저하된다.
         # aggregate_mic_boost=True 이면 pan 필터로 c0 비중을 2배 (0.5) 로 유지하고
         # BlackHole 좌/우 (c1,c2) 를 각 0.25 로 낮춰 합계 1.0 로 클리핑을 피하면서
         # 마이크 채널만 상대적으로 보호한다.
-        if device.is_aggregate and self._recording_config.aggregate_mic_boost:
+        if native_capture:
+            logger.info("Aggregate 분리 녹음 (CoreAudio): 마이크(L), 시스템 오디오(R)")
+        elif mic_channel is not None:
+            rx_left, rx_right = (1, 2) if mic_channel == 0 else (0, 1)
+            # channelmap이 누락된 입력 채널을 검출한다. pan만 쓰면 없는 채널이
+            # 무음으로 채워져 잘못된 위치를 정상 분리 녹음으로 저장할 수 있다.
+            filter_spec = (
+                "channelmap=map=0|1|2:channel_layout=3.0,"
+                f"pan=stereo|c0=c{mic_channel}|c1=0.5*c{rx_left}+0.5*c{rx_right},"
+                f"aresample={self._sample_rate},asetnsamples=n={self._sample_rate // 4}:p=0,"
+                "astats=metadata=1:reset=1:measure_perchannel=RMS_level:measure_overall=none,"
+                r"ametadata=print:file='pipe\:1':direct=1"
+            )
+            cmd += ["-af", filter_spec, "-metadata", f"comment={RECORDING_TRACK_COMMENT}"]
+            logger.info("Aggregate 분리 녹음: 마이크(L), 시스템 오디오(R)")
+        elif device.is_aggregate and self._recording_config.aggregate_mic_boost:
             cmd += ["-af", "pan=mono|c0=0.5*c0+0.25*c1+0.25*c2"]
             logger.info("Aggregate 마이크 보정 필터 적용: pan=mono|c0=0.5*c0+0.25*c1+0.25*c2")
         else:
             cmd += ["-ac", str(self._channels)]
 
-        cmd += [
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            str(self._sample_rate),
-            str(output_file),
-        ]
+        if not native_capture:
+            cmd += ["-acodec", "pcm_s16le", "-ar", str(self._sample_rate), str(output_file)]
 
         logger.info(
             f"싱글트랙 녹음 시작: meeting_id={meeting_id}, "
@@ -675,19 +749,31 @@ class AudioRecorder:
         )
 
         try:
+            self._first_audio_levels.clear()
+            self._audio_levels = None
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._start_pipe_drain(self._process)
+            self._split_level_meter = mic_channel is not None
+            self._start_pipe_drain(self._process, split_meter=self._split_level_meter)
         except FileNotFoundError as e:
+            if native_capture:
+                raise AudioDeviceError("CoreAudio 분리 녹음 실행 파일을 찾을 수 없습니다.") from e
             raise FFmpegRecordError(
                 "ffmpeg가 설치되어 있지 않습니다. 'brew install ffmpeg'로 설치하세요."
             ) from e
         except OSError as e:
-            raise FFmpegRecordError(f"ffmpeg 프로세스 시작 실패: {e}") from e
+            raise FFmpegRecordError(f"녹음 프로세스 시작 실패: {e}") from e
+        if native_capture:
+            try:
+                await asyncio.wait_for(self._first_audio_levels.wait(), timeout=4.0)
+            except TimeoutError as e:
+                raise AudioDeviceError("CoreAudio 녹음에서 입력을 받지 못했습니다.") from e
+            if self._audio_levels is None or self._process.returncode is not None:
+                raise AudioDeviceError("CoreAudio 녹음이 입력을 받기 전에 종료됐습니다.")
 
     async def _select_devices_multitrack(self) -> dict[str, AudioDevice]:
         """멀티트랙 녹음용 장치를 선택한다.
@@ -863,9 +949,18 @@ class AudioRecorder:
             FFmpegRecordError: ffmpeg 종료 처리 실패 시
         """
         async with self._state_lock:
-            stopped, result, meeting_id = await self._stop_recording_locked(
-                _from_guard=_from_guard
-            )
+            meeting_id = self._meeting_id
+            try:
+                stopped, result, meeting_id = await self._stop_recording_locked(
+                    _from_guard=_from_guard
+                )
+            except FFmpegRecordError as exc:
+                # 상태 초기화 뒤 실패를 알린다. 다음 start보다 먼저 전송해야
+                # 새 녹음 표시줄을 이전 오류 이벤트가 숨기지 않는다.
+                await self._broadcast_event(
+                    "recording_error", {"meeting_id": meeting_id, "error": str(exc)}
+                )
+                raise
 
         # 콜백은 외부 코드이므로 상태 lock 밖에서 호출한다. 콜백이 다음 녹음을
         # 시작해도 re-entrant lock 대기로 멈추지 않아야 한다.
@@ -952,6 +1047,9 @@ class AudioRecorder:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._duration_broadcast_task
         self._duration_broadcast_task = None
+        self._split_level_meter = False
+        self._audio_levels = None
+        self._audio_levels_at = 0.0
 
     async def _await_critical_cleanup(self, cleanup: Coroutine[Any, Any, None]) -> None:
         """취소가 중첩돼도 subprocess 정리가 끝날 때까지 기다린다.
@@ -1040,36 +1138,9 @@ class AudioRecorder:
 
         logger.info(f"ffmpeg 종료 시도: 녹음 시간={duration:.1f}초")
 
-        # 1단계: stdin에 'q' 전송 (graceful 종료)
-        try:
-            if self._process.stdin is not None:
-                self._process.stdin.write(b"q")
-                await self._process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            logger.debug("ffmpeg stdin 전송 실패 (이미 종료됨)")
-
-        # 2단계: graceful 타임아웃 대기
-        try:
-            await asyncio.wait_for(
-                self._process.wait(),
-                timeout=self._graceful_timeout,
-            )
-            logger.info("ffmpeg 정상 종료 완료")
-        except TimeoutError:
-            # 3단계: SIGTERM 강제 종료
-            logger.warning(
-                f"ffmpeg graceful 종료 타임아웃 ({self._graceful_timeout}초). SIGTERM 전송"
-            )
-            try:
-                self._process.terminate()
-                await asyncio.wait_for(
-                    self._process.wait(),
-                    timeout=5,
-                )
-            except TimeoutError:
-                logger.error("ffmpeg SIGTERM 타임아웃. SIGKILL 전송")
-                self._process.kill()
-                await self._process.wait()
+        # native 캡처와 ffmpeg 모두 성공 종료가 확인된 파일만 후처리한다.
+        # 실패 파일은 짧거나 비어 있어도 삭제하지 않고 임시 위치에 보존한다.
+        await self._terminate_one_ffmpeg(self._process, "recording")
 
         # 최소 시간 미달 체크
         if duration < self._min_duration:
@@ -1121,7 +1192,7 @@ class AudioRecorder:
         proc: asyncio.subprocess.Process,
         label: str,
     ) -> None:
-        """하나의 ffmpeg 프로세스를 graceful하게 종료한다.
+        """캡처 프로세스를 종료하고 정상 종료 여부를 확인한다.
 
         Args:
             proc: 종료할 프로세스
@@ -1135,19 +1206,30 @@ class AudioRecorder:
         except (BrokenPipeError, ConnectionResetError, OSError):
             logger.debug(f"ffmpeg stdin 전송 실패 ({label}, 이미 종료됨)")
 
-        # graceful 타임아웃 대기
+        # 종료 신호가 필요했던 파일은 끝부분의 완전성을 확인할 수 없다.
+        forced = False
         try:
-            await asyncio.wait_for(proc.wait(), timeout=self._graceful_timeout)
-            logger.info(f"ffmpeg 정상 종료 ({label})")
+            returncode = await asyncio.wait_for(proc.wait(), timeout=self._graceful_timeout)
         except TimeoutError:
+            forced = True
             logger.warning(f"ffmpeg graceful 타임아웃 ({label}). SIGTERM 전송")
             try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+                returncode = await asyncio.wait_for(proc.wait(), timeout=5)
             except TimeoutError:
                 logger.error(f"ffmpeg SIGTERM 타임아웃 ({label}). SIGKILL 전송")
-                proc.kill()
-                await proc.wait()
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                returncode = await proc.wait()
+
+        if forced or returncode != 0:
+            reason = "정상 종료 시간 초과" if forced else f"종료 코드 {returncode}"
+            raise FFmpegRecordError(
+                f"녹음이 정상적으로 완료되지 않았습니다 ({label}: {reason}). "
+                f"부분 파일은 {self._temp_dir}에 보존했습니다."
+            )
+        logger.info(f"녹음 프로세스 정상 종료 ({label})")
 
     async def _terminate_multitrack(self) -> RecordingResult | None:
         """멀티트랙 ffmpeg 프로세스를 모두 종료하고 결과를 반환한다.
@@ -1246,16 +1328,17 @@ class AudioRecorder:
             pass
 
     async def _duration_broadcast_loop(self) -> None:
-        """10초 간격으로 녹음 경과 시간을 브로드캐스트한다."""
+        """녹음 시간과 분리 녹음의 최신 채널 음량을 전송한다."""
         try:
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(0.5 if self._split_level_meter else 10)
                 if self._state == RecordingState.RECORDING:
                     await self._broadcast_event(
                         "recording_duration",
                         {
                             "meeting_id": self._meeting_id,
                             "duration_seconds": round(self.current_duration, 1),
+                            "audio_levels": self._recent_audio_levels(),
                         },
                     )
         except asyncio.CancelledError:
@@ -1383,6 +1466,7 @@ class AudioRecorder:
             "duration_seconds": round(self.current_duration, 1),
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
+            "audio_levels": self._recent_audio_levels(),
             "is_system_audio": (
                 # Aggregate 는 BlackHole 경로를 포함하므로 시스템 오디오 캡처에 해당한다
                 (self._current_device.is_blackhole or self._current_device.is_aggregate)

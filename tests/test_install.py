@@ -460,7 +460,12 @@ class TestCheckPythonVersion:
     def test_python_없을_때_실패(self, tmp_path: Path) -> None:
         """python3.11+이 없으면 실패하는지 확인한다."""
         mock_env = _create_mock_env(tmp_path, create_python=False)
-        result = _source_and_call(mock_env, "check_python_version")
+        # /usr/bin의 실제 Python이 없는 장치 시나리오에 끼어들지 않게 한다.
+        result = _source_and_call(
+            mock_env,
+            'command() { if [[ "$1" == "-v" && "$2" == python* ]]; then return 1; fi; '
+            'builtin command "$@"; }; check_python_version',
+        )
         assert result.returncode != 0
 
 
