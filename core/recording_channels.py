@@ -191,7 +191,7 @@ def _frame_power(samples: NDArray[np.float32], frame_size: int) -> NDArray[np.fl
 
     complete = len(samples) // frame_size * frame_size
     squared = np.square(samples, dtype=np.float64)
-    powers = squared[:complete].reshape(-1, frame_size).mean(axis=1)
+    powers: NDArray[np.float64] = squared[:complete].reshape(-1, frame_size).mean(axis=1)
     if complete < len(squared):
         powers = np.append(powers, squared[complete:].mean())
     return powers

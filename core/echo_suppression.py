@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -105,7 +106,7 @@ def _fit_sparse_path(
     norm = np.sqrt(np.maximum(power, float(power.max()) * 0.03) + 1e-12)
     positions: list[int] = []
     columns: list[NDArray[np.float64]] = []
-    coefficients = np.empty(0, dtype=np.float64)
+    coefficients: NDArray[np.float64] = np.empty(0, dtype=np.float64)
     target = captured.ravel()
     residual = captured
     for _ in range(10):
@@ -124,7 +125,10 @@ def _fit_sparse_path(
         gram = design.T @ design
         # 매우 비슷한 두 지연을 학습해 마이크 신호까지 설명하려는 해를 억제한다.
         ridge = 1e-5 * max(float(np.trace(gram)) / len(positions), 1e-9)
-        coefficients = np.linalg.solve(gram + np.eye(len(positions)) * ridge, design.T @ target)
+        coefficients = cast(
+            NDArray[np.float64],
+            np.linalg.solve(gram + np.eye(len(positions)) * ridge, design.T @ target),
+        )
         residual = (target - design @ coefficients).reshape(captured.shape)
     taps = np.zeros(history + 1, dtype=np.float64)
     if positions and np.sum(np.abs(coefficients)) <= 3.2:
