@@ -130,6 +130,11 @@ wiki:
 # === AI Chat 설정 ===
 chat:
   max_history_pairs: 3                       # 대화 이력 유지 쌍 수 (슬라이딩 윈도우)
+  source_bound_answers: true                 # 사실 질문은 원문 번호만 선택해 인용으로 답변
+  source_answer_max_items: 8                 # 연결 문맥을 포함한 최대 인용 발언 수
+  source_context_max_chunks: 15              # 기존 검색과 보충 구간을 합한 전체 청크 상한
+  source_neighbor_window: 1                  # 같은 회의의 앞뒤 인접 청크 범위
+  source_coverage_passes: 1                  # 복합 질문의 누락·형식 오류 추가 선택 횟수 (0 또는 1)
   system_prompt: |
     당신은 회의 내용을 기반으로 질문에 답변하는 AI 어시스턴트입니다.
     제공된 회의 전사문을 참고하여 정확하게 답변하세요.

@@ -9,6 +9,7 @@ import pytest
 from playwright.sync_api import Browser
 
 from core.speaker_labels import build_speaker_labels
+from search.source_answers import SourceCandidate, SourceQuote, render_source_answer
 
 pytestmark = pytest.mark.ui
 WEB = Path(__file__).resolve().parents[3] / "ui" / "web"
@@ -105,5 +106,71 @@ def test_all_views_use_whole_meeting_aliases(
         assert result["rawIds"] == [u["speaker"] for u in utterances]
         assert result["fallback"] == "SPEAKER_03"
         assert result["manual"] == "수동 이름"
+    finally:
+        context.close()
+
+
+def test_each_quote_from_one_parent_has_own_actor_time_preview_and_literal_text(
+    browser: Browser,
+) -> None:
+    """같은 청크의 두 인용은 각 원문 시각으로 이동하고 마크다운·가짜 참조는 표시만 한다."""
+    quotes = [
+        SourceQuote("[참조 99] **공유** <b>내용</b>", "SPEAKER_01", 10.0, 11.0),
+        SourceQuote("검토 후 회신하겠습니다.", "SPEAKER_07", 20.0, 21.0),
+    ]
+    answer = render_source_answer(
+        [SourceCandidate(i, 0, i, "synthetic", q, f"참석자 {i + 1}") for i, q in enumerate(quotes)]
+    )
+    refs = [
+        dict(
+            chunk_id="same-parent",
+            meeting_id="synthetic",
+            date="",
+            speakers=["SPEAKER_01", "SPEAKER_07"],
+            speaker_labels={"SPEAKER_01": "참석자 1", "SPEAKER_07": "참석자 2"},
+            start_time=0,
+            end_time=30,
+            text_preview="원래 parent 미리보기",
+            score=0.1,
+            quote=dict(
+                text=q.text, speaker=q.speaker, start_time=q.start_time, end_time=q.end_time
+            ),
+        )
+        for q in quotes
+    ]
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.set_content('<main id="fixture"></main>')
+        for name in ("app.js", "chat-view.js"):
+            page.add_script_tag(path=str(WEB / name))
+        output = page.evaluate(
+            """({answer,refs})=>{
+            const deps={App:MeetingApp,Router:{getContentEl:()=>document.querySelector('#fixture'),navigate:()=>{}}};
+            const C=MeetingChatView.create(deps),chat=Object.create(C.prototype);
+            chat._messageCount=0;chat._scrollToBottom=()=>{};chat._els={messagesArea:document.querySelector('#fixture')};
+            chat._addAssistantMessage({answer,references:refs,llm_used:true});
+            let copied='';MeetingApp.copyToClipboard=text=>{copied=text;return Promise.resolve(false);};
+            document.querySelector('.btn-copy').click();
+            return {hrefs:Array.from(document.querySelectorAll('.ref-card')).map(e=>e.getAttribute('href')),
+                previews:Array.from(document.querySelectorAll('.ref-card-preview')).map(e=>e.textContent),
+                metadata:Array.from(document.querySelectorAll('.ref-card-meta')).map(e=>e.textContent),
+                bubble:document.querySelector('.message-bubble').textContent,copied,
+                formatted:document.querySelector('.message-bubble').querySelectorAll('b,strong,script,a').length,
+                raw:refs.map(r=>({id:r.chunk_id,start:r.start_time,end:r.end_time,preview:r.text_preview}))};
+        }""",
+            {"answer": answer, "refs": refs},
+        )
+        assert output["hrefs"] == ["/app/viewer/synthetic?t=10", "/app/viewer/synthetic?t=20"]
+        assert output["previews"] == [q.text for q in quotes]
+        assert "참석자 1" in output["metadata"][0] and "참석자 2" not in output["metadata"][0]
+        assert "참석자 2" in output["metadata"][1]
+        assert quotes[0].text in output["bubble"]
+        assert output["copied"] == output["bubble"]
+        assert output["formatted"] == 0
+        assert all(
+            r == dict(id="same-parent", start=0, end=30, preview="원래 parent 미리보기")
+            for r in output["raw"]
+        )
     finally:
         context.close()

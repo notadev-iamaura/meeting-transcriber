@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from core.chat_scope import ChatSourceScope
 from core.wiki.router import QueryRouter, RouteDecision, RouterVerdict
 
 logger = logging.getLogger(__name__)
@@ -260,7 +261,9 @@ class HybridChatService:
             answer, sources = await self._synthesize_from_wiki(query, verdict)
         except Exception as exc:  # noqa: BLE001 — graceful degradation
             logger.warning("WIKI 합성 실패, RAG 폴백 수행: %s", exc, exc_info=True)
-            rag_response = await self._chat_service.respond(query, **kwargs)
+            rag_response = await self._chat_service.respond(
+                query, **{**kwargs, "source_scope": ChatSourceScope.WIKI_FALLBACK}
+            )
             return HybridChatResponse(
                 source_type="rag",
                 router_verdict=verdict,

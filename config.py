@@ -606,6 +606,13 @@ class ChatConfig(BaseModel):
     """AI Chat 설정"""
 
     max_history_pairs: int = Field(default=3, ge=1, le=10)
+    source_bound_answers: bool = True
+    source_answer_max_items: int = Field(default=8, ge=1, le=16)
+    source_context_max_chunks: int = Field(default=15, ge=1, le=40)
+    source_neighbor_window: int = Field(default=1, ge=0, le=2)
+    source_coverage_passes: int = Field(default=1, ge=0, le=1, strict=True)
+    source_focus_max_calls: int = Field(default=4, ge=1, le=4, strict=True)
+    source_focus_max_items: int = Field(default=3, ge=1, le=16, strict=True)
     system_prompt: str = (
         "당신은 회의 내용을 기반으로 질문에 답변하는 AI 어시스턴트입니다.\n"
         "제공된 회의 전사문을 참고하여 정확하게 답변하세요.\n"
