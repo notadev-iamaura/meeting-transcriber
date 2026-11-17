@@ -982,7 +982,13 @@ class JobProcessor:
             )
             return False
 
-    async def _finalize_user_cancellation(self, job_id: int, meeting_id: str) -> None:
+    async def _finalize_user_cancellation(
+        self,
+        job_id: int,
+        meeting_id: str,
+        *,
+        notify_thermal: bool = True,
+    ) -> None:
         """durable claim 또는 legacy flag를 recorded 취소 상태로 확정한다."""
         self._cancellation_requests.discard(meeting_id)
         try:
@@ -1004,7 +1010,8 @@ class JobProcessor:
                 logger.error("취소 후 상태 복귀 실패: job_id=%s, error=%s", job_id, exc)
         except Exception as exc:
             logger.error("취소 claim 확정 실패: job_id=%s, error=%s", job_id, exc)
-        await self._thermal_manager.notify_job_completed()
+        if notify_thermal:
+            await self._thermal_manager.notify_job_completed()
         await self._broadcast_event(
             "job_cancelled",
             {"job_id": job_id, "meeting_id": meeting_id, "status": "recorded"},
@@ -1311,6 +1318,9 @@ class JobProcessor:
             except Exception as e:
                 logger.debug(f"step_progress 처리 실패 (무시): {e}")
 
+        pipeline_completed = False
+        completion_confirmed = False
+        thermal_completion_started = False
         try:
             # 파이프라인 실행: batch 가 명시한 실행 의도는 우선하고,
             # 빈 값이면 pipeline.run 내부에서 config.pipeline.skip_llm_steps 를 사용한다.
@@ -1326,6 +1336,7 @@ class JobProcessor:
                 stt_model=queued_stt_model,
                 **extra_options,
             )
+            pipeline_completed = result.status == "completed"
 
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
@@ -1337,11 +1348,14 @@ class JobProcessor:
 
             # 완료 상태 업데이트. 실패 시 복구 경로를 통해 pipeline_state 와 DB 상태를 맞춘다.
             status_recovered = await self._mark_job_completed_after_pipeline(job_id, meeting_id)
+            completion_confirmed = status_recovered
             if not status_recovered and self._is_job_cancellation_requested(
                 meeting_id,
                 job_id,
             ):
                 raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
+            # 완료 카운터는 이 호출의 첫 await 전에 증가한다. 쿨다운 취소 시 재통지하지 않는다.
+            thermal_completion_started = True
             await self._thermal_manager.notify_job_completed()
             if not status_recovered:
                 await self._broadcast_event(
@@ -1365,11 +1379,27 @@ class JobProcessor:
             is_user_cancel = self._is_job_cancellation_requested(meeting_id, job_id)
 
             if is_user_cancel:
-                await self._finalize_user_cancellation(job_id, meeting_id)
+                await self._finalize_user_cancellation(
+                    job_id,
+                    meeting_id,
+                    notify_thermal=not thermal_completion_started,
+                )
                 # 사용자 취소는 작업 루프를 계속 동작시켜야 하므로 재전파하지 않는다.
                 return False
 
             self._cancellation_requests.discard(meeting_id)
+            if pipeline_completed and completion_confirmed:
+                # 본체와 DB의 완료는 확정됐다. 종료 중 쿨다운/이벤트 대기 취소로 되돌리지 않는다.
+                await self._broadcast_event(
+                    "job_completed",
+                    {"job_id": job_id, "meeting_id": meeting_id, "status": "completed"},
+                )
+                logger.info(
+                    "앱 종료 중 완료 작업 보존: job_id=%s, meeting_id=%s",
+                    job_id,
+                    meeting_id,
+                )
+                raise
             try:
                 await asyncio.to_thread(
                     self._job_queue.queue.force_set_status,
@@ -1379,7 +1409,9 @@ class JobProcessor:
                 )
             except Exception as exc:
                 logger.error(f"종료 중 작업 재대기 실패: job_id={job_id}, error={exc}")
-            await self._thermal_manager.notify_job_completed()
+            if not thermal_completion_started:
+                thermal_completion_started = True
+                await self._thermal_manager.notify_job_completed()
             await self._broadcast_event(
                 "job_interrupted",
                 {"job_id": job_id, "meeting_id": meeting_id, "status": "queued"},

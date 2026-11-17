@@ -121,6 +121,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.job_queue = async_queue
     app.state.start_time = time.time()
 
+    # 모델은 로드하지 않고 admission/cleanup 상태를 관리하는 객체만 공유한다.
+    # Wiki API·리소스 상태도 파이프라인/검색/채팅과 같은 매니저를 관측해야 한다.
+    from core.model_manager import get_model_manager
+
+    model_manager = getattr(app.state, "model_manager", None)
+    if model_manager is None:
+        model_manager = get_model_manager()
+    app.state.model_manager = model_manager
+
     # 검색/Chat 엔진은 첫 요청 시점에 생성한다. 서버 콜드 스타트는
     # UI/API shell 응답을 우선하고, 검색/Chat 의존성 오류는 해당 API에서 503으로 드러낸다.
     app.state.search_engine = None
@@ -231,6 +240,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             pipeline_manager = PipelineManager(
                 config=config,
+                model_manager=model_manager,
                 meeting_mutation_coordinator=app.state.meeting_mutation_coordinator,
             )
             app.state.pipeline_manager = pipeline_manager

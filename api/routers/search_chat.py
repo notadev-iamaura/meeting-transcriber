@@ -421,11 +421,11 @@ def _build_hybrid_chat_service(request: Request, chat_engine: Any) -> Any:
     wiki_llm: Any = None
     if config.wiki.router_llm_fallback:
         try:
+            from api.dependencies import get_model_manager  # noqa: PLC0415
             from core.wiki.llm_client import MlxWikiClient  # noqa: PLC0415
 
-            model_manager = getattr(request.app.state, "model_manager", None)
-            if model_manager is not None:
-                wiki_llm = MlxWikiClient(config=config, model_manager=model_manager)
+            model_manager = get_model_manager(request)
+            wiki_llm = MlxWikiClient(config=config, model_manager=model_manager)
         except Exception as exc:  # noqa: BLE001 — LLM 폴백은 옵션
             logger.warning("MlxWikiClient 초기화 실패, LLM 폴백 비활성: %s", exc)
             wiki_llm = None

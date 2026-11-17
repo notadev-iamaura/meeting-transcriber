@@ -267,8 +267,10 @@ async def get_system_resources(request: Request) -> SystemResourcesResponse:
     mem = psutil.virtual_memory()
     cpu = psutil.cpu_percent(interval=None)
 
-    # model_manager에서 현재 로드된 모델명 조회
-    model_manager = getattr(request.app.state, "model_manager", None)
+    # 실제 파이프라인/검색/채팅이 사용하는 공유 객체의 상태를 조회한다.
+    from api.dependencies import get_model_manager
+
+    model_manager = get_model_manager(request)
     loaded_model = None
     native_cleanup_pending = False
     native_cleanup_model_name = None

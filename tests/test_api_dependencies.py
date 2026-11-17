@@ -55,7 +55,9 @@ def test_get_search_engine_lazily_creates_and_caches() -> None:
         assert dependencies.get_search_engine(request) is engine
         assert dependencies.get_search_engine(request) is engine
 
-    search_cls.assert_called_once_with(config=config)
+    search_cls.assert_called_once_with(
+        config=config, model_manager=request.app.state.model_manager
+    )
 
 
 def test_get_search_engine_creation_failure_raises_503() -> None:
@@ -90,7 +92,9 @@ def test_get_chat_engine_lazily_uses_existing_search_engine() -> None:
         assert dependencies.get_chat_engine(request) is chat_engine
         assert dependencies.get_chat_engine(request) is chat_engine
 
-    chat_cls.assert_called_once_with(config=config, search_engine=search_engine)
+    chat_cls.assert_called_once_with(
+        config=config, search_engine=search_engine, model_manager=request.app.state.model_manager
+    )
 
 
 def test_get_chat_engine_creates_search_engine_when_missing() -> None:
@@ -107,8 +111,12 @@ def test_get_chat_engine_creates_search_engine_when_missing() -> None:
     ):
         assert dependencies.get_chat_engine(request) is chat_engine
 
-    search_cls.assert_called_once_with(config=config)
-    chat_cls.assert_called_once_with(config=config, search_engine=search_engine)
+    search_cls.assert_called_once_with(
+        config=config, model_manager=request.app.state.model_manager
+    )
+    chat_cls.assert_called_once_with(
+        config=config, search_engine=search_engine, model_manager=request.app.state.model_manager
+    )
 
 
 def test_get_chat_engine_creation_failure_raises_503() -> None:

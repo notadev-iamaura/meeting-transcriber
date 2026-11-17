@@ -14,7 +14,13 @@ import pytest
 
 from api.routers.meeting_detail import _build_meeting_item
 from config import AppConfig, PathsConfig
-from core.pipeline import PIPELINE_STEPS, InvalidInputError, PipelineManager, PipelineState
+from core.pipeline import (
+    PIPELINE_STEPS,
+    InvalidInputError,
+    PipelineManager,
+    PipelineState,
+    PipelineStep,
+)
 from steps.diarizer import DiarizationResult, DiarizationSegment
 from steps.transcriber import TranscriptResult, TranscriptSegment
 
@@ -391,3 +397,124 @@ async def test_정상_resume_경로도_state와_다른_전사_checkpoint를_거�
 
     with pytest.raises(InvalidInputError, match="provider/model"):
         await pipeline.run(tmp_path / "original.m4a", meeting_id=meeting_id)
+
+
+def _seed_legacy_resume(
+    pipeline: PipelineManager,
+    tmp_path: Path,
+    *,
+    state_model: str = "",
+    checkpoint_model: str | None = None,
+    checkpoint_provider: str | None = None,
+    with_checkpoint: bool = True,
+) -> tuple[str, Path, Path]:
+    """실제 장애와 같은 convert/transcribe 완료 구버전 상태를 격리 저장한다."""
+    meeting_id = "legacy_local_resume"
+    state_path = pipeline._get_state_path(meeting_id)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    output = pipeline._get_output_dir(meeting_id)
+    state = PipelineState(
+        meeting_id=meeting_id,
+        audio_path=str(tmp_path / "original.m4a"),
+        status="failed",
+        current_step="diarize",
+        completed_steps=["convert", "transcribe"],
+        wav_path=str(output / "meeting.wav"),
+        output_dir=str(output),
+        stt_provider="local" if state_model else "",
+        stt_model=state_model,
+    )
+    state.save(state_path)
+    checkpoint = pipeline._get_checkpoint_path(meeting_id, PipelineStep.TRANSCRIBE)
+    data: dict[str, object] = {
+        "audio_path": str(output / "meeting.wav"),
+        "language": "ko",
+        "full_text": "보존할 과거 전사문",
+        "segments": [{"text": "보존할 과거 전사문", "start": 1.0, "end": 2.0}],
+    }
+    if checkpoint_model is not None:
+        data["model"] = checkpoint_model
+    if checkpoint_provider is not None:
+        data["provider"] = checkpoint_provider
+    if with_checkpoint:
+        checkpoint.write_text(json.dumps(data, ensure_ascii=False))
+    return meeting_id, state_path, checkpoint
+
+
+@pytest.mark.asyncio
+async def test_구버전_로컬_전사는_현재_로컬_queue로_재개해도_원래모델을_꾸며내지_않는다(
+    tmp_path: Path,
+) -> None:
+    """새 API queue snapshot이 있어도 완료된 옛 로컬 결과를 보존해 이어간다."""
+    config = _config(tmp_path)
+    pipeline = PipelineManager(config, MagicMock())
+    meeting_id, state_path, checkpoint = _seed_legacy_resume(pipeline, tmp_path)
+    original = checkpoint.read_bytes()
+    with (
+        patch.object(pipeline, "_run_step_convert", new_callable=AsyncMock) as convert,
+        patch.object(pipeline, "_run_step_transcribe", new_callable=AsyncMock) as transcribe,
+    ):
+        state = await pipeline.run(
+            tmp_path / "original.m4a",
+            meeting_id=meeting_id,
+            stt_provider="local",
+            stt_model=config.stt.model_name,
+            stop_after=PipelineStep.TRANSCRIBE,
+        )
+    assert state.status == "paused"
+    assert state.stt_provider == "local" and state.stt_model == "legacy-local"
+    assert PipelineState.from_file(state_path).stt_model == "legacy-local"
+    assert checkpoint.read_bytes() == original
+    assert any("과거 로컬 전사문" in message for message in state.warnings)
+    convert.assert_not_awaited()
+    transcribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "openai_request",
+        "known_checkpoint",
+        "pinned_state",
+        "other_local",
+        "missing_checkpoint",
+        "openai_checkpoint",
+    ],
+)
+async def test_legacy_이관이_외부선택이나_알려진_모델의_고정계약을_우회하지_않는다(
+    tmp_path: Path, case: str
+) -> None:
+    """허용 범위는 provenance가 없는 실제 완료 로컬 전사문 이관으로 한정한다."""
+    config = _config(tmp_path)
+    pipeline = PipelineManager(config, MagicMock())
+    seed_options: dict[str, object] = {}
+    if case == "known_checkpoint":
+        seed_options["checkpoint_model"] = "previous-local-model"
+    if case == "pinned_state":
+        seed_options["state_model"] = "previous-local-model"
+    if case == "missing_checkpoint":
+        seed_options["with_checkpoint"] = False
+    if case == "openai_checkpoint":
+        seed_options.update(
+            checkpoint_provider="openai", checkpoint_model="gpt-4o-transcribe-diarize"
+        )
+    meeting_id, state_path, checkpoint = _seed_legacy_resume(pipeline, tmp_path, **seed_options)
+    state_before = state_path.read_bytes()
+    original = checkpoint.read_bytes() if checkpoint.exists() else None
+    with pytest.raises(InvalidInputError):
+        await pipeline.run(
+            tmp_path / "original.m4a",
+            meeting_id=meeting_id,
+            stt_provider="openai" if case == "openai_request" else "local",
+            stt_model=(
+                "gpt-4o-transcribe-diarize"
+                if case == "openai_request"
+                else "another-local-model"
+                if case == "other_local"
+                else config.stt.model_name
+            ),
+            stop_after=PipelineStep.TRANSCRIBE,
+        )
+    assert state_path.read_bytes() == state_before
+    assert (checkpoint.read_bytes() if checkpoint.exists() else None) == original

@@ -2908,12 +2908,33 @@ class PipelineManager:
                 "파이프라인 상태의 전사 provider가 유효하지 않습니다.",
                 failure_kind=AudioFailureKind.SECURITY_BLOCKED,
             )
-        if requested_provider and (
-            state.stt_provider != requested_provider or state.stt_model != requested_model
+        # provider/model 필드 도입 전 로컬 전사 결과는 정확한 모델을 알 수 없다.
+        # API가 현재 로컬 기본값을 queue snapshot으로 보냈더라도 이미 완료된
+        # 전사를 다시 실행하지 않는 이관 1회만 허용하고 provenance는 legacy로 남긴다.
+        legacy_local_resume = (
+            stt_selection_initialized
+            and transcript_already_completed
+            and PipelineStep.CONVERT.value in state.completed_steps
+            and restored_transcript is not None
+            and restored_selection == ("local", "legacy-local")
+            and state.stt_provider == "local"
+            and state.stt_model == "legacy-local"
+            and requested_provider == "local"
+            and requested_model == str(getattr(self._config.stt, "model_name", ""))
+        )
+        if (
+            requested_provider
+            and not legacy_local_resume
+            and (state.stt_provider != requested_provider or state.stt_model != requested_model)
         ):
             raise InvalidInputError(
                 "큐에 고정된 전사 선택과 파이프라인 상태의 선택이 다릅니다.",
                 failure_kind=AudioFailureKind.SECURITY_BLOCKED,
+            )
+        if legacy_local_resume:
+            state.warnings.append(
+                "모델 정보가 없는 과거 로컬 전사문을 보존하고 다음 단계부터 재개합니다. "
+                "원래 전사 모델은 legacy-local로 기록합니다."
             )
         allowed_openai_model = getattr(
             self._config.stt,
