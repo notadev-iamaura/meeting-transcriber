@@ -1627,9 +1627,27 @@
             var self = this;
             var els = self._els;
             var actionsEl = els.viewerActions;
-            actionsEl.innerHTML = "";
             actionsEl.setAttribute("role", "toolbar");
             actionsEl.setAttribute("aria-label", "회의 작업");
+            // 전사·마이크 응답이 늦게 도착해도 사용자가 연 메뉴와 트리거를 유지한다.
+            var more = actionsEl.querySelector(".viewer-more-actions");
+            if (!more) {
+                more = document.createElement("details");
+                more.className = "viewer-more-actions";
+                more.innerHTML = '<summary>더 보기</summary><div class="viewer-more-panel"></div>';
+                more.addEventListener("keydown", function (event) {
+                    if (event.key === "Escape") {
+                        event.preventDefault(); event.stopPropagation();
+                        more.open = false; more.querySelector("summary").focus();
+                    }
+                });
+                actionsEl.appendChild(more);
+            }
+            var morePanel = more.querySelector(".viewer-more-panel");
+            var focusedAction = morePanel.contains(document.activeElement) ? document.activeElement : null;
+            actionsEl.querySelectorAll(".viewer-failure-notice, .viewer-action-group").forEach(function (el) {
+                el.remove();
+            });
 
             // 부분 전사문이 있어도 실패 원인과 복구 안내를 숨기지 않는다.
             if (data.status === "failed") {
@@ -1686,7 +1704,7 @@
                     Router.navigate(modelSettings ? "/app/settings" : "/app/setup");
                 });
                 failure.appendChild(recoveryLink);
-                actionsEl.appendChild(failure);
+                actionsEl.insertBefore(failure, more);
             }
 
             function makeGroup(className, label) {
@@ -1694,24 +1712,15 @@
                 group.className = "viewer-action-group " + className;
                 group.setAttribute("role", "group");
                 group.setAttribute("aria-label", label);
-                actionsEl.appendChild(group);
                 return group;
             }
 
             var primaryGroup = makeGroup("primary", "주요 작업");
             var secondaryGroup = makeGroup("secondary", "보조 작업");
             var dangerGroup = makeGroup("danger", "위험 작업");
-            var more = document.createElement("details");
-            more.className = "viewer-more-actions";
-            var moreLabel = document.createElement("summary");
-            moreLabel.textContent = "더 보기";
-            more.appendChild(moreLabel);
-            var morePanel = document.createElement("div");
-            morePanel.className = "viewer-more-panel";
+            actionsEl.insertBefore(primaryGroup, more);
             morePanel.appendChild(secondaryGroup);
             morePanel.appendChild(dangerGroup);
-            more.appendChild(morePanel);
-            actionsEl.appendChild(more);
             var micState = self._micTranscription;
             if (micState && micState.retry_available === true && !self._micRequestPending &&
                     (micState.status === "complete" || micState.status === "unknown")) {
@@ -1723,13 +1732,6 @@
                 micRetryBtn.addEventListener("click", function () { self._retryMicTranscription(); });
                 secondaryGroup.appendChild(micRetryBtn);
             }
-            more.addEventListener("keydown", function (event) {
-                if (event.key === "Escape") {
-                    event.preventDefault(); event.stopPropagation();
-                    more.open = false; moreLabel.focus();
-                }
-            });
-
             var folderBtn = document.createElement("button");
             folderBtn.type = "button";
             folderBtn.className = "viewer-action-btn open-audio-folder";
@@ -1911,6 +1913,12 @@
                     group.remove();
                 }
             });
+            if (focusedAction) {
+                var nextFocus = Array.from(morePanel.querySelectorAll("button")).find(function (button) {
+                    return button.textContent === focusedAction.textContent;
+                });
+                (nextFocus || more.querySelector("summary")).focus({ preventScroll: true });
+            }
         };
 
         /**
