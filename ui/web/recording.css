@@ -1,7 +1,8 @@
 /* Recording HUD styles extracted from style.css. */
 
 /* 저장 장애는 일시적인 토스트와 분리해 새 녹음이 시작될 때까지 유지한다. */
-.recording-failure {
+.recording-failure,
+.recording-outcome {
   position: fixed;
   z-index: 2100;
   top: 12px;
@@ -24,14 +25,23 @@
 }
 
 .recording-failure[hidden],
+.recording-outcome[hidden],
 .recording-failure details[hidden] { display: none; }
+.recording-outcome {
+  border: 0.5px solid var(--border);
+  width: min(420px, calc(100vw - 32px));
+  padding-right: 64px;
+}
+.recording-outcome p { margin: 3px 0 0; white-space: pre-line; }
+.recording-outcome a { display: inline-block; margin: 6px 12px 0 0; color: var(--accent-text); }
+#recordingOutcomeClose { position: absolute; top: 10px; right: 10px; }
 .recording-failure strong { font-size: 15px; }
 .recording-failure p { margin: 6px 0 0; }
 .recording-failure summary { cursor: pointer; margin-top: 8px; }
 .recording-failure ul { padding-left: 20px; margin: 6px 0; }
 @media (max-width: 600px) {
   /* 메뉴·홈 버튼은 오류가 지속되는 동안에도 조작할 수 있어야 한다. */
-  .recording-failure { top: 80px; }
+  .recording-failure, .recording-outcome { top: 80px; }
 }
 
 /* 녹음 상태 표시: 화면 상단 가운데 플로팅 필 */

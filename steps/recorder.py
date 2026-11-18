@@ -31,6 +31,7 @@ from typing import Any, Union, cast
 from config import AppConfig, get_config
 from core.coreaudio_helper import get_aggregate_device_names
 from core.recording_channels import RECORDING_TRACK_COMMENT, has_sustained_recording_signal
+from core.zoom_topic import ZoomTopicObservation, save_recording_topic
 from steps.zoom_activity import ZoomAudioActivityChecker
 
 logger = logging.getLogger(__name__)
@@ -189,11 +190,15 @@ class AudioRecorder:
         self._start_time: float | None = None
         self._current_device: AudioDevice | None = None
         self._meeting_id: str | None = None
+        self._zoom_topic: ZoomTopicObservation | None = None
+        self._manual_zoom_topic_task: asyncio.Task[None] | None = None
         self._max_duration_task: asyncio.Task[None] | None = None
         self._duration_broadcast_task: asyncio.Task[None] | None = None
         self._capture_watchdog_task: asyncio.Task[None] | None = None
         self._capture_started_at = 0.0
         self._last_recording_error: dict[str, Any] | None = None
+        self._last_stop: dict[str, Any] | None = None
+        self._stop_reason = ""
         self._capture_failure_callback: Callable[[], None] | None = None
         self._split_level_meter = False
         self._audio_levels: dict[str, float] | None = None
@@ -263,6 +268,48 @@ class AudioRecorder:
     def on_capture_failure(self, callback: Callable[[], None]) -> None:
         """녹음 실패 확정 시 호출할 즉시 반환 알림 콜백을 등록한다."""
         self._capture_failure_callback = callback
+
+    def track_zoom_topic(self, observation: ZoomTopicObservation) -> None:
+        """자동 시작에 성공한 녹음에서만 현재 회의의 주제를 관측한다."""
+        if self.is_recording:
+            self._zoom_topic = observation
+
+    def _save_zoom_topic(self, source: Path, destination: Path) -> None:
+        """감시 폴더로 녹음을 이동하기 전에 동일 원본의 회의명을 기록한다."""
+        if self._zoom_topic is not None and self._zoom_topic.title:
+            try:
+                identity = source.stat(follow_symlinks=False)
+            except OSError:
+                return
+            save_recording_topic(self._config, destination, identity, self._zoom_topic.title)
+
+    async def _monitor_manual_zoom_topic(self, observation: ZoomTopicObservation) -> None:
+        """수동 녹음 시작 시 실제 Zoom 오디오가 있었던 한 회의의 명시적 주제만 수집한다."""
+        checker = ZoomAudioActivityChecker(self._config.zoom.process_name)
+        started_in_zoom = False
+        zoom_ended = False
+        while self.is_recording:
+            activity = await checker.check(require_coreaudio=True)
+            if activity.source != "coreaudio":
+                observation.observe("", ambiguous=True)
+                return
+            if activity.active:
+                if zoom_ended:
+                    observation.observe("", ambiguous=True)
+                    return
+                started_in_zoom = True
+                topic, ambiguous, authorized = await checker.read_meeting_topic()
+                if not authorized:
+                    observation.observe("", ambiguous=True)
+                    return
+                observation.observe(topic, ambiguous=ambiguous)
+                if observation.ambiguous:
+                    return
+            elif started_in_zoom:
+                zoom_ended = True
+            else:
+                return
+            await asyncio.sleep(self._config.zoom.poll_interval_seconds)
 
     async def detect_audio_devices(self) -> list[AudioDevice]:
         """사용 가능한 오디오 입력 장치 목록을 반환한다.
@@ -542,6 +589,8 @@ class AudioRecorder:
     async def start_recording(
         self,
         meeting_id: str | None = None,
+        *,
+        observe_manual_zoom_topic: bool = False,
     ) -> None:
         """녹음을 시작한다.
 
@@ -549,6 +598,7 @@ class AudioRecorder:
 
         Args:
             meeting_id: 회의 식별자 (None이면 타임스탬프로 자동 생성)
+            observe_manual_zoom_topic: 시스템 오디오를 포함한 수동 녹음에서 Zoom 주제를 확인한다.
 
         Raises:
             AlreadyRecordingError: 이미 녹음 중일 때
@@ -582,6 +632,7 @@ class AudioRecorder:
                 self._start_time = time.time()
                 self._capture_started_at = time.monotonic()
                 self._last_recording_error = None
+                self._last_stop = None
 
                 # 최대 녹음 시간 가드 시작
                 self._max_duration_task = asyncio.create_task(
@@ -612,6 +663,15 @@ class AudioRecorder:
                 self._capture_watchdog_task = asyncio.create_task(
                     self._capture_watchdog(), name="recording-capture-watchdog"
                 )
+                if observe_manual_zoom_topic and (
+                    self._split_level_meter
+                    or (self._current_device and self._current_device.is_blackhole)
+                    or "system" in self._current_devices
+                ):
+                    self._zoom_topic = ZoomTopicObservation()
+                    self._manual_zoom_topic_task = asyncio.create_task(
+                        self._monitor_manual_zoom_topic(self._zoom_topic), name="manual-zoom-topic"
+                    )
 
                 pids = (
                     {k: p.pid for k, p in self._processes.items()}
@@ -1036,6 +1096,7 @@ class AudioRecorder:
         self,
         *,
         _from_guard: bool = False,
+        zoom_session: ZoomTopicObservation | None = None,
     ) -> RecordingResult | None:
         """녹음을 정지하고 파일을 audio_input으로 이동한다.
 
@@ -1044,6 +1105,7 @@ class AudioRecorder:
 
         Args:
             _from_guard: _max_duration_guard에서 호출 시 True (내부 전용)
+            zoom_session: Zoom 종료 이벤트가 시작했던 녹음에만 정지를 적용한다.
 
         Returns:
             녹음 결과 (RecordingResult) 또는 최소 시간 미달 시 None
@@ -1051,15 +1113,39 @@ class AudioRecorder:
         Raises:
             FFmpegRecordError: ffmpeg 종료 처리 실패 시
         """
+        result, _ = await self.stop_recording_with_outcome(
+            _from_guard=_from_guard, zoom_session=zoom_session
+        )
+        return result
+
+    async def stop_recording_with_outcome(
+        self,
+        *,
+        _from_guard: bool = False,
+        zoom_session: ZoomTopicObservation | None = None,
+        expected_meeting_id: str | None = None,
+    ) -> tuple[RecordingResult | None, dict[str, Any] | None]:
+        """요청한 녹음만 종료하고 같은 시점에 확정한 저장 결과를 반환한다."""
         async with self._state_lock:
+            if zoom_session is not None and self._zoom_topic is not zoom_session:
+                return None, None
             meeting_id = self._meeting_id
+            if expected_meeting_id and meeting_id and expected_meeting_id != meeting_id:
+                return None, None
             if self._state == RecordingState.IDLE and self._last_recording_error is not None:
                 raise FFmpegRecordError(self._last_recording_error["error"])
+            if self._state != RecordingState.RECORDING:
+                previous = self._last_stop
+                if previous and (
+                    not expected_meeting_id or previous["meeting_id"] == expected_meeting_id
+                ):
+                    return None, previous
+                return None, None
+            self._stop_reason = ""
+            expected_files = len(self._current_files) if self._processes else 1
             partial_paths = self._partial_recording_files()
             try:
-                stopped, result, meeting_id = await self._stop_recording_locked(
-                    _from_guard=_from_guard
-                )
+                result = await self._stop_recording_locked(_from_guard=_from_guard)
             except FFmpegRecordError as exc:
                 logger.error(f"녹음 종료 실패: {exc}")
                 # 정상 종료 경로에서 실패한 경우도 abort에서 한 번만 알린다.
@@ -1067,25 +1153,34 @@ class AudioRecorder:
                     failure = self._remember_recording_error(meeting_id, partial_paths)
                     await self._broadcast_event("recording_error", failure)
                 raise
+            paths: list[Path] = []
+            if result is not None:
+                paths = (
+                    list(result.file_paths.values()) if result.file_paths else [result.file_path]
+                )
+            outcome = {
+                "meeting_id": meeting_id,
+                "ended_at": result.ended_at if result else datetime.now().isoformat(),
+                "saved": bool(paths),
+                "discarded": not paths,
+                "reason": self._stop_reason,
+                "files": [path.name for path in paths],
+                "expected_files": expected_files,
+            }
+            self._last_stop = outcome
 
         # 콜백은 외부 코드이므로 상태 lock 밖에서 호출한다. 콜백이 다음 녹음을
         # 시작해도 re-entrant lock 대기로 멈추지 않아야 한다.
-        if stopped:
-            await self._notify_recording_stopped(result, meeting_id)
-        return result
+        await self._notify_recording_stopped(result, outcome)
+        return result, outcome
 
     async def _stop_recording_locked(
         self,
         *,
         _from_guard: bool,
-    ) -> tuple[bool, RecordingResult | None, str | None]:
+    ) -> RecordingResult | None:
         """상태 lock을 보유한 채 녹음을 정지한다."""
-        if self._state != RecordingState.RECORDING:
-            logger.warning(f"녹음 중이 아닙니다. 현재 상태: {self._state.value}")
-            return False, None, None
-
         self._state = RecordingState.STOPPING
-        meeting_id = self._meeting_id
         terminated_cleanly = False
         try:
             # watcher보다 stop이 lock을 먼저 얻어도 이미 실패한 캡처를 게시하지 않는다.
@@ -1101,10 +1196,12 @@ class AudioRecorder:
                 result = await self._terminate_ffmpeg()
             terminated_cleanly = True
 
-            return True, result, meeting_id
-        except FFmpegRecordError:
+            return result
+        except (OSError, FFmpegRecordError) as exc:
             await self._await_critical_cleanup(self._abort_capture_locked(_from_guard=_from_guard))
             terminated_cleanly = True  # 실패 정리가 이미 모든 프로세스를 회수했다.
+            if isinstance(exc, OSError):
+                raise FFmpegRecordError("녹음 파일을 저장하지 못했습니다.") from exc
             raise
         finally:
             # 종료 중 예외/취소가 나도 STOPPING 상태와 ffmpeg 참조를 남기지 않는다.
@@ -1117,14 +1214,14 @@ class AudioRecorder:
     async def _notify_recording_stopped(
         self,
         result: RecordingResult | None,
-        meeting_id: str | None,
+        outcome: dict[str, Any],
     ) -> None:
         """상태 전이가 끝난 뒤 완료 콜백과 WebSocket 이벤트를 전달한다."""
         if result is not None:
             await self._broadcast_event(
                 "recording_stopped",
                 {
-                    "meeting_id": meeting_id,
+                    **outcome,
                     "duration_seconds": result.duration_seconds,
                     "file_path": str(result.file_path),
                     "audio_device": result.audio_device,
@@ -1137,17 +1234,14 @@ class AudioRecorder:
             await self._fire_callbacks(result)
             return
 
-        await self._broadcast_event(
-            "recording_stopped",
-            {
-                "meeting_id": meeting_id,
-                "discarded": True,
-                "reason": "최소 녹음 시간 미달",
-            },
-        )
+        await self._broadcast_event("recording_stopped", outcome)
 
     async def _cancel_background_tasks(self, *, _from_guard: bool) -> None:
         """녹음 가드와 경과시간 브로드캐스트 태스크를 종료한다."""
+        topic_task, self._manual_zoom_topic_task = self._manual_zoom_topic_task, None
+        if topic_task is not None:
+            topic_task.cancel()
+            await asyncio.gather(topic_task, return_exceptions=True)
         watchdog, self._capture_watchdog_task = self._capture_watchdog_task, None
         if watchdog is not None and watchdog is not asyncio.current_task():
             watchdog.cancel()
@@ -1223,6 +1317,7 @@ class AudioRecorder:
         self._start_time = None
         self._current_device = None
         self._meeting_id = None
+        self._zoom_topic = None
         self._max_duration_task = None
         self._duration_broadcast_task = None
         self._capture_started_at = 0.0
@@ -1248,7 +1343,7 @@ class AudioRecorder:
             FFmpegRecordError: 프로세스 종료 실패 시
         """
         if self._process is None or self._current_file is None:
-            return None
+            raise FFmpegRecordError("녹음 프로세스 또는 출력 파일을 확인할 수 없습니다.")
 
         duration = self.current_duration
         ended_at = datetime.now().isoformat()
@@ -1264,6 +1359,7 @@ class AudioRecorder:
 
         # 최소 시간 미달 체크
         if duration < self._min_duration:
+            self._stop_reason = f"최소 녹음 시간({self._min_duration:g}초)보다 짧습니다."
             logger.info(
                 f"녹음 시간 {duration:.1f}초 < 최소 {self._min_duration}초. "
                 f"파일 파기: {self._current_file}"
@@ -1278,12 +1374,14 @@ class AudioRecorder:
 
         file_size = self._current_file.stat().st_size
         if file_size == 0:
+            self._stop_reason = "녹음 파일이 비어 있습니다."
             logger.warning(f"녹음 파일이 비어있습니다: {self._current_file}")
             self._current_file.unlink()
             return None
 
         # 무음 감지: RMS 에너지가 임계값 미만이면 무음 파일로 판정
         if not self._check_audio_energy(self._current_file):
+            self._stop_reason = "녹음에서 소리가 감지되지 않았습니다."
             logger.warning(
                 f"무음 녹음 파일 파기: {self._current_file} "
                 f"(장치: {self._current_device.name if self._current_device else '알 수 없음'})"
@@ -1295,6 +1393,7 @@ class AudioRecorder:
         self._audio_input_dir.mkdir(parents=True, exist_ok=True)
         dest_file = self._audio_input_dir / self._current_file.name
 
+        self._save_zoom_topic(self._current_file, dest_file)
         shutil.move(str(self._current_file), str(dest_file))
         logger.info(f"녹음 파일 이동: {self._current_file} → {dest_file}")
 
@@ -1383,6 +1482,7 @@ class AudioRecorder:
 
         # 최소 시간 미달 체크
         if duration < self._min_duration:
+            self._stop_reason = f"최소 녹음 시간({self._min_duration:g}초)보다 짧습니다."
             logger.info(
                 f"녹음 시간 {duration:.1f}초 < 최소 {self._min_duration}초. 멀티트랙 파일 파기"
             )
@@ -1395,25 +1495,35 @@ class AudioRecorder:
         self._audio_input_dir.mkdir(parents=True, exist_ok=True)
         moved_files: dict[str, Path] = {}
         total_size = 0
+        failed_files: list[str] = []
 
         for track_name, file_path in self._current_files.items():
-            if not file_path.exists():
-                logger.warning(f"멀티트랙 파일 미생성: {track_name}={file_path}")
+            try:
+                if not file_path.exists():
+                    logger.warning(f"멀티트랙 파일 미생성: {track_name}={file_path}")
+                    continue
+                file_size = file_path.stat().st_size
+                if file_size == 0:
+                    logger.warning(f"멀티트랙 파일 비어있음: {track_name}={file_path}")
+                    file_path.unlink()
+                    continue
+                dest = self._audio_input_dir / file_path.name
+                self._save_zoom_topic(file_path, dest)
+                shutil.move(str(file_path), str(dest))
+            except OSError:
+                logger.exception(f"멀티트랙 파일 저장 실패: {track_name}")
+                failed_files.append(file_path.name)
                 continue
-
-            file_size = file_path.stat().st_size
-            if file_size == 0:
-                logger.warning(f"멀티트랙 파일 비어있음: {track_name}={file_path}")
-                file_path.unlink()
-                continue
-
-            dest = self._audio_input_dir / file_path.name
-            shutil.move(str(file_path), str(dest))
             moved_files[track_name] = dest
             total_size += file_size
             logger.info(f"멀티트랙 파일 이동: {file_path} → {dest}")
 
+        if failed_files and not moved_files:
+            raise FFmpegRecordError("녹음 트랙을 저장하지 못했습니다.")
+        if failed_files:
+            self._stop_reason = f"저장하지 못한 파일({', '.join(failed_files)})은 임시 녹음 폴더에서 확인해 주세요."
         if not moved_files:
+            self._stop_reason = "저장할 오디오 트랙이 없습니다."
             logger.warning("유효한 멀티트랙 파일이 없습니다.")
             return None
 
@@ -1596,6 +1706,7 @@ class AudioRecorder:
             "duration_seconds": round(self.current_duration, 1),
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
+            "last_stop": self._last_stop,
             "audio_levels": self._recent_audio_levels(),
             "last_error": self._last_recording_error.copy()
             if self._last_recording_error

@@ -281,7 +281,7 @@ def test_history_refresh_preserves_keyboard_focus_and_scroll(ui_page: Page) -> N
     )
     ui_page.locator("#batchHistoryButton").click()
     dialog = ui_page.get_by_role("dialog", name="작업 내역")
-    last_link = dialog.get_by_role("link", name="녹취 19", exact=True)
+    last_link = dialog.get_by_role("link", name="일시 미상 녹취 19", exact=True)
     last_link.focus()
     before = dialog.evaluate("el => el.scrollTop")
     receipt["events"].append(

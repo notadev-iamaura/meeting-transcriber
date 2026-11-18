@@ -98,8 +98,9 @@ class SettingsResponse(BaseModel):
     lifecycle_interval_hours: int = 24
     lifecycle_run_on_startup: bool = False
     # 자동 전사/요약
-    auto_processing_enabled: bool = False
-    auto_processing_run_at: str = "02:00"
+    auto_processing_enabled: bool = True
+    auto_processing_run_at: str = "01:00"
+    auto_processing_stop_at: str = "06:00"
     auto_processing_recent_hours: int = 48
     auto_processing_action: str = "full"
     auto_processing_max_items_per_run: int = 0
@@ -146,6 +147,7 @@ class SettingsUpdateRequest(BaseModel):
     # 자동 전사/요약
     auto_processing_enabled: bool | None = None
     auto_processing_run_at: str | None = None
+    auto_processing_stop_at: str | None = None
     auto_processing_recent_hours: int | None = None
     auto_processing_action: str | None = None
     auto_processing_max_items_per_run: int | None = None
@@ -194,6 +196,7 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         lifecycle_run_on_startup=config.lifecycle.run_on_startup,
         auto_processing_enabled=config.auto_processing.enabled,
         auto_processing_run_at=config.auto_processing.run_at,
+        auto_processing_stop_at=config.auto_processing.stop_at,
         auto_processing_recent_hours=config.auto_processing.recent_hours,
         auto_processing_action=config.auto_processing.action,
         auto_processing_max_items_per_run=getattr(config.auto_processing, "max_items_per_run", 0),
@@ -404,13 +407,15 @@ async def _update_settings_locked(
                 status_code=400,
                 detail="lifecycle_interval_hours 는 1~168 범위의 정수여야 합니다.",
             )
-    if "auto_processing_run_at" in updates:
-        v = updates["auto_processing_run_at"]
-        if not (isinstance(v, str) and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", v)):
-            raise HTTPException(
-                status_code=400,
-                detail="auto_processing_run_at 은 HH:MM 형식이어야 합니다.",
-            )
+    for field in ("auto_processing_run_at", "auto_processing_stop_at"):
+        if field in updates and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", updates[field]):
+            raise HTTPException(status_code=400, detail=f"{field} 값은 HH:MM 형식이어야 합니다.")
+    if updates.get("auto_processing_run_at", config.auto_processing.run_at) == updates.get(
+        "auto_processing_stop_at", config.auto_processing.stop_at
+    ):
+        raise HTTPException(
+            status_code=400, detail="야간 처리 시작 시각과 종료 시각을 다르게 지정해 주세요."
+        )
     if "auto_processing_recent_hours" in updates:
         v = updates["auto_processing_recent_hours"]
         if not (isinstance(v, int) and 1 <= v <= 720):
@@ -490,6 +495,8 @@ async def _update_settings_locked(
         changed_fields.append("auto_processing_enabled")
     if "auto_processing_run_at" in updates:
         changed_fields.append("auto_processing_run_at")
+    if "auto_processing_stop_at" in updates:
+        changed_fields.append("auto_processing_stop_at")
     if "auto_processing_recent_hours" in updates:
         changed_fields.append("auto_processing_recent_hours")
     if "auto_processing_action" in updates:
@@ -597,13 +604,10 @@ async def _update_settings_locked(
         if "auto_processing_enabled" in updates:
             val = "true" if updates["auto_processing_enabled"] else "false"
             content = _replace_yaml_value(content, "auto_processing", "enabled", val)
-        if "auto_processing_run_at" in updates:
-            content = _replace_yaml_value(
-                content,
-                "auto_processing",
-                "run_at",
-                f'"{updates["auto_processing_run_at"]}"',
-            )
+        for time_key in ("run_at", "stop_at"):
+            if f"auto_processing_{time_key}" in updates:
+                value = updates[f"auto_processing_{time_key}"]
+                content = _replace_yaml_value(content, "auto_processing", time_key, f'"{value}"')
         if "auto_processing_recent_hours" in updates:
             content = _replace_yaml_value(
                 content,
@@ -722,6 +726,8 @@ async def _update_settings_locked(
         auto_processing_updates["enabled"] = updates["auto_processing_enabled"]
     if "auto_processing_run_at" in updates:
         auto_processing_updates["run_at"] = updates["auto_processing_run_at"]
+    if "auto_processing_stop_at" in updates:
+        auto_processing_updates["stop_at"] = updates["auto_processing_stop_at"]
     if "auto_processing_recent_hours" in updates:
         auto_processing_updates["recent_hours"] = updates["auto_processing_recent_hours"]
     if "auto_processing_action" in updates:
@@ -748,6 +754,9 @@ async def _update_settings_locked(
         await lifecycle_scheduler.update_config(config)
 
     auto_processing_scheduler = getattr(request.app.state, "auto_processing_scheduler", None)
+    job_processor = getattr(request.app.state, "job_processor", None)
+    if auto_processing_updates and job_processor is not None:
+        job_processor.update_auto_processing_config(config.auto_processing)
     if auto_processing_updates and auto_processing_scheduler is not None:
         await auto_processing_scheduler.update_config(config)
 

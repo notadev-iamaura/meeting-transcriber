@@ -444,23 +444,22 @@
 
         els.searchEmpty.style.display = "none";
 
-        results.forEach(function (item) {
+        var meetings = deps.ListPanel && deps.ListPanel.getMeetings ? deps.ListPanel.getMeetings() : [];
+        results.forEach(function (item, index) {
             var el = document.createElement("div");
             el.className = "result-item";
             el.setAttribute("role", "button");
             el.setAttribute("tabindex", "0");
-            el.setAttribute("aria-label",
-                item.meeting_id + " 검색 결과 — " +
-                App.formatTime(item.start_time) + " ~ " +
-                App.formatTime(item.end_time));
+            el.setAttribute("aria-labelledby", "searchResultMeeting" + index + " searchResultTime" + index);
 
-            // 헤더: 회의 ID
+            // 회의 일시와 제목
             var header = document.createElement("div");
             header.className = "result-header";
 
             var meetingId = document.createElement("span");
             meetingId.className = "result-meeting-id";
-            meetingId.textContent = item.meeting_id;
+            meetingId.id = "searchResultMeeting" + index;
+            App.renderReferenceHeading(meetingId, item, meetings);
 
             header.appendChild(meetingId);
 
@@ -472,11 +471,6 @@
             // 메타 정보
             var meta = document.createElement("div");
             meta.className = "result-meta";
-
-            var dateItem = document.createElement("span");
-            dateItem.className = "result-meta-item";
-            dateItem.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(item.date || "-") + '</span>';
-            meta.appendChild(dateItem);
 
             if (item.speakers && item.speakers.length > 0) {
                 var speakerItem = document.createElement("span");
@@ -490,6 +484,7 @@
 
             var timeItem = document.createElement("span");
             timeItem.className = "result-meta-item";
+            timeItem.id = "searchResultTime" + index;
             timeItem.innerHTML = Icons.clock + ' <span>' + App.escapeHtml(App.formatTime(item.start_time) +
                 " ~ " + App.formatTime(item.end_time)) + '</span>';
             meta.appendChild(timeItem);

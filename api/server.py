@@ -179,19 +179,27 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             zoom_detector = ZoomDetector(config=config)
 
             if recorder is not None:
+                from core.zoom_topic import ZoomTopicObservation
+
+                auto_zoom_session: ZoomTopicObservation | None = None
 
                 async def _on_zoom_meeting_change(is_active: bool) -> None:
-                    """Zoom 회의 시작/종료 시 녹음을 제어한다."""
+                    """같은 Zoom 회의가 직접 시작한 녹음만 자동으로 종료한다."""
+                    nonlocal auto_zoom_session
                     if is_active:
+                        auto_zoom_session = None
                         logger.info("Zoom 회의 감지 → 자동 녹음 시작")
                         try:
                             await recorder.start_recording()
+                            auto_zoom_session = zoom_detector.observe_recording_topic()
+                            recorder.track_zoom_topic(auto_zoom_session)
                         except Exception as e:
                             logger.error(f"Zoom 자동 녹음 시작 실패: {e}")
-                    else:
+                    elif auto_zoom_session is not None:
+                        session, auto_zoom_session = auto_zoom_session, None
                         logger.info("Zoom 회의 종료 감지 → 녹음 정지")
                         try:
-                            await recorder.stop_recording()
+                            await recorder.stop_recording(zoom_session=session)
                         except Exception as e:
                             logger.error(f"Zoom 자동 녹음 정지 실패: {e}")
 

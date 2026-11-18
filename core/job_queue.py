@@ -26,6 +26,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from core.nightly_window import NIGHTLY_ACTIONS
 from core.quarantine import (
     QuarantineError,
     _open_directory_tree_no_follow,
@@ -128,6 +129,26 @@ class Job:
     # 마이그레이션 전 legacy job으로 간주해 실행 시 설정을 1회 snapshot한다.
     stt_provider: str = ""
     stt_model: str = ""
+    last_nightly_window: str = ""
+
+
+def nightly_transcription_exclusion(job: Job, window: str) -> str:
+    """현재 저장된 작업을 이 예약 창에서 등록할 수 없는 이유를 반환한다."""
+    if job.error_message.startswith("사용자가 취소함"):
+        return "사용자 취소"
+    if job.last_nightly_window == window:
+        return "이번 예약에서 이미 등록"
+    if job.stt_provider not in {"", "local"}:
+        return "외부 전사 선택"
+    if job.status == JobStatus.FAILED:
+        if job.requested_action not in {"", "full", "transcribe"} | NIGHTLY_ACTIONS:
+            return "다른 작업 진행 또는 복구 필요"
+        if job.retry_count >= job.max_retries:
+            return "재시도 한도 도달"
+        return ""
+    if job.status == JobStatus.RECORDED and not job.requested_action:
+        return ""
+    return "다른 작업 진행 또는 완료"
 
 
 @dataclass(frozen=True)
@@ -184,7 +205,10 @@ def parse_cancellation_claim(requested_action: str) -> CancellationClaim | None:
         JobStatus.EMBEDDING.value,
     }:
         return None
-    if not isinstance(original_action, str) or original_action not in {"", "transcribe", "full"}:
+    if (
+        not isinstance(original_action, str)
+        or original_action not in {"", "transcribe", "full"} | NIGHTLY_ACTIONS
+    ):
         return None
     if not isinstance(token, str):
         return None
@@ -1363,7 +1387,8 @@ class JobQueue:
         title TEXT NOT NULL DEFAULT '',
         requested_action TEXT NOT NULL DEFAULT '',
         stt_provider TEXT NOT NULL DEFAULT '',
-        stt_model TEXT NOT NULL DEFAULT ''
+        stt_model TEXT NOT NULL DEFAULT '',
+        last_nightly_window TEXT NOT NULL DEFAULT ''
     )
     """
 
@@ -1540,6 +1565,10 @@ class JobQueue:
         if "stt_model" not in existing_columns:
             logger.info("JobQueue 마이그레이션: jobs.stt_model 컬럼 추가")
             conn.execute("ALTER TABLE jobs ADD COLUMN stt_model TEXT NOT NULL DEFAULT ''")
+        if "last_nightly_window" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN last_nightly_window TEXT NOT NULL DEFAULT ''"
+            )
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
@@ -1567,6 +1596,10 @@ class JobQueue:
             stt_model = row["stt_model"]
         except (KeyError, IndexError):
             stt_model = ""
+        try:
+            last_nightly_window = row["last_nightly_window"]
+        except (KeyError, IndexError):
+            last_nightly_window = ""
 
         return Job(
             id=row["id"],
@@ -1582,6 +1615,7 @@ class JobQueue:
             requested_action=requested_action or "",
             stt_provider=stt_provider or "",
             stt_model=stt_model or "",
+            last_nightly_window=last_nightly_window or "",
         )
 
     def add_job(
@@ -1592,6 +1626,7 @@ class JobQueue:
         *,
         stt_provider: str = "",
         stt_model: str = "",
+        title: str = "",
     ) -> int:
         """새 작업을 큐에 등록한다.
 
@@ -1618,8 +1653,8 @@ class JobQueue:
                     INSERT INTO jobs
                         (meeting_id, audio_path, status, retry_count,
                          max_retries, error_message, created_at, updated_at,
-                         stt_provider, stt_model)
-                    VALUES (?, ?, ?, 0, ?, '', ?, ?, ?, ?)
+                         stt_provider, stt_model, title)
+                    VALUES (?, ?, ?, 0, ?, '', ?, ?, ?, ?, ?)
                     """,
                     (
                         meeting_id,
@@ -1630,6 +1665,7 @@ class JobQueue:
                         now,
                         stt_provider,
                         stt_model,
+                        title,
                     ),
                 )
                 conn.commit()
@@ -2088,11 +2124,9 @@ class JobQueue:
                 raise JobNotFoundError(job_id)
             current_status = str(row["status"])
             current_action = str(row["requested_action"] or "")
-            if current_status not in allowed_statuses or current_action not in {
-                "",
-                "transcribe",
-                "full",
-            }:
+            if current_status not in allowed_statuses or current_action not in (
+                {"", "transcribe", "full"} | NIGHTLY_ACTIONS
+            ):
                 raise InvalidTransitionError(job_id, current_status, "cancel")
             claim = CancellationClaim(
                 original_status=current_status,
@@ -2166,6 +2200,7 @@ class JobQueue:
         *,
         stt_provider: str = "",
         stt_model: str = "",
+        nightly_window: str = "",
     ) -> Job:
         """작업을 queued 상태로 전환하면서 실행 의도를 저장한다.
 
@@ -2181,7 +2216,10 @@ class JobQueue:
             JobQueueError: requested_action 이 유효하지 않을 때
             InvalidTransitionError: 현재 상태에서 queued 전이가 불가능할 때
         """
-        allowed_actions = {"", "transcribe", "full"}
+        allowed_actions = {"", "transcribe", "full"} | NIGHTLY_ACTIONS
+        scheduled = requested_action in NIGHTLY_ACTIONS
+        if scheduled and (stt_provider != "local" or not nightly_window):
+            raise JobQueueError("야간 예약에는 로컬 전사와 예약 시작 시각이 필요합니다.")
         if requested_action not in allowed_actions:
             raise JobQueueError(f"유효하지 않은 requested_action: {requested_action}")
         _validate_stt_snapshot(stt_provider, stt_model)
@@ -2190,12 +2228,16 @@ class JobQueue:
         now = self._now_iso()
         with self._write_lock:
             row = conn.execute(
-                "SELECT status FROM jobs WHERE id = ?",
+                "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
             if row is None:
                 raise JobNotFoundError(job_id)
             current_status = JobStatus(str(row["status"]))
+            if scheduled:
+                reason = nightly_transcription_exclusion(self._row_to_job(row), nightly_window)
+                if reason:
+                    raise JobQueueError(f"야간 예약 제외: {reason}")
             if JobStatus.QUEUED not in VALID_TRANSITIONS.get(current_status, set()):
                 raise InvalidTransitionError(
                     job_id,
@@ -2209,18 +2251,28 @@ class JobQueue:
                     requested_action = ?,
                     stt_provider = ?,
                     stt_model = ?,
+                    last_nightly_window = ?,
+                    retry_count = retry_count + ?,
                     error_message = '',
                     updated_at = ?
-                WHERE id = ? AND status = ?
+                WHERE id = ? AND status = ? AND requested_action = ? AND error_message = ?
+                    AND retry_count = ? AND last_nightly_window = ? AND stt_provider = ?
                 """,
                 (
                     JobStatus.QUEUED.value,
                     requested_action,
                     stt_provider,
                     stt_model,
+                    nightly_window if scheduled else row["last_nightly_window"],
+                    int(scheduled and current_status == JobStatus.FAILED),
                     now,
                     job_id,
                     current_status.value,
+                    row["requested_action"],
+                    row["error_message"],
+                    row["retry_count"],
+                    row["last_nightly_window"],
+                    row["stt_provider"],
                 ),
             )
             if cursor.rowcount != 1:
@@ -2780,6 +2832,8 @@ class JobQueue:
                 UPDATE jobs
                 SET status = ?, retry_count = ?,
                     stt_provider = ?, stt_model = ?,
+                    requested_action = CASE requested_action WHEN 'nightly_full' THEN 'full'
+                        WHEN 'nightly_transcribe' THEN 'transcribe' ELSE requested_action END,
                     error_message = '', updated_at = ?
                 WHERE id = ? AND status = ? AND retry_count = ?
                 """,
@@ -3475,6 +3529,8 @@ class JobQueue:
                     UPDATE jobs
                     SET status = ?,
                         retry_count = retry_count + 1,
+                        requested_action = CASE requested_action WHEN 'nightly_full' THEN 'full'
+                            WHEN 'nightly_transcribe' THEN 'transcribe' ELSE requested_action END,
                         error_message = '',
                         updated_at = ?
                     WHERE status = ? AND retry_count < max_retries
@@ -3608,6 +3664,7 @@ class AsyncJobQueue:
         *,
         stt_provider: str = "",
         stt_model: str = "",
+        title: str = "",
     ) -> int:
         """비동기로 새 작업을 등록한다.
 
@@ -3628,6 +3685,7 @@ class AsyncJobQueue:
             initial_status,
             stt_provider=stt_provider,
             stt_model=stt_model,
+            title=title,
         )
 
     async def get_job(self, job_id: int) -> Job:
@@ -3704,6 +3762,7 @@ class AsyncJobQueue:
         *,
         stt_provider: str = "",
         stt_model: str = "",
+        nightly_window: str = "",
     ) -> Job:
         """비동기로 작업을 queued 상태로 전환하면서 실행 의도를 저장한다."""
         import asyncio
@@ -3714,6 +3773,7 @@ class AsyncJobQueue:
             requested_action,
             stt_provider=stt_provider,
             stt_model=stt_model,
+            nightly_window=nightly_window,
         )
 
     async def queue_failed_job(

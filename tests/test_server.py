@@ -202,6 +202,23 @@ class TestRuntimeProfile:
             assert app.state.recorder is mocks["recorder"]
             mocks["recorder"].on_capture_failure.assert_called_once_with(notify_recording_failure)
             assert app.state.zoom_detector is mocks["zoom"]
+            zoom_change = mocks["zoom"].on_meeting_change.call_args.args[0]
+            mocks["recorder"].start_recording = AsyncMock()
+            asyncio.run(zoom_change(True))
+            mocks["recorder"].track_zoom_topic.assert_called_once_with(
+                mocks["zoom"].observe_recording_topic.return_value
+            )
+            mocks["recorder"].stop_recording = AsyncMock()
+            asyncio.run(zoom_change(False))
+            mocks["recorder"].stop_recording.assert_awaited_once_with(
+                zoom_session=mocks["zoom"].observe_recording_topic.return_value
+            )
+            # 이미 사용자가 녹음 중이어서 자동 시작이 실패하면 기존 녹음의 이름은 그대로다.
+            mocks["recorder"].start_recording.side_effect = RuntimeError("이미 녹음 중")
+            asyncio.run(zoom_change(True))
+            asyncio.run(zoom_change(False))
+            assert mocks["recorder"].stop_recording.await_count == 1
+            assert mocks["recorder"].track_zoom_topic.call_count == 1
             assert app.state.folder_watcher is mocks["watcher"]
             assert app.state.job_processor is mocks["processor"]
             assert (

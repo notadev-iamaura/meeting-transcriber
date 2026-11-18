@@ -912,13 +912,18 @@ class AutoProcessingConfig(BaseModel):
     """자동 전사/요약 실행 설정"""
 
     enabled: bool = Field(
-        default=False,
+        default=True,
         description="매일 지정 시각에 최근 회의 중 누락된 전사/요약을 자동 처리할지 여부.",
     )
     run_at: str = Field(
-        default="02:00",
+        default="01:00",
         pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
         description="자동 처리 실행 시각(HH:MM, 로컬 시간).",
+    )
+    stop_at: str = Field(
+        default="06:00",
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="예약 작업을 일시 정지하는 시각(HH:MM, 로컬 시간).",
     )
     recent_hours: int = Field(
         default=48,
@@ -959,6 +964,25 @@ class AutoProcessingConfig(BaseModel):
         ge=30,
         description="자동 전사 허용 thermal.cooldown_seconds 하한.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_window(cls, values: Any) -> Any:
+        """종료 시각을 저장하지 않던 이전 06시 시작 설정은 다섯 시간 창으로 연다."""
+        if (
+            isinstance(values, dict)
+            and values.get("run_at") == "06:00"
+            and "stop_at" not in values
+        ):
+            return {**values, "stop_at": "11:00"}
+        return values
+
+    @model_validator(mode="after")
+    def _validate_time_window(self) -> AutoProcessingConfig:
+        """예약 시작과 마감이 같은 모호한 설정을 거부한다."""
+        if self.run_at == self.stop_at:
+            raise ValueError("자동 처리 시작과 종료 시각은 달라야 합니다.")
+        return self
 
 
 class WikiRankingConfig(BaseModel):

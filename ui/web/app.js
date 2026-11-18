@@ -639,31 +639,219 @@
     }
 
     /**
-     * 회의 표시용 제목을 반환한다.
-     * 사용자 정의 title 이 있으면 그대로, 없으면 meeting_id 의 타임스탬프를 파싱.
+     * 저장된 회의 제목을 반환한다. 제목이 없으면 날짜와 구분되는 이름을 쓴다.
      * @param {Object} meeting - { meeting_id, created_at, title }
      * @returns {string} 표시용 제목
      */
     function extractMeetingTitle(meeting) {
-        if (!meeting) return "-";
-        // 사용자 정의 title 우선
-        if (meeting.title && meeting.title.trim()) {
-            return meeting.title.trim();
+        return (meeting && typeof meeting.title === "string" && meeting.title.trim()) || "제목 없는 회의";
+    }
+
+    function recordingStart(meeting) {
+        if (typeof meeting.recorded_at === "string") return meeting.recorded_at;
+        var match = String(meeting.meeting_id || "").match(/^meeting_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?:$|_| \(\d+\)$)/);
+        return match ? match[1] + "-" + match[2] + "-" + match[3] + "T" + match[4] + ":" + match[5] + ":" + match[6] : "";
+    }
+
+    /** 녹음 시작 시각을 우선하고, 과거 파일에 등록 시각만 있으면 이를 명시한다. */
+    function meetingDateLabel(meeting) {
+        var started = recordingStart(meeting);
+        if (started) return formatDate(started);
+        if (meeting.date && /^\d{4}-\d{2}-\d{2}$/.test(meeting.date)) return meeting.date + " · 시간 미상";
+        if (meeting.created_at) return "등록 " + formatDate(meeting.created_at);
+        return "일시 미상";
+    }
+
+    function compareMeetingTimes(a, b, oldestFirst) {
+        var left = Date.parse(recordingStart(a) || a.created_at || "");
+        var right = Date.parse(recordingStart(b) || b.created_at || "");
+        if (isNaN(left)) return isNaN(right) ? 0 : 1;
+        if (isNaN(right)) return -1;
+        return oldestFirst ? left - right : right - left;
+    }
+
+    /** 목록·출처에서 같은 순서의 두 줄을 쓰며 전체 제목은 보조기술과 툴팁에도 유지한다. */
+    function renderMeetingHeading(host, meeting) {
+        var date = document.createElement("span");
+        date.className = "meeting-heading-date";
+        date.textContent = meetingDateLabel(meeting);
+        var title = document.createElement("span");
+        title.className = "meeting-heading-name";
+        title.textContent = extractMeetingTitle(meeting);
+        title.title = title.textContent;
+        host.classList.add("meeting-heading");
+        host.replaceChildren(date, document.createTextNode(" "), title);
+    }
+
+    // 검색 청크에 저장되지 않는 편집 가능한 회의 제목은 목록 또는 현재 회의 정보에서 읽는다.
+    var headingRequests = new Map();
+    function renderReferenceHeading(host, reference, meetings) {
+        var id = reference.meeting_id;
+        var known = (meetings || []).find(function (entry) { return entry.meeting_id === id; });
+        if (known || Object.prototype.hasOwnProperty.call(reference, "title") || !id) {
+            renderMeetingHeading(host, Object.assign({}, reference, known));
+            return;
         }
-        // meeting_YYYYMMDD_HHMMSS 패턴 매칭
-        var mid = meeting.meeting_id || "";
-        var match = mid.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
-        if (match) {
-            return (
-                match[1] + "-" + match[2] + "-" + match[3] + " " +
-                match[4] + ":" + match[5]
-            );
+        renderMeetingHeading(host, Object.assign({}, reference, { title: "제목 확인 중…" }));
+        if (!headingRequests.has(id)) {
+            headingRequests.set(id, apiRequest("/meetings/" + encodeURIComponent(id))
+                .finally(function () { headingRequests.delete(id); }));
         }
-        // 폴백: created_at
-        if (meeting.created_at) {
-            return formatDate(meeting.created_at);
+        headingRequests.get(id).then(function (meeting) {
+            renderMeetingHeading(host, Object.assign({}, reference, meeting));
+        }).catch(function () {
+            renderMeetingHeading(host, Object.assign({}, reference, { title: "회의 제목 확인 불가" }));
+        });
+    }
+
+    /** 회의 일시와 제목을 함께 읽을 수 있는 단일 선택기. 기존 폼의 value/change를 유지한다. */
+    function createMeetingPicker(select, label, emptyLabel, showStatus) {
+        var wrap = document.createElement("div");
+        wrap.className = "meeting-picker";
+        var trigger = document.createElement("button");
+        trigger.id = select.id + "Picker";
+        trigger.type = "button";
+        trigger.className = "meeting-picker-trigger";
+        trigger.setAttribute("role", "combobox");
+        trigger.setAttribute("aria-haspopup", "listbox");
+        trigger.setAttribute("aria-expanded", "false");
+        var value = document.createElement("span");
+        value.id = trigger.id + "Value";
+        trigger.setAttribute("aria-labelledby", label.id + " " + value.id);
+        trigger.appendChild(value);
+        var list = document.createElement("div");
+        list.id = trigger.id + "Options";
+        list.className = "meeting-picker-options";
+        list.setAttribute("role", "listbox");
+        list.setAttribute("aria-labelledby", label.id);
+        list.hidden = true;
+        trigger.setAttribute("aria-controls", list.id);
+        select.hidden = true;
+        select.after(wrap);
+        wrap.append(trigger, list);
+        var active = 0;
+        var meetings = [];
+        var prefix = "";
+        var lastTyped = 0;
+
+        function display(host, index) {
+            host.classList.remove("meeting-heading");
+            if (index > 0) renderMeetingHeading(host, meetings[index - 1]);
+            else host.textContent = emptyLabel;
         }
-        return mid || "-";
+        function sync() {
+            display(value, select.selectedIndex);
+            Array.from(list.children).forEach(function (option, index) {
+                option.setAttribute("aria-selected", String(index === select.selectedIndex));
+            });
+        }
+        function focusOption(index) {
+            if (!list.children.length) return;
+            list.children[active]?.classList.remove("active");
+            active = Math.min(Math.max(index, 0), list.children.length - 1);
+            var option = list.children[active];
+            option.classList.add("active");
+            trigger.setAttribute("aria-activedescendant", option.id);
+            if (!list.hidden) {
+                var top = option.offsetTop, bottom = top + option.offsetHeight;
+                if (top < list.scrollTop) list.scrollTop = top;
+                else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+            }
+        }
+        function outside(event) {
+            if (!wrap.contains(event.target)) close();
+        }
+        function open() {
+            if (!list.hidden) return;
+            trigger.focus({preventScroll: true});
+            list.hidden = false;
+            trigger.setAttribute("aria-expanded", "true");
+            focusOption(select.selectedIndex);
+            document.addEventListener("pointerdown", outside, true);
+        }
+        function close() {
+            list.hidden = true;
+            trigger.setAttribute("aria-expanded", "false");
+            trigger.removeAttribute("aria-activedescendant");
+            document.removeEventListener("pointerdown", outside, true);
+            prefix = "";
+        }
+        function choose(index) {
+            var changed = select.selectedIndex !== index;
+            select.selectedIndex = index;
+            close();
+            sync();
+            if (changed) select.dispatchEvent(new Event("change", {bubbles: true}));
+        }
+        function setMeetings(rows, selectedId) {
+            var highlightedId = !list.hidden && select.options[active] ? select.options[active].value : null;
+            var restore = selectedId === undefined ? select.value : selectedId;
+            meetings = rows;
+            select.replaceChildren();
+            list.replaceChildren();
+            [null].concat(meetings).forEach(function (meeting, index) {
+                var option = document.createElement("option");
+                option.value = meeting ? meeting.meeting_id : "";
+                option.textContent = meeting ? meetingDateLabel(meeting) + " · " + extractMeetingTitle(meeting) : emptyLabel;
+                select.appendChild(option);
+                var row = document.createElement("div");
+                row.setAttribute("role", "option");
+                row.id = list.id + "-" + index;
+                row.dataset.value = option.value;
+                var text = document.createElement("span");
+                display(text, index);
+                row.appendChild(text);
+                if (meeting && showStatus && meeting.status) {
+                    var status = document.createElement("span");
+                    status.className = "meeting-picker-status";
+                    status.textContent = getStatusLabel(meeting);
+                    row.appendChild(status);
+                }
+                list.appendChild(row);
+            });
+            select.value = restore || "";
+            if (select.selectedIndex < 0) select.selectedIndex = 0;
+            sync();
+            if (!list.hidden) {
+                var index = Array.from(select.options).findIndex(function (opt) { return opt.value === highlightedId; });
+                focusOption(index < 0 ? select.selectedIndex : index);
+            }
+        }
+        trigger.addEventListener("click", function () { if (list.hidden) open(); else close(); });
+        trigger.addEventListener("blur", close);
+        list.addEventListener("mousedown", function (event) { event.preventDefault(); });
+        list.addEventListener("click", function (event) {
+            var row = event.target.closest('[role="option"]');
+            if (row) choose(Array.prototype.indexOf.call(list.children, row));
+        });
+        trigger.addEventListener("keydown", function (event) {
+            if (event.metaKey || event.ctrlKey || event.isComposing) return;
+            var key = event.key;
+            if (key === "Escape" && !list.hidden) {
+                close();
+                event.stopPropagation();
+            } else if (key === "Enter" || key === " ") {
+                if (list.hidden) open(); else choose(active);
+            } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(key)) {
+                open();
+                if (key === "Home") focusOption(0);
+                else if (key === "End") focusOption(list.children.length - 1);
+                else focusOption(active + (key === "ArrowDown" ? 1 : -1));
+            } else if (key.length === 1 && !event.altKey) {
+                open();
+                var now = Date.now();
+                prefix = (now - lastTyped < 700 ? prefix : "") + key.toLowerCase();
+                lastTyped = now;
+                var found = meetings.findIndex(function (meeting) {
+                    return extractMeetingTitle(meeting).toLowerCase().startsWith(prefix) || meetingDateLabel(meeting).startsWith(prefix);
+                });
+                if (found >= 0) focusOption(found + 1);
+            } else return;
+            event.preventDefault();
+        });
+        select.addEventListener("change", sync);
+        setMeetings([]);
+        return {setMeetings: setMeetings, sync: sync, destroy: close};
     }
 
     /** 전체 전사문의 첫 등장 순서로 회의 안에서만 쓰는 표시명을 만든다. */
@@ -707,6 +895,11 @@
         copyToClipboard: copyToClipboard,
         createSkeletonCards: createSkeletonCards,
         extractMeetingTitle: extractMeetingTitle,
+        meetingDateLabel: meetingDateLabel,
+        compareMeetingTimes: compareMeetingTimes,
+        renderMeetingHeading: renderMeetingHeading,
+        renderReferenceHeading: renderReferenceHeading,
+        createMeetingPicker: createMeetingPicker,
         buildSpeakerLabels: buildSpeakerLabels,
         speakerLabel: speakerLabel,
 

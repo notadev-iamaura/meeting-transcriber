@@ -290,6 +290,68 @@ def test_stop_http_failure_restores_persistent_capture_warning(browser: Browser)
             context.close()
 
 
+def test_only_one_stop_action_and_actual_transcription_state(browser: Browser) -> None:
+    """대형·축소 화면에서 한 번 종료하고 회의 등록·대기·실행·완료를 순서대로 확인한다."""
+    with audio_recovery_server() as fixture:
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(f"{fixture.url}/app")
+            _control(page, "record-start")
+            stop = page.get_by_role("button", name="녹음 끝내기", exact=True)
+            expect(stop).to_have_count(1)
+            page.get_by_role("button", name="녹음 HUD 최소화").click()
+            expect(stop).to_have_count(1)
+            stop.click()
+            notice = page.locator("#recordingOutcome")
+            expect(notice).to_contain_text("녹음 파일을 저장했습니다")
+            expect(notice).to_contain_text("미등록 · 전사 시작 전")
+            assert fixture.stop_posts == 1
+            for action, label in [
+                ("record-register", "전사 시작 전"),
+                ("record-queue", "전사 대기열에 등록됨"),
+                ("record-transcribe", "전사 중"),
+                ("record-complete", "전사 완료"),
+            ]:
+                _control(page, action)
+                expect(page.locator("#recordingOutcomeMessage")).to_have_text(label)
+            expect(notice.get_by_role("link", name="회의 열기")).to_have_attribute(
+                "href", "/app/viewer/capture_1"
+            )
+            page.reload()
+            expect(notice).to_contain_text("전사 완료")
+            notice.get_by_role("button", name="녹음 결과 닫기").click()
+            page.reload()
+            expect(notice).to_be_hidden()
+        finally:
+            context.close()
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_short_recording_has_no_transcription_link(browser: Browser, automatic: bool) -> None:
+    """버튼과 자동 종료 모두 짧은 녹음의 저장 여부와 전사 미시작을 안내한다."""
+    with audio_recovery_server() as fixture:
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(f"{fixture.url}/app")
+            _control(page, "record-start")
+            with page.expect_response("**/__fixture/record-short"):
+                _control(page, "record-short")
+            if automatic:
+                _control(page, "record-auto-stop")
+            else:
+                page.get_by_role("button", name="녹음 끝내기", exact=True).click()
+            notice = page.locator("#recordingOutcome")
+            expect(notice).to_contain_text("저장하지 않았습니다")
+            expect(notice).to_contain_text("최소 녹음 시간(30초)")
+            expect(notice).to_contain_text("전사를 시작하지 않았습니다")
+            expect(notice.get_by_role("link")).to_have_count(0)
+            assert fixture.stop_posts == int(not automatic)
+        finally:
+            context.close()
+
+
 def test_audio_warnings_fit_mobile_viewport(browser: Browser) -> None:
     """좁은 화면에서도 오류·재시도 버튼이 잘리지 않는다."""
     with audio_recovery_server() as fixture:

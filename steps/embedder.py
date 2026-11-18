@@ -30,6 +30,7 @@ from typing import Any, cast
 from config import AppConfig, get_config
 from core.io_utils import atomic_write_json, read_text_no_follow
 from core.model_manager import ModelLoadManager, await_native_inference, get_model_manager
+from core.nightly_window import finish_nightly_write
 from core.preflight import run_preflight
 from steps.chunker import ChunkedResult
 
@@ -952,6 +953,18 @@ class Embedder:
             embedding_dimension=self._dimension,
         )
 
+        await finish_nightly_write(self._store_indexes(result))
+        logger.info(
+            f"임베딩 파이프라인 완료: meeting_id={meeting_id}, "
+            f"청크 {result.total_chunks}개, "
+            f"ChromaDB={'성공' if result.chroma_stored else '실패'}, "
+            f"FTS5={'성공' if result.fts_stored else '실패'}"
+        )
+        return result
+
+    async def _store_indexes(self, result: EmbeddedResult) -> None:
+        """같은 임베딩 결과를 두 검색 저장소에 게시하고 실패 시 부분 저장을 정리한다."""
+        meeting_id = result.meeting_id
         try:
             # 3. ChromaDB 저장 (fail-loud: StorageError 가 발생하면 그대로 raise)
             # 정책: ChromaDB 또는 FTS5 어느 한 쪽이라도 저장 실패 시 단계 자체를 실패로 처리.
@@ -960,7 +973,7 @@ class Embedder:
             # 차라리 명시적으로 실패시켜 재시도 또는 사용자 알림으로 이어지게 한다.
             await asyncio.to_thread(
                 _store_chunks_chroma,
-                embedded_chunks,
+                result.chunks,
                 self._chroma_dir,
                 meeting_id,
             )
@@ -970,7 +983,7 @@ class Embedder:
             await asyncio.to_thread(_ensure_fts_table, self._meetings_db)
             await asyncio.to_thread(
                 _store_chunks_fts,
-                embedded_chunks,
+                result.chunks,
                 self._meetings_db,
                 meeting_id,
             )
@@ -980,16 +993,6 @@ class Embedder:
             if isinstance(e, StorageError):
                 raise
             raise StorageError(f"검색 인덱스 저장 실패: {e}") from e
-
-        # 5. 결과 로깅
-        logger.info(
-            f"임베딩 파이프라인 완료: meeting_id={meeting_id}, "
-            f"청크 {result.total_chunks}개, "
-            f"ChromaDB={'성공' if result.chroma_stored else '실패'}, "
-            f"FTS5={'성공' if result.fts_stored else '실패'}"
-        )
-
-        return result
 
     async def _purge_partial_index_after_storage_failure(
         self,

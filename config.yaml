@@ -273,8 +273,9 @@ lifecycle:
 
 # === 자동 전사/요약 설정 ===
 auto_processing:
-  enabled: false                             # 매일 지정 시각에 누락된 전사/요약 자동 처리
-  run_at: "02:00"                            # 실행 시각 (HH:MM, 로컬 시간)
+  enabled: true                              # 매일 지정 시각에 최근 미전사 녹음 처리
+  run_at: "01:00"                            # 시작 시각 (HH:MM, 로컬 시간)
+  stop_at: "06:00"                           # 종료 시각에 예약 작업을 안전하게 보류
   recent_hours: 48                           # 최근 N시간 내 회의만 대상
   action: "full"                             # transcribe | summarize | full
   run_on_startup_if_missed: true             # 시작/감사 완료 시 오늘 실행 시간이 지났으면 1회 실행

@@ -2851,6 +2851,7 @@ class PipelineManager:
         stt_provider: str | None = None,
         stt_model: str | None = None,
         stop_after: PipelineStep | None = None,
+        require_full_processing: bool = False,
     ) -> PipelineState:
         """회의 전체 파이프라인을 같은 회의의 다른 mutation과 직렬화해 실행한다.
 
@@ -2858,6 +2859,8 @@ class PipelineManager:
         확정하고 검증한 뒤 전체 실행 구간 동안 공유 lease를 유지한다.
         """
         # ID 자동 생성도 실제 본문과 동일한 lexical 입력 경로를 사용한다.
+        if require_full_processing and not self._checkpoint_enabled:
+            raise PipelineError("야간 전체 처리를 이어가려면 체크포인트를 활성화해야 합니다.")
         if stop_after is not None:
             if not isinstance(stop_after, PipelineStep) or stop_after not in PIPELINE_STEPS:
                 raise PipelineError("stop_after는 유효한 PipelineStep이어야 합니다")
@@ -2878,6 +2881,7 @@ class PipelineManager:
                 stt_provider=stt_provider,
                 stt_model=stt_model,
                 stop_after=stop_after,
+                require_full_processing=require_full_processing,
             )
 
     async def _run_with_meeting_lease_held(
@@ -2891,6 +2895,7 @@ class PipelineManager:
         stt_provider: str | None = None,
         stt_model: str | None = None,
         stop_after: PipelineStep | None = None,
+        require_full_processing: bool = False,
     ) -> PipelineState:
         """공유 회의 mutation lease를 보유한 상태에서 파이프라인 본문을 실행한다.
 
@@ -3276,6 +3281,14 @@ class PipelineManager:
                 if llm_warning is not None and llm_warning not in state.warnings:
                     state.warnings.append(llm_warning)
                 mem_ok, mem_free = self._resource_guard.check_memory()
+                if require_full_processing and not mem_ok:
+                    state.status = "paused"
+                    state.current_step = step.value
+                    state.error_message = (
+                        f"가용 메모리 부족({mem_free:.1f}GB)으로 {step.value} 단계 대기 중"
+                    )
+                    self._save_state(state, state_path)
+                    return state
                 if _skip_llm or not mem_ok:
                     # 스킵 사유에 따른 메시지 구분
                     if _skip_llm:

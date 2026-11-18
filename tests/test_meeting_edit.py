@@ -216,6 +216,30 @@ class TestPatchMeetingTitle:
 
 
 class TestUpdateSummary:
+    def test_다른_창에서_바꾼_요약을_보호하고_재전송은_멱등하다(
+        self, client: TestClient, seeded_meeting: str, isolated_base: Path
+    ) -> None:
+        """두 마크다운이 있는 과거 회의도 표시된 본문에만 조건부 편집을 적용한다."""
+        directory = isolated_base / "outputs" / seeded_meeting
+        minutes = directory / "meeting_minutes.md"
+        old_minutes = minutes.read_bytes()
+        summary = directory / "summary.md"
+        summary.write_text("편집 시작 시점", encoding="utf-8")
+        url = f"/api/meetings/{seeded_meeting}/summary"
+        base = client.get(url).json()["markdown"]
+        first = {"markdown": "다른 창에서 저장한 내용", "expected_markdown": base}
+        assert client.put(url, json=first).status_code == 200
+        backup = summary.with_suffix(".md.bak").read_bytes()
+        stale = {"markdown": "남아 있는 초안", "expected_markdown": base}
+        assert client.put(url, json=stale).status_code == 412
+        assert client.put(url, json=first).status_code == 200
+        assert summary.with_suffix(".md.bak").read_bytes() == backup
+        assert client.get(url).json()["markdown"] == first["markdown"]
+        stale["expected_markdown"] = first["markdown"]
+        assert client.put(url, json=stale).status_code == 200
+        assert client.get(url).json()["markdown"] == stale["markdown"]
+        assert minutes.read_bytes() == old_minutes
+
     def test_요약_덮어쓰기(
         self,
         client: TestClient,

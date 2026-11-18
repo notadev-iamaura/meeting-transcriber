@@ -39,6 +39,9 @@
             var _meetingsHasMore = false; // 추가 페이지 존재 여부
             var _meetingsLoading = false; // 첫 페이지/새로고침 로딩 중
             var _meetingsLoadingMore = false; // 추가 페이지 로딩 중
+            var _pageOrder = "newest";
+            var _loadedOrder = "newest";
+            var _pageGeneration = 0;
 
             // 다중 선택 상태 (bulk-actions §A)
             // _selectedIds: 현재 체크된 meeting_id 의 Set
@@ -176,6 +179,15 @@
                 // 정렬 변경
                 if (_sortEl) {
                     _sortEl.addEventListener("change", function () {
+                        var order = _sortEl.value === "oldest" ? "oldest" : "newest";
+                        if (order !== _pageOrder) {
+                            _pageOrder = order;
+                            _pageGeneration++;
+                            _meetingsLoading = false;
+                            _meetingsLoadingMore = false;
+                            if (_meetingsHasMore || !_meetings.length) loadMeetings();
+                            else _loadedOrder = order;
+                        }
                         _applyFilterAndSort();
                     });
                 }
@@ -240,6 +252,106 @@
                 var _recEpoch = 0;
                 var _recStatusPending = null;
                 var _recFailureSignature = "";
+                var outcomeNotice = document.getElementById("recordingOutcome");
+                var outcome = null;
+                var outcomeQuery = null;
+                var outcomeStamp = "";
+
+                function _hideOutcome() {
+                    if (outcomeNotice) outcomeNotice.hidden = true;
+                    outcome = null;
+                    outcomeQuery = null;
+                }
+
+                var closeOutcome = document.getElementById("recordingOutcomeClose");
+                if (closeOutcome) closeOutcome.addEventListener("click", function () {
+                    _hideOutcome();
+                    try { sessionStorage.setItem("recap.dismissedRecording", outcomeStamp); } catch (_) {}
+                });
+
+                async function _refreshOutcomeTracks() {
+                    if (!outcome || !outcome.saved || outcomeQuery || outcomeNotice.hidden) return;
+                    var current = outcome;
+                    outcomeQuery = current;
+                    try {
+                        var tracks = await Promise.all(current.files.map(async function (name) {
+                            var id = name.replace(/\.[^.]+$/, "");
+                            try {
+                                var meeting = await App.apiRequest("/meetings/" + encodeURIComponent(id));
+                                if (meeting.meeting_id !== id) return {name: name, label: "전사 상태 확인 필요"};
+                                var label = App.getStatusLabel(meeting);
+                                if (meeting.status === "recorded") label = "전사 시작 전";
+                                if (meeting.status === "queued") label = "전사 대기열에 등록됨";
+                                if (label === "완료") label = "전사 완료";
+                                return {name: name, id: id, label: label || "전사 상태 확인 필요"};
+                            } catch (error) {
+                                return {name: name, label: error.status === 404 ? "미등록 · 전사 시작 전" : "전사 상태 확인 필요"};
+                            }
+                        }));
+                        if (outcome !== current) return;
+                        var message = tracks.map(function (track) {
+                            return tracks.length > 1 ? track.name + " · " + track.label : track.label;
+                        }).join("\n");
+                        if (current.reason) message += "\n" + current.reason;
+                        var messageEl = document.getElementById("recordingOutcomeMessage");
+                        if (messageEl.textContent !== message) App.safeText(messageEl, message);
+                        var links = document.getElementById("recordingOutcomeLinks");
+                        var registered = tracks.filter(function (track) { return track.id; });
+                        var ids = JSON.stringify(registered.map(function (track) { return track.id; }));
+                        if (links.dataset.ids !== ids) {
+                            links.dataset.ids = ids;
+                            links.replaceChildren();
+                            registered.forEach(function (track) {
+                                var link = document.createElement("a");
+                                link.href = "/app/viewer/" + encodeURIComponent(track.id);
+                                link.textContent = tracks.length > 1 ? track.name + " 열기" : "회의 열기";
+                                link.addEventListener("click", function (event) {
+                                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                    event.preventDefault();
+                                    Router.navigate(link.getAttribute("href"));
+                                });
+                                links.appendChild(link);
+                            });
+                        }
+                    } finally {
+                        if (outcomeQuery === current) outcomeQuery = null;
+                    }
+                }
+
+                function _onOutcomeJobUpdate(event) {
+                    if (!outcome || !outcome.saved) return;
+                    var id = (event.detail || {}).meeting_id;
+                    if (outcome.files.some(function (name) { return name.replace(/\.[^.]+$/, "") === id; })) {
+                        _refreshOutcomeTracks();
+                    }
+                }
+                ["ws:job_added", "ws:job_completed", "ws:pipeline_status"].forEach(function (name) {
+                    document.addEventListener(name, _onOutcomeJobUpdate);
+                });
+
+                function _showOutcome(detail) {
+                    if (!outcomeNotice || !detail || !detail.ended_at || !Array.isArray(detail.files) || typeof detail.saved !== "boolean") return;
+                    var stamp = detail.meeting_id + "/" + detail.ended_at;
+                    if (outcomeStamp !== stamp) {
+                        _hideOutcome();
+                        outcomeStamp = stamp;
+                        try { if (sessionStorage.getItem("recap.dismissedRecording") === stamp) return; } catch (_) {}
+                        outcome = detail;
+                        var files = detail.files || [];
+                        var title = detail.saved ? "녹음 파일을 저장했습니다" : "녹음 파일을 저장하지 않았습니다";
+                        if (detail.saved && files.length < detail.expected_files) {
+                            title = "녹음 파일 " + detail.expected_files + "개 중 " + files.length + "개를 저장했습니다";
+                        }
+                        App.safeText(document.getElementById("recordingOutcomeTitle"), title);
+                        App.safeText(document.getElementById("recordingOutcomeMessage"), detail.saved
+                            ? "전사 상태 확인 중…" : detail.reason + " 전사를 시작하지 않았습니다.");
+                        var links = document.getElementById("recordingOutcomeLinks");
+                        links.replaceChildren();
+                        delete links.dataset.ids;
+                        outcomeNotice.hidden = false;
+                    }
+                    _refreshOutcomeTracks();
+                }
                 function _formatRecDuration(sec) {
                     var s0 = Math.floor(sec);
                     if (s0 < 0) s0 = 0;
@@ -357,6 +469,7 @@
 
                 function _renderRecordingFailure(detail) {
                     detail = detail || {};
+                    _hideOutcome();
                     _finishRecHUD();
                     _recMeetingId = detail.meeting_id || _recMeetingId;
                     var signature = JSON.stringify(detail);
@@ -386,15 +499,28 @@
                     _recTerminal = false;
                     _recMeetingId = detail.meeting_id || null;
                     _recFailureSignature = "";
+                    _hideOutcome();
                     var failure = document.getElementById("recordingFailure");
                     if (failure) failure.hidden = true;
                     _showRecHUD(mode);
                     _startRecTicker(detail.duration_seconds || 0);
                     _renderRecLevels(detail.audio_levels);
-                    ["recordingStopBtn", "recordingOverlayStopBtn", "recordingOverlayCancelBtn"].forEach(function (id) {
-                        var button = document.getElementById(id);
-                        if (button) button.disabled = false;
-                    });
+                    _setRecStopping(false);
+                }
+
+                function _setRecStopping(stopping) {
+                    var label = stopping ? "저장 확인 중…" : "녹음 끝내기";
+                    var overlayStop = document.getElementById("recordingOverlayStopBtn");
+                    var pillStop = document.getElementById("recordingStopBtn");
+                    if (overlayStop) {
+                        overlayStop.disabled = stopping;
+                        App.safeText(overlayStop, label);
+                    }
+                    if (pillStop) {
+                        pillStop.disabled = stopping;
+                        pillStop.title = label;
+                        pillStop.setAttribute("aria-label", label);
+                    }
                 }
 
                 function _currentRecEvent(detail) {
@@ -422,6 +548,7 @@
                         } else if (_recActive && rec.state !== "stopping") {
                             _finishRecHUD();
                         }
+                        if (!rec.is_recording && rec.last_stop && rec.state === "idle") _showOutcome(rec.last_stop);
                         return false;
                     }).catch(function () { return false; }).finally(function () { _recStatusPending = null; });
                     return _recStatusPending;
@@ -445,8 +572,10 @@
                     loadMeetings();
                 });
                 document.addEventListener("ws:recording_stopped", function (event) {
-                    if (!_currentRecEvent(event.detail || {})) return;
+                    var detail = event.detail || {};
+                    if (!_currentRecEvent(detail) || _recFailureSignature) return;
                     _finishRecHUD();
+                    _showOutcome(detail);
                     loadMeetings();
                 });
                 document.addEventListener("ws:recording_duration", function (e) {
@@ -489,21 +618,28 @@
                     }
 
                     async function sendStop() {
+                        if (!_recActive) return;
                         var stopEpoch = _recEpoch;
+                        if (document.getElementById("recordingOverlayStopBtn").disabled) return;
+                        _setRecStopping(true);
                         try {
-                            await App.apiRequest("/recording/stop", { method: "POST" });
-                            if (stopEpoch === _recEpoch || !_recActive) _finishRecHUD();
+                            var detail = await App.apiRequest("/recording/stop", {
+                                method: "POST", headers: {"Content-Type": "application/json"},
+                                body: JSON.stringify({meeting_id: _recMeetingId})
+                            });
+                            if (!_currentRecEvent(detail) || _recFailureSignature || (stopEpoch !== _recEpoch && _recActive)) return;
+                            if (_recActive) _finishRecHUD();
+                            _showOutcome(detail);
                         } catch (err) {
                             if (stopEpoch !== _recEpoch && _recActive) return;
                             var failedCapture = await _refreshRecordingStatus();
-                            if (!failedCapture && !_recFailureSignature) errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
-                            var ob = document.getElementById("recordingOverlayStopBtn");
-                            var oc = document.getElementById("recordingOverlayCancelBtn");
-                            if (ob) ob.disabled = false;
-                            if (oc) oc.disabled = false;
+                            if (!failedCapture && !_recFailureSignature && !outcome) errorBanner.show("녹음 종료 결과 확인 필요: " + (err.message || "알 수 없는 오류"));
+                            if (stopEpoch === _recEpoch) _setRecStopping(false);
                         }
                     }
 
+                    var pillStop = document.getElementById("recordingStopBtn");
+                    if (pillStop) pillStop.addEventListener("click", sendStop);
                     // Overlay 내부 버튼들 — data-recording-action 속성으로 delegate
                     var overlay = document.getElementById("recordingOverlay");
                     if (overlay) {
@@ -513,11 +649,7 @@
                             var action = t.getAttribute("data-recording-action");
                             if (action === "minimize") {
                                 _showRecHUD("pill");
-                            } else if (action === "cancel" || action === "stop") {
-                                var stopBtn = document.getElementById("recordingOverlayStopBtn");
-                                var cancelBtn = document.getElementById("recordingOverlayCancelBtn");
-                                if (stopBtn) stopBtn.disabled = true;
-                                if (cancelBtn) cancelBtn.disabled = true;
+                            } else if (action === "stop") {
                                 sendStop();
                             }
                         });
@@ -562,6 +694,9 @@
                 var _importModalEl = document.getElementById("importModal");
                 var _importDropzone = document.getElementById("importDropzone");
                 var _importFileInput = document.getElementById("importFileInput");
+                var _zoomFolderInput = document.getElementById("importZoomFolderInput");
+                var _zoomFolderButton = document.getElementById("importZoomFolderButton");
+                var _zoomFolders = new WeakMap();
                 var _importQueue = document.getElementById("importQueue");
                 var _importQueueList = document.getElementById("importQueueList");
                 var _importNotice = document.getElementById("importNotice");
@@ -586,8 +721,9 @@
 
                         var name = document.createElement("span");
                         name.className = "import-queue-item-name";
-                        name.textContent = f.name;
-                        name.setAttribute("title", f.name);
+                        var displayName = _zoomFolders.has(f) ? _zoomFolders.get(f) + " / " + f.name : f.name;
+                        name.textContent = displayName;
+                        name.title = displayName;
 
                         var meta = document.createElement("span");
                         meta.className = "import-queue-item-meta";
@@ -615,7 +751,7 @@
                         _importNotice.hidden = _importFiles.length === 0;
                         if (_importFiles.length > 0) {
                             _importNotice.textContent =
-                                _importFiles.length + "개 파일이 준비되었습니다. 업로드하면 전사 대기열에 추가됩니다.";
+                                _importFiles.length + "개 파일이 준비되었습니다. 가져온 파일은 확인 후 회의 목록에 표시됩니다.";
                         }
                     }
                 }
@@ -644,6 +780,24 @@
                     _importBtn.addEventListener("click", _openImportModal);
                 }
 
+                if (_zoomFolderButton && _zoomFolderInput) {
+                    _zoomFolderButton.hidden = !("webkitdirectory" in _zoomFolderInput);
+                    _zoomFolderButton.addEventListener("click", function () { _zoomFolderInput.click(); });
+                    _zoomFolderInput.addEventListener("change", function () {
+                        var recordings = Array.from(_zoomFolderInput.files || []).filter(function (file) {
+                            var parts = file.webkitRelativePath.split("/");
+                            if (parts.length !== 2 || !/^audio(?:_only|\d+)\.m4a$/i.test(file.name)) return false;
+                            _zoomFolders.set(file, parts[0]);
+                            return true;
+                        });
+                        _addImportFiles(recordings);
+                        if (!recordings.length && _importNotice) {
+                            _importNotice.hidden = false;
+                            _importNotice.textContent = "이 폴더에서 Zoom의 전체 회의 오디오를 찾지 못했습니다. 회의 하나의 녹음 폴더를 선택하거나 오디오 파일을 직접 가져오세요.";
+                        }
+                        _zoomFolderInput.value = "";
+                    });
+                }
                 if (_importDropzone && _importFileInput) {
                     _importDropzone.addEventListener("click", function () {
                         _importFileInput.click();
@@ -700,15 +854,14 @@
                                     file.name;
                             }
                             try {
-                                var resp = await fetch("/api/uploads", {
-                                    method: "POST",
-                                    headers: {
-                                        "Content-Type": "application/octet-stream",
-                                        // RFC 3986 unreserved 외 문자(한글 등) 안전하게 전달.
-                                        "X-Filename": encodeURIComponent(file.name),
-                                    },
-                                    body: file,
-                                });
+                                var headers = {
+                                    "Content-Type": "application/octet-stream",
+                                    "X-Filename": encodeURIComponent(file.name),
+                                };
+                                if (_zoomFolders.has(file)) {
+                                    headers["X-Zoom-Recording-Folder"] = encodeURIComponent(_zoomFolders.get(file));
+                                }
+                                var resp = await fetch("/api/uploads", { method: "POST", headers: headers, body: file });
                                 if (!resp.ok) {
                                     var errText = "";
                                     try {
@@ -735,7 +888,7 @@
                             if (_importNotice) {
                                 _importNotice.hidden = false;
                                 _importNotice.textContent =
-                                    succeeded + "건 업로드 완료. 전사 대기열에 추가되었습니다.";
+                                    succeeded + "건을 저장했습니다. 파일을 확인한 뒤 회의 목록에 표시합니다.";
                             }
                             // 업로드 직후 사이드바 + 대시보드를 즉시 한 번 갱신.
                             if (window.ListPanel && ListPanel.loadMeetings) {
@@ -768,27 +921,6 @@
                     document.addEventListener("keydown", function (e) {
                         if (e.key === "Escape" && !_importModalEl.classList.contains("hidden")) {
                             _closeImportModal();
-                        }
-                    });
-                }
-
-                // 녹음 HUD 의 즉시 정지 버튼: 클릭 시 /api/recording/stop 호출.
-                // POST 성공 시 pill 을 즉시 숨김 — WebSocket 이 끊긴 상태에서도 UI 가 멈추지 않도록.
-                // 백엔드의 ws:recording_stopped 가 뒤이어 도착해도 기존 핸들러의 동작(hide+ticker stop)은 멱등.
-                var _recStopBtn = document.getElementById("recordingStopBtn");
-                if (_recStopBtn) {
-                    _recStopBtn.addEventListener("click", async function () {
-                        if (_recStopBtn.disabled) return;
-                        _recStopBtn.disabled = true;
-                        var stopEpoch = _recEpoch;
-                        try {
-                            await App.apiRequest("/recording/stop", { method: "POST" });
-                            if (stopEpoch === _recEpoch || !_recActive) _finishRecHUD();
-                        } catch (err) {
-                            if (stopEpoch !== _recEpoch && _recActive) return;
-                            var failedCapture = await _refreshRecordingStatus();
-                            if (!failedCapture && !_recFailureSignature) errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
-                            _recStopBtn.disabled = false;
                         }
                     });
                 }
@@ -875,7 +1007,7 @@
              */
             function _meetingsEndpoint(offset, limit) {
                 return "/meetings?offset=" + encodeURIComponent(offset) +
-                    "&limit=" + encodeURIComponent(limit);
+                    "&limit=" + encodeURIComponent(limit) + (_pageOrder === "oldest" ? "&order=oldest" : "");
             }
 
             function _meetingKey(meeting) {
@@ -929,15 +1061,17 @@
                 options = options || {};
                 var append = options.append === true;
                 var preserveLoaded = options.preserveLoaded === true;
+                var generation = _pageGeneration;
 
                 if (append) {
-                    if (_meetingsLoadingMore || _meetingsLoading || !_meetingsHasMore) {
+                    if (_meetingsLoadingMore || _meetingsLoading || !_meetingsHasMore || _loadedOrder !== _pageOrder) {
                         return;
                     }
                     _meetingsLoadingMore = true;
                     _applyFilterAndSort();
                     try {
                         var pageData = await _fetchMeetingsPage(_meetings.length);
+                        if (generation !== _pageGeneration) return;
                         var pageMeetings = pageData.meetings || [];
                         _meetings = _mergeMeetingPages(_meetings, pageMeetings);
                         _updatePaginationState(_normaliseTotal(pageData, _meetings.length));
@@ -945,8 +1079,10 @@
                     } catch (e) {
                         // 추가 페이지 로드 실패는 현재 목록을 유지한다.
                     } finally {
-                        _meetingsLoadingMore = false;
-                        _applyFilterAndSort();
+                        if (generation === _pageGeneration) {
+                            _meetingsLoadingMore = false;
+                            _applyFilterAndSort();
+                        }
                     }
                     return;
                 }
@@ -961,26 +1097,28 @@
                 }
                 try {
                     var data = await _fetchMeetingsPage(0);
+                    if (generation !== _pageGeneration) return;
                     var firstPage = data.meetings || [];
                     var nextTotal = _normaliseTotal(data, firstPage.length);
-                    if (preserveLoaded && nextTotal >= _meetingsTotal) {
+                    if (preserveLoaded && _loadedOrder === _pageOrder && nextTotal >= _meetingsTotal) {
                         _meetings = _mergeMeetingPages(firstPage, _meetings);
                     } else {
                         _meetings = firstPage;
                     }
+                    _loadedOrder = _pageOrder;
                     _updatePaginationState(nextTotal);
                     _applyFilterAndSort();
                 } catch (e) {
                     // 조용히 처리 (리스트 로드 실패는 치명적이지 않음)
                     // 실패 시 스켈레톤이 남아있을 수 있으므로 정리
-                    if (_listEl) {
+                    if (generation === _pageGeneration && _listEl) {
                         var skeletons = _listEl.querySelectorAll(".skeleton-card");
                         if (skeletons.length > 0) {
                             _listEl.innerHTML = "";
                         }
                     }
                 } finally {
-                    _meetingsLoading = false;
+                    if (generation === _pageGeneration) _meetingsLoading = false;
                 }
             }
 
@@ -1043,45 +1181,20 @@
             function _sortMeetings(meetings, sortBy) {
                 var sorted = meetings.slice();
 
-                if (sortBy === "newest") {
+                if (sortBy === "newest" || sortBy === "oldest") {
                     sorted.sort(function (a, b) {
-                        return (b.created_at || "").localeCompare(a.created_at || "");
-                    });
-                } else if (sortBy === "oldest") {
-                    sorted.sort(function (a, b) {
-                        return (a.created_at || "").localeCompare(b.created_at || "");
+                        return App.compareMeetingTimes(a, b, sortBy === "oldest");
                     });
                 } else if (sortBy === "status") {
                     sorted.sort(function (a, b) {
                         var oa = STATUS_SORT_ORDER[a.status] != null ? STATUS_SORT_ORDER[a.status] : 99;
                         var ob = STATUS_SORT_ORDER[b.status] != null ? STATUS_SORT_ORDER[b.status] : 99;
                         if (oa !== ob) return oa - ob;
-                        return (b.created_at || "").localeCompare(a.created_at || "");
+                        return App.compareMeetingTimes(a, b);
                     });
                 }
 
                 return sorted;
-            }
-
-            /**
-             * meeting_id에서 날짜 기반 제목을 추출한다.
-             * 예: "meeting_20260310_193619" → "2026-03-10 19:36"
-             * @param {string} meetingId - 회의 ID
-             * @param {string} createdAt - 생성일 (폴백)
-             * @returns {string} 날짜 기반 제목
-             */
-            function _extractTitle(meetingId, createdAt) {
-                // meeting_YYYYMMDD_HHMMSS 패턴 매칭
-                var match = (meetingId || "").match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
-                if (match) {
-                    return match[1] + "-" + match[2] + "-" + match[3] + " " +
-                           match[4] + ":" + match[5];
-                }
-                // 폴백: created_at 날짜 사용
-                if (createdAt) {
-                    return App.formatDate(createdAt);
-                }
-                return meetingId || "-";
             }
 
             /**
@@ -1091,7 +1204,23 @@
             function render(meetings) {
                 _listEl.innerHTML = "";
 
-                if (meetings.length === 0) {
+                if (meetings.length === 0 && _meetings.length && _searchEl && _searchEl.value.trim()) {
+                    var noResults = document.createElement("div");
+                    noResults.className = "empty-state";
+                    noResults.setAttribute("role", "status");
+                    noResults.innerHTML = '<h2 class="empty-state-title">검색 결과가 없습니다</h2>' +
+                        '<p class="empty-state-description"></p>' +
+                        '<button class="empty-state-cta secondary" type="button">검색어 지우기</button>';
+                    noResults.querySelector("p").textContent = _meetingsHasMore
+                        ? "불러온 회의에서 찾지 못했습니다. 더 보기를 눌러 이전 회의도 확인하세요."
+                        : "다른 제목이나 날짜로 찾아보세요. 발언을 찾으려면 회의 내용 검색을 이용하세요.";
+                    noResults.querySelector("button").addEventListener("click", function () {
+                        _searchEl.value = "";
+                        _applyFilterAndSort();
+                        _searchEl.focus();
+                    });
+                    _listEl.appendChild(noResults);
+                } else if (meetings.length === 0) {
                     // 빈 상태 (mockup §5.1) — fixture 의 마크업 인터페이스와 일치
                     var empty = document.createElement("div");
                     empty.className = "empty-state-container";
@@ -1140,7 +1269,7 @@
                     item.setAttribute("role", "option");
                     item.setAttribute("tabindex", "0");
                     item.setAttribute("aria-label",
-                        _extractTitle(meeting.meeting_id, meeting.created_at) +
+                        App.meetingDateLabel(meeting) + " · " + App.extractMeetingTitle(meeting) +
                         " — " + App.getStatusLabel(meeting));
                     // 다중 선택 상태 (bulk-actions §A) — multi-select listbox 표준
                     // aria-checked: 'true' | 'false' (체크박스 의미) — SR 단일 진실
@@ -1191,10 +1320,9 @@
                     var textContainer = document.createElement("div");
                     textContainer.className = "meeting-item-text";
 
-                    // 제목: 사용자 정의 title 우선, 없으면 날짜 기반 폴백
                     var titleEl = document.createElement("div");
                     titleEl.className = "meeting-item-title";
-                    titleEl.textContent = App.extractMeetingTitle(meeting);
+                    App.renderMeetingHeading(titleEl, meeting);
 
                     // 요약 프리뷰 1줄 — summary 가 있으면 우선, 없으면 상태 라벨
                     // 전체 요약을 native tooltip 으로 노출해 한 줄 잘림 보완.

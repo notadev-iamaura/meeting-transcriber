@@ -797,7 +797,7 @@
                     if (group.identity_scope === "meeting" || group.identity_scope === "unresolved") {
                         var meetingSeconds = group.meeting_id && group.meeting_id.match(/^meeting_\d{8}_\d{4}(\d{2})$/);
                         scope = group.meeting_id
-                            ? "회의 " + App.extractMeetingTitle({ meeting_id: group.meeting_id }) + (meetingSeconds ? ":" + meetingSeconds[1] : "")
+                            ? "회의 " + App.meetingDateLabel({ meeting_id: group.meeting_id }) + (meetingSeconds ? ":" + meetingSeconds[1] : "")
                             : "담당 회의 확인 필요";
                         if (group.identity_scope === "unresolved") scope += " · 담당자 확인 필요";
                     }

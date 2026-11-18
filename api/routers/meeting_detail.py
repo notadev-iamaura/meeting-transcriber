@@ -1130,6 +1130,17 @@ def _write_retranscribe_recovery_marker(
         os.close(root_fd)
 
 
+def recording_start(meeting_id: str) -> datetime | None:
+    """녹음기와 Zoom 가져오기가 파일명에 보존한 로컬 시작 시각을 읽는다."""
+    match = re.match(r"^meeting_(\d{8}_\d{6})(?:_| \(\d+\)$|$)", meeting_id)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match[1], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
 def _build_meeting_item(
     job: Any,
     *,
@@ -1178,6 +1189,7 @@ def _build_meeting_item(
     from core.meeting_progress import effective_meeting_status
 
     response_status = effective_meeting_status(job.status, pipeline_state)
+    started = recording_start(job.meeting_id)
     return MeetingItem(
         id=job.id,
         meeting_id=job.meeting_id,
@@ -1188,6 +1200,7 @@ def _build_meeting_item(
         if response_status == "failed" and job.status == "completed"
         else job.error_message,
         created_at=job.created_at,
+        recorded_at=started.isoformat() if started else "",
         updated_at=job.updated_at,
         title=getattr(job, "title", "") or "",
         degraded=degraded,
@@ -1275,7 +1288,8 @@ class MeetingItem(BaseModel):
         error_message: 에러 메시지
         created_at: 생성 시각
         updated_at: 수정 시각
-        title: 사용자 정의 제목 (빈 문자열이면 프론트가 타임스탬프 폴백)
+        recorded_at: 파일명이 보존한 녹음 시작 시각. 모르면 빈 문자열.
+        title: 저장된 회의 제목 (미지정이면 빈 문자열)
     """
 
     id: int
@@ -1285,6 +1299,7 @@ class MeetingItem(BaseModel):
     retry_count: int = 0
     error_message: str = ""
     created_at: str = ""
+    recorded_at: str = ""
     updated_at: str = ""
     title: str = ""
     degraded: bool = False
@@ -3236,6 +3251,9 @@ class SummaryUpdateRequest(BaseModel):
         max_length=200000,
         description="수정된 회의록 마크다운 본문",
     )
+    expected_markdown: str | None = Field(
+        default=None, description="편집할 때 본 원문. 달라졌으면 저장 전에 충돌을 알린다."
+    )
 
 
 @router.put(
@@ -3250,7 +3268,7 @@ async def update_summary(
 ) -> SummaryResponse:
     """사용자가 편집한 회의록(마크다운) 본문을 저장한다.
 
-    기존 `meeting_minutes.md` (없으면 `summary.md`) 파일을 덮어쓰고,
+    GET이 표시한 기존 마크다운 파일을 덮어쓰고,
     직전 버전을 `.bak` 로 백업한다. 이후 `GET /summary` 는 수정본을 반환한다.
 
     기존 요약 산출물이 있는 `POST /summarize?force=true` 요청은 현재 수정본을
@@ -3285,24 +3303,30 @@ async def update_summary(
         artifact_label="회의록 편집",
     )
 
-    # 기존 파일 결정: meeting_minutes.md 우선, 없으면 summary.md. 존재 확인도
-    # no-follow로 수행해 정적 symlink를 다른 산출물로 오인하지 않는다.
+    # GET과 동일한 우선순위를 사용한다. JSON 시절의 요약은 마크다운으로 게시한다.
     minutes_md = meeting_dir / "meeting_minutes.md"
     summary_md = meeting_dir / "summary.md"
 
     try:
-        try:
-            await asyncio.to_thread(read_text_no_follow, minutes_md)
-        except FileNotFoundError:
+        target = minutes_md
+        current = ""
+        for candidate in (summary_md, minutes_md):
             try:
-                await asyncio.to_thread(read_text_no_follow, summary_md)
+                current = await asyncio.to_thread(read_text_no_follow, candidate)
             except FileNotFoundError:
-                # 둘 다 없으면 meeting_minutes.md 로 새로 생성한다.
-                target = minutes_md
-            else:
-                target = summary_md
-        else:
-            target = minutes_md
+                continue
+            target = candidate
+            break
+        if body.expected_markdown is not None:
+            if not current:
+                # GET이 JSON에서 복원한 본문도 같은 회의 쓰기 잠금 안에서 비교한다.
+                current = (await get_summary(request, meeting_id)).markdown
+            if current != body.expected_markdown and current != body.markdown:
+                raise HTTPException(
+                    status_code=412, detail="편집 중 다른 곳에서 요약을 저장했습니다."
+                )
+            if current == body.markdown:
+                return SummaryResponse(markdown=current, meeting_id=meeting_id)
 
         await asyncio.to_thread(
             _atomic_write_text_pinned,

@@ -363,7 +363,8 @@ def test_auto_processing_status_api는_스케줄러_상태를_반환한다(tmp_p
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["run_at"] == "02:00"
+    assert data["run_at"] == "01:00"
+    assert data["stop_at"] == "06:00"
     assert data["recent_hours"] == 48
     assert data["max_items_per_run"] == 0
     assert data["run_on_startup_if_missed"] is True

@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -15,6 +16,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from config import AppConfig
 from core.quarantine import (
     QuarantineError,
     _lexical_absolute,
@@ -23,6 +25,7 @@ from core.quarantine import (
     _same_validated_content,
     _unlink_if_inode,
 )
+from core.zoom_topic import normalize_zoom_topic, save_recording_topic
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +187,8 @@ def _publish_upload(
     temp_fd: int,
     temp_identity: os.stat_result,
     filename: str,
+    zoom_config: AppConfig | None = None,
+    zoom_topic: str = "",
 ) -> str:
     """완성된 temp inode를 same-directory hardlink로 무덮어쓰기 publish한다."""
     _verify_directory_identity(upload_dir, directory_fd, directory_identity)
@@ -196,6 +201,15 @@ def _publish_upload(
 
     published_name: str | None = None
     for candidate_name in _upload_candidate_names(filename):
+        if zoom_topic and zoom_config is not None:
+            try:
+                os.stat(candidate_name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                save_recording_topic(
+                    zoom_config, upload_dir / candidate_name, temp_identity, zoom_topic
+                )
+            else:
+                continue
         try:
             os.link(
                 temp_name,
@@ -333,6 +347,25 @@ def _resolve_unique_upload_path(target_dir: Path, filename: str) -> Path:
     raise HTTPException(status_code=409, detail="동일한 이름의 파일이 너무 많습니다.")
 
 
+def _zoom_folder_recording(filename: str, folder: str) -> tuple[str, str]:
+    """명시적으로 선택한 Zoom 회의 폴더의 날짜와 주제를 전체 오디오에 결합한다."""
+    if not re.fullmatch(r"audio(?:_only|[0-9]+)\.m4a", filename, re.IGNORECASE):
+        return filename, ""
+    match = re.fullmatch(
+        r"([0-9]{4}-[0-9]{2}-[0-9]{2})[ _]([0-9]{2}[.][0-9]{2}[.][0-9]{2})[ ]+([^/\\]+)",
+        folder,
+    )
+    if not match:
+        return filename, ""
+    try:
+        start = datetime.strptime(f"{match[1]} {match[2]}", "%Y-%m-%d %H.%M.%S")
+    except ValueError:
+        return filename, ""
+    topic = normalize_zoom_topic(re.sub(r"\s+[0-9]{9,11}$", "", match[3]))
+    # 감시기는 확장자를 뺀 이름을 DB 키로 쓰므로 같은 시각의 기존 WAV와도 구분한다.
+    return f"meeting_{start:%Y%m%d_%H%M%S}_zoom_{uuid.uuid4().hex}.m4a", topic
+
+
 @router.post("/uploads", response_model=UploadResponse, status_code=201)
 async def upload_audio(request: Request) -> UploadResponse:
     """프론트가 fetch 로 전송한 단일 오디오 파일을 audio_input 폴더에 저장한다.
@@ -347,6 +380,7 @@ async def upload_audio(request: Request) -> UploadResponse:
 
     Headers:
         X-Filename: URL 인코딩된 원본 파일명. 예: "회의록 2026-04-29.m4a"
+        X-Zoom-Recording-Folder: 사용자가 선택한 Zoom 녹음 폴더의 이름(선택, URL 인코딩).
         Content-Length: 본문 크기 (선택, 사전 검증용).
 
     Returns:
@@ -373,6 +407,8 @@ async def upload_audio(request: Request) -> UploadResponse:
         ) from e
 
     filename = _sanitize_upload_filename(decoded, supported_exts)
+    folder = unquote(request.headers.get("x-zoom-recording-folder", ""))
+    filename, topic = _zoom_folder_recording(filename, folder)
 
     # 본문 크기 사전 검증 — Content-Length 가 있을 때만 (정확하지 않을 수 있음).
     content_length = request.headers.get("content-length")
@@ -439,6 +475,8 @@ async def upload_audio(request: Request) -> UploadResponse:
             temp_fd=temp_fd,
             temp_identity=completed_identity,
             filename=filename,
+            zoom_config=config,
+            zoom_topic=topic,
         )
         # publish 헬퍼가 inode를 확인하고 temp entry를 제거했다.
         temp_name = None

@@ -9,6 +9,7 @@ CoreAudio process list를 우선 사용해 Zoom 계열 프로세스가 실제 �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -22,6 +23,20 @@ logger = logging.getLogger(__name__)
 
 class ZoomActivityError(Exception):
     """Zoom 활동 감지 중 에러가 발생했을 때."""
+
+
+async def _read_helper_output(
+    proc: asyncio.subprocess.Process, timeout: float
+) -> tuple[bytes, bytes]:
+    """녹음 중단이나 시간 초과 때 조회 프로세스도 회수한다."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except (TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        await proc.communicate()
+        raise
 
 
 @dataclass(frozen=True)
@@ -61,14 +76,31 @@ class ZoomAudioActivityChecker:
         result = await self.check()
         return result.active
 
-    async def check(self) -> ZoomActivityResult:
+    async def read_meeting_topic(self) -> tuple[str, bool, bool]:
+        """기존 접근 권한으로 현재 Zoom 회의의 명시적 주제·모호성·조회 가능 여부를 읽는다."""
+        if sys.platform != "darwin":
+            return "", False, False
+        try:
+            result = await self._run_helper("--meeting-topic")
+        except ZoomActivityError:
+            return "", False, False
+        title = result.get("topic")
+        return (
+            title if isinstance(title, str) else "",
+            result.get("ambiguous") is True,
+            result.get("authorized") is True,
+        )
+
+    async def check(self, *, require_coreaudio: bool = False) -> ZoomActivityResult:
         """Zoom 오디오 활동을 확인하고 감지 소스를 함께 반환한다."""
-        if not self._prefer_coreaudio:
+        if not self._prefer_coreaudio and not require_coreaudio:
             return await self._check_process_fallback()
 
         try:
             return await self._check_coreaudio()
         except ZoomActivityError as e:
+            if require_coreaudio:
+                return ZoomActivityResult(active=False, source="unavailable")
             if not self._coreaudio_warning_logged:
                 logger.warning(f"CoreAudio Zoom 활동 확인 실패. pgrep 폴백 사용: {e}")
                 self._coreaudio_warning_logged = True
@@ -120,7 +152,7 @@ class ZoomAudioActivityChecker:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            stdout, stderr = await _read_helper_output(proc, timeout=3.0)
         except TimeoutError as e:
             raise ZoomActivityError("CoreAudio helper 실행 타임아웃") from e
         except OSError as e:
@@ -170,7 +202,7 @@ class ZoomAudioActivityChecker:
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                _, stderr = await _read_helper_output(proc, timeout=30.0)
             except TimeoutError as e:
                 raise ZoomActivityError("CoreAudio helper 컴파일 타임아웃") from e
             except FileNotFoundError as e:

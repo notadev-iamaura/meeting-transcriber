@@ -468,29 +468,20 @@
                     var added = [];
                     for (var i = 0; i < Math.min(meetings.length, 5); i++) {
                         var m = meetings[i];
-                        if (!m || !m.id) continue;
-                        var title =
-                            m.title ||
-                            (App.getFileName
-                                ? App.getFileName(m.audio_file || "")
-                                : "") ||
-                            m.id;
+                        if (!m || !m.meeting_id) continue;
                         added.push({
-                            id: "meeting:" + m.id,
+                            id: "meeting:" + m.meeting_id,
                             category: "회의",
-                            title: String(title),
-                            subtitle: m.created_at
-                                ? App.formatDate
-                                    ? App.formatDate(m.created_at)
-                                    : String(m.created_at)
-                                : "",
+                            meeting: m,
+                            title: App.extractMeetingTitle(m),
+                            subtitle: App.meetingDateLabel(m),
                             run: (function (mid) {
                                 return function () {
                                     Router.navigate(
                                         "/app/viewer/" + encodeURIComponent(mid)
                                     );
                                 };
-                            })(m.id),
+                            })(m.meeting_id),
                         });
                     }
                     self._mergeDynamicItems("회의", added);
@@ -660,16 +651,14 @@
                 // label
                 var label = document.createElement("span");
                 label.className = "command-palette-item-label";
-                label.textContent = item.title || "";
+                if (item.meeting) App.renderMeetingHeading(label, item.meeting);
+                else label.textContent = item.title || "";
                 li.appendChild(label);
 
                 // subtitle 은 카테고리에 따라 meta(시간/메타정보) 또는 hint(보조 안내)
-                if (item.subtitle) {
+                if (item.subtitle && !item.meeting) {
                     var sub = document.createElement("span");
-                    sub.className =
-                        item.category === "회의"
-                            ? "command-palette-item-meta"
-                            : "command-palette-item-hint";
+                    sub.className = "command-palette-item-hint";
                     sub.textContent = item.subtitle;
                     li.appendChild(sub);
                 }

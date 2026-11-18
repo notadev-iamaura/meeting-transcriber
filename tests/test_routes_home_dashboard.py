@@ -234,6 +234,7 @@ class TestAudioInputRecoveryEndpoint:
         app = _make_test_app(tmp_path)
         original = b"stable recovered recording"
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            app.state.config.auto_processing.enabled = False
             app.state.config.audio_quality.enabled = False
             watcher = FolderWatcher(app.state.job_queue, config=app.state.config)
             watcher._debounce_seconds = 0.0
@@ -355,6 +356,68 @@ class TestOpenAudioFolderEndpoint:
 
 class TestUploadEndpoint:
     """업로드 엔드포인트 — X-Filename + raw body."""
+
+    def test_zoom_폴더의_제목은_해당_오디오에만_결합한다(self, tmp_path: Path) -> None:
+        """같은 시각의 다른 녹취와 단일 파일 가져오기의 제목을 보존한다."""
+        from urllib.parse import quote
+
+        from api.routers.meeting_detail import recording_start
+        from core.zoom_topic import read_recording_topic
+
+        app = _make_test_app(tmp_path)
+        with TestClient(app) as client:
+            directory = app.state.config.paths.resolved_audio_input_dir
+            directory.mkdir(parents=True, exist_ok=True)
+            original = directory / "meeting_20261117_113500.wav"
+            original.write_bytes(b"existing Recap recording")
+            queue = app.state.job_queue.queue
+            original_id = queue.add_job(
+                original.stem, str(original), "recorded", title="내가 정한 제목"
+            )
+            imported_ids = []
+            for topic in ("주간 점검", "제품 검토"):
+                response = client.post(
+                    "/api/uploads",
+                    content=b"synthetic audio",
+                    headers={
+                        "X-Filename": "audio_only.m4a",
+                        "X-Zoom-Recording-Folder": quote(
+                            f"2026-11-17 11.35.00 {topic} 12345678901"
+                        ),
+                    },
+                )
+                assert response.status_code == 201
+                path = Path(response.json()["path"])
+                assert recording_start(path.stem) == datetime(2026, 11, 17, 11, 35)
+                st = path.stat()
+                identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+                title = read_recording_topic(app.state.config, path, identity)
+                assert title == topic
+                imported_ids.append(queue.add_job(path.stem, str(path), "recorded", title=title))
+            assert [queue.get_job(i).title for i in (original_id, *imported_ids)] == [
+                "내가 정한 제목",
+                "주간 점검",
+                "제품 검토",
+            ]
+            assert original.read_bytes() == b"existing Recap recording"
+            single = client.post(
+                "/api/uploads", content=b"synthetic", headers={"X-Filename": "audio_only.m4a"}
+            )
+            assert single.json()["filename"] == "audio_only.m4a"
+
+    @pytest.mark.parametrize(
+        "filename,folder",
+        [
+            ("audio123.m4a", "제목만 있는 폴더"),
+            ("audio123.m4a", "2026-02-31 12.00.00 제품 검토"),
+            ("audio123.m4a", "2026-11-17 11.35.00 상위/하위"),
+            ("audioPerson123.m4a", "2026-11-17 11.35.00 제품 검토"),
+        ],
+    )
+    def test_zoom_정보가_모호하면_일반_파일로_가져온다(self, filename: str, folder: str) -> None:
+        from api.routers.uploads import _zoom_folder_recording
+
+        assert _zoom_folder_recording(filename, folder) == (filename, "")
 
     def test_정상_업로드(self, tmp_path: Path) -> None:
         """올바른 헤더 + 본문이면 audio_input_dir 에 파일이 저장된다."""

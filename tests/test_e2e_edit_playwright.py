@@ -514,11 +514,12 @@ class TestTitleEdit:
         assert requests == ["POST", "POST", "POST"]
 
     def test_제목_기본_표시_타임스탬프(self, page: Page, seeded_meeting_id: str) -> None:
-        """title 이 비어있으면 meeting_id 의 타임스탬프가 표시된다."""
+        """제목이 비어도 첫 줄에 회의 시각을 남기고 제목 줄에 기본 이름을 표시한다."""
         _open_viewer(page, seeded_meeting_id)
         title_text = page.locator(".viewer-title-text")
         # meeting_20260407_140000 → "2026-04-07 14:00"
-        expect(title_text).to_contain_text("2026-04-07 14:00")
+        expect(page.locator("#viewerMeetingDate")).to_have_text("2026-04-07 14:00")
+        expect(title_text).to_have_text("제목 없는 회의")
 
     def test_제목_인라인_편집_저장(self, page: Page, seeded_meeting_id: str) -> None:
         """제목 텍스트 클릭 → input → Enter → 변경 저장."""
@@ -569,12 +570,49 @@ class TestTitleEdit:
         input_el.fill("")
         input_el.press("Enter")
 
-        expect(page.locator(".viewer-title-text")).to_contain_text(
-            "2026-04-07 14:00", timeout=5000
-        )
+        expect(page.locator(".viewer-title-text")).to_have_text("제목 없는 회의", timeout=5000)
+        expect(page.locator("#viewerMeetingDate")).to_have_text("2026-04-07 14:00")
 
 
 class TestSummaryEdit:
+    def test_요약_초안_이동_새로고침_저장실패_재시도(
+        self, page: Page, seeded_meeting_id: str, test_base_dir: Path
+    ) -> None:
+        """탭과 회의 화면을 벗어나도 초안만 복원되며 저장 성공 후 본문에 반영된다."""
+        _open_viewer(page, seeded_meeting_id)
+        page.locator("#viewerTabSummary").click()
+        page.get_by_role("button", name="✎ 편집").click()
+        draft = "## 편집 중\n겹쳐 말한 부분까지 확인했습니다."
+        editor = page.get_by_role("textbox", name="회의 요약 편집")
+        editor.fill(draft)
+        minutes = test_base_dir / "outputs" / seeded_meeting_id / "meeting_minutes.md"
+        before = minutes.read_text(encoding="utf-8")
+        page.locator("#viewerTabTranscript").click()
+        page.locator("#viewerTabSummary").click()
+        expect(editor).to_have_value(draft)
+        page.get_by_role("link", name="홈으로 이동").click()
+        page.go_back()
+        expect(editor).to_have_value(draft)
+        page.reload()
+        expect(editor).to_have_value(draft)
+        assert minutes.read_text(encoding="utf-8") == before
+
+        url = f"**/api/meetings/{seeded_meeting_id}/summary"
+        page.route(
+            url,
+            lambda route: route.abort() if route.request.method == "PUT" else route.continue_(),
+        )
+        page.get_by_role("button", name="저장", exact=True).click()
+        expect(page.locator(".summary-draft-status")).to_contain_text("저장 실패")
+        expect(editor).to_have_value(draft)
+        page.unroute(url)
+        editor.press("Control+Enter")
+        expect(page.locator(".summary-rendered")).to_contain_text("겹쳐 말한 부분")
+        assert minutes.read_text(encoding="utf-8") == draft
+        page.reload()
+        page.locator("#viewerTabSummary").click()
+        expect(editor).to_have_count(0)
+
     def test_요약_편집_저장(self, page: Page, seeded_meeting_id: str, test_base_dir: Path) -> None:
         """요약 탭 → 편집 → textarea 수정 → 저장."""
         _open_viewer(page, seeded_meeting_id)

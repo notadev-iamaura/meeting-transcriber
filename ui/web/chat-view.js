@@ -53,6 +53,7 @@
             self._isSending = false;
             self._messageCount = 0;
             self._hasMeetings = null;
+            self._meetings = [];
             self._indexReady = null;
             self._indexStatus = null;
             self._missingMeetingIds = [];
@@ -62,6 +63,7 @@
             self._sessionId = self._generateSessionId();
 
             self._render();
+            self._meetingPicker = App.createMeetingPicker(self._els.meetingFilter, document.getElementById("chatMeetingLabel"), "전체 회의", true);
             self._bind();
             self._loadMeetingList();
         }
@@ -149,7 +151,7 @@
 
                 // 제어 바
                 '  <div class="controls-bar">',
-                '    <span class="controls-label">검색 범위:</span>',
+                '    <label class="controls-label" id="chatMeetingLabel" for="chatMeetingFilterPicker">검색 범위</label>',
                 '    <select class="controls-select" id="chatMeetingFilter" aria-label="검색 범위 회의 선택">',
                 '      <option value="">전체 회의</option>',
                 '    </select>',
@@ -312,10 +314,10 @@
          */
         ChatView.prototype._loadMeetingList = async function () {
             var self = this;
-            var els = self._els;
             try {
                 var data = await App.apiRequest("/meetings");
                 var meetings = data.meetings || [];
+                self._meetings = meetings;
                 self._hasMeetings = meetings.length > 0;
                 if (self._hasMeetings) {
                     try {
@@ -336,25 +338,7 @@
                     self._indexReady = false;
                 }
 
-                meetings.forEach(function (meeting) {
-                    var option = document.createElement("option");
-                    option.value = meeting.meeting_id;
-
-                    var statusLabel = {
-                        completed: "\u2713",
-                        recorded: "\u25CF",
-                        recording: "\u25CF",
-                        transcribing: "\u2022",
-                        diarizing: "\u2022",
-                        merging: "\u2022",
-                        embedding: "\u2022",
-                        queued: "\u2022",
-                        failed: "\u2717",
-                    };
-                    var icon = statusLabel[meeting.status] || "";
-                    option.textContent = icon + " " + meeting.meeting_id;
-                    els.meetingFilter.appendChild(option);
-                });
+                self._meetingPicker.setMeetings(meetings);
                 self._updateScopeStatus();
                 self._syncChatAvailability();
             } catch (e) {
@@ -419,14 +403,12 @@
         ChatView.prototype._updateScopeStatus = function () {
             var els = this._els;
             if (!els.scopeStatus || !els.meetingFilter) return;
-            var selected = els.meetingFilter.options[els.meetingFilter.selectedIndex];
-            var label = selected ? selected.textContent.trim() : "";
             if (!els.meetingFilter.value) {
                 els.scopeStatus.textContent = "전체 회의에서 검색";
             } else if (this._isSelectedMeetingMissing()) {
-                els.scopeStatus.textContent = label.replace(/^[✓●•✗]\s*/, "") + " 회의 검색 준비 필요";
+                els.scopeStatus.textContent = "선택한 회의의 검색 준비 필요";
             } else {
-                els.scopeStatus.textContent = label.replace(/^[✓●•✗]\s*/, "") + " 회의만 검색";
+                els.scopeStatus.textContent = "선택한 회의에서 검색";
             }
             this._syncChatAvailability();
         };
@@ -435,16 +417,7 @@
          * 회의 필터 드롭다운을 갱신한다.
          */
         ChatView.prototype._refreshMeetingFilter = function () {
-            var self = this;
-            var els = self._els;
-            var currentValue = els.meetingFilter.value;
-            els.meetingFilter.innerHTML = '<option value="">전체 회의</option>';
-            self._loadMeetingList().then(function () {
-                if (currentValue) {
-                    els.meetingFilter.value = currentValue;
-                }
-                self._updateScopeStatus();
-            });
+            this._loadMeetingList();
         };
 
         /**
@@ -628,6 +601,7 @@
                         if (action === "clear_filters") {
                             if (self._els.meetingFilter) {
                                 self._els.meetingFilter.value = "";
+                                self._meetingPicker.sync();
                                 self._updateScopeStatus();
                             }
                             if (!self._els.chatInput.disabled) self._els.chatInput.focus();
@@ -690,10 +664,7 @@
                     meta.className = "ref-card-meta";
 
                     var meetingSpan = document.createElement("span");
-                    meetingSpan.textContent = ref.meeting_id;
-
-                    var dateSpan = document.createElement("span");
-                    dateSpan.textContent = ref.date || "";
+                    App.renderReferenceHeading(meetingSpan, ref, self._meetings);
 
                     var speakersSpan = document.createElement("span");
                     speakersSpan.textContent = (quote ? [quote.speaker] : ref.speakers || []).map(function (speaker) {
@@ -704,7 +675,6 @@
                     timeSpan.textContent = App.formatTime(quote ? quote.start_time : ref.start_time) + "~" + App.formatTime(quote ? quote.end_time : ref.end_time);
 
                     meta.appendChild(meetingSpan);
-                    if (ref.date) meta.appendChild(dateSpan);
                     if (quote || ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
                     meta.appendChild(timeSpan);
 
@@ -918,6 +888,7 @@
          * 뷰를 정리한다.
          */
         ChatView.prototype.destroy = function () {
+            this._meetingPicker.destroy();
             // 진행 중인 요청 취소
             if (this._currentAbortController) {
                 this._currentAbortController.abort();
