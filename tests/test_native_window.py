@@ -229,6 +229,27 @@ class TestLaunchNativeWindow:
 class TestRunWebviewWindow:
     """run_webview_window 함수 테스트."""
 
+    def test_packaged_icon_reaches_mac_window_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """패키지 아이콘 경로를 별도 창의 AppKit 프로세스까지 전달한다."""
+        from ui.native_window import run_webview_window
+
+        icon_path = "/Applications/My Recap.app/Contents/Resources/Recap.icns"
+        monkeypatch.setenv("RECAP_BUNDLE_ICON", icon_path)
+        appkit, webview = MagicMock(), MagicMock()
+        with (
+            patch("sys.platform", "darwin"),
+            patch.dict("sys.modules", {"webview": webview, "AppKit": appkit}),
+        ):
+            run_webview_window("http://localhost:8765/app", "Recap", 1200, 800, 800, 600)
+
+        load_icon = appkit.NSImage.alloc.return_value.initWithContentsOfFile_
+        load_icon.assert_called_once_with(icon_path)
+        set_icon = appkit.NSApplication.sharedApplication.return_value.setApplicationIconImage_
+        set_icon.assert_called_once_with(load_icon.return_value)
+        webview.start.assert_called_once_with()
+
     def test_webview_호출(self) -> None:
         """webview.create_window과 webview.start가 호출되는지 확인한다."""
         mock_webview = MagicMock()

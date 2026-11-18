@@ -295,6 +295,7 @@ open http://127.0.0.1:8765/app/setup
 ```
 
 생성된 `Recap.app`을 더블클릭하면 브라우저 대신 Recap 전용 macOS 창이 열립니다.
+기본 빌드와 `--bundle-source` 빌드에는 Finder와 Dock용 [Recap 아이콘](scripts/assets/Recap.icon/Assets/Artwork.png)이 자동으로 포함됩니다.
 이미 실행 중인 로컬 서버가 있으면 연결하고, 없으면 앱이 서버를 시작합니다.
 창을 닫거나 앱을 종료하면 앱이 직접 시작한 서버만 정상 종료하며, 기존 서버는 유지합니다.
 창 크기는 `config.yaml`의 `window` 설정을 사용하고, `.app`에서는 항상 전용 창을 엽니다.

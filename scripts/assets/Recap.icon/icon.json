@@ -1,0 +1,18 @@
+{
+  "fill": {"solid": "srgb:0.867,0.906,0.580,1.000"},
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "Artwork.png",
+          "name": "Recap",
+          "position": {"scale": 1.19, "translation-in-points": [0, 0]},
+          "glass": false
+        }
+      ],
+      "shadow": {"kind": "neutral", "opacity": 0},
+      "translucency": {"enabled": false, "value": 0}
+    }
+  ],
+  "supported-platforms": {"squares": "shared"}
+}
