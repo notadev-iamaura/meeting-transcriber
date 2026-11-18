@@ -28,6 +28,34 @@
             corrected: 4,
         };
 
+        // 이 창의 화면 이동은 메모리에서 복원하고, 같은 탭의 새로고침은 sessionStorage로 복원한다.
+        var summaryDrafts = new Map();
+        var summarySaves = new Map();
+        function getSummaryDraft(id) {
+            if (summaryDrafts.has(id)) return summaryDrafts.get(id);
+            try {
+                var draft = JSON.parse(sessionStorage.getItem("recap:summary-draft:" + id));
+                if (draft && typeof draft.base === "string" && typeof draft.text === "string") {
+                    summaryDrafts.set(id, draft);
+                    return draft;
+                }
+            } catch (_) { /* 저장소 사용이 제한된 창에서도 계속 편집할 수 있다. */ }
+            return null;
+        }
+        function setSummaryDraft(id, draft) {
+            var key = "recap:summary-draft:" + id;
+            if (draft) summaryDrafts.set(id, draft);
+            else summaryDrafts.delete(id);
+            try {
+                if (draft) sessionStorage.setItem(key, JSON.stringify(draft));
+                else sessionStorage.removeItem(key);
+                return true;
+            } catch (_) {
+                try { sessionStorage.removeItem(key); } catch (_) { /* 메모리로 유지 */ }
+                return false;
+            }
+        }
+
         // =================================================================
         // === ViewerView (전사문 뷰어) ===
         // =================================================================
@@ -80,6 +108,7 @@
             self._micRetryObserved = false;
             self._micRequestError = "";
             self._micStatusEpoch = 0;
+            self._summaryLoadVersion = 0;
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
             var urlParams = new URLSearchParams(window.location.search);
@@ -88,6 +117,9 @@
 
             self._render();
             self._bind();
+            if (getSummaryDraft(meetingId) && !urlParams.has("t") && !urlParams.has("q")) {
+                document.getElementById("viewerTabSummary").click();
+            }
             self._loadData();
             self._lastTitlePending = false;
             var onTitleUpdate = function (event) {
@@ -112,7 +144,7 @@
                 // 회의 정보 헤더
                 '<div class="viewer-header" id="viewerMeetingInfo" style="display:none;">',
                 '  <div class="viewer-header-top">',
-                '    <h2 class="viewer-title" id="viewerMeetingTitle"></h2>',
+                '    <div class="viewer-meeting-heading"><span class="meeting-heading-date" id="viewerMeetingDate"></span><h2 class="viewer-title" id="viewerMeetingTitle"></h2></div>',
                 '    <span class="viewer-status" id="viewerMeetingStatus"></span>',
                 '    <button type="button" class="density-toggle" id="viewerDensityToggle"',
                 '            aria-label="타임라인 밀도 전환" title="밀도 전환 (조밀/편안)"',
@@ -126,7 +158,6 @@
                 '  </div>',
                 '  <div class="viewer-meta">',
                 '    <span class="viewer-meta-item" id="viewerMetaFile"></span>',
-                '    <span class="viewer-meta-item" id="viewerMetaDate"></span>',
                 '    <span class="viewer-meta-item" id="viewerMetaSpeakers"></span>',
                 '    <span class="viewer-meta-item" id="viewerMetaUtterances"></span>',
                 '    <span class="viewer-meta-item transcription-provider-meta" id="viewerMetaTranscription" hidden></span>',
@@ -246,7 +277,7 @@
                 meetingTitle: document.getElementById("viewerMeetingTitle"),
                 meetingStatus: document.getElementById("viewerMeetingStatus"),
                 metaFile: document.getElementById("viewerMetaFile"),
-                metaDate: document.getElementById("viewerMetaDate"),
+                meetingDate: document.getElementById("viewerMeetingDate"),
                 metaSpeakers: document.getElementById("viewerMetaSpeakers"),
                 metaUtterances: document.getElementById("viewerMetaUtterances"),
                 metaTranscription: document.getElementById("viewerMetaTranscription"),
@@ -534,15 +565,14 @@
                         var summary = await App.apiRequest(
                             "/meetings/" + encodeURIComponent(self._meetingId) + "/summary"
                         );
-                        if (summary.markdown) {
+                        if (summary.markdown && !self._destroyed) {
                             clearInterval(pollTimer);
                             btn.classList.remove("loading");
                             // _renderSummaryView 를 거쳐야 편집 툴바가 다시 그려지고
                             // _currentSummaryMd 가 올바르게 갱신된다.
-                            self._currentSummaryMd = summary.markdown;
                             els.summaryEmpty.style.display = "none";
                             if (els.summarizeBtn) els.summarizeBtn.style.display = "none";
-                            self._renderSummaryView(summary.markdown);
+                            self._showLoadedSummary(summary.markdown);
                             // 처리 로그도 갱신 (요약 단계 elapsed 가 추가됨)
                             self._loadPipelineLog();
                             return;
@@ -1348,15 +1378,14 @@
                 }
 
                 els.meetingInfo.style.display = "block";
-                // 사용자 정의 title 우선, 없으면 타임스탬프 폴백
                 self._lastMeetingData = data;
+                App.safeText(els.meetingDate, App.meetingDateLabel(data));
                 if (!els.meetingTitle.classList.contains("editing")) self._renderMeetingTitle(data);
 
                 els.meetingStatus.className = "viewer-status " + data.status;
                 App.safeText(els.meetingStatus, App.getStatusLabel(data));
 
                 els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(App.getFileName(data.audio_path)) + '</span>';
-                els.metaDate.innerHTML = Icons.calendar + ' <span>' + App.escapeHtml(App.formatDate(data.created_at)) + '</span>';
                 if (data.stt_provider) {
                     var processingLocation = data.stt_provider === "openai"
                         ? "OpenAI 서버"
@@ -1407,7 +1436,7 @@
             var titleSpan = document.createElement("span");
             titleSpan.className = "viewer-title-text";
             titleSpan.textContent = displayTitle;
-            titleSpan.title = "클릭하여 제목 편집";
+            titleSpan.title = displayTitle + " · 클릭하여 제목 편집";
             titleSpan.addEventListener("click", function () {
                 self._beginEditTitle(data);
             });
@@ -1509,10 +1538,8 @@
                 }, 100);
             });
 
-            setTimeout(function () {
-                input.focus();
-                input.select();
-            }, 0);
+            input.focus();
+            input.select();
         };
 
         /**
@@ -1600,9 +1627,27 @@
             var self = this;
             var els = self._els;
             var actionsEl = els.viewerActions;
-            actionsEl.innerHTML = "";
             actionsEl.setAttribute("role", "toolbar");
             actionsEl.setAttribute("aria-label", "회의 작업");
+            // 전사·마이크 응답이 늦게 도착해도 사용자가 연 메뉴와 트리거를 유지한다.
+            var more = actionsEl.querySelector(".viewer-more-actions");
+            if (!more) {
+                more = document.createElement("details");
+                more.className = "viewer-more-actions";
+                more.innerHTML = '<summary>더 보기</summary><div class="viewer-more-panel"></div>';
+                more.addEventListener("keydown", function (event) {
+                    if (event.key === "Escape") {
+                        event.preventDefault(); event.stopPropagation();
+                        more.open = false; more.querySelector("summary").focus();
+                    }
+                });
+                actionsEl.appendChild(more);
+            }
+            var morePanel = more.querySelector(".viewer-more-panel");
+            var focusedAction = morePanel.contains(document.activeElement) ? document.activeElement : null;
+            actionsEl.querySelectorAll(".viewer-failure-notice, .viewer-action-group").forEach(function (el) {
+                el.remove();
+            });
 
             // 부분 전사문이 있어도 실패 원인과 복구 안내를 숨기지 않는다.
             if (data.status === "failed") {
@@ -1659,7 +1704,7 @@
                     Router.navigate(modelSettings ? "/app/settings" : "/app/setup");
                 });
                 failure.appendChild(recoveryLink);
-                actionsEl.appendChild(failure);
+                actionsEl.insertBefore(failure, more);
             }
 
             function makeGroup(className, label) {
@@ -1667,24 +1712,15 @@
                 group.className = "viewer-action-group " + className;
                 group.setAttribute("role", "group");
                 group.setAttribute("aria-label", label);
-                actionsEl.appendChild(group);
                 return group;
             }
 
             var primaryGroup = makeGroup("primary", "주요 작업");
             var secondaryGroup = makeGroup("secondary", "보조 작업");
             var dangerGroup = makeGroup("danger", "위험 작업");
-            var more = document.createElement("details");
-            more.className = "viewer-more-actions";
-            var moreLabel = document.createElement("summary");
-            moreLabel.textContent = "더 보기";
-            more.appendChild(moreLabel);
-            var morePanel = document.createElement("div");
-            morePanel.className = "viewer-more-panel";
+            actionsEl.insertBefore(primaryGroup, more);
             morePanel.appendChild(secondaryGroup);
             morePanel.appendChild(dangerGroup);
-            more.appendChild(morePanel);
-            actionsEl.appendChild(more);
             var micState = self._micTranscription;
             if (micState && micState.retry_available === true && !self._micRequestPending &&
                     (micState.status === "complete" || micState.status === "unknown")) {
@@ -1696,13 +1732,6 @@
                 micRetryBtn.addEventListener("click", function () { self._retryMicTranscription(); });
                 secondaryGroup.appendChild(micRetryBtn);
             }
-            more.addEventListener("keydown", function (event) {
-                if (event.key === "Escape") {
-                    event.preventDefault(); event.stopPropagation();
-                    more.open = false; moreLabel.focus();
-                }
-            });
-
             var folderBtn = document.createElement("button");
             folderBtn.type = "button";
             folderBtn.className = "viewer-action-btn open-audio-folder";
@@ -1884,6 +1913,12 @@
                     group.remove();
                 }
             });
+            if (focusedAction) {
+                var nextFocus = Array.from(morePanel.querySelectorAll("button")).find(function (button) {
+                    return button.textContent === focusedAction.textContent;
+                });
+                (nextFocus || more.querySelector("summary")).focus({ preventScroll: true });
+            }
         };
 
         /**
@@ -3040,6 +3075,7 @@
             }
             try {
                 await App.apiDelete("/meetings/" + encodeURIComponent(meetingId));
+                setSummaryDraft(meetingId, null);
                 ListPanel.loadMeetings();
                 Router.navigate("/app");
             } catch (e) {
@@ -3506,23 +3542,25 @@
         ViewerView.prototype._loadSummary = async function () {
             var self = this;
             var els = self._els;
+            var version = ++self._summaryLoadVersion;
             els.summaryLoading.classList.add("visible");
             els.summaryEmpty.style.display = "none";
 
             try {
+                // 이동 직전에 누른 저장이 끝난 뒤 최신 본문과 이 창의 초안을 함께 읽는다.
+                if (summarySaves.has(self._meetingId)) await summarySaves.get(self._meetingId);
+                if (self._destroyed || version !== self._summaryLoadVersion) return;
                 var data = await App.apiRequest(
                     "/meetings/" + encodeURIComponent(self._meetingId) + "/summary"
                 );
-
-                if (!data.markdown) {
+                if (self._destroyed || version !== self._summaryLoadVersion) return;
+                if (!data.markdown && !getSummaryDraft(self._meetingId) && !self._refreshSummaryEditor) {
                     els.summaryEmpty.style.display = "block";
                     els.summarizeBtn.style.display = "inline-block";
                     return;
                 }
 
-                // 현재 마크다운 보관 (편집 시 기준값)
-                self._currentSummaryMd = data.markdown;
-                self._renderSummaryView(data.markdown);
+                self._showLoadedSummary(data.markdown || "");
 
                 // 요약 생성 버튼 숨기기
                 els.summarizeBtn.style.display = "none";
@@ -3531,7 +3569,11 @@
                 els.tabNav.style.display = "flex";
 
             } catch (e) {
-                if (e.status === 404) {
+                if (self._destroyed || version !== self._summaryLoadVersion) return;
+                if (getSummaryDraft(self._meetingId) || self._refreshSummaryEditor) {
+                    self._showLoadedSummary(null);
+                    els.tabNav.style.display = "flex";
+                } else if (e.status === 404) {
                     els.summaryEmpty.style.display = "block";
                     els.summarizeBtn.style.display = "inline-block";
                 } else {
@@ -3539,15 +3581,26 @@
                     els.summaryEmpty.style.display = "block";
                 }
             } finally {
-                els.summaryLoading.classList.remove("visible");
+                if (version === self._summaryLoadVersion) els.summaryLoading.classList.remove("visible");
             }
+        };
+
+        ViewerView.prototype._showLoadedSummary = function (markdown) {
+            this._currentSummaryMd = markdown;
+            if (this._refreshSummaryEditor) {
+                this._refreshSummaryEditor();
+                return;
+            }
+            var draft = getSummaryDraft(this._meetingId);
+            if (draft) this._beginEditSummary(draft);
+            else this._renderSummaryView(markdown);
         };
 
         /**
          * 요약 뷰 모드 (마크다운 렌더링 + 편집 버튼) 를 그린다.
          * @param {string} markdown
          */
-        ViewerView.prototype._renderSummaryView = function (markdown) {
+        ViewerView.prototype._renderSummaryView = function (markdown, message) {
             var self = this;
             var els = self._els;
 
@@ -3566,6 +3619,13 @@
                 self._beginEditSummary();
             });
             toolbar.appendChild(editBtn);
+            if (message) {
+                var status = document.createElement("span");
+                status.className = "summary-draft-status";
+                status.setAttribute("role", "status");
+                status.textContent = message;
+                toolbar.appendChild(status);
+            }
 
             els.summaryContent.appendChild(toolbar);
 
@@ -3579,10 +3639,14 @@
         /**
          * 요약 편집 모드로 전환한다 (textarea + 저장/취소).
          */
-        ViewerView.prototype._beginEditSummary = function () {
+        ViewerView.prototype._beginEditSummary = function (draft) {
             var self = this;
             var els = self._els;
-            var markdown = self._currentSummaryMd || "";
+            var id = self._meetingId;
+            var base = draft ? draft.base : self._currentSummaryMd;
+            var storageAvailable = true;
+            var saving = false;
+            var saveError = "";
 
             els.summaryContent.innerHTML = "";
 
@@ -3591,9 +3655,22 @@
 
             var textarea = document.createElement("textarea");
             textarea.className = "summary-textarea";
-            textarea.value = markdown;
+            textarea.setAttribute("aria-label", "회의 요약 편집");
+            textarea.value = draft ? draft.text : base;
             textarea.spellcheck = false;
             editor.appendChild(textarea);
+
+            var latest = document.createElement("details");
+            var latestLabel = document.createElement("summary");
+            latestLabel.textContent = "현재 저장된 요약 확인";
+            var latestText = document.createElement("pre");
+            latest.append(latestLabel, latestText);
+            editor.appendChild(latest);
+
+            var status = document.createElement("p");
+            status.className = "summary-draft-status";
+            status.setAttribute("role", "status");
+            editor.appendChild(status);
 
             var toolbar = document.createElement("div");
             toolbar.className = "summary-edit-actions";
@@ -3603,44 +3680,83 @@
             cancelBtn.className = "btn-secondary";
             cancelBtn.textContent = "취소";
             cancelBtn.addEventListener("click", function () {
-                self._renderSummaryView(self._currentSummaryMd || "");
+                if (saving) return;
+                setSummaryDraft(id, null);
+                self._refreshSummaryEditor = null;
+                if (self._currentSummaryMd == null) {
+                    els.summaryContent.replaceChildren();
+                    self._loadSummary();
+                } else self._renderSummaryView(self._currentSummaryMd);
             });
             toolbar.appendChild(cancelBtn);
 
             var saveBtn = document.createElement("button");
             saveBtn.type = "button";
             saveBtn.className = "btn-summary-save";
-            saveBtn.textContent = "저장";
-            saveBtn.addEventListener("click", async function () {
-                // 변경 없으면 저장 스킵 + dirty 마킹도 안 함 (회귀 방지)
-                if (textarea.value === (self._currentSummaryMd || "")) {
-                    self._renderSummaryView(self._currentSummaryMd || "");
+            function refresh() {
+                var conflict = self._currentSummaryMd != null && self._currentSummaryMd !== base;
+                latest.hidden = !conflict;
+                if (conflict) latestText.textContent = self._currentSummaryMd;
+                textarea.readOnly = saving;
+                saveBtn.disabled = saving || !textarea.value.length;
+                cancelBtn.disabled = saving;
+                saveBtn.textContent = saving ? "저장 중…" : conflict ? "확인한 요약을 초안으로 교체" : "저장";
+                var message = saveError;
+                if (!message && saving) message = "회의 요약을 저장하고 있습니다.";
+                if (!message && conflict) message = "다른 곳에서 요약을 수정했습니다. 현재 저장된 요약을 확인한 뒤 초안을 적용하세요.";
+                if (!message && self._currentSummaryMd == null) message = "저장된 요약을 불러오지 못했습니다. 초안을 보관하고 있습니다.";
+                if (!message && getSummaryDraft(id)) message = storageAvailable
+                    ? "이 창에 초안을 보관했습니다. 돌아오면 이어서 편집할 수 있습니다."
+                    : "화면을 옮겨도 초안을 유지합니다. 새로고침 전에 저장하세요.";
+                if (status.textContent !== message) status.textContent = message;
+                status.hidden = !message;
+            }
+            self._refreshSummaryEditor = refresh;
+            textarea.addEventListener("input", function () {
+                saveError = "";
+                var unchanged = textarea.value === base && base === self._currentSummaryMd;
+                storageAvailable = setSummaryDraft(id, unchanged ? null : {base: base, text: textarea.value});
+                refresh();
+            });
+            function save() {
+                if (saveBtn.disabled || summarySaves.has(id)) return;
+                var text = textarea.value;
+                if (text === base && text === self._currentSummaryMd) {
+                    cancelBtn.click();
                     return;
                 }
-                saveBtn.disabled = true;
-                saveBtn.textContent = "저장 중…";
-                try {
-                    var resp = await fetch(
-                        "/api/meetings/" +
-                            encodeURIComponent(self._meetingId) +
-                            "/summary",
-                        {
-                            method: "PUT",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ markdown: textarea.value }),
-                        }
-                    );
-                    if (!resp.ok) {
-                        var err = await resp.json().catch(function () { return {}; });
-                        throw new Error(err.detail || "HTTP " + resp.status);
-                    }
-                    var data = await resp.json();
+                var expected = self._currentSummaryMd == null ? base : self._currentSummaryMd;
+                saving = true;
+                saveError = "";
+                refresh();
+                var request = App.apiRequest("/meetings/" + encodeURIComponent(id) + "/summary", {
+                    method: "PUT",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({markdown: text, expected_markdown: expected}),
+                }).then(function (data) {
+                    setSummaryDraft(id, null);
+                    if (self._destroyed) return;
+                    self._summaryLoadVersion++;
+                    els.summaryLoading.classList.remove("visible");
+                    self._refreshSummaryEditor = null;
                     self._currentSummaryMd = data.markdown;
-                    self._renderSummaryView(data.markdown);
-                } catch (e) {
-                    errorBanner.show("회의록 저장 실패: " + (e.message || e));
-                    saveBtn.disabled = false;
-                    saveBtn.textContent = "저장";
+                    self._renderSummaryView(data.markdown, "요약을 저장했습니다.");
+                }).catch(function (e) {
+                    if (self._destroyed) return;
+                    saveError = e.status === 412 ? "" : "저장 실패 · " + e.message;
+                    if (e.status === 412) self._loadSummary();
+                }).finally(function () {
+                    summarySaves.delete(id);
+                    saving = false;
+                    if (!self._destroyed && self._refreshSummaryEditor === refresh) refresh();
+                });
+                summarySaves.set(id, request);
+            }
+            saveBtn.addEventListener("click", save);
+            textarea.addEventListener("keydown", function (event) {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.isComposing) {
+                    event.preventDefault();
+                    save();
                 }
             });
             toolbar.appendChild(saveBtn);
@@ -3648,7 +3764,8 @@
             editor.appendChild(toolbar);
             els.summaryContent.appendChild(editor);
 
-            setTimeout(function () { textarea.focus(); }, 0);
+            refresh();
+            if (!draft) textarea.focus();
         };
 
         /**

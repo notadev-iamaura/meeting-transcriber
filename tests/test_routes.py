@@ -490,6 +490,33 @@ class TestStatusEndpoint:
 class TestMeetingsEndpoint:
     """GET /api/meetings 엔드포인트 테스트."""
 
+    def test_녹음_시각으로_전체를_정렬한_뒤_페이징한다(self, tmp_path: Path) -> None:
+        """같은 날 등록한 지난 회의와 일반 파일을 최신순·오래된순 페이지에서 찾는다."""
+        jobs = [
+            MockJob(
+                index,
+                f"meeting_20261117_10{index:02d}00",
+                "/a.wav",
+                "recorded",
+                created_at="2026-11-18T12:00:00",
+            )
+            for index in range(51)
+        ]
+        jobs.append(
+            MockJob(52, "imported", "/b.wav", "recorded", created_at="2026-11-16T09:00:00")
+        )
+        app = _make_test_app(tmp_path)
+        with TestClient(app) as client:
+            app.state.job_queue.get_all_jobs = AsyncMock(return_value=jobs)
+            first = client.get("/api/meetings").json()
+            next_page = client.get("/api/meetings?offset=50").json()["meetings"]
+            oldest = client.get("/api/meetings?order=oldest&limit=1").json()["meetings"]
+        assert first["total"] == 52
+        assert first["meetings"][0]["recorded_at"] == "2026-11-17T10:50:00"
+        assert [m["meeting_id"] for m in next_page] == ["meeting_20261117_100000", "imported"]
+        assert oldest[0]["meeting_id"] == "imported"
+        assert oldest[0]["recorded_at"] == ""
+
     def test_meetings_전체_목록_조회(self, tmp_path: Path) -> None:
         """전체 회의 목록을 반환하는지 확인한다."""
         app = _make_test_app(tmp_path)
@@ -1741,11 +1768,19 @@ class TestRecordingEndpoints:
 
         with TestClient(app) as client:
             mock_recorder = self._setup_recorder(app, is_recording=True)
-            mock_recorder.stop_recording = AsyncMock(return_value=mock_result)
+            mock_recorder.stop_recording_with_outcome = AsyncMock(
+                return_value=(
+                    mock_result,
+                    {"meeting_id": "test", "saved": True, "files": ["test.wav"]},
+                )
+            )
             response = client.post("/api/recording/stop")
 
         assert response.status_code == 200
-        mock_recorder.stop_recording.assert_called_once()
+        mock_recorder.stop_recording_with_outcome.assert_awaited_once_with(
+            expected_meeting_id=None
+        )
+        assert response.json()["saved"] is True
 
     def test_recording_devices_조회(self, tmp_path: Path) -> None:
         """GET /api/recording/devices가 오디오 장치 목록을 반환하는지 확인한다."""

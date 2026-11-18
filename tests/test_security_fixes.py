@@ -487,6 +487,7 @@ auto_processing:
         auto_processing=SimpleNamespace(
             enabled=False,
             run_at="02:00",
+            stop_at="06:00",
             recent_hours=48,
             action="full",
             run_on_startup_if_missed=False,
@@ -739,6 +740,7 @@ class TestAutoProcessingSettings:
         data = resp.json()
         assert data["auto_processing_enabled"] is False
         assert data["auto_processing_run_at"] == "02:00"
+        assert data["auto_processing_stop_at"] == "06:00"
         assert data["auto_processing_recent_hours"] == 48
         assert data["auto_processing_action"] == "full"
         assert data["auto_processing_max_items_per_run"] == 0
@@ -750,6 +752,7 @@ class TestAutoProcessingSettings:
             json={
                 "auto_processing_enabled": True,
                 "auto_processing_run_at": "03:30",
+                "auto_processing_stop_at": "07:15",
                 "auto_processing_recent_hours": 72,
                 "auto_processing_action": "summarize",
                 "auto_processing_max_items_per_run": 3,
@@ -763,6 +766,7 @@ class TestAutoProcessingSettings:
         assert {
             "auto_processing_enabled",
             "auto_processing_run_at",
+            "auto_processing_stop_at",
             "auto_processing_recent_hours",
             "auto_processing_action",
             "auto_processing_max_items_per_run",
@@ -771,6 +775,10 @@ class TestAutoProcessingSettings:
         settings = body["settings"]
         assert settings["auto_processing_enabled"] is True
         assert settings["auto_processing_run_at"] == "03:30"
+        assert settings["auto_processing_stop_at"] == "07:15"
+        from api.routers.settings import _get_config_path
+
+        assert 'stop_at: "07:15"' in _get_config_path().read_text()
         assert settings["auto_processing_recent_hours"] == 72
         assert settings["auto_processing_action"] == "summarize"
         assert settings["auto_processing_max_items_per_run"] == 3
@@ -802,6 +810,9 @@ class TestAutoProcessingSettings:
         [
             ({"auto_processing_run_at": "24:00"}, "auto_processing_run_at"),
             ({"auto_processing_run_at": "2:00"}, "auto_processing_run_at"),
+            ({"auto_processing_stop_at": "06:70"}, "auto_processing_stop_at"),
+            ({"auto_processing_run_at": "06:00"}, "다르게"),
+            ({"auto_processing_stop_at": "02:00"}, "다르게"),
             ({"auto_processing_recent_hours": 0}, "auto_processing_recent_hours"),
             ({"auto_processing_recent_hours": 721}, "auto_processing_recent_hours"),
             ({"auto_processing_max_items_per_run": -1}, "auto_processing_max_items_per_run"),

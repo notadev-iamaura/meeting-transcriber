@@ -18,10 +18,12 @@ import json
 import logging
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, cast
 
 import rumps
@@ -424,7 +426,7 @@ class MeetingTranscriberApp(rumps.App):
         if is_rec != self._is_recording:
             self._is_recording = is_rec
             if is_rec:
-                self._menu_recording.title = "⏹️ 녹음 정지"
+                self._menu_recording.title = "⏹️ 녹음 끝내기"
             else:
                 self._menu_recording.title = "🎙️ 녹음 시작"
 
@@ -493,7 +495,9 @@ class MeetingTranscriberApp(rumps.App):
 
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
-                logger.info(f"녹음 제어 응답: {result}")
+            if self._is_recording and "saved" in result:
+                title, message = self._stop_receipt(result)
+                rumps.notification("Recap", title, message)
 
         except (urllib.error.URLError, urllib.error.HTTPError) as e:
             logger.error(f"녹음 제어 실패: {e}")
@@ -503,6 +507,32 @@ class MeetingTranscriberApp(rumps.App):
             )
         except Exception as e:
             logger.error(f"녹음 제어 중 예상치 못한 오류: {e}")
+
+    def _stop_receipt(self, result: dict[str, Any]) -> tuple[str, str]:
+        """메뉴에서 끝낸 녹음의 저장 결과와 현재 확인되는 파일별 전사 상태를 표시한다."""
+        if not result["saved"]:
+            return "녹음이 저장되지 않았습니다", f"{result.get('reason', '')} · 전사 시작 안 함"
+        files = result["files"]
+        lines = []
+        for name in files:
+            meeting_id = urllib.parse.quote(Path(name).stem, safe="")
+            try:
+                url = build_api_url(self.config, f"/api/meetings/{meeting_id}")
+                with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
+                    meeting = json.load(response)
+                state = meeting["status"]
+                status = (
+                    "전사 시작 전"
+                    if state == "recorded"
+                    else _QUEUE_STATUS_LABELS.get(state, state)
+                )
+            except urllib.error.HTTPError as exc:
+                status = "회의 등록 확인 중" if exc.code == 404 else "전사 상태 확인 필요"
+            except (OSError, ValueError, KeyError):
+                status = "전사 상태 확인 필요"
+            lines.append(f"{name} · {status}" if len(files) > 1 else status)
+        title = "녹음 저장 완료" if len(files) == result["expected_files"] else "녹음 일부 저장"
+        return title, "\n".join(lines)
 
     def _on_open_web_ui(self, _sender: Any) -> None:
         """네이티브 창으로 웹 UI를 연다. 실패 시 브라우저 폴백.

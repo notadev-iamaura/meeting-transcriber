@@ -161,9 +161,8 @@
   background: var(--bg-active);
 }
 
-/* selected 항목의 프리뷰 텍스트 — `--bg-active` (rgba(0,122,255,0.12) on light)
-   배경에서 axe color-contrast (4.5:1) 통과를 위해 `--text-primary` 사용.
-   `--text-secondary` 는 4:1 미달. */
+/* 선택 배경에서 작은 날짜와 상태 텍스트의 대비를 유지한다. */
+.meeting-item.selected .meeting-heading-date,
 .meeting-item.selected .meeting-item-preview {
   color: var(--text-primary);
 }

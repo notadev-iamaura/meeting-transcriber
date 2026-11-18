@@ -858,6 +858,7 @@
         ? SearchViewModule.create({
             App: App,
             Router: Router,
+            ListPanel: ListPanel,
             Icons: Icons,
             errorBanner: errorBanner,
         })
@@ -932,6 +933,7 @@
         ? AbTestViewModule.create({
             App: App,
             Router: Router,
+            ListPanel: ListPanel,
             errorBanner: errorBanner,
         })
         : {

@@ -312,6 +312,12 @@ def test_t101_meeting_list_empty_state(browser: Browser, spa_static_server: str)
         )
 
 
+def _choose_chat_meeting(page: Page, meeting_id: str) -> None:
+    """두 줄 회의 목록에서 보이는 항목을 골라 실제 변경 이벤트를 발생시킨다."""
+    page.locator("#chatMeetingFilterPicker").click()
+    page.locator(f"#chatMeetingFilterPickerOptions [data-value='{meeting_id}']").click()
+
+
 def test_meeting_list_loads_more_in_50_item_pages(
     browser: Browser,
     spa_static_server: str,
@@ -372,6 +378,175 @@ def test_meeting_list_loads_more_in_50_item_pages(
         assert page.locator("#listCount").inner_text().strip() == "120/120"
 
     assert requests[:3] == [(0, 50), (50, 50), (100, 50)]
+
+
+@pytest.mark.parametrize("width", [390, 1280])
+def test_meeting_headings_and_palette_open_the_same_recording(
+    browser: Browser, spa_static_server: str, width: int
+) -> None:
+    """두 줄의 순서, 날짜 역전, 긴 제목, 키보드 이동과 실제 회의 ID를 함께 확인한다."""
+    recent_id = "meeting_20261117_132405"
+    older_id = "meeting_20261116_175600"
+    name = "팀 <회의> " + "장기 일정 검토 " * 10 + "마무리"
+    meetings = [
+        {"id": 32, "meeting_id": older_id, "title": "", "status": "recorded"},
+        {"id": 17, "meeting_id": recent_id, "title": name, "status": "recorded"},
+    ]
+    for meeting in meetings:
+        meeting["created_at"] = "2026-11-18T19:00:00"
+
+    def api(route: Route) -> None:
+        path = urlparse(route.request.url).path
+        if path == "/api/meetings":
+            route.fulfill(json={"meetings": meetings, "total": len(meetings)})
+        elif path == "/api/meetings/" + recent_id:
+            route.fulfill(json=meetings[1])
+        elif path == "/api/dashboard/stats":
+            route.fulfill(json={"total_meetings": len(meetings)})
+        else:
+            _mock_api(route)
+
+    with _spa_page(
+        browser, spa_static_server, {"width": width, "height": 800}, api_handler=api
+    ) as page:
+        recent = page.locator(".home-recent-row").first
+        date = recent.locator(".meeting-heading-date")
+        title = recent.locator(".meeting-heading-name")
+        expect(date).to_have_text("2026-11-17 13:24")
+        expect(title).to_have_text(name)
+        expect(title).to_have_attribute("title", name)
+        box_date, box_title = date.bounding_box(), title.bounding_box()
+        assert box_date and box_title and box_date["y"] + box_date["height"] <= box_title["y"] + 1
+        if width == 390:
+            page.locator("#mobile-menu-toggle").click()
+        side = page.locator(".meeting-item")
+        expect(side.first).to_have_attribute("data-meeting-id", recent_id)
+        page.locator("#listSortSelect").select_option("oldest")
+        expect(side.first).to_have_attribute("data-meeting-id", older_id)
+        expect(side.first.locator(".meeting-heading-name")).to_have_text("제목 없는 회의")
+        if width == 390:
+            page.keyboard.press("Escape")
+        page.keyboard.press("Meta+k")
+        palette = page.locator("dialog.command-palette")
+        palette.get_by_role("searchbox").fill("마무리")
+        option = palette.get_by_role("option").filter(has_text="마무리")
+        expect(option).to_have_attribute("data-meeting-id", recent_id)
+        expect(option.locator(".meeting-heading-date")).to_have_text("2026-11-17 13:24")
+        page.keyboard.press("Enter")
+        page.wait_for_url("**/app/viewer/" + recent_id)
+        expect(page.locator("#viewerMeetingDate")).to_have_text("2026-11-17 13:24")
+        expect(page.locator(".viewer-title-text")).to_have_text(name)
+        page.get_by_role("button", name="제목 편집").press("Enter")
+        expect(page.get_by_role("textbox", name="회의 제목", exact=True)).to_have_value(name)
+        page.keyboard.press("Escape")
+        expect(page.locator(".viewer-title-text")).to_have_text(name)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize(
+    ("route_path", "field", "field_label"),
+    [
+        ("/app/chat", "chatMeetingFilter", "검색 범위"),
+        ("/app/ab-test/new", "abSourceMeeting", "소스 회의"),
+    ],
+)
+def test_meeting_picker_two_lines_keyboard_and_cancel(
+    browser: Browser, spa_static_server: str, route_path: str, field: str, field_label: str
+) -> None:
+    """좁은 화면의 선택 버튼과 후보에서 제목을 읽고, 화살표 탐색 후 확정·취소한다."""
+    selected_id = "meeting_20261117_164330"
+    title = "합성 회의 " + "매우 긴 이름 " * 8 + "끝"
+
+    def api(route: Route) -> None:
+        if urlparse(route.request.url).path == "/api/meetings":
+            route.fulfill(
+                json={
+                    "meetings": [
+                        {"meeting_id": selected_id, "title": title, "status": "completed"},
+                        {"meeting_id": "meeting_20261116_100000", "status": "completed"},
+                    ]
+                }
+            )
+        else:
+            _mock_api(route)
+
+    with _spa_page(
+        browser, spa_static_server, {"width": 390, "height": 745}, path=route_path, api_handler=api
+    ) as page:
+        trigger = page.locator(f"#{field}Picker")
+        value = page.locator(f"#{field}")
+        trigger.press("Enter")
+        options = page.get_by_role("listbox", name=field_label)
+        row = options.locator(f"[data-value='{selected_id}']")
+        expect(row.locator(".meeting-heading-name")).to_have_text(title)
+        date_box = row.locator(".meeting-heading-date").bounding_box()
+        title_box = row.locator(".meeting-heading-name").bounding_box()
+        assert date_box and title_box and date_box["y"] + date_box["height"] <= title_box["y"] + 1
+        trigger.press("ArrowDown")
+        trigger.press("Enter")
+        expect(value).to_have_value(selected_id)
+        expect(trigger.locator(".meeting-heading-date")).to_have_text("2026-11-17 16:43")
+        expect(trigger.locator(".meeting-heading-name")).to_have_text(title)
+        expect(trigger).to_be_focused()
+        trigger.press("End")
+        trigger.press("Escape")
+        expect(options).to_be_hidden()
+        expect(trigger).to_be_focused()
+        expect(value).to_have_value(selected_id)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_search_resolves_titles_beyond_the_loaded_meetings(
+    browser: Browser, spa_static_server: str
+) -> None:
+    """목록 밖의 한 회의를 인용하는 두 검색 결과가 상세 정보를 공유하고 발화로 이동한다."""
+    meeting_id = "meeting_20261112_084500"
+    detail_requests = []
+    chunk = {
+        "meeting_id": meeting_id,
+        "date": "2026-11-12",
+        "text": "합성 발화",
+        "start_time": 3,
+        "end_time": 5,
+        "source": "fts",
+        "score": 0.6,
+        "chunk_index": 0,
+        "speakers": [],
+    }
+
+    def api(route: Route) -> None:
+        path = urlparse(route.request.url).path
+        if path == "/api/meetings":
+            route.fulfill(json={"meetings": [{"meeting_id": "other", "status": "completed"}]})
+        elif path == "/api/reindex/status":
+            route.fulfill(json={"total": 2, "indexed": 2})
+        elif path == "/api/search":
+            route.fulfill(json={"results": [chunk, {**chunk, "start_time": 9}]})
+        elif path == "/api/meetings/" + meeting_id:
+            detail_requests.append(path)
+            route.fulfill(
+                json={"meeting_id": meeting_id, "title": "편집한 제목", "status": "completed"}
+            )
+        else:
+            _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/search",
+        api_handler=api,
+    ) as page:
+        search = page.locator("#searchQuery")
+        search.fill("발화")
+        search.press("Enter")
+        rows = page.locator(".result-item")
+        expect(rows.locator(".meeting-heading-name")).to_have_text(["편집한 제목", "편집한 제목"])
+        expect(rows.first.locator(".meeting-heading-date")).to_have_text("2026-11-12 08:45")
+        assert len(detail_requests) == 1
+        rows.nth(1).press("Enter")
+        page.wait_for_url("**/app/viewer/" + meeting_id + "?**")
+        assert parse_qs(urlparse(page.url).query) == {"t": ["9"], "q": ["발화"]}
 
 
 def test_home_recent_meetings_preserves_focus_and_opens_viewer(
@@ -493,6 +668,7 @@ def test_home_route_stats_actions_dropdowns_and_public_boundary(
         assert page.locator(".home-stats").count() == 1
         assert page.locator(".empty-view").count() == 1
         assert page.locator("#homeStatTotal").inner_text() == "9"
+        expect(page.get_by_role("button", name="녹음 시작", exact=True)).to_be_visible()
         assert page.locator("#homeStatQueue").inner_text() == "3"
         assert page.locator("#homeStatQueueSub").inner_text() == "미전사 4"
         assert page.locator("#homeStatActive").inner_text() == "1"
@@ -1424,7 +1600,7 @@ def test_chat_send_preserves_payload_session_and_filter(
             "#chatMeetingFilter option[value='meeting-b']",
             state="attached",
         )
-        page.select_option("#chatMeetingFilter", "meeting-b")
+        _choose_chat_meeting(page, "meeting-b")
 
         page.locator("#chatInput").fill("첫 질문")
         page.locator("#chatSendBtn").click()
@@ -1515,7 +1691,7 @@ def test_chat_selected_missing_meeting_disables_input(
     ) as page:
         page.wait_for_selector("#chatMeetingFilter option[value='meeting-b']", state="attached")
 
-        page.select_option("#chatMeetingFilter", "meeting-b")
+        _choose_chat_meeting(page, "meeting-b")
         assert page.locator("#chatInput").is_disabled()
         assert "검색 준비 필요" in page.locator("#chatScopeStatus").inner_text()
         assert (
@@ -1524,9 +1700,9 @@ def test_chat_selected_missing_meeting_disables_input(
         )
         assert chat_calls == []
 
-        page.select_option("#chatMeetingFilter", "meeting-a")
+        _choose_chat_meeting(page, "meeting-a")
         assert not page.locator("#chatInput").is_disabled()
-        assert "meeting-a 회의만 검색" in page.locator("#chatScopeStatus").inner_text()
+        assert "선택한 회의에서 검색" in page.locator("#chatScopeStatus").inner_text()
 
 
 def test_chat_no_grounding_preserves_repair_actions(
@@ -4028,8 +4204,8 @@ def test_chat_prompt_chip_and_scope_status(browser: Browser, spa_static_server: 
         page.wait_for_selector("#chatMeetingFilter option[value='meeting-a']", state="attached")
         page.locator(".welcome-tip").first.click()
         assert "결정된 일정" in page.locator("#chatInput").input_value()
-        page.select_option("#chatMeetingFilter", "meeting-a")
-        assert "meeting-a 회의만 검색" in page.locator("#chatScopeStatus").inner_text()
+        _choose_chat_meeting(page, "meeting-a")
+        assert "선택한 회의에서 검색" in page.locator("#chatScopeStatus").inner_text()
 
 
 def test_settings_general_save_bar_tracks_dirty_state(

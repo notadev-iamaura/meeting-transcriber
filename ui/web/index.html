@@ -242,6 +242,15 @@
     <p>저장 공간과 폴더 접근 권한을 확인한 뒤 새 녹음을 시작해 주세요.</p>
   </section>
 
+  <section id="recordingOutcome" class="recording-outcome" aria-label="녹음 종료 결과" hidden>
+    <div role="status" aria-live="polite" aria-atomic="true">
+      <strong id="recordingOutcomeTitle"></strong>
+      <p id="recordingOutcomeMessage"></p>
+    </div>
+    <div id="recordingOutcomeLinks"></div>
+    <button type="button" class="btn-secondary" id="recordingOutcomeClose" aria-label="녹음 결과 닫기">닫기</button>
+  </section>
+
   <div id="recordingStatus" class="recording-status" role="status" aria-live="polite" aria-hidden="true" hidden inert>
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
@@ -255,7 +264,7 @@
         <path d="M4 10h12M10 4v12"></path>
       </svg>
     </button>
-    <button type="button" id="recordingStopBtn" class="recording-stop-btn" aria-label="녹음 정지">
+    <button type="button" id="recordingStopBtn" class="recording-stop-btn" aria-label="녹음 끝내기" title="녹음 끝내기">
       <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="5" y="5" width="10" height="10" rx="1"></rect>
       </svg>
@@ -288,8 +297,7 @@
       </div>
       <div class="recording-actions">
         <button type="button" class="rec-btn ghost" data-recording-action="minimize" aria-label="녹음 HUD 최소화">최소화</button>
-        <button type="button" class="rec-btn ghost" data-recording-action="cancel" id="recordingOverlayCancelBtn" aria-label="녹음 취소">취소</button>
-        <button type="button" class="rec-btn primary" data-recording-action="stop" id="recordingOverlayStopBtn" aria-label="녹음 정지 후 전사 시작">녹음 정지 · 전사 시작</button>
+        <button type="button" class="rec-btn primary" data-recording-action="stop" id="recordingOverlayStopBtn">녹음 끝내기</button>
       </div>
     </div>
   </div>
@@ -299,9 +307,7 @@
     <div class="modal-content import-modal-content">
       <h3 class="modal-title" id="importModalTitle">오디오 가져오기</h3>
       <p class="modal-message">
-        파일을 끌어다 놓거나 클릭해 선택하세요.
-        선택된 파일은 <code class="mono-inline">~/.meeting-transcriber/audio_input</code>
-        폴더로 안전하게 업로드되고 전사 대기열에 추가됩니다.
+        오디오 파일을 선택하거나 끌어다 놓으세요. Zoom 녹음 폴더를 선택하면 폴더 이름에서 회의 일시와 제목을 가져올 수 있습니다.
       </p>
       <div class="import-dropzone" id="importDropzone" tabindex="0" role="button" aria-label="오디오 파일 드롭존">
         <svg width="28" height="28" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -313,6 +319,8 @@
         <div class="import-dropzone-sub">.m4a · .wav · .mp3 · 최대 2 GB</div>
         <input type="file" id="importFileInput" multiple accept="audio/*,.m4a,.wav,.mp3" hidden>
       </div>
+      <button class="btn-secondary" type="button" id="importZoomFolderButton">Zoom 녹음 폴더 선택</button>
+      <input type="file" id="importZoomFolderInput" webkitdirectory multiple hidden>
       <div class="import-queue" id="importQueue" hidden>
         <div class="overline import-queue-header">선택된 파일</div>
         <div class="import-queue-list" id="importQueueList"></div>

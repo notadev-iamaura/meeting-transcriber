@@ -21,6 +21,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 from config import AppConfig, get_config
+from core.zoom_topic import ZoomTopicObservation
 from steps.zoom_activity import ZoomAudioActivityChecker
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class ZoomDetector:
         # 콜백 목록
         self._sync_callbacks: list[SyncCallback] = []
         self._async_callbacks: list[AsyncCallback] = []
+        self._recording_topic: ZoomTopicObservation | None = None
 
         logger.info(
             f"ZoomDetector 초기화: "
@@ -120,6 +122,11 @@ class ZoomDetector:
     def is_running(self) -> bool:
         """감지 루프가 실행 중인지 반환한다."""
         return self._is_running
+
+    def observe_recording_topic(self) -> ZoomTopicObservation:
+        """자동 녹음이 시작된 현재 회의 한 건에만 주제 관측을 연결한다."""
+        self._recording_topic = ZoomTopicObservation()
+        return self._recording_topic
 
     def on_meeting_change(self, callback: SyncCallback | AsyncCallback) -> None:
         """미팅 상태 변화 콜백을 등록한다.
@@ -203,6 +210,7 @@ class ZoomDetector:
             return  # 상태 변화 없음
 
         self._is_meeting_active = is_active
+        self._recording_topic = None
 
         if is_active:
             # 미팅 시작
@@ -238,6 +246,15 @@ class ZoomDetector:
             try:
                 is_active = await self._check_zoom_process()
                 await self._handle_state_change(is_active)
+                if is_active and self._recording_topic is not None:
+                    (
+                        topic,
+                        ambiguous,
+                        authorized,
+                    ) = await self._activity_checker.read_meeting_topic()
+                    self._recording_topic.observe(topic, ambiguous=ambiguous)
+                    if not authorized or self._recording_topic.ambiguous:
+                        self._recording_topic = None
 
                 # 프로세스 확인 성공 시 에러 카운터 초기화
                 if consecutive_errors > 0:

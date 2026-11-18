@@ -23,6 +23,7 @@ async def get_auto_processing_status(request: Request) -> dict[str, Any]:
         "running": False,
         "processing": False,
         "run_at": config.auto_processing.run_at,
+        "stop_at": config.auto_processing.stop_at,
         "recent_hours": config.auto_processing.recent_hours,
         "action": config.auto_processing.action,
         "max_items_per_run": config.auto_processing.max_items_per_run,

@@ -664,8 +664,8 @@
                 '    </div>',
                 '  </section>',
                 '  <section class="settings-section">',
-                '    <h3 class="settings-section-title">자동 전사/요약</h3>',
-                '    <p class="settings-section-desc">앱이 실행 중일 때 지정된 시각에 최근 회의 중 아직 전사나 요약이 없는 항목을 처리합니다. 처리 방식은 작업 종류를, 1회 처리 상한은 이번 실행의 건수를 정합니다.</p>',
+                '    <h3 class="settings-section-title">야간 자동 처리</h3>',
+                '    <p class="settings-section-desc">Mac의 현지 시각을 기준으로 처리합니다. Mac이 깨어 있고 Recap이 실행 중이면 화면을 잠가도 계속됩니다. 종료 시각에는 야간 작업을 멈추고 진행 내용을 보존합니다.</p>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsAutoProcessingEnabled">자동 처리</label>',
@@ -675,11 +675,15 @@
                 '        </label>',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsAutoProcessingRunAt">실행 시각</label>',
-                '        <input type="time" class="setting-input" id="settingsAutoProcessingRunAt" min="00:00" max="23:59" step="60" value="02:00">',
+                '        <label class="setting-label" for="settingsAutoProcessingRunAt">시작 시각</label>',
+                '        <input type="time" class="setting-input" id="settingsAutoProcessingRunAt" step="60" value="01:00">',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsAutoProcessingRecentHours">대상 범위</label>',
+                '        <label class="setting-label" for="settingsAutoProcessingStopAt">종료 시각</label>',
+                '        <input type="time" class="setting-input" id="settingsAutoProcessingStopAt" step="60" value="06:00">',
+                '      </div>',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsAutoProcessingRecentHours">파일 등록 후</label>',
                 '        <div class="setting-number-group">',
                 '          <input type="number" class="setting-input" id="settingsAutoProcessingRecentHours" min="1" max="720" step="1" value="48">',
                 '          <span class="setting-unit">시간 이내</span>',
@@ -695,7 +699,7 @@
                 '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsAutoProcessingAction">처리 방식</label>',
                 '        <select class="setting-select" id="settingsAutoProcessingAction">',
-                '          <option value="full">전사·요약 모두</option>',
+                '          <option value="full">전체 처리 · 전사부터 검색까지</option>',
                 '          <option value="transcribe">전사만</option>',
                 '          <option value="summarize">요약만</option>',
                 '        </select>',
@@ -914,6 +918,7 @@
                 lifecycleRunOnStartup: document.getElementById("settingsLifecycleRunOnStartup"),
                 autoProcessingEnabled: document.getElementById("settingsAutoProcessingEnabled"),
                 autoProcessingRunAt: document.getElementById("settingsAutoProcessingRunAt"),
+                autoProcessingStopAt: document.getElementById("settingsAutoProcessingStopAt"),
                 autoProcessingRecentHours: document.getElementById("settingsAutoProcessingRecentHours"),
                 autoProcessingMaxItems: document.getElementById("settingsAutoProcessingMaxItems"),
                 autoProcessingAction: document.getElementById("settingsAutoProcessingAction"),
@@ -1024,7 +1029,7 @@
                 els.hfEnabled, els.hfNoSpeech, els.hfCompRatio, els.hfRepetition,
                 els.lifecycleEnabled, els.lifecycleInterval, els.lifecycleHotDays,
                 els.lifecycleWarmDays, els.lifecycleRunOnStartup,
-                els.autoProcessingEnabled, els.autoProcessingRunAt,
+                els.autoProcessingEnabled, els.autoProcessingRunAt, els.autoProcessingStopAt,
                 els.autoProcessingRecentHours, els.autoProcessingMaxItems,
                 els.autoProcessingAction,
                 els.autoProcessingRunOnStartup,
@@ -1138,6 +1143,9 @@
                 els.autoProcessingEnabled.checked = !!data.auto_processing_enabled;
                 if (data.auto_processing_run_at) {
                     els.autoProcessingRunAt.value = data.auto_processing_run_at;
+                }
+                if (data.auto_processing_stop_at) {
+                    els.autoProcessingStopAt.value = data.auto_processing_stop_at;
                 }
                 if (data.auto_processing_recent_hours !== undefined && data.auto_processing_recent_hours !== null) {
                     els.autoProcessingRecentHours.value = data.auto_processing_recent_hours;
@@ -1519,7 +1527,8 @@
                 lifecycle_warm_days: parseInt(els.lifecycleWarmDays.value, 10),
                 lifecycle_run_on_startup: els.lifecycleRunOnStartup.checked,
                 auto_processing_enabled: els.autoProcessingEnabled.checked,
-                auto_processing_run_at: els.autoProcessingRunAt.value || "02:00",
+                auto_processing_run_at: els.autoProcessingRunAt.value || "01:00",
+                auto_processing_stop_at: els.autoProcessingStopAt.value || "06:00",
                 auto_processing_recent_hours: parseInt(els.autoProcessingRecentHours.value, 10),
                 auto_processing_max_items_per_run: parseInt(els.autoProcessingMaxItems.value, 10),
                 auto_processing_action: els.autoProcessingAction.value,
@@ -1606,9 +1615,11 @@
                 if (skippedByLimit > 0) {
                     parts.push("상한 보류 " + skippedByLimit + "건");
                 }
-                if (otherSkipped > 0) {
-                    parts.push("기타 보류 " + otherSkipped + "건");
-                }
+                Object.entries(result.skipped_reasons || {}).forEach(function (entry) {
+                    parts.push(entry[0] + " " + entry[1] + "건");
+                    otherSkipped -= entry[1];
+                });
+                if (otherSkipped > 0) parts.push("기타 보류 " + otherSkipped + "건");
                 if ((result.failed || 0) > 0) {
                     parts.push("등록/처리 실패 " + result.failed + "건");
                 }

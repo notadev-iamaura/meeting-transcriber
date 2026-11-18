@@ -730,6 +730,24 @@ class TestToggleRecording:
     녹음 시작/정지 토글 동작, 에러 처리를 검증한다.
     """
 
+    def test_종료_결과는_저장된_파일별_전사_상태를_표시(self, tmp_path: Path) -> None:
+        """미등록과 이미 시작한 전사, 미저장을 각각 알려준다."""
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = _make_test_config(tmp_path)
+        missing = urllib.error.HTTPError("url", 404, "미등록", None, None)
+        processing = MagicMock()
+        processing.__enter__.return_value.read.return_value = b'{"status":"transcribing"}'
+        with patch("ui.menubar.urllib.request.urlopen", side_effect=[missing, processing]):
+            title, message = app._stop_receipt(
+                {"saved": True, "files": ["mic.wav", "system.wav"], "expected_files": 2}
+            )
+        assert title == "녹음 저장 완료"
+        assert message == "mic.wav · 회의 등록 확인 중\nsystem.wav · 전사"
+        assert app._stop_receipt({"saved": False, "reason": "무음"}) == (
+            "녹음이 저장되지 않았습니다",
+            "무음 · 전사 시작 안 함",
+        )
+
     @patch("ui.menubar.rumps.App.__init__", return_value=None)
     def test_녹음_시작_호출(
         self,

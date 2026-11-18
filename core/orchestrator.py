@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from config import AppConfig
+from config import AppConfig, AutoProcessingConfig
 from core.io_utils import atomic_write_json
 from core.job_queue import (
     InvalidTransitionError,
@@ -39,12 +39,20 @@ from core.job_queue import (
     rollback_retranscribe_staging,
 )
 from core.meeting_mutation import MeetingMutationCoordinator
+from core.nightly_window import (
+    NIGHTLY_ACTIONS,
+    NightlyWindowClosed,
+    current_window,
+    run_during_window,
+)
 from core.perf_stats import PerfStats
 from core.pipeline import InvalidInputError, PipelineManager, PipelineStep
 from core.quarantine import restore_from_quarantine
 from core.stage_work_queue import StageWorkQueue, StageWorkSpec
 
 logger = logging.getLogger(__name__)
+
+_NIGHTLY_MEMORY_DEFERRED = "메모리가 부족해 다음 예약 시간에 이어서 처리합니다."
 
 
 class JobProcessor:
@@ -84,6 +92,7 @@ class JobProcessor:
         self._thermal_manager = thermal_manager
         self._ws_manager = ws_manager
         self._poll_interval = poll_interval
+        self._nightly_config = getattr(getattr(pipeline, "_config", None), "auto_processing", None)
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -597,6 +606,29 @@ class JobProcessor:
             logger.info("작업 루프 취소됨")
             raise
 
+    def update_auto_processing_config(self, config: AutoProcessingConfig) -> None:
+        """설정 변경 직후 대기 작업과 실행 중인 야간 작업 모두 새 시간대를 따른다."""
+        self._nightly_config = config
+
+    def _night_seconds_left(self) -> float:
+        """예약 작업을 허용하는 남은 시간을 현재 로컬 벽시계로 계산한다."""
+        now = datetime.now()
+        window = current_window(self._nightly_config, now) if self._nightly_config else None
+        return (window[1] - now).total_seconds() if window else 0.0
+
+    def _job_ready_now(self, job: Any) -> bool:
+        """야간 대기열만 시간대와 이번 창 메모리 보류 여부를 확인한다."""
+        if getattr(job, "requested_action", "") not in NIGHTLY_ACTIONS:
+            return True
+        now = datetime.now()
+        window = current_window(self._nightly_config, now) if self._nightly_config else None
+        if not window:
+            return False
+        return (
+            str(job.error_message) != _NIGHTLY_MEMORY_DEFERRED
+            or str(job.updated_at) < window[0].isoformat()
+        )
+
     async def _get_next_job(self) -> Any | None:
         """큐에서 다음 대기 작업을 가져온다.
 
@@ -605,8 +637,9 @@ class JobProcessor:
         """
         try:
             pending = await self._job_queue.get_pending_jobs()
-            if pending:
-                return pending[0]
+            for job in pending:
+                if self._job_ready_now(job):
+                    return job
             return None
         except Exception as e:
             logger.error(f"작업 큐 조회 실패: {e}")
@@ -1151,19 +1184,13 @@ class JobProcessor:
         meeting_id = job.meeting_id
         audio_path = job.audio_path
         requested_action = str(getattr(job, "requested_action", "") or "")
-        skip_llm_steps_override: bool | None
-        if requested_action == "transcribe":
-            skip_llm_steps_override = True
-        elif requested_action == "full":
-            skip_llm_steps_override = False
-        else:
-            skip_llm_steps_override = None
-
         logger.info(f"작업 처리 시작: job_id={job_id}, meeting_id={meeting_id}")
 
         # 서멀 대기 뒤 queued 상태를 원자적으로 선점한다. 폴링 snapshot을 얻은
         # 동안 사용자가 취소해 recorded가 된 작업은 여기서 반드시 중단한다.
         await self._thermal_manager.wait_if_needed()
+        if not self._job_ready_now(job):
+            return False
         try:
             if already_claimed:
                 claimed_job = await asyncio.to_thread(self._job_queue.queue.get_job, job_id)
@@ -1204,6 +1231,18 @@ class JobProcessor:
             if already_claimed:
                 await self._thermal_manager.notify_job_completed()
             return False
+        claimed_action = str(claimed_job.requested_action or "")
+        nightly = claimed_action in NIGHTLY_ACTIONS
+        skip_llm_steps_override: bool | None = None
+        if claimed_action in {"transcribe", "nightly_transcribe"}:
+            skip_llm_steps_override = True
+        elif claimed_action in {"full", "nightly_full"}:
+            skip_llm_steps_override = False
+        if nightly and queued_stt_provider != "local":
+            await self._update_job_status_safe(
+                job_id, "failed", error_message="야간 예약의 로컬 전사 선택을 확인할 수 없습니다."
+            )
+            return False
         if not queued_stt_provider and not queued_stt_model:
             # v3 마이그레이션 전 legacy queued job만 실행 직전 설정을
             # 1회 snapshot한다. 신규 큐는 모두 등록 시점에 저장된다.
@@ -1239,6 +1278,8 @@ class JobProcessor:
             Raises:
                 asyncio.CancelledError: 사용자가 이 회의에 대해 취소를 요청한 경우
             """
+            if nightly and self._night_seconds_left() <= 0:
+                raise NightlyWindowClosed
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 logger.info(
                     f"취소 감지: meeting_id={meeting_id}, step={step_name} → CancelledError 발생"
@@ -1336,7 +1377,11 @@ class JobProcessor:
         try:
             # 파이프라인 실행: batch 가 명시한 실행 의도는 우선하고,
             # 빈 값이면 pipeline.run 내부에서 config.pipeline.skip_llm_steps 를 사용한다.
-            extra_options = {} if stop_after is None else {"stop_after": stop_after}
+            extra_options: dict[str, Any] = (
+                {} if stop_after is None else {"stop_after": stop_after}
+            )
+            if claimed_action == "nightly_full":
+                extra_options["require_full_processing"] = True
             if claimed_job.requested_action == "retry_mic":
                 result = await self._pipeline.retry_mic(
                     Path(audio_path),
@@ -1346,22 +1391,38 @@ class JobProcessor:
                     should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
                 )
             else:
-                result = await self._pipeline.run(
-                    Path(audio_path),
-                    meeting_id=meeting_id,
-                    on_step_start=on_step_start,
-                    on_step_progress=on_step_progress,
-                    skip_llm_steps=skip_llm_steps_override,
-                    should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
-                    stt_provider=queued_stt_provider,
-                    stt_model=queued_stt_model,
-                    **extra_options,
+
+                async def run_pipeline() -> Any:
+                    """선점한 작업의 모델과 실행 의도로 체크포인트에서 시작한다."""
+                    return await self._pipeline.run(
+                        Path(audio_path),
+                        meeting_id=meeting_id,
+                        on_step_start=on_step_start,
+                        on_step_progress=on_step_progress,
+                        skip_llm_steps=skip_llm_steps_override,
+                        should_cancel=lambda: self._is_job_cancellation_requested(
+                            meeting_id, job_id
+                        ),
+                        stt_provider=queued_stt_provider,
+                        stt_model=queued_stt_model,
+                        **extra_options,
+                    )
+
+                result = (
+                    await run_during_window(run_pipeline, self._night_seconds_left)
+                    if nightly
+                    else await run_pipeline()
                 )
             pipeline_completed = result.status == "completed"
 
             if self._is_job_cancellation_requested(meeting_id, job_id):
                 raise asyncio.CancelledError(f"사용자 취소: {meeting_id}")
 
+            if nightly and result.status == "paused":
+                await self._defer_nightly_job(
+                    job_id, meeting_id, "memory", _NIGHTLY_MEMORY_DEFERRED
+                )
+                return False
             if stop_after is not None:
                 if result.status not in {"paused", "completed"}:
                     raise RuntimeError("벌크 중간 단계가 paused 상태를 반환하지 않았습니다")
@@ -1396,7 +1457,7 @@ class JobProcessor:
             logger.info(f"작업 처리 완료: job_id={job_id}")
             return status_recovered
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             is_user_cancel = self._is_job_cancellation_requested(meeting_id, job_id)
 
             if is_user_cancel:
@@ -1408,6 +1469,14 @@ class JobProcessor:
                 # 사용자 취소는 작업 루프를 계속 동작시켜야 하므로 재전파하지 않는다.
                 return False
 
+            if isinstance(exc, NightlyWindowClosed):
+                await self._defer_nightly_job(
+                    job_id,
+                    meeting_id,
+                    "nightly_window_closed",
+                    "야간 처리 시간이 끝났습니다. 다음 예약 시간에 이어서 처리합니다.",
+                )
+                return False
             self._cancellation_requests.discard(meeting_id)
             if pipeline_completed and completion_confirmed:
                 # 본체와 DB의 완료는 확정됐다. 종료 중 쿨다운/이벤트 대기 취소로 되돌리지 않는다.
@@ -1490,6 +1559,24 @@ class JobProcessor:
 
             logger.error(f"작업 처리 실패: job_id={job_id}, error={e}")
         return False
+
+    async def _defer_nightly_job(
+        self, job_id: int, meeting_id: str, reason: str, message: str
+    ) -> None:
+        """체크포인트와 재시도 횟수를 보존하며, 동시 수동 취소가 선점했으면 확정한다."""
+        try:
+            await asyncio.to_thread(
+                self._job_queue.queue.force_set_status, job_id, JobStatus.QUEUED, message
+            )
+        except InvalidTransitionError:
+            if self._is_job_cancellation_requested(meeting_id, job_id):
+                await self._finalize_user_cancellation(job_id, meeting_id)
+                return
+            raise
+        await self._broadcast_event(
+            "job_interrupted",
+            {"job_id": job_id, "meeting_id": meeting_id, "status": "queued", "reason": reason},
+        )
 
 
 # === 파이프라인 단계 → 작업 상태 매핑 ===

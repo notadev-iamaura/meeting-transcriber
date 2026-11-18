@@ -5,6 +5,8 @@
 // CoreAudio process list를 조회해 Zoom 계열 프로세스가 실제 오디오 I/O를
 // 실행 중인지 확인한다. 출력은 Python 쪽에서 파싱하기 쉽게 한 줄 JSON이다.
 
+import AppKit
+import ApplicationServices
 import AudioToolbox
 import CoreAudio
 import Darwin
@@ -409,6 +411,96 @@ private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws 
     if let failure = state.failure { throw failure }
     if let failure = waitFailure ?? finishFailure { throw failure }
     try audioCheck(stopStatus)
+}
+
+// 회의 창의 명시적 주제 필드만 본다. 창을 열거나 권한을 요청하지 않는다.
+private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    return value
+}
+
+private func axText(_ element: AXUIElement, _ name: String) -> String {
+    if let text = axAttribute(element, name) as? String, !text.isEmpty {
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if name == kAXTitleAttribute, let label = axAttribute(element, kAXTitleUIElementAttribute),
+       CFGetTypeID(label) == AXUIElementGetTypeID() {
+        let labelElement = label as! AXUIElement
+        return (axAttribute(labelElement, kAXValueAttribute) as? String) ?? ""
+    }
+    return ""
+}
+
+private func topicLabel(_ value: String, infoPanel: Bool) -> Bool {
+    let label = value.trimmingCharacters(in: CharacterSet(charactersIn: " :：")).lowercased()
+    return ["meeting topic", "회의 주제"].contains(label)
+        || (infoPanel && ["topic", "주제"].contains(label))
+}
+
+private func zoomMeetingTopic() -> (String, Bool, Bool) {
+    guard AXIsProcessTrusted() else { return ("", false, false) }
+    let zoom = NSRunningApplication.runningApplications(withBundleIdentifier: "us.zoom.xos")
+    guard zoom.count == 1 else { return ("", zoom.count > 1, true) }
+    let app = AXUIElementCreateApplication(zoom[0].processIdentifier)
+    AXUIElementSetMessagingTimeout(app, 0.12)
+    guard let windows = axAttribute(app, kAXWindowsAttribute) as? [AXUIElement] else { return ("", false, true) }
+    let result = extractZoomTopic(windows: windows, text: axText) { node in
+        axAttribute(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    }
+    return (result.0, result.1, true)
+}
+
+private func extractZoomTopic<Node>(windows: [Node], text: (Node, String) -> String,
+                                    childrenOf: (Node) -> [Node]) -> (String, Bool) {
+    let meetingNames = ["zoom meeting", "zoom 회의", "zoom webinar", "zoom 웨비나"]
+    let infoNames = ["meeting info", "meeting information", "회의 정보"]
+    var meetingWindows: [Node] = []
+    for window in windows {
+        let name = text(window, kAXTitleAttribute).lowercased()
+        if meetingNames.contains(name) { meetingWindows.append(window) }
+    }
+    guard meetingWindows.count == 1 else {
+        return ("", meetingWindows.count > 1)
+    }
+    // 별도 창은 예약된 다른 회의 정보일 수 있다. 실제 회의 창과 그 자식만 허용한다.
+    var stack = [(meetingWindows[0], false)]
+    var topics = Set<String>()
+    var visited = 0
+    let deadline = ProcessInfo.processInfo.systemUptime + 1.2
+    while let (element, inInfo) = stack.popLast() {
+        visited += 1
+        guard visited <= 200, ProcessInfo.processInfo.systemUptime < deadline else { return ("", false) }
+        let role = text(element, kAXRoleAttribute)
+        // 채팅 목록, 문서, 참석자 표, 웹 화면의 내용을 읽지 않는다.
+        if ["AXTextField", "AXStaticText"].contains(role) {
+            let title = text(element, kAXTitleAttribute)
+            let description = text(element, kAXDescriptionAttribute)
+            if topicLabel(title, infoPanel: inInfo) || topicLabel(description, infoPanel: inInfo) {
+                let value = text(element, kAXValueAttribute)
+                if !value.isEmpty && !topicLabel(value, infoPanel: inInfo) { topics.insert(value) }
+            }
+            continue
+        }
+        guard ["AXWindow", "AXGroup", "AXSplitGroup", "AXPopover", "AXSheet", "AXToolbar"].contains(role) else { continue }
+        let isInfo = inInfo || infoNames.contains(text(element, kAXTitleAttribute).lowercased())
+            || infoNames.contains(text(element, kAXDescriptionAttribute).lowercased())
+        let children = childrenOf(element)
+        if children.count == 2, text(children[0], kAXRoleAttribute) == "AXStaticText",
+           topicLabel(text(children[0], kAXValueAttribute), infoPanel: isInfo),
+           ["AXStaticText", "AXTextField"].contains(text(children[1], kAXRoleAttribute)) {
+            let value = text(children[1], kAXValueAttribute)
+            if !value.isEmpty { topics.insert(value) }
+        }
+        stack.append(contentsOf: children.map { ($0, isInfo) })
+    }
+    return (topics.count == 1 ? (topics.first ?? "") : "", topics.count > 1)
+}
+
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--meeting-topic" {
+    let (topic, ambiguous, authorized) = zoomMeetingTopic()
+    print("{\"ok\":true,\"topic\":\(jsonStringLiteral(topic)),\"ambiguous\":\(ambiguous),\"authorized\":\(authorized)}")
+    exit(0)
 }
 
 if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "--record-split",

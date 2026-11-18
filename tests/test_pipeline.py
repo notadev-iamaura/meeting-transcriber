@@ -5752,11 +5752,13 @@ class TestDegradedFlagLogicSeparation:
         assert state.degraded is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("nightly", [False, True])
     async def test_케이스B_실시간메모리부족시_llm_스킵(
         self,
         mock_config: MagicMock,
         mock_model_manager: MagicMock,
         audio_file: Path,
+        nightly: bool,
     ) -> None:
         """케이스 B: 초기 check_all은 OK이지만 단계 직전 check_memory가
         False를 반환하면 LLM 단계가 스킵되어야 한다.
@@ -5834,11 +5836,19 @@ class TestDegradedFlagLogicSeparation:
             ),
         ):
             pipeline = PipelineManager(mock_config, mock_model_manager)
-            state = await pipeline.run(audio_file, meeting_id="realtime_low_mem_test")
+            state = await pipeline.run(
+                audio_file, meeting_id="realtime_low_mem_test", require_full_processing=nightly
+            )
 
         # 실시간 메모리 부족 → LLM 단계 스킵
         mock_correct.assert_not_called()
         mock_summarize.assert_not_called()
+        if nightly:
+            stored = pipeline.get_status("realtime_low_mem_test")
+            assert state.status == stored.status == "paused"
+            assert stored.completed_steps == ["convert", "transcribe", "diarize", "merge"]
+            assert stored.current_step == "correct" and stored.skipped_steps == []
+            return
         assert "correct" in state.skipped_steps
         assert "summarize" in state.skipped_steps
         # state.degraded 도 True 로 설정된다 (스킵 시 설정)

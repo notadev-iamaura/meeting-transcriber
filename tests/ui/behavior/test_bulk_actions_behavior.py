@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from playwright.sync_api import Browser, Page, expect
+from playwright.sync_api import Browser, Page, Route, expect
 
 from tests.ui.conftest import empty_meetings_dom, meetings_listbox
 
@@ -281,7 +281,7 @@ def test_history_refresh_preserves_keyboard_focus_and_scroll(ui_page: Page) -> N
     )
     ui_page.locator("#batchHistoryButton").click()
     dialog = ui_page.get_by_role("dialog", name="작업 내역")
-    last_link = dialog.get_by_role("link", name="녹취 19", exact=True)
+    last_link = dialog.get_by_role("link", name="일시 미상 녹취 19", exact=True)
     last_link.focus()
     before = dialog.evaluate("el => el.scrollTop")
     receipt["events"].append(
@@ -328,6 +328,29 @@ def test_contextual_toolbar_viewer_layout_desktop_and_mobile(ui_page: Page) -> N
         path="/private/tmp/recap-contextual-actions-selection-390.png", animations="disabled"
     )
     assert ui_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_viewer_more_actions_stay_open_when_transcript_arrives(ui_page: Page) -> None:
+    """더 보기에서 작업을 고르는 중에 늦은 전사 응답이 와도 메뉴와 포커스를 유지한다."""
+    held: list[Route] = []
+    ui_page.route("**/api/meetings/*/transcript", lambda route: held.append(route))
+    with ui_page.expect_request("**/api/meetings/*/transcript"):
+        _meeting_items(ui_page).nth(3).click()
+
+    summary = ui_page.locator(".viewer-more-actions > summary")
+    panel = ui_page.locator(".viewer-more-panel")
+    summary.click()
+    action = panel.get_by_role("button", name="다른 모델로 텍스트 변환하기…")
+    action.focus()
+    expect(action).to_be_focused()
+
+    held[0].fulfill(json={"utterances": [{"speaker": "S1", "start": 0, "end": 2, "text": "검토"}]})
+    expect(panel.locator(".viewer-action-btn.copy")).to_have_count(1)
+    expect(panel).to_be_visible()
+    expect(action).to_be_focused()
+    ui_page.keyboard.press("Escape")
+    expect(panel).to_be_hidden()
+    expect(summary).to_be_focused()
 
 
 # ============================================================================

@@ -31,6 +31,12 @@ aria-label="합성 검증 도구">
 <button data-fixture="request-failed">요청 오류 준비</button>
 <button data-fixture="request-ready">요청 정상 준비</button>
 <button data-fixture="record-start">합성 녹음 시작</button>
+<button data-fixture="record-short">짧은 녹음 준비</button>
+<button data-fixture="record-register">회의 등록</button>
+<button data-fixture="record-queue">전사 대기</button>
+<button data-fixture="record-transcribe">전사 처리</button>
+<button data-fixture="record-complete">전사 완료</button>
+<button data-fixture="record-auto-stop">자동 녹음 종료</button>
 <button data-fixture="record-failed">저장 오류</button>
 <button data-fixture="record-stop-failed">정지 오류 준비</button>
 <button data-fixture="late-duration">지연 음량 이벤트</button>
@@ -63,6 +69,9 @@ class AudioRecoveryFixture:
         self.retry_error = False
         self.stop_error = False
         self.record_number = 0
+        self.short = False
+        self.capture_status: str | None = None
+        self.stop_posts = 0
         self.mic = self.mic_state(mic_status)
         self.recording: dict[str, Any] = {"is_recording": False, "state": "idle"}
         self.utterances = [
@@ -153,6 +162,8 @@ class AudioRecoveryFixture:
         elif name == "record-start":
             self.record_number += 1
             self.stop_error = False
+            self.short = False
+            self.capture_status = None
             self.recording = {
                 "is_recording": True,
                 "state": "recording",
@@ -161,6 +172,18 @@ class AudioRecoveryFixture:
                 "audio_levels": {"mic_dbfs": -18, "system_dbfs": -12},
             }
             event("recording_started", self.recording)
+        elif name == "record-short":
+            self.short = True
+        elif name in {"record-register", "record-queue", "record-transcribe", "record-complete"}:
+            self.capture_status = {
+                "record-register": "recorded",
+                "record-queue": "queued",
+                "record-transcribe": "transcribing",
+                "record-complete": "completed",
+            }[name]
+            event("job_added", {"meeting_id": f"capture_{self.record_number}"})
+        elif name == "record-auto-stop":
+            event("recording_stopped", self.finish())
         elif name in {"record-failed", "record-stop-failed"}:
             self.stop_error = True
             self.recording = {"is_recording": False, "state": "idle", "last_error": self.failure()}
@@ -175,6 +198,21 @@ class AudioRecoveryFixture:
             event("recording_error", {**self.failure(), "meeting_id": "capture_0"})
             event("recording_stopped", {"meeting_id": "capture_0"})
         return {"events": events}
+
+    def finish(self) -> dict[str, Any]:
+        """같은 회기의 HTTP·WebSocket·다음 상태 조회에 같은 종료 결과를 제공한다."""
+        mid = f"capture_{self.record_number}"
+        result = {
+            "meeting_id": mid,
+            "ended_at": f"2026-11-18T12:01:{self.record_number:02}",
+            "files": [] if self.short else [f"{mid}.wav"],
+            "expected_files": 1,
+            "saved": not self.short,
+            "discarded": self.short,
+            "reason": "최소 녹음 시간(30초)보다 짧습니다." if self.short else "",
+        }
+        self.recording = {"is_recording": False, "state": "idle", "last_stop": result}
+        return result
 
     def api(self, path: str, method: str) -> tuple[int, dict[str, Any]]:
         """실제 앱·모델·오디오 파일을 호출하지 않는 합성 응답을 만든다."""
@@ -192,10 +230,17 @@ class AudioRecoveryFixture:
         if path == "/api/recording/status":
             return 200, self.recording
         if path == "/api/recording/stop":
+            self.stop_posts += 1
             if self.stop_error:
                 return 500, {"detail": "녹음 저장 오류"}
-            self.recording = {"is_recording": False, "state": "idle"}
-            return 200, {"status": "stopped"}
+            return 200, {"status": "ok", **self.finish()}
+        if path == f"/api/meetings/capture_{self.record_number}":
+            if self.capture_status is None:
+                return 404, {"detail": "회의 미등록"}
+            return 200, {
+                "meeting_id": f"capture_{self.record_number}",
+                "status": self.capture_status,
+            }
         if path.endswith("/transcript"):
             return 200, {
                 "meeting_id": MEETING_ID,

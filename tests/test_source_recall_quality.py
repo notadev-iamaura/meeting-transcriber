@@ -119,9 +119,12 @@ def test_content_topic_precedes_generic_future_facet_and_keeps_base_metadata(
     assert rows[1].score == 0.1 and other.meeting_id == "other"
 
 
-def test_natural_meeting_scope_requires_unique_current_indexed_identity(config: AppConfig) -> None:
+@pytest.mark.parametrize("suffix", ["", "_zoom_0123456789abcdef0123456789abcdef"])
+def test_natural_meeting_scope_requires_unique_current_indexed_identity(
+    config: AppConfig, suffix: str
+) -> None:
     """자연어 날짜·시각은 실제 보존 날짜와 색인 ID가 유일할 때만 필터가 된다."""
-    mid = "meeting_20310115_094510"
+    mid = f"meeting_20310115_094510{suffix}"
     row = _meeting(config, mid)
     _index(config, [row])
     query = "2031년 1월 15일 09:45 회의 기준 베타 확장본은 어떤 상태인가요?"

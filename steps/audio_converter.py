@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import AppConfig
+from core.nightly_window import finish_nightly_write
 from core.recording_channels import RECORDING_TRACK_COMMENT
 
 logger = logging.getLogger(__name__)
@@ -424,10 +425,12 @@ class AudioConverter:
         Returns:
             변환된 WAV 파일 경로 (Path)
         """
-        return await asyncio.to_thread(
-            self.convert,
-            input_path,
-            output_dir,
-            output_filename,
-            preserve_recording_tracks=preserve_recording_tracks,
+        return await finish_nightly_write(
+            asyncio.to_thread(
+                self.convert,
+                input_path,
+                output_dir,
+                output_filename,
+                preserve_recording_tracks=preserve_recording_tracks,
+            )
         )

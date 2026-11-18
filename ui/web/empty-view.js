@@ -310,6 +310,7 @@
             '  </section>',
             '',
             '  <section class="home-actions" aria-label="홈 빠른 작업">',
+            '    <button class="home-primary-action home-bulk-action" id="homeActionRecordAgain" type="button" hidden>녹음 시작</button>',
             '    <button class="home-action-btn" id="homeActionOpenFolder" type="button">',
             '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
             '        <path d="M3 5a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5z"/>',
@@ -408,12 +409,12 @@
             });
         }
 
-        var recordingBtn = document.getElementById("homeActionStartRecording");
-        if (recordingBtn) {
-            recordingBtn.addEventListener("click", function () {
-                self._startRecording(recordingBtn);
+        ["homeActionStartRecording", "homeActionRecordAgain"].forEach(function (id) {
+            var button = document.getElementById(id);
+            if (button) button.addEventListener("click", function () {
+                self._startRecording(button);
             });
-        }
+        });
     };
 
     /**
@@ -468,7 +469,7 @@
                 var section = document.getElementById("homeRecent");
                 var host = document.getElementById("homeRecentRows");
                 if (!section || !host) return;
-                var meetings = (data.meetings || []).slice(0, 6);
+                var meetings = (data.meetings || []).slice().sort(App.compareMeetingTimes).slice(0, 6);
                 var snapshot = JSON.stringify(meetings);
                 if (snapshot === self._recentSnapshot) return;
                 self._recentSnapshot = snapshot;
@@ -480,10 +481,7 @@
                     link.href = "/app/viewer/" + encodeURIComponent(meeting.meeting_id);
                     var title = document.createElement("span");
                     title.className = "home-recent-title";
-                    var match = (meeting.meeting_id || "").match(/^meeting_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
-                    title.textContent = meeting.title || (match
-                        ? match[1] + "-" + match[2] + "-" + match[3] + " " + match[4] + ":" + match[5] + " 녹취"
-                        : meeting.meeting_id);
+                    App.renderMeetingHeading(title, meeting);
                     var status = document.createElement("span");
                     status.className = "home-recent-status";
                     status.dataset.status = meeting.status;
@@ -539,11 +537,8 @@
         var original = btn.textContent;
         btn.disabled = true;
         btn.textContent = "녹음 시작 중...";
+        if (msgEl) msgEl.textContent = "";
         App.apiRequest("/recording/start", { method: "POST" })
-            .then(function () {
-                if (self._destroyed) return;
-                if (msgEl) msgEl.textContent = "녹음이 시작되었습니다. 상단 녹음 상태에서 정지할 수 있습니다.";
-            })
             .catch(function (err) {
                 if (self._destroyed) return;
                 if (msgEl) {

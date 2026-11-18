@@ -16,8 +16,10 @@
 의존성: pytest, pytest-asyncio
 """
 
+import asyncio
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +28,7 @@ import numpy as np
 import pytest
 
 from config import AppConfig, EmbeddingConfig, PathsConfig
+from core.nightly_window import NightlyWindowClosed, run_during_window
 from steps.chunker import Chunk, ChunkedResult
 from steps.embedder import (
     _CHROMA_COLLECTION_NAME,
@@ -130,6 +133,37 @@ def _make_embedder(config: AppConfig | None = None) -> Embedder:
 def _make_fake_embeddings(count: int, dim: int = 384) -> list[list[float]]:
     """테스트용 가짜 임베딩 벡터를 생성한다."""
     return [np.random.randn(dim).tolist() for _ in range(count)]
+
+
+async def test_nightly_cutoff_finishes_both_index_writes(tmp_path: Path) -> None:
+    """벡터 저장 도중 마감되면 FTS5 게시까지 끝난 뒤에만 회의의 쓰기 잠금을 반납한다."""
+    embedder = _make_embedder(AppConfig(paths=PathsConfig(base_dir=str(tmp_path))))
+    embedder._model_manager.acquire.return_value.__aenter__.return_value = _make_fake_model()
+    started = threading.Event()
+    release = threading.Event()
+
+    def store_vector(*args: object) -> None:
+        """벡터 저장이 끝나기 전 잠시 멈춰 실제 취소 경계를 만든다."""
+        started.set()
+        assert release.wait(timeout=4)
+
+    with patch("steps.embedder._store_chunks_chroma", side_effect=store_vector):
+        task = asyncio.create_task(
+            run_during_window(
+                lambda: embedder.embed(_make_chunked_result()),
+                lambda: 0.0 if started.is_set() else 0.01,
+            )
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.sleep(0.05)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(NightlyWindowClosed):
+            await asyncio.wait_for(task, 3)
+    with sqlite3.connect(embedder._meetings_db) as db:
+        assert db.execute("SELECT text FROM chunks_fts").fetchall() == [("테스트 발화입니다",)]
 
 
 def _make_fake_model(batch_size: int = 32, dim: int = 384) -> MagicMock:

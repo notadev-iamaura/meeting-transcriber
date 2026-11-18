@@ -26,6 +26,18 @@ class RecordingErrorResponse(BaseModel):
     partial_file_names: list[str]
 
 
+class RecordingStopOutcome(BaseModel):
+    """종료가 확정된 녹음의 저장 결과와 실제 파일 이름."""
+
+    meeting_id: str | None = None
+    ended_at: str
+    saved: bool
+    discarded: bool
+    reason: str
+    files: list[str]
+    expected_files: int
+
+
 class RecordingStatusResponse(BaseModel):
     """녹음 상태 응답 스키마.
 
@@ -46,6 +58,7 @@ class RecordingStatusResponse(BaseModel):
     is_system_audio: bool = False
     audio_levels: dict[str, float] | None = None
     last_error: RecordingErrorResponse | None = None
+    last_stop: RecordingStopOutcome | None = None
 
 
 class AudioDeviceItem(BaseModel):
@@ -114,7 +127,7 @@ async def start_recording(
     try:
         from steps.recorder import AlreadyRecordingError, AudioDeviceError
 
-        await recorder.start_recording(meeting_id=meeting_id)
+        await recorder.start_recording(meeting_id=meeting_id, observe_manual_zoom_topic=True)
         return {
             "status": "ok",
             "message": "녹음을 시작했습니다.",
@@ -134,7 +147,9 @@ async def start_recording(
 
 
 @router.post("/recording/stop")
-async def stop_recording(request: Request) -> dict[str, Any]:
+async def stop_recording(
+    request: Request, body: RecordingStartRequest | None = None
+) -> dict[str, Any]:
     """녹음을 정지한다.
 
     Args:
@@ -150,21 +165,25 @@ async def stop_recording(request: Request) -> dict[str, Any]:
     from steps.recorder import FFmpegRecordError
 
     try:
-        result = await recorder.stop_recording()
-        if result is None:
-            return {
-                "status": "ok",
-                "message": "녹음이 정지되었습니다. (최소 시간 미달로 파일 파기)",
-                "discarded": True,
-            }
-
-        return {
+        result, outcome = await recorder.stop_recording_with_outcome(
+            expected_meeting_id=body.meeting_id if body else None
+        )
+        if outcome is None:
+            raise HTTPException(status_code=409, detail="요청한 녹음이 진행 중이지 않습니다.")
+        response = {
             "status": "ok",
-            "message": "녹음이 정지되었습니다.",
-            "file_path": str(result.file_path),
-            "duration_seconds": result.duration_seconds,
-            "audio_device": result.audio_device,
+            "message": "녹음을 끝냈습니다.",
+            **outcome,
         }
+        if result is not None:
+            response.update(
+                file_path=str(result.file_path),
+                duration_seconds=result.duration_seconds,
+                audio_device=result.audio_device,
+            )
+        return response
+    except HTTPException:
+        raise
     except FFmpegRecordError as e:
         raise HTTPException(
             status_code=500,
@@ -174,7 +193,7 @@ async def stop_recording(request: Request) -> dict[str, Any]:
         logger.exception(f"녹음 정지 실패: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"녹음 정지 중 오류가 발생했습니다: {e}",
+            detail="녹음 종료 결과를 확인하지 못했습니다. 녹음 상태를 확인해 주세요.",
         ) from e
 
 

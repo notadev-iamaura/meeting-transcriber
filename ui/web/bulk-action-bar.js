@@ -111,7 +111,8 @@
             var canCancel = false;
             (receipt.candidates || []).forEach(function (row) {
                 var item = makeElement("div", null, "batch-review-row");
-                var link = makeElement("a", row.title || row.meeting_id);
+                var link = makeElement("a");
+                App.renderMeetingHeading(link, Object.assign({}, row, { title: row.original_title ?? row.title }));
                 link.dataset.historyKey = receipt.request_id + ":" + row.meeting_id + ":link";
                 link.href = "/app/viewer/" + encodeURIComponent(row.meeting_id);
                 item.appendChild(link);
@@ -391,9 +392,11 @@
                     var cb = doc.createElement("input");
                     cb.type = "checkbox"; cb.value = row.meeting_id; cb.checked = true;
                     label.appendChild(cb);
-                    label.appendChild(makeElement("span", row.title || row.meeting_id));
+                    var heading = makeElement("span");
+                    App.renderMeetingHeading(heading, Object.assign({}, row, { title: row.original_title ?? row.title }));
+                    label.appendChild(heading);
                     line.appendChild(label);
-                    line.appendChild(makeElement("p", (row.status_label || row.status || "상태 확인 필요") + (row.created_at ? " · 등록 " + row.created_at : "")));
+                    line.appendChild(makeElement("p", row.status_label || row.status || "상태 확인 필요"));
                     line.appendChild(makeElement("p", row.reason || "실행 가능"));
                     cb.addEventListener("change", function () {
                         if (cb.checked) selected.add(row.meeting_id); else selected.delete(row.meeting_id);

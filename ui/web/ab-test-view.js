@@ -12,6 +12,14 @@
         var App = deps.App || window.MeetingApp;
         var Router = deps.Router || (window.SPA && window.SPA.Router);
         var errorBanner = deps.errorBanner || { show: function () {} };
+        function renderSource(host, meetingId) {
+            if (!meetingId) {
+                host.textContent = "원본 회의 정보 없음";
+                return;
+            }
+            var meetings = deps.ListPanel ? deps.ListPanel.getMeetings() : [];
+            App.renderReferenceHeading(host, { meeting_id: meetingId }, meetings);
+        }
 
         if (!App || !Router) {
             throw new Error("MeetingAbTestView requires App and Router");
@@ -127,13 +135,14 @@
                     '<div class="ab-test-card-body">',
                     '  <div class="ab-test-card-title">' + App.escapeHtml(variantALabel) + ' vs ' + App.escapeHtml(variantBLabel) + '</div>',
                     '  <div class="ab-test-card-meta">',
-                    '    소스: ' + App.escapeHtml(test.source_meeting_id || "-"),
-                    dateStr ? (' · ' + App.escapeHtml(dateStr)) : '',
+                    '    <span class="ab-source-meeting"></span>',
+                    dateStr ? ('테스트 시작 ' + App.escapeHtml(dateStr)) : '',
                     '  </div>',
                     '</div>',
                     '<span class="ab-test-status ' + App.escapeHtml(statusClass) + '">' + App.escapeHtml(statusText) + '</span>',
                     '<button class="ab-test-card-delete" data-test-id="' + App.escapeHtml(test.test_id) + '">삭제</button>',
                 ].join("");
+                renderSource(card.querySelector(".ab-source-meeting"), test.source_meeting_id);
 
                 // 카드 클릭 → 결과 뷰
                 var onCardClick = function (e) {
@@ -221,6 +230,7 @@
             if (typeParam === "stt") self._testType = "stt";
 
             self._render();
+            self._meetingPicker = App.createMeetingPicker(document.getElementById("abSourceMeeting"), document.getElementById("abSourceLabel"), "회의 선택");
             self._bind();
             self._loadData();
             document.title = "새 A/B 테스트 · Recap";
@@ -243,7 +253,7 @@
 
                 // 소스 회의 선택
                 '  <div class="ab-form-section">',
-                '    <label class="ab-form-label">소스 회의</label>',
+                '    <label class="ab-form-label" id="abSourceLabel" for="abSourceMeetingPicker">소스 회의</label>',
                 '    <select class="ab-form-select" id="abSourceMeeting">',
                 '      <option value="">회의를 선택하세요...</option>',
                 '    </select>',
@@ -440,13 +450,6 @@
             // 현재 선택값을 보존해두고 재구성 후 복원한다
             var prevValue = srcSel.value;
 
-            // 기존 옵션 초기화 (placeholder 포함 전체 재구성)
-            srcSel.innerHTML = "";
-            var placeholder = document.createElement("option");
-            placeholder.value = "";
-            placeholder.textContent = "회의 선택...";
-            srcSel.appendChild(placeholder);
-
             // 유형별 필터: LLM 은 completed 만, STT 는 wav 파일이 있는 상태(recorded 이상)
             var filtered = self._meetings.filter(function (m) {
                 if (self._testType === "llm") {
@@ -459,18 +462,7 @@
                 }
             });
 
-            filtered.forEach(function (m) {
-                var opt = document.createElement("option");
-                opt.value = m.meeting_id;
-                opt.textContent = App.extractMeetingTitle ? App.extractMeetingTitle(m) : m.meeting_id;
-                srcSel.appendChild(opt);
-            });
-
-            // 이전 선택값 또는 URL source 파라미터 복원
-            var restoreValue = prevValue || self._sourceParam;
-            if (restoreValue) {
-                srcSel.value = restoreValue;
-            }
+            self._meetingPicker.setMeetings(filtered, prevValue || self._sourceParam);
         };
 
         /**
@@ -656,6 +648,7 @@
          * 뷰 정리.
          */
         AbTestNewView.prototype.destroy = function () {
+            this._meetingPicker.destroy();
             this._destroyed = true;
             var i;
             for (i = 0; i < this._listeners.length; i++) {
@@ -770,7 +763,7 @@
             var typeClass = (meta.test_type || "llm").toLowerCase();
             var va = meta.variant_a || {};
             var vb = meta.variant_b || {};
-            var sourceId = meta.source_meeting_id || "-";
+            var sourceId = meta.source_meeting_id || "";
 
             headerEl.innerHTML = [
                 '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">',
@@ -781,10 +774,11 @@
                 App.escapeHtml(va.label || "A") + ' vs ' + App.escapeHtml(vb.label || "B"),
                 '</h2>',
                 '<div class="ab-result-meta">',
-                '  <span>소스: <a href="/app/viewer/' + App.escapeHtml(encodeURIComponent(sourceId)) + '">' + App.escapeHtml(sourceId) + '</a></span>',
+                '  <div>원본 회의 ' + (sourceId ? '<a class="ab-source-meeting" href="/app/viewer/' + App.escapeHtml(encodeURIComponent(sourceId)) + '"></a>' : '<span class="ab-source-meeting"></span>') + '</div>',
                 '  <span>상태: <span class="ab-test-status ' + App.escapeHtml(meta.status || "pending") + '">' + App.escapeHtml(meta.status || "pending") + '</span></span>',
                 '</div>',
             ].join("\n");
+            renderSource(headerEl.querySelector(".ab-source-meeting"), sourceId);
 
             var self = this;
             var backLink = document.getElementById("abBackLink");

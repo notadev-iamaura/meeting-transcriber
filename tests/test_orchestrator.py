@@ -1494,10 +1494,12 @@ class TestProcessJobSkipLlm:
         expected_skip: bool,
         processor: JobProcessor,
         mock_pipeline: AsyncMock,
+        mock_job_queue: AsyncMock,
     ) -> None:
         """일괄 큐잉된 작업은 저장된 실행 의도를 pipeline.run 에 명시 전달한다."""
         job = _make_job(job_id=3, meeting_id=f"batch_{requested_action}")
         job.requested_action = requested_action
+        mock_job_queue.claim_queued_job_for_processing.return_value = job
         mock_pipeline.run.return_value = MagicMock(status="completed")
 
         await processor._process_job(job)

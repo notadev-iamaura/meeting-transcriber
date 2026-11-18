@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from steps.zoom_activity import ZoomActivityError, ZoomActivityResult, ZoomAudioActivityChecker
+from steps.zoom_activity import (
+    ZoomActivityError,
+    ZoomActivityResult,
+    ZoomAudioActivityChecker,
+    _read_helper_output,
+)
+
+
+async def test_cancelled_topic_lookup_reaps_helper() -> None:
+    """수동 녹음 정지 시 아직 응답하지 않은 조회 프로세스도 회수한다."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(10)",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    task = asyncio.create_task(_read_helper_output(process, 3))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.returncode is not None
 
 
 @pytest.mark.asyncio

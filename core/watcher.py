@@ -1194,11 +1194,20 @@ class FolderWatcher:
             return None
 
         from core.job_queue import JobStatus
+        from core.zoom_topic import read_recording_topic
+
+        title = await asyncio.to_thread(
+            read_recording_topic,
+            self._config,
+            action.safe_path,
+            action.fingerprint.as_recovery_tuple(),
+        )
 
         job_id = await self._job_queue.add_job(
             meeting_id=action.meeting_id,
             audio_path=str(action.safe_path),
             initial_status=JobStatus.RECORDED.value,
+            **({"title": title} if title else {}),
         )
         logger.info(
             f"작업 큐 등록 (녹음 완료, 전사 대기): job_id={job_id}, "

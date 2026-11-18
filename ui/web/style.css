@@ -1432,6 +1432,89 @@ button {
 .home-recent-row:hover { background: var(--bg-hover); }
 .home-recent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .home-recent-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.meeting-heading,
+.viewer-meeting-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  gap: 2px;
+}
+.meeting-heading-date {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.meeting-heading-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meeting-picker { position: relative; min-width: 0; max-width: 100%; }
+.controls-bar .meeting-picker { flex: 0 1 18rem; }
+.meeting-picker-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+}
+.meeting-picker-trigger::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border: solid var(--text-secondary);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg) translateY(-2px);
+}
+.meeting-picker-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.meeting-picker-options {
+  position: absolute;
+  z-index: 12;
+  inset-inline: 0;
+  top: calc(100% + 4px);
+  max-height: min(17rem, 38vh);
+  overflow: auto;
+  padding: 4px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  box-shadow: var(--shadow);
+}
+.meeting-picker-options [role="option"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.meeting-picker-options [role="option"].active,
+.meeting-picker-options [role="option"]:hover { background: var(--bg-hover); }
+.meeting-picker-options [role="option"].active { outline: 1px solid var(--accent); outline-offset: -1px; }
+.meeting-picker-options [aria-selected="true"] { font-weight: 600; }
+.meeting-picker-status { flex-shrink: 0; color: var(--text-secondary); font-size: 11px; }
+.viewer-meeting-heading { flex: 1; }
+.viewer-meeting-heading > .meeting-heading-date { padding-inline-start: 4px; }
+ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: inherit; }
 .home-recent-status {
   flex-shrink: 0;
   max-width: 45%;
@@ -4326,8 +4409,17 @@ dialog.transcription-model-dialog::backdrop {
 }
 
 .ref-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
   font-size: 10px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
+}
+
+.ref-card-meta > .meeting-heading {
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: var(--text-primary);
 }
 
 .ref-card-preview {
@@ -5157,7 +5249,8 @@ dialog.transcription-model-dialog::backdrop {
   transition: opacity var(--duration-fast) var(--ease-macos), background var(--duration-fast) var(--ease-macos);
 }
 
-.viewer-title:hover .viewer-title-edit-btn {
+.viewer-title:hover .viewer-title-edit-btn,
+.viewer-title:focus-within .viewer-title-edit-btn {
   opacity: 1;
 }
 
@@ -5172,6 +5265,7 @@ dialog.transcription-model-dialog::backdrop {
 
 .viewer-title-input {
   flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   border: 1px solid var(--accent);
   border-radius: 6px;
@@ -5192,8 +5286,10 @@ dialog.transcription-model-dialog::backdrop {
 }
 
 @media (max-width: 768px) {
-  .viewer-title {
+  .viewer-meeting-heading {
     flex: 1 1 100%;
+  }
+  .viewer-title {
     max-width: 100%;
     min-width: 0;
     letter-spacing: 0;
@@ -5202,9 +5298,7 @@ dialog.transcription-model-dialog::backdrop {
   .viewer-title-text {
     display: block;
     max-width: 100%;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    white-space: nowrap;
   }
 }
 
@@ -5227,6 +5321,19 @@ dialog.transcription-model-dialog::backdrop {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.summary-draft-status {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.summary-editor details pre {
+  max-height: 35vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .summary-textarea {

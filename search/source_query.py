@@ -23,6 +23,9 @@ _MEETING_DATE = re.compile(
     r"(?P<year>\d{4})(?:년|[-./])\s*(?P<month>\d{1,2})(?:월|[-./])\s*"
     r"(?P<day>\d{1,2})일?\s*(?:(?P<hour>\d{1,2})\s*[:시]\s*(?P<minute>\d{1,2})분?)?\s*회의"
 )
+_TIMESTAMPED_MEETING_ID = re.compile(
+    r"meeting_(\d{8})_(\d{2})(\d{2})(\d{2})(?:_zoom_[0-9a-f]{32})?"
+)
 _QUOTED = re.compile(r"(?<!\w)['\"‘“]([^'\"’”\r\n]+)['\"’”]")
 _NOISE = frozenset(
     (
@@ -288,7 +291,7 @@ def resolve_source_scope(
             if revision_status(config, mid) not in {"legacy", "current"}:
                 continue
             _, source = read_source(config, mid)
-            encoded = re.fullmatch(r"meeting_(\d{8})_(\d{2})(\d{2})(\d{2})", mid)
+            encoded = _TIMESTAMPED_MEETING_ID.fullmatch(mid)
             if prefix is not None and encoded is None:
                 continue
             if encoded:
@@ -445,7 +448,7 @@ def _latest_related_meeting(config: Any, query: str, results: list[SearchResult]
                 preserved = saved["date"]
             except FileNotFoundError:
                 pass
-            encoded = re.fullmatch(r"meeting_(\d{8})_(\d{2})(\d{2})(\d{2})", mid)
+            encoded = _TIMESTAMPED_MEETING_ID.fullmatch(mid)
             if encoded:
                 time(int(encoded[2]), int(encoded[3]), int(encoded[4]))
                 if encoded[1] != f"{parsed:%Y%m%d}":

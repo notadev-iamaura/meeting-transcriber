@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -201,6 +202,7 @@ async def get_meetings(
     request: Request,
     offset: int = 0,
     limit: int = 50,
+    order: Literal["newest", "oldest"] = "newest",
 ) -> MeetingsResponse:
     """회의 목록을 반환한다.
 
@@ -211,6 +213,7 @@ async def get_meetings(
         request: FastAPI Request 객체
         offset: 건너뛸 항목 수 (기본 0)
         limit: 반환할 최대 항목 수 (기본 50, 최대 200)
+        order: 녹음 시작 시각 기준 조회 순서. 시작 시각이 없으면 등록 시각을 쓴다.
 
     Returns:
         MeetingsResponse: 회의 목록 (페이징 적용)
@@ -226,7 +229,17 @@ async def get_meetings(
 
         # PERF: 메모리에서 슬라이싱으로 페이지네이션 적용
         # (SQLite 쿼리에 LIMIT/OFFSET 추가 시 JobQueue 인터페이스 변경 필요)
-        paged_jobs = all_jobs[offset : offset + limit]
+        def sort_time(job: Any) -> float:
+            """카드에 표시할 녹음 또는 등록 시각을 비교하고 미상은 마지막에 둔다."""
+            started = _meeting_detail_router.recording_start(job.meeting_id)
+            try:
+                instant = started or datetime.fromisoformat(job.created_at)
+                return instant.timestamp()
+            except (TypeError, ValueError, OverflowError, OSError):
+                return float("inf") if order == "oldest" else float("-inf")
+
+        ordered = sorted(all_jobs, key=sort_time, reverse=order == "newest")
+        paged_jobs = ordered[offset : offset + limit]
 
         config = getattr(request.app.state, "config", None)
         raw_queue = getattr(queue, "queue", queue)

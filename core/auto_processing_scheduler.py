@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, time, timedelta
 from typing import Any
 
 from config import AppConfig
 from core.auto_processing import AutoProcessingResult, AutoProcessingRunner
+from core.io_utils import atomic_write_json_pinned, read_text_no_follow
+from core.nightly_window import NightlyWindowClosed, current_window, run_during_window
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +129,9 @@ class AutoProcessingScheduler:
         finally:
             self._run_lock.release()
 
-    async def _execute_run_once(self, config_snapshot: AppConfig) -> AutoProcessingResult:
+    async def _execute_run_once(
+        self, config_snapshot: AppConfig, *, scheduled: bool = False
+    ) -> AutoProcessingResult:
         """이미 선점된 run lock 아래에서 설정 스냅샷으로 배치를 실행한다."""
         self.last_started_at = datetime.now()
         self.last_error = None
@@ -136,10 +141,16 @@ class AutoProcessingScheduler:
                 job_queue=self._job_queue,
                 pipeline=self._pipeline,
             )
-            result = await runner.run(
-                action=config_snapshot.auto_processing.action,
-                recent_hours=config_snapshot.auto_processing.recent_hours,
-            )
+
+            async def run() -> AutoProcessingResult:
+                """수동 실행과 예약 실행을 같은 분류기로 처리한다."""
+                return await runner.run(
+                    action=config_snapshot.auto_processing.action,
+                    recent_hours=config_snapshot.auto_processing.recent_hours,
+                    scheduled=scheduled,
+                )
+
+            result = await run_during_window(run, self._seconds_left) if scheduled else await run()
             self.last_result = result
             self.last_completed_at = datetime.now()
             return result
@@ -157,6 +168,7 @@ class AutoProcessingScheduler:
             "running": self.is_running,
             "processing": self.is_processing,
             "run_at": self._config.auto_processing.run_at,
+            "stop_at": self._config.auto_processing.stop_at,
             "recent_hours": self._config.auto_processing.recent_hours,
             "action": self._config.auto_processing.action,
             "max_items_per_run": self._config.auto_processing.max_items_per_run,
@@ -180,6 +192,7 @@ class AutoProcessingScheduler:
                 "summarized": result.summarized,
                 "skipped": result.skipped,
                 "skipped_by_limit": result.skipped_by_limit,
+                "skipped_reasons": result.skipped_reasons,
                 "failed": result.failed,
                 "meeting_ids": result.meeting_ids,
                 "errors": result.errors,
@@ -188,24 +201,49 @@ class AutoProcessingScheduler:
 
     async def _run_loop(self) -> None:
         """설정된 매일 시각까지 대기 후 자동 처리를 반복한다."""
-        try:
-            if self._config.auto_processing.run_on_startup_if_missed:
-                now = datetime.now()
-                if now.time() >= self._parse_run_at():
-                    await self._run_once_safely()
+        auto = self._config.auto_processing
+        window = current_window(auto, datetime.now())
+        last_window = window[0] if window and not auto.run_on_startup_if_missed else None
+        while True:
+            now = datetime.now()
+            window = current_window(auto, now)
+            if window and last_window != window[0]:
+                try:
+                    if await self._run_scheduled_window(window[0]):
+                        last_window = window[0]
+                except NightlyWindowClosed:
+                    logger.info("야간 처리 시간이 끝나 예약 대상 확인을 중단했습니다.")
+                except Exception:
+                    logger.exception("야간 처리 예약 확인 실패")
+            # 시스템 절전 동안 asyncio의 단조 시간이 정지하는 Mac에서도
+            # 깨어난 다음 벽시계를 기준으로 현재 실행 창을 다시 확인한다.
+            await asyncio.sleep(min(60.0, self.seconds_until_next_run()))
 
-            while True:
-                await asyncio.sleep(self.seconds_until_next_run())
-                await self._run_once_safely()
-        except asyncio.CancelledError:
-            raise
+    def _seconds_left(self) -> float:
+        """현재 예약 창에 남은 실제 시각을 계산한다."""
+        now = datetime.now()
+        window = current_window(self._config.auto_processing, now)
+        return (window[1] - now).total_seconds() if window else 0.0
 
-    async def _run_once_safely(self) -> None:
-        """스케줄러 루프용 1회 실행 래퍼. 실패해도 다음 일정을 유지한다."""
-        try:
-            await self.run_once()
-        except Exception:
-            logger.warning("자동 전사/요약 실패 후 다음 일정을 계속 대기합니다.")
+    async def _run_scheduled_window(self, start: datetime) -> bool:
+        """완료한 창은 재시작 후에도 중복 예약하지 않는다. 중단되면 큐 상태에서 재개한다."""
+        marker = self._config.paths.resolved_base_dir / "nightly_processing.json"
+        key = start.isoformat()
+        async with self._run_lock:
+            try:
+                saved = json.loads(await asyncio.to_thread(read_text_no_follow, marker))
+            except FileNotFoundError:
+                saved = {}
+            if saved.get("start") == key:
+                return True
+            window = current_window(self._config.auto_processing, datetime.now())
+            if not window or window[0] != start:
+                return False
+            result = await self._execute_run_once(self._config, scheduled=True)
+            if result.errors:
+                return False
+            await asyncio.to_thread(atomic_write_json_pinned, marker, {"start": key}, backup=False)
+            return True
 
     def seconds_until_next_run(self, now: datetime | None = None) -> float:
         """다음 실행 시각까지 남은 초를 반환한다."""
