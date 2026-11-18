@@ -154,8 +154,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     elif config.recording.enabled:
         try:
             from steps.recorder import AudioRecorder
+            from ui.recording_notification import notify_recording_failure
 
             recorder = AudioRecorder(config=config, ws_manager=ws_manager)
+            recorder.on_capture_failure(notify_recording_failure)
             app.state.recorder = recorder
             logger.info("AudioRecorder 초기화 완료")
         except Exception as e:

@@ -143,6 +143,10 @@ jobs:
           tests/ui/behavior/test_wiki_pipeline_progress.py
           tests/ui/behavior/test_speaker_labels.py
 
+      - name: 녹음 중단 알림 및 마이크 재전사 UI 검사
+        timeout-minutes: 5
+        run: pytest -m ui -q tests/ui/behavior/test_audio_recovery.py
+
   swift-build:
     name: Swift 컴파일 검증 (Aggregate Device)
     runs-on: macos-latest

@@ -73,6 +73,13 @@
             self._startTranscriptionDialog = null;
             self._startTranscriptionCleanup = null;
             self._audioFolderPending = false;
+            self._micTranscription = null;
+            self._micStatusPromise = null;
+            self._micPollTimer = null;
+            self._micRequestPending = false;
+            self._micRetryObserved = false;
+            self._micRequestError = "";
+            self._micStatusEpoch = 0;
 
             // URL 쿼리 파라미터에서 검색어, 타임스탬프 추출
             var urlParams = new URLSearchParams(window.location.search);
@@ -133,6 +140,17 @@
                 '    <div class="log-table" id="viewerLogTable"></div>',
                 '  </details>',
                 '</div>',
+
+                '<section class="mic-transcription-notice" id="viewerMicTranscription" hidden',
+                '         aria-labelledby="viewerMicTitle" role="status" aria-live="polite">',
+                '  <div class="mic-transcription-copy">',
+                '    <strong id="viewerMicTitle"></strong>',
+                '    <p id="viewerMicMessage"></p>',
+                '    <p id="viewerMicIntervals" hidden></p>',
+                '    <p class="mic-transcription-error" id="viewerMicError" hidden></p>',
+                '  </div>',
+                '  <button type="button" class="viewer-action-btn" id="viewerMicRetry">내 마이크만 다시 전사</button>',
+                '</section>',
 
                 // 탭 네비게이션
                 '<div class="tabs" id="viewerTabNav" style="display:none;" role="tablist" aria-label="회의 내용 탭">',
@@ -233,6 +251,12 @@
                 metaUtterances: document.getElementById("viewerMetaUtterances"),
                 metaTranscription: document.getElementById("viewerMetaTranscription"),
                 transcriptSourceStatus: document.getElementById("viewerTranscriptSourceStatus"),
+                micNotice: document.getElementById("viewerMicTranscription"),
+                micTitle: document.getElementById("viewerMicTitle"),
+                micMessage: document.getElementById("viewerMicMessage"),
+                micIntervals: document.getElementById("viewerMicIntervals"),
+                micError: document.getElementById("viewerMicError"),
+                micRetry: document.getElementById("viewerMicRetry"),
                 speakerLegend: document.getElementById("viewerSpeakerLegend"),
                 viewerActions: document.getElementById("viewerActions"),
                 logPanel: document.getElementById("viewerLogPanel"),
@@ -295,6 +319,24 @@
         ViewerView.prototype._bind = function () {
             var self = this;
             var els = self._els;
+
+            var onMicRetry = function () { self._retryMicTranscription(); };
+            els.micRetry.addEventListener("click", onMicRetry);
+            self._listeners.push({ el: els.micRetry, type: "click", fn: onMicRetry });
+            var onMicProgress = function (event) {
+                var detail = event.detail || {};
+                if (detail.meeting_id && detail.meeting_id !== self._meetingId) return;
+                if (event.type === "ws:mic_transcription_warning") {
+                    // 먼저 도착한 상태 조회가 방금 받은 누락 경고를 덮지 못하게 한다.
+                    self._micStatusEpoch += 1;
+                    self._applyMicTranscription(detail);
+                }
+                self._loadMicTranscription();
+            };
+            ["ws:mic_transcription_warning", "ws:pipeline_status", "ws:job_completed", "ws:job_failed", "ws:job_cancelled"].forEach(function (type) {
+                document.addEventListener(type, onMicProgress);
+                self._listeners.push({ el: document, type: type, fn: onMicProgress });
+            });
 
             // 탭 전환
             var tabBtns = document.querySelectorAll("#viewerTabNav .tab-btn");
@@ -536,9 +578,129 @@
          * 초기 데이터를 로드한다.
          */
         ViewerView.prototype._loadData = async function () {
+            this._loadMicTranscription();
             await this._loadMeetingInfo();
             this._loadTranscript();
             this._loadSummary();
+        };
+
+        ViewerView.prototype._renderMicTranscription = function () {
+            var els = this._els;
+            var data = this._micTranscription || {};
+            var status = data.status || "not_applicable";
+            var pending = this._micRequestPending || status === "retry_queued" || status === "retrying";
+            var failed = ["empty", "low_volume", "partial", "retry_failed"].indexOf(status) !== -1;
+            var finished = this._micRetryObserved && (status === "complete" || status === "no_speech");
+            var visible = pending || failed || finished || Boolean(this._micRequestError);
+            var uncovered = Array.isArray(data.uncovered_intervals) ? data.uncovered_intervals.filter(function (interval) {
+                return Array.isArray(interval) && interval.length === 2 &&
+                    Number.isFinite(interval[0]) && Number.isFinite(interval[1]) &&
+                    interval[0] >= 0 && interval[1] > interval[0];
+            }) : [];
+            var signature = JSON.stringify([status, pending, visible, data.retry_available, data.message, data.no_new_speech, uncovered, this._micRequestError]);
+            if (signature === this._micNoticeSignature) return;
+            this._micNoticeSignature = signature;
+            els.micNotice.hidden = !visible;
+            if (!visible) return;
+            els.micNotice.classList.toggle("is-error", (!pending && failed) || Boolean(this._micRequestError));
+            els.micNotice.classList.toggle("is-complete", !pending && finished && status === "complete");
+            els.micNotice.setAttribute("aria-busy", pending ? "true" : "false");
+            els.micTitle.textContent = pending
+                ? (status === "retrying" ? "내 마이크를 다시 전사하고 있습니다" : "내 마이크 재전사를 기다리고 있습니다")
+                : status === "complete" ? (data.no_new_speech ? "새로 추가할 내 발화가 없습니다" : "내 마이크 전사를 반영했습니다")
+                : status === "no_speech" ? "마이크 트랙 확인을 마쳤습니다"
+                : status === "retry_failed" ? "내 마이크 재전사를 완료하지 못했습니다"
+                : status === "partial" ? "내 마이크 발화 일부가 전사되지 않았을 수 있습니다"
+                : "내 마이크 음성이 전사문에 반영되지 않았습니다";
+            els.micMessage.textContent = pending
+                ? "마이크 트랙만 처리합니다. 기존 전사문은 계속 확인할 수 있습니다."
+                : data.message || (status === "complete"
+                    ? "추가된 발화와 요약 내용을 확인해 주세요."
+                    : "마이크에서 음성을 감지했지만 텍스트를 만들지 못했습니다. 마이크 트랙만 다시 전사할 수 있습니다.");
+            els.micError.hidden = !this._micRequestError;
+            els.micError.textContent = this._micRequestError;
+            els.micIntervals.hidden = pending || status !== "partial" || uncovered.length === 0;
+            els.micIntervals.textContent = uncovered.length
+                ? "확인이 필요한 구간: " + App.formatTime(uncovered[0][0]) + "–" + App.formatTime(uncovered[0][1]) +
+                    (uncovered.length > 1 ? " 외 " + (uncovered.length - 1) + "구간" : "")
+                : "";
+            els.micRetry.hidden = !failed && !pending;
+            els.micRetry.disabled = pending || data.retry_available !== true;
+            els.micRetry.textContent = pending ? "재전사 처리 중…" : "내 마이크만 다시 전사";
+        };
+
+        ViewerView.prototype._applyMicTranscription = function (data) {
+            if (this._destroyed || !data || typeof data.status !== "string") return;
+            var previous = this._micTranscription && this._micTranscription.status;
+            var pending = data.status === "retry_queued" || data.status === "retrying";
+            if (pending) this._micRetryObserved = true;
+            this._micTranscription = data;
+            this._renderMicTranscription();
+            if (this._lastMeetingData) this._renderActions(this._lastMeetingData);
+            clearTimeout(this._micPollTimer);
+            this._micPollTimer = null;
+            if (pending) {
+                var self = this;
+                this._micPollTimer = setTimeout(function () { self._loadMicTranscription(); }, 2000);
+            } else if ((previous === "retrying" || previous === "retry_queued") && (data.status === "complete" || data.status === "partial")) {
+                this._micStatusEpoch += 1;
+                this._loadMeetingInfo();
+                this._loadTranscript({ force: true });
+                this._loadSummary();
+            }
+        };
+
+        ViewerView.prototype._loadMicTranscription = function () {
+            var self = this;
+            if (self._destroyed || self._micRequestPending) return Promise.resolve();
+            if (self._micStatusPromise) return self._micStatusPromise;
+            var epoch = self._micStatusEpoch;
+            self._micStatusPromise = App.apiRequest(
+                "/meetings/" + encodeURIComponent(self._meetingId) + "/mic-transcription"
+            ).then(function (data) {
+                if (self._destroyed || epoch !== self._micStatusEpoch) return;
+                self._micRequestError = "";
+                self._applyMicTranscription(data);
+            }).catch(function () {
+                if (self._destroyed || epoch !== self._micStatusEpoch) return;
+                var status = self._micTranscription && self._micTranscription.status;
+                if (status === "retry_queued" || status === "retrying") {
+                    self._micRequestError = "처리 상태를 확인하지 못했습니다. 잠시 후 다시 확인합니다.";
+                    self._renderMicTranscription();
+                    clearTimeout(self._micPollTimer);
+                    self._micPollTimer = setTimeout(function () { self._loadMicTranscription(); }, 2000);
+                }
+            }).finally(function () { self._micStatusPromise = null; });
+            return self._micStatusPromise;
+        };
+
+        ViewerView.prototype._retryMicTranscription = async function () {
+            var self = this;
+            if (self._destroyed || self._micRequestPending || !self._micTranscription || self._micTranscription.retry_available !== true) return;
+            self._micRequestPending = true;
+            self._micRequestError = "";
+            self._micStatusEpoch += 1;
+            clearTimeout(self._micPollTimer);
+            self._renderMicTranscription();
+            if (self._lastMeetingData) self._renderActions(self._lastMeetingData);
+            try {
+                await App.apiRequest("/meetings/" + encodeURIComponent(self._meetingId) + "/mic-transcription/retry", { method: "POST" });
+                if (self._destroyed) return;
+                self._micRetryObserved = true;
+                self._applyMicTranscription({ status: "retry_queued", retry_available: false });
+            } catch (error) {
+                if (self._destroyed) return;
+                self._micRequestError = "재전사 요청 실패: " + (error.message || "잠시 후 다시 시도해 주세요.");
+                if (error.status === 409) self._micRefreshAfterConflict = true;
+            } finally {
+                self._micRequestPending = false;
+                if (!self._destroyed) {
+                    self._renderMicTranscription();
+                    if (self._lastMeetingData) self._renderActions(self._lastMeetingData);
+                    if (!self._micRequestError || self._micRefreshAfterConflict) self._loadMicTranscription();
+                    self._micRefreshAfterConflict = false;
+                }
+            }
         };
 
         /**
@@ -1523,6 +1685,17 @@
             morePanel.appendChild(dangerGroup);
             more.appendChild(morePanel);
             actionsEl.appendChild(more);
+            var micState = self._micTranscription;
+            if (micState && micState.retry_available === true && !self._micRequestPending &&
+                    (micState.status === "complete" || micState.status === "unknown")) {
+                var micRetryBtn = document.createElement("button");
+                micRetryBtn.type = "button";
+                micRetryBtn.className = "viewer-action-btn mic-track-retry";
+                micRetryBtn.textContent = "내 마이크만 다시 전사";
+                micRetryBtn.title = "내 발화가 빠졌다고 느낄 때 마이크 트랙만 다시 확인합니다. 기존 발화와 편집은 유지합니다.";
+                micRetryBtn.addEventListener("click", function () { self._retryMicTranscription(); });
+                secondaryGroup.appendChild(micRetryBtn);
+            }
             more.addEventListener("keydown", function (event) {
                 if (event.key === "Escape") {
                     event.preventDefault(); event.stopPropagation();
@@ -2985,6 +3158,10 @@
             var self = this;
             var els = self._els;
             options = options || {};
+            // 재시도 접수 이전 응답이 새 진행 상태를 덮어쓰지 않도록 전용 상태 조회를 우선한다.
+            if (data.mic_transcription && !self._micRequestPending && !self._micRetryObserved) {
+                self._applyMicTranscription(data.mic_transcription);
+            }
 
             var stage = self._normalizeTranscriptStage(data.source_stage || "corrected");
             var readonly = typeof data.readonly === "boolean" ? data.readonly : false;
@@ -3082,6 +3259,7 @@
         ViewerView.prototype._loadTranscript = async function (options) {
             var self = this;
             var els = self._els;
+            var micEpoch = self._micStatusEpoch;
             options = options || {};
             var showLoading = !options.silent;
             if (showLoading) {
@@ -3095,6 +3273,8 @@
                 var data = await App.apiRequest(
                     "/meetings/" + encodeURIComponent(self._meetingId) + "/transcript"
                 );
+                // 재전사 완료 전에 시작한 응답이 복구된 발화를 다시 숨기지 않는다.
+                if (self._destroyed || micEpoch !== self._micStatusEpoch) return true;
 
                 if (!self._applyTranscriptResponse(data, options)) {
                     els.transcriptEmpty.style.display = "block";
@@ -3104,6 +3284,7 @@
                 return true;
 
             } catch (e) {
+                if (self._destroyed || micEpoch !== self._micStatusEpoch) return true;
                 if (e.status === 404) {
                     if (!options.silent) {
                         els.transcriptEmpty.style.display = "block";
@@ -3475,6 +3656,7 @@
          */
         ViewerView.prototype.destroy = function () {
             this._destroyed = true;
+            clearTimeout(this._micPollTimer);
             if (this._startTranscriptionCleanup) {
                 this._startTranscriptionCleanup(false);
             }

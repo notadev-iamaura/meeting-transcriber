@@ -824,6 +824,8 @@ class SplitTrackProcessingConfig(BaseModel):
     silence_gap_seconds: float = Field(default=5.0, ge=1, le=45)
     speech_verification: bool = True
     speech_threshold: float = Field(default=0.20, ge=0.05, le=0.5)
+    missing_speech_min_seconds: float = Field(default=1.0, ge=0.3, le=10)
+    transcript_time_tolerance_seconds: float = Field(default=0.35, ge=0, le=2)
 
 
 class RecordingConfig(BaseModel):
@@ -840,6 +842,7 @@ class RecordingConfig(BaseModel):
     max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간
     min_duration_seconds: int = Field(default=30, ge=1)  # 최소 길이 미달 시 파기
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    capture_stall_timeout_seconds: float = Field(default=5.0, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음
     separate_mic_track: bool = True  # 검증된 Aggregate를 마이크 L / 시스템 R로 저장
     split_track_processing: SplitTrackProcessingConfig = Field(

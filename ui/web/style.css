@@ -2814,6 +2814,36 @@ button {
 }
 
 .viewer-status.completed { color: var(--completed); background: rgba(52, 199, 89, 0.1); }
+.mic-transcription-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  border: 0.5px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.mic-transcription-notice[hidden] { display: none; }
+.mic-transcription-notice button[hidden],
+.mic-transcription-copy p[hidden] { display: none; }
+.mic-transcription-notice.is-error { border-left-color: var(--error); }
+.mic-transcription-notice.is-complete { border-left-color: var(--success); }
+.mic-global-warning { margin: 12px 20px; flex-shrink: 0; }
+.mic-transcription-copy { min-width: 0; overflow-wrap: anywhere; }
+.mic-transcription-copy p { margin: 4px 0 0; }
+.mic-transcription-error { font-weight: 500; }
+.mic-transcription-notice button { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .mic-transcription-notice { flex-direction: column; align-items: stretch; }
+  .mic-transcription-notice button { align-self: flex-start; }
+}
+
 .viewer-status.recording { color: var(--recording); background: rgba(255, 59, 48, 0.1); }
 .viewer-status.transcribing,
 .viewer-status.diarizing,

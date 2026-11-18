@@ -257,11 +257,43 @@ private final class SplitRecording {
     var micPower = 0.0
     var systemPower = 0.0
     var meterCount = 0
+    private var failurePipe: [Int32] = [-1, -1]
+    var failureDescriptor: Int32 { failurePipe[0] }
 
-    init(output: FileHandle, rate: UInt32, mic: Int) {
+    init(output: FileHandle, rate: UInt32, mic: Int) throws {
         self.output = output
         self.rate = rate
         self.mic = mic
+        guard pipe(&failurePipe) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    deinit {
+        for fd in failurePipe where fd >= 0 { close(fd) }
+    }
+
+    func recordFailure(_ error: Error) {
+        // 콜백 스레드만 failure를 쓰며, 메인 스레드는 큐를 멈춘 뒤 읽는다.
+        guard failure == nil else { return }
+        failure = error
+        var signal: UInt8 = 1
+        var count: Int
+        repeat {
+            count = withUnsafePointer(to: &signal) { write(failurePipe[1], $0, 1) }
+        } while count < 0 && errno == EINTR
+    }
+
+    func finish() throws {
+        // 실패 전 완전히 기록한 프레임 수로 헤더를 마감한다. 부분 파일은 삭제하지 않는다.
+        do {
+            try output.seek(toOffset: 0)
+            try output.write(contentsOf: wavHeader(rate: rate, frames: frames))
+        } catch {
+            try? output.close()
+            throw error
+        }
+        try output.close()
     }
 
     func append(_ buffer: AudioQueueBufferRef) throws {
@@ -299,6 +331,27 @@ private final class SplitRecording {
     }
 }
 
+private func waitForRecordingStop(failureDescriptor: Int32) throws {
+    var descriptors = [
+        pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0),
+        pollfd(fd: failureDescriptor, events: Int16(POLLIN), revents: 0),
+    ]
+    while true {
+        let status = poll(&descriptors, nfds_t(descriptors.count), -1)
+        if status < 0 {
+            if errno == EINTR { continue }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        if descriptors[1].revents != 0 { return }
+        if descriptors[0].revents != 0 {
+            var command: UInt8 = 0
+            let count = read(STDIN_FILENO, &command, 1)
+            if count < 0 && errno == EINTR { continue }
+            if count != 1 || command == 113 { return }
+        }
+    }
+}
+
 private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws {
     func audioCheck(_ status: OSStatus) throws {
         if status != noErr { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
@@ -312,7 +365,7 @@ private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws 
     guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
     let output = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     try output.write(contentsOf: wavHeader(rate: rate, frames: 0))
-    let state = SplitRecording(output: output, rate: rate, mic: mic)
+    let state = try SplitRecording(output: output, rate: rate, mic: mic)
     var format = AudioStreamBasicDescription(
         mSampleRate: Double(rate), mFormatID: kAudioFormatLinearPCM,
         mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
@@ -328,9 +381,9 @@ private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws 
             try state.append(buffer)
             let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
             if status != noErr && status != kAudioQueueErr_EnqueueDuringReset {
-                state.failure = NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+                state.recordFailure(NSError(domain: NSOSStatusErrorDomain, code: Int(status)))
             }
-        } catch { state.failure = error }
+        } catch { state.recordFailure(error) }
     }, Unmanaged.passUnretained(state).toOpaque(), nil, nil, 0, &reference))
     guard let queue = reference else { throw CocoaError(.featureUnsupported) }
     defer { AudioQueueDispose(queue, true) }
@@ -346,13 +399,16 @@ private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws 
         try audioCheck(AudioQueueEnqueueBuffer(queue, buffer, 0, nil))
     }
     try audioCheck(AudioQueueStart(queue, nil))
-    var command: UInt8 = 0
-    while read(STDIN_FILENO, &command, 1) == 1 && command != 113 {} // q 또는 stdin 종료
-    try audioCheck(AudioQueueStop(queue, true))
-    try output.seek(toOffset: 0)
-    try output.write(contentsOf: wavHeader(rate: rate, frames: state.frames))
-    try output.close()
+    var waitFailure: Error?
+    do { try waitForRecordingStop(failureDescriptor: state.failureDescriptor) }
+    catch { waitFailure = error }
+    let stopStatus = AudioQueueStop(queue, true)
+    var finishFailure: Error?
+    do { try state.finish() }
+    catch { finishFailure = error }
     if let failure = state.failure { throw failure }
+    if let failure = waitFailure ?? finishFailure { throw failure }
+    try audioCheck(stopStatus)
 }
 
 if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "--record-split",

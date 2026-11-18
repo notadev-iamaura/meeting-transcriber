@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class RecordingErrorResponse(BaseModel):
+    """경로·시스템 오류를 노출하지 않는 최근 녹음 실패 안내."""
+
+    meeting_id: str | None = None
+    code: str
+    error: str
+    occurred_at: str
+    partial_files_preserved: bool
+    partial_file_names: list[str]
+
+
 class RecordingStatusResponse(BaseModel):
     """녹음 상태 응답 스키마.
 
@@ -34,6 +45,7 @@ class RecordingStatusResponse(BaseModel):
     device: str | None = None
     is_system_audio: bool = False
     audio_levels: dict[str, float] | None = None
+    last_error: RecordingErrorResponse | None = None
 
 
 class AudioDeviceItem(BaseModel):
@@ -135,6 +147,7 @@ async def stop_recording(request: Request) -> dict[str, Any]:
         HTTPException: 서버 에러(500)
     """
     recorder = _get_recorder(request)
+    from steps.recorder import FFmpegRecordError
 
     try:
         result = await recorder.stop_recording()
@@ -152,6 +165,11 @@ async def stop_recording(request: Request) -> dict[str, Any]:
             "duration_seconds": result.duration_seconds,
             "audio_device": result.audio_device,
         }
+    except FFmpegRecordError as e:
+        raise HTTPException(
+            status_code=500,
+            detail="녹음을 정상적으로 완료하지 못했습니다. 녹음 상태의 안내를 확인하세요.",
+        ) from e
     except Exception as e:
         logger.exception(f"녹음 정지 실패: {e}")
         raise HTTPException(

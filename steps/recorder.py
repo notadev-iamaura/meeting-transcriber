@@ -191,6 +191,10 @@ class AudioRecorder:
         self._meeting_id: str | None = None
         self._max_duration_task: asyncio.Task[None] | None = None
         self._duration_broadcast_task: asyncio.Task[None] | None = None
+        self._capture_watchdog_task: asyncio.Task[None] | None = None
+        self._capture_started_at = 0.0
+        self._last_recording_error: dict[str, Any] | None = None
+        self._capture_failure_callback: Callable[[], None] | None = None
         self._split_level_meter = False
         self._audio_levels: dict[str, float] | None = None
         self._audio_levels_at = 0.0
@@ -255,6 +259,10 @@ class AudioRecorder:
             self._async_callbacks.append(cast(AsyncCallback, callback))
         else:
             self._sync_callbacks.append(cast(SyncCallback, callback))
+
+    def on_capture_failure(self, callback: Callable[[], None]) -> None:
+        """녹음 실패 확정 시 호출할 즉시 반환 알림 콜백을 등록한다."""
+        self._capture_failure_callback = callback
 
     async def detect_audio_devices(self) -> list[AudioDevice]:
         """사용 가능한 오디오 입력 장치 목록을 반환한다.
@@ -572,6 +580,8 @@ class AudioRecorder:
 
                 self._state = RecordingState.RECORDING
                 self._start_time = time.time()
+                self._capture_started_at = time.monotonic()
+                self._last_recording_error = None
 
                 # 최대 녹음 시간 가드 시작
                 self._max_duration_task = asyncio.create_task(
@@ -598,6 +608,9 @@ class AudioRecorder:
                         "device": device_name,
                         "is_multitrack": bool(self._processes),
                     },
+                )
+                self._capture_watchdog_task = asyncio.create_task(
+                    self._capture_watchdog(), name="recording-capture-watchdog"
                 )
 
                 pids = (
@@ -633,6 +646,96 @@ class AudioRecorder:
             # drain은 best-effort 백그라운드 작업이다. 어떤 예외든 녹음 자체를
             # 막으면 안 되므로 로그만 남기고 조용히 끝낸다.
             logger.debug(f"ffmpeg 파이프 drain 중 종료: {e}")
+
+    def _capture_failure_reason(self) -> str | None:
+        """종료 요청 전 프로세스 종료와 프레임 단절을 감지한다. 무음은 정상 입력이다."""
+        processes = self._processes or ({"recording": self._process} if self._process else {})
+        for label, proc in processes.items():
+            if proc is not None and isinstance(proc.returncode, int):
+                return f"{label}: 정지 요청 전 종료 코드 {proc.returncode}"
+        if self._split_level_meter:
+            last_frame = max(self._capture_started_at, self._audio_levels_at)
+            if (
+                time.monotonic() - last_frame
+                > self._recording_config.capture_stall_timeout_seconds
+            ):
+                return "분리 녹음 입력 프레임 수신 중단"
+        return None
+
+    def _partial_recording_files(self) -> list[Path]:
+        """현재 녹음의 임시 파일 경로를 정리 전에 복사한다."""
+        return list(self._current_files.values()) or (
+            [self._current_file] if self._current_file is not None else []
+        )
+
+    def _remember_recording_error(
+        self, meeting_id: str | None, paths: list[Path]
+    ) -> dict[str, Any]:
+        """절대 경로와 시스템 오류를 제외한 사용자용 실패 상태를 보존한다."""
+        names: list[str] = []
+        for path in paths:
+            try:
+                if path.is_file():
+                    names.append(path.name)
+            except OSError:
+                logger.warning("부분 녹음 파일의 상태를 확인하지 못했습니다.")
+        preservation = (
+            "부분 파일은 임시 녹음 폴더에 보존했습니다."
+            if names
+            else "저장된 부분 파일을 확인하지 못했습니다."
+        )
+        self._last_recording_error = {
+            "meeting_id": meeting_id,
+            "code": "capture_failed",
+            "error": f"녹음을 정상적으로 완료하지 못했습니다. {preservation} 전사는 시작하지 않았습니다.",
+            "occurred_at": datetime.now().isoformat(),
+            "partial_files_preserved": bool(names),
+            "partial_file_names": names,
+        }
+        if self._capture_failure_callback is not None:
+            try:
+                self._capture_failure_callback()
+            except Exception:
+                logger.exception("녹음 실패 알림 콜백 오류")
+        return self._last_recording_error.copy()
+
+    async def _capture_watchdog(self) -> None:
+        """캡처 장애를 사용자 정지 없이 알리고 부분 파일과 실패 상태를 보존한다."""
+        while True:
+            await asyncio.sleep(0.25)
+            async with self._state_lock:
+                if self._state != RecordingState.RECORDING:
+                    return
+                reason = self._capture_failure_reason()
+                if reason is None:
+                    continue
+                logger.error(f"녹음 도중 캡처 실패: {reason}")
+                self._state = RecordingState.STOPPING
+                self._capture_watchdog_task = None
+                # 정지 요청과 같은 상태 lock을 유지한 채 취소에도 정리를 완료한다.
+                await self._await_critical_cleanup(self._abort_capture_locked(_from_guard=False))
+                return
+
+    async def _abort_capture_locked(self, *, _from_guard: bool) -> None:
+        """실패를 먼저 알리고 남은 프로세스도 q로 마감하되 모든 원본을 보존한다."""
+        failure = self._remember_recording_error(self._meeting_id, self._partial_recording_files())
+        try:
+            await self._cancel_background_tasks(_from_guard=_from_guard)
+            # 종료 대기가 길어져도 오류와 타이머 정지는 즉시 알린다.
+            await self._broadcast_event("recording_error", failure)
+            processes = list(self._processes.items()) or (
+                [("recording", self._process)] if self._process else []
+            )
+            for label, proc in processes:
+                try:
+                    await self._terminate_one_ffmpeg(proc, label)
+                except FFmpegRecordError:
+                    pass  # 실패 원본은 후처리·삭제·완료 콜백 없이 보존한다.
+        finally:
+            try:
+                await self._cleanup_recording_processes()
+            finally:
+                await self._reset_recording_state()
 
     async def _read_audio_levels(self, stream: asyncio.StreamReader) -> None:
         """녹음기의 채널별 숫자만 읽고 최신 프레임을 메모리에 둔다."""
@@ -950,16 +1053,19 @@ class AudioRecorder:
         """
         async with self._state_lock:
             meeting_id = self._meeting_id
+            if self._state == RecordingState.IDLE and self._last_recording_error is not None:
+                raise FFmpegRecordError(self._last_recording_error["error"])
+            partial_paths = self._partial_recording_files()
             try:
                 stopped, result, meeting_id = await self._stop_recording_locked(
                     _from_guard=_from_guard
                 )
             except FFmpegRecordError as exc:
-                # 상태 초기화 뒤 실패를 알린다. 다음 start보다 먼저 전송해야
-                # 새 녹음 표시줄을 이전 오류 이벤트가 숨기지 않는다.
-                await self._broadcast_event(
-                    "recording_error", {"meeting_id": meeting_id, "error": str(exc)}
-                )
+                logger.error(f"녹음 종료 실패: {exc}")
+                # 정상 종료 경로에서 실패한 경우도 abort에서 한 번만 알린다.
+                if self._last_recording_error is None:
+                    failure = self._remember_recording_error(meeting_id, partial_paths)
+                    await self._broadcast_event("recording_error", failure)
                 raise
 
         # 콜백은 외부 코드이므로 상태 lock 밖에서 호출한다. 콜백이 다음 녹음을
@@ -982,7 +1088,11 @@ class AudioRecorder:
         meeting_id = self._meeting_id
         terminated_cleanly = False
         try:
+            # watcher보다 stop이 lock을 먼저 얻어도 이미 실패한 캡처를 게시하지 않는다.
+            reason = self._capture_failure_reason()
             await self._cancel_background_tasks(_from_guard=_from_guard)
+            if reason is not None:
+                raise FFmpegRecordError(f"녹음 중 캡처가 중단됐습니다 ({reason}).")
 
             # 멀티트랙 vs 싱글트랙 종료 분기
             if self._processes:
@@ -992,6 +1102,10 @@ class AudioRecorder:
             terminated_cleanly = True
 
             return True, result, meeting_id
+        except FFmpegRecordError:
+            await self._await_critical_cleanup(self._abort_capture_locked(_from_guard=_from_guard))
+            terminated_cleanly = True  # 실패 정리가 이미 모든 프로세스를 회수했다.
+            raise
         finally:
             # 종료 중 예외/취소가 나도 STOPPING 상태와 ffmpeg 참조를 남기지 않는다.
             try:
@@ -1034,6 +1148,11 @@ class AudioRecorder:
 
     async def _cancel_background_tasks(self, *, _from_guard: bool) -> None:
         """녹음 가드와 경과시간 브로드캐스트 태스크를 종료한다."""
+        watchdog, self._capture_watchdog_task = self._capture_watchdog_task, None
+        if watchdog is not None and watchdog is not asyncio.current_task():
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
         # 가드 태스크 취소 (_from_guard=True이면 자기 자신이므로 건너뜀)
         if not _from_guard and self._max_duration_task is not None:
             self._max_duration_task.cancel()
@@ -1106,6 +1225,7 @@ class AudioRecorder:
         self._meeting_id = None
         self._max_duration_task = None
         self._duration_broadcast_task = None
+        self._capture_started_at = 0.0
         self._processes.clear()
         self._current_files.clear()
         self._current_devices.clear()
@@ -1198,12 +1318,17 @@ class AudioRecorder:
             proc: 종료할 프로세스
             label: 로그용 트랙 라벨 (예: "system", "mic")
         """
+        # 정지 상태로 전환한 뒤 백그라운드 태스크를 정리하는 await 사이에도
+        # 캡처가 끝날 수 있다. q를 보내기 직전에 다시 확인해 코드 0도 실패로 남긴다.
+        exited_before_stop = isinstance(proc.returncode, int)
+        stop_pipe_failed = False
         # stdin 'q' 전송
         try:
             if proc.stdin is not None:
                 proc.stdin.write(b"q")
                 await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError):
+            stop_pipe_failed = True
             logger.debug(f"ffmpeg stdin 전송 실패 ({label}, 이미 종료됨)")
 
         # 종료 신호가 필요했던 파일은 끝부분의 완전성을 확인할 수 없다.
@@ -1223,8 +1348,13 @@ class AudioRecorder:
                     proc.kill()
                 returncode = await proc.wait()
 
-        if forced or returncode != 0:
-            reason = "정상 종료 시간 초과" if forced else f"종료 코드 {returncode}"
+        if forced or returncode != 0 or exited_before_stop or stop_pipe_failed:
+            if forced:
+                reason = "정상 종료 시간 초과"
+            elif exited_before_stop or stop_pipe_failed:
+                reason = f"정지 요청 전 종료 코드 {returncode}"
+            else:
+                reason = f"종료 코드 {returncode}"
             raise FFmpegRecordError(
                 f"녹음이 정상적으로 완료되지 않았습니다 ({label}: {reason}). "
                 f"부분 파일은 {self._temp_dir}에 보존했습니다."
@@ -1467,6 +1597,9 @@ class AudioRecorder:
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
             "audio_levels": self._recent_audio_levels(),
+            "last_error": self._last_recording_error.copy()
+            if self._last_recording_error
+            else None,
             "is_system_audio": (
                 # Aggregate 는 BlackHole 경로를 포함하므로 시스템 오디오 캡처에 해당한다
                 (self._current_device.is_blackhole or self._current_device.is_aggregate)

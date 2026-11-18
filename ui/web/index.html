@@ -192,6 +192,13 @@
         <span id="backgroundWorkMessage" role="status" aria-live="polite"></span>
         <button id="backgroundWorkHistory" type="button" class="btn-secondary">작업 내역</button>
       </div>
+      <section id="micGlobalWarning" class="mic-transcription-notice is-error mic-global-warning" hidden role="status" aria-live="polite">
+        <div class="mic-transcription-copy">
+          <strong>내 마이크 발화를 확인해 주세요</strong>
+          <p id="micGlobalWarningMessage"></p>
+        </div>
+        <button id="micGlobalWarningOpen" class="viewer-action-btn" type="button">해당 회의 확인</button>
+      </section>
 
       <main id="content">
         <!-- spa.js가 동적으로 렌더링 -->
@@ -224,6 +231,17 @@
   </div>
 
   <!-- 녹음 상태 플로팅 pill (HUD 최소화 상태) — overlay 가 최소화되었을 때 표시 -->
+  <section id="recordingFailure" class="recording-failure" role="alert" aria-live="assertive" aria-labelledby="recordingFailureTitle" hidden>
+    <strong id="recordingFailureTitle">오류로 녹음이 중단됐습니다</strong>
+    <p id="recordingFailureMessage"></p>
+    <p id="recordingFailurePreserved"></p>
+    <details id="recordingFailureFiles" hidden>
+      <summary>보존된 부분 파일</summary>
+      <ul id="recordingFailureFileList"></ul>
+    </details>
+    <p>저장 공간과 폴더 접근 권한을 확인한 뒤 새 녹음을 시작해 주세요.</p>
+  </section>
+
   <div id="recordingStatus" class="recording-status" role="status" aria-live="polite" aria-hidden="true" hidden inert>
     <span class="recording-dot" aria-hidden="true"></span>
     <span class="recording-text">녹음 중</span>
