@@ -832,7 +832,7 @@ class TestStopRecording:
         recorder = AudioRecorder(config=_make_test_config(tmp_path))
         recorder._state = RecordingState.RECORDING
         recorder._meeting_id = "test"
-        recorder._process = MagicMock(pid=12345)
+        recorder._process = _mock_ffmpeg_process(pid=12345)
 
         with (
             patch.object(

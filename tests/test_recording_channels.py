@@ -151,17 +151,33 @@ async def test_recording_flows_into_one_meeting_and_keeps_speaker_sources(
     values = (mic, *loopback) if mic_channel == 0 else (*loopback, mic)
     _write_pcm(input_wav, values, seconds=34)
     create_process = asyncio.create_subprocess_exec
+    capture_ready = tmp_path / "fixture-ready"
 
     async def record_from_fixture(*args: str, **kwargs: object) -> asyncio.subprocess.Process:
-        """실제 FFmpeg 필터를 실행하고 물리 장치 입력만 테스트 WAV로 바꾼다."""
+        """실제 FFmpeg 필터를 실행하고 유한 입력 처리 후 캡처처럼 q를 기다린다."""
         assert args[2:6] == ("-f", "avfoundation", "-i", ":2")
-        return await create_process(*args[:2], "-i", str(input_wav), *args[6:], **kwargs)
+        return await create_process(
+            sys.executable,
+            "-c",
+            "import pathlib, subprocess, sys; "
+            "subprocess.run(sys.argv[2:], stdin=subprocess.DEVNULL, check=True); "
+            "pathlib.Path(sys.argv[1]).touch(); sys.stdin.buffer.read(1)",
+            str(capture_ready),
+            *args[:2],
+            "-i",
+            str(input_wav),
+            *args[6:],
+            **kwargs,
+        )
 
     with monkeypatch.context() as capture:
         capture.setattr(asyncio, "create_subprocess_exec", record_from_fixture)
         await recorder.start_recording(meeting_id="meeting_split_sources")
         assert recorder._process is not None
-        assert await recorder._process.wait() == 0
+        async with asyncio.timeout(5):
+            while not capture_ready.exists() or recorder.get_status()["audio_levels"] is None:
+                await asyncio.sleep(0.01)
+        assert recorder._process.returncode is None
         levels = recorder.get_status()["audio_levels"]
         assert levels["mic_dbfs"] == pytest.approx(-12.2 if mic_signal else -90.0, abs=0.2)
         assert levels["system_dbfs"] == pytest.approx(-18.3 if system_signal else -90.0, abs=0.2)

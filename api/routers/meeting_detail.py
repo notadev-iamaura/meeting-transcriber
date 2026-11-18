@@ -1209,7 +1209,7 @@ async def reconcile_job_state_for_response(
     """완료 체크포인트와 실패 job.status 가 충돌하면 DB 상태를 복구한다."""
     from core.job_queue import JobStatus
 
-    if job.status != JobStatus.FAILED.value:
+    if job.status != JobStatus.FAILED.value or getattr(job, "requested_action", "") == "retry_mic":
         pipeline_state = (
             _read_pipeline_state_for_response(config, job.meeting_id)
             if include_pipeline_state
@@ -1372,6 +1372,7 @@ class TranscriptResponse(BaseModel):
     readonly: bool = False
     search_status: str = "legacy"
     summary_needs_review: bool = False
+    mic_transcription: dict[str, Any] | None = None
 
 
 class SummaryResponse(BaseModel):
@@ -1711,7 +1712,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
         try:
             stt_selection = selection_from_state_or_config(
                 config,
-                pipeline_state,
+                None if getattr(job, "requested_action", "") == "retry_mic" else pipeline_state,
                 job=job,
             )
         except ValueError as exc:
@@ -2836,6 +2837,107 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
                     )
 
 
+@router.get("/meetings/{meeting_id}/mic-transcription")
+async def get_mic_transcription(request: Request, meeting_id: str) -> dict[str, Any]:
+    """전사문 유무와 무관하게 마이크 처리 결과와 재시도 상태를 반환한다."""
+    from core.mic_transcription import mic_transcription_status
+
+    _validate_meeting_id(meeting_id)
+    config = _get_config(request)
+    queue = _get_job_queue(request)
+    job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    try:
+        return await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
+    except (OSError, ValueError, AudioAdmissionError) as exc:
+        raise HTTPException(
+            status_code=409, detail="마이크 처리 기록을 확인할 수 없습니다."
+        ) from exc
+
+
+async def _mic_transcription_for_view(request: Request, meeting_id: str) -> dict[str, Any] | None:
+    """과거 DB 없는 전사도 읽을 수 있도록 보조 상태의 부재를 분리한다."""
+    try:
+        return await get_mic_transcription(request, meeting_id)
+    except HTTPException:
+        return None
+
+
+@router.post(
+    "/meetings/{meeting_id}/mic-transcription/retry",
+    status_code=202,
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
+async def retry_mic_transcription(request: Request, meeting_id: str) -> dict[str, Any]:
+    """분리 녹음을 기존 발화 보존형 로컬 마이크 전용 재시도로 접수한다."""
+    import uuid
+
+    from core.io_utils import atomic_write_json_pinned
+    from core.job_queue import InvalidTransitionError
+    from core.mic_transcription import mic_transcription_status
+    from core.recording_channels import has_separate_mic_track
+    from core.search_revision import checkpoint_dir
+
+    _validate_meeting_id(meeting_id)
+    config = _get_config(request)
+    _get_pipeline_manager(request)
+    queue = _get_job_queue(request)
+    job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    try:
+        state = await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
+        if not state["retry_available"]:
+            raise HTTPException(
+                status_code=409, detail="현재 상태에서는 마이크만 다시 전사할 수 없습니다."
+            )
+        if not await asyncio.to_thread(has_separate_mic_track, Path(job.audio_path)):
+            raise HTTPException(status_code=409, detail="마이크 트랙이 확인된 앱 녹음이 아닙니다.")
+        status_path = checkpoint_dir(config, meeting_id) / "mic_transcription.json"
+        try:
+            saved = json.loads(await asyncio.to_thread(read_text_no_follow, status_path))
+        except FileNotFoundError:
+            saved = {"version": 1, "status": "unknown", "speech_detected": False}
+        model = saved.get("model") or config.stt.model_name
+        # API가 가진 회의 lease 안에서 새 요청과 중단된 작업 재개를 구별한다.
+        await asyncio.to_thread(
+            atomic_write_json_pinned,
+            status_path,
+            dict(saved, request_id=uuid.uuid4().hex),
+            backup=True,
+        )
+        try:
+            updated = await asyncio.to_thread(queue.queue.queue_mic_retry, job.id, stt_model=model)
+        except Exception:
+            await asyncio.to_thread(atomic_write_json_pinned, status_path, saved, backup=False)
+            raise
+        processor = getattr(request.app.state, "job_processor", None)
+        if processor is not None:
+            processor._cancellation_requests.discard(meeting_id)
+        chat = getattr(request.app.state, "chat_engine", None)
+        if chat is not None:
+            chat.invalidate_transcript_history()
+        return {
+            "meeting_id": meeting_id,
+            "job_id": updated.id,
+            "status": "queued",
+            "message": "내 마이크 트랙 재전사를 접수했습니다.",
+        }
+    except HTTPException:
+        raise
+    except (
+        OSError,
+        ValueError,
+        AudioAdmissionError,
+        JobQueueError,
+        InvalidTransitionError,
+    ) as exc:
+        raise HTTPException(
+            status_code=409, detail="마이크 재전사 접수를 확인할 수 없습니다."
+        ) from exc
+
+
 @router.get(
     "/meetings/{meeting_id}/transcript",
     response_model=TranscriptResponse,
@@ -2993,6 +3095,7 @@ async def get_transcript(
             readonly=readonly,
             search_status=revision_status(config, meeting_id),
             summary_needs_review=bool(data.get("search_revision")),
+            mic_transcription=await _mic_transcription_for_view(request, meeting_id),
         )
     except HTTPException:
         raise

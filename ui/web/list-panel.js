@@ -33,6 +33,7 @@
             var _statusText = null;       // #statusText 엘리먼트
             var _statusTimer = null;      // 상태 폴링 타이머
             var _meetingsTimer = null;    // 회의 목록 폴링 타이머
+            var _recordingStatusTimer = null;
             var _searchTimeout = null;    // 검색 디바운스 타이머
             var _meetingsTotal = 0;       // 서버 기준 전체 회의 수
             var _meetingsHasMore = false; // 추가 페이지 존재 여부
@@ -185,6 +186,23 @@
                 }
 
                 // WebSocket 이벤트 리스닝 — 회의 목록 자동 갱신
+                var micWarningMeetingId = null;
+                var micWarning = document.getElementById("micGlobalWarning");
+                var micWarningOpen = document.getElementById("micGlobalWarningOpen");
+                document.addEventListener("ws:mic_transcription_warning", function (event) {
+                    var detail = event.detail || {};
+                    if (!detail.meeting_id || !micWarning) return;
+                    // 상세 화면에서는 같은 이벤트를 받아 전용 상태·복구 버튼을 갱신한다.
+                    if (_activeId === detail.meeting_id) return;
+                    micWarningMeetingId = detail.meeting_id;
+                    App.safeText(document.getElementById("micGlobalWarningMessage"), detail.message || "마이크 음성을 감지했지만 텍스트를 만들지 못했습니다. 해당 회의에서 처리 상태를 확인해 주세요.");
+                    micWarning.hidden = false;
+                });
+                if (micWarningOpen) micWarningOpen.addEventListener("click", function () {
+                    if (!micWarningMeetingId) return;
+                    Router.navigate("/app/viewer/" + encodeURIComponent(micWarningMeetingId));
+                    micWarning.hidden = true;
+                });
                 document.addEventListener("ws:job_completed", function () {
                     loadMeetings({ preserveLoaded: true });
                 });
@@ -216,6 +234,12 @@
                 var _recTickTimer = null;
                 var _recBaseSeconds = 0;          // 마지막 싱크 시점의 서버 초
                 var _recBaseWallClock = 0;        // 그 싱크를 받은 로컬 타임스탬프 (ms)
+                var _recMeetingId = null;
+                var _recTerminal = false;
+                var _recActive = false;
+                var _recEpoch = 0;
+                var _recStatusPending = null;
+                var _recFailureSignature = "";
                 function _formatRecDuration(sec) {
                     var s0 = Math.floor(sec);
                     if (s0 < 0) s0 = 0;
@@ -258,6 +282,9 @@
                     }
                     _recBaseSeconds = 0;
                     _recBaseWallClock = 0;
+                    App.safeText(document.getElementById("recordingDuration"), "00:00");
+                    App.safeText(document.getElementById("recordingOverlayTimer"), "00:00:00");
+                    App.safeText(document.getElementById("recordingOverlayMetaDuration"), "00:00:00");
                 }
 
                 // 녹음 HUD 상태 제어 — overlay(기본) ↔ pill(최소화) 배타 표시.
@@ -319,6 +346,87 @@
                     }
                 }
 
+                function _finishRecHUD() {
+                    _recEpoch += 1;
+                    _recActive = false;
+                    _recTerminal = true;
+                    _showRecHUD("none");
+                    _stopRecTicker();
+                    _renderRecLevels(null);
+                }
+
+                function _renderRecordingFailure(detail) {
+                    detail = detail || {};
+                    _finishRecHUD();
+                    _recMeetingId = detail.meeting_id || _recMeetingId;
+                    var signature = JSON.stringify(detail);
+                    if (_recFailureSignature === signature) return;
+                    _recFailureSignature = signature;
+                    var notice = document.getElementById("recordingFailure");
+                    if (!notice) return;
+                    App.safeText(document.getElementById("recordingFailureMessage"), detail.error || detail.message || "녹음 파일을 정상적으로 저장하지 못했습니다.");
+                    App.safeText(document.getElementById("recordingFailurePreserved"), detail.partial_files_preserved
+                        ? "중단 전 부분 파일을 보존했습니다. 불완전할 수 있어 자동 전사하지 않았습니다."
+                        : "저장된 부분 파일은 확인되지 않았습니다. 이번 녹음은 자동 전사하지 않았습니다.");
+                    var names = Array.isArray(detail.partial_file_names) ? detail.partial_file_names : [];
+                    var list = document.getElementById("recordingFailureFileList");
+                    list.textContent = "";
+                    names.forEach(function (name) {
+                        var item = document.createElement("li");
+                        item.textContent = String(name);
+                        list.appendChild(item);
+                    });
+                    document.getElementById("recordingFailureFiles").hidden = names.length === 0;
+                    notice.hidden = false;
+                }
+
+                function _beginRecHUD(detail, mode) {
+                    _recEpoch += 1;
+                    _recActive = true;
+                    _recTerminal = false;
+                    _recMeetingId = detail.meeting_id || null;
+                    _recFailureSignature = "";
+                    var failure = document.getElementById("recordingFailure");
+                    if (failure) failure.hidden = true;
+                    _showRecHUD(mode);
+                    _startRecTicker(detail.duration_seconds || 0);
+                    _renderRecLevels(detail.audio_levels);
+                    ["recordingStopBtn", "recordingOverlayStopBtn", "recordingOverlayCancelBtn"].forEach(function (id) {
+                        var button = document.getElementById(id);
+                        if (button) button.disabled = false;
+                    });
+                }
+
+                function _currentRecEvent(detail) {
+                    return !_recMeetingId || !detail.meeting_id || detail.meeting_id === _recMeetingId;
+                }
+
+                function _refreshRecordingStatus() {
+                    if (_recStatusPending) return _recStatusPending;
+                    var epoch = _recEpoch;
+                    _recStatusPending = App.apiRequest("/recording/status").then(function (rec) {
+                        if (!rec || epoch !== _recEpoch) return false;
+                        if (rec.last_error) {
+                            _renderRecordingFailure(rec.last_error);
+                            return true;
+                        }
+                        if (rec.is_recording) {
+                            if (!_recActive || (rec.meeting_id && rec.meeting_id !== _recMeetingId)) {
+                                _beginRecHUD(rec, "pill");
+                            } else {
+                                _recBaseSeconds = rec.duration_seconds || 0;
+                                _recBaseWallClock = Date.now();
+                                _renderRecDuration();
+                                _renderRecLevels(rec.audio_levels);
+                            }
+                        } else if (_recActive && rec.state !== "stopping") {
+                            _finishRecHUD();
+                        }
+                        return false;
+                    }).catch(function () { return false; }).finally(function () { _recStatusPending = null; });
+                    return _recStatusPending;
+                }
+
                 // 채널별 음량이 없는 녹음에서는 진행 표시를 사용한다.
                 (function mountRecordingWaveBars() {
                     var wave = document.querySelector("#recordingOverlay .recording-wave");
@@ -331,29 +439,22 @@
                     }
                 })();
 
-                document.addEventListener("ws:recording_started", function () {
+                document.addEventListener("ws:recording_started", function (event) {
                     // 새 녹음 → overlay 기본 표시
-                    _showRecHUD("overlay");
-                    _startRecTicker(0);
-                    _renderRecLevels(null);
-                    // 버튼 disabled 초기화
-                    var recStopBtn = document.getElementById("recordingStopBtn");
-                    if (recStopBtn) recStopBtn.disabled = false;
-                    var overlayStop = document.getElementById("recordingOverlayStopBtn");
-                    if (overlayStop) overlayStop.disabled = false;
-                    var overlayCancel = document.getElementById("recordingOverlayCancelBtn");
-                    if (overlayCancel) overlayCancel.disabled = false;
+                    _beginRecHUD(event.detail || {}, "overlay");
                     loadMeetings();
                 });
-                document.addEventListener("ws:recording_stopped", function () {
-                    _showRecHUD("none");
-                    _stopRecTicker();
-                    _renderRecLevels(null);
+                document.addEventListener("ws:recording_stopped", function (event) {
+                    if (!_currentRecEvent(event.detail || {})) return;
+                    _finishRecHUD();
                     loadMeetings();
                 });
                 document.addEventListener("ws:recording_duration", function (e) {
                     // 백엔드 싱크 포인트: 기준선을 갱신하고 즉시 렌더
                     var detail = e.detail || {};
+                    if (_recTerminal || !_currentRecEvent(detail)) return;
+                    _recActive = true;
+                    _recMeetingId = detail.meeting_id || _recMeetingId;
                     _renderRecLevels(detail.audio_levels);
                     var seconds = detail.duration_seconds || 0;
                     _recBaseSeconds = seconds;
@@ -373,10 +474,9 @@
                 });
                 document.addEventListener("ws:recording_error", function (e) {
                     var detail = e.detail || {};
-                    _showRecHUD("none");
-                    _stopRecTicker();
-                    var msg = detail.error || detail.message || "녹음 중 오류가 발생했습니다";
-                    errorBanner.show(msg);
+                    if (!_currentRecEvent(detail)) return;
+                    _renderRecordingFailure(detail);
+                    loadMeetings();
                 });
 
                 // Overlay ↔ pill 전환 버튼들
@@ -389,12 +489,14 @@
                     }
 
                     async function sendStop() {
+                        var stopEpoch = _recEpoch;
                         try {
                             await App.apiRequest("/recording/stop", { method: "POST" });
-                            _showRecHUD("none");
-                            _stopRecTicker();
+                            if (stopEpoch === _recEpoch || !_recActive) _finishRecHUD();
                         } catch (err) {
-                            errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
+                            if (stopEpoch !== _recEpoch && _recActive) return;
+                            var failedCapture = await _refreshRecordingStatus();
+                            if (!failedCapture && !_recFailureSignature) errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
                             var ob = document.getElementById("recordingOverlayStopBtn");
                             var oc = document.getElementById("recordingOverlayCancelBtn");
                             if (ob) ob.disabled = false;
@@ -678,13 +780,14 @@
                     _recStopBtn.addEventListener("click", async function () {
                         if (_recStopBtn.disabled) return;
                         _recStopBtn.disabled = true;
+                        var stopEpoch = _recEpoch;
                         try {
                             await App.apiRequest("/recording/stop", { method: "POST" });
-                            var recStatus = document.getElementById("recordingStatus");
-                            if (recStatus) recStatus.classList.remove("visible");
-                            _stopRecTicker();
+                            if (stopEpoch === _recEpoch || !_recActive) _finishRecHUD();
                         } catch (err) {
-                            errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
+                            if (stopEpoch !== _recEpoch && _recActive) return;
+                            var failedCapture = await _refreshRecordingStatus();
+                            if (!failedCapture && !_recFailureSignature) errorBanner.show("녹음 정지 실패: " + (err.message || "알 수 없는 오류"));
                             _recStopBtn.disabled = false;
                         }
                     });
@@ -733,27 +836,8 @@
                 // 새로고침/재방문 시 진행 중인 녹음 상태 복원
                 // (백엔드는 녹음을 계속하지만 ws:recording_started 이벤트는 다시 안 오므로
                 //  프론트 플로팅 바가 사라지는 UX 결함을 방지)
-                App.apiRequest("/recording/status")
-                    .then(function (rec) {
-                        if (rec && rec.is_recording) {
-                            // 복원 시엔 최소화(pill) 모드로 표시해 작업 중이던 뷰를 가리지 않는다.
-                            // 사용자가 pill 의 확장 버튼을 눌러 overlay 로 볼 수 있음.
-                            _showRecHUD("pill");
-                            _startRecTicker(rec.duration_seconds || 0);
-                            _renderRecLevels(rec.audio_levels);
-                            // 새로고침으로 새 DOM 이 로드된 상태라 버튼은 기본 활성이지만,
-                            // 브라우저 form state 자동 복원에 대비해 명시적으로 리셋.
-                            var recStopBtn = document.getElementById("recordingStopBtn");
-                            if (recStopBtn) recStopBtn.disabled = false;
-                            var overlayStop = document.getElementById("recordingOverlayStopBtn");
-                            if (overlayStop) overlayStop.disabled = false;
-                            var overlayCancel = document.getElementById("recordingOverlayCancelBtn");
-                            if (overlayCancel) overlayCancel.disabled = false;
-                        }
-                    })
-                    .catch(function () {
-                        // recorder 미초기화 등은 무시
-                    });
+                _refreshRecordingStatus();
+                _recordingStatusTimer = setInterval(_refreshRecordingStatus, STATUS_POLL_INTERVAL);
 
                 // 주기적 폴링 (WebSocket 폴백)
                 _statusTimer = setInterval(fetchStatus, STATUS_POLL_INTERVAL);
@@ -1253,6 +1337,7 @@
              * 리스트 패널 타이머를 정리한다.
              */
             function destroy() {
+                if (_recordingStatusTimer) clearInterval(_recordingStatusTimer);
                 if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; }
                 if (_meetingsTimer) { clearInterval(_meetingsTimer); _meetingsTimer = null; }
                 if (_searchTimeout) { clearTimeout(_searchTimeout); _searchTimeout = null; }

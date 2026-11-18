@@ -33,6 +33,7 @@ class PreparedRecordingTrack:
     path: Path
     clip_timestamps: tuple[float, ...]
     active_rms_dbfs: float
+    speech_intervals: tuple[tuple[float, float], ...] = ()
 
 
 def _matches_track_layout(source: SoundFile) -> bool:
@@ -270,12 +271,14 @@ def prepare_recording_track(
             for samples in audio.blocks(blocksize=65536, dtype="float32"):
                 output.write(np.clip(samples * gain, -0.98, 0.98))
         path = normalized
+    verified_speech: tuple[tuple[float, float], ...] = ()
     if settings.speech_verification:
         # 에너지만으로는 선풍기·키보드·순간 잡음과 말소리를 구별할 수 없다.
         # 작은 목소리를 먼저 보정한 사본에서 검사하고, 원본은 변경하지 않는다.
         speech = _detect_recording_speech(path, settings.speech_threshold)
         if not speech:
             return None
+        verified_speech = tuple(speech)
         regions = []
         for left, right in speech:
             if regions and left - regions[-1][1] < settings.silence_gap_seconds:
@@ -288,7 +291,7 @@ def prepare_recording_track(
         f"분리 음성 전처리: {included:.2f}/{duration:.2f}초 전사, "
         f"활성 음량 {active_dbfs:.1f}dBFS, 보정 {gain_db:.1f}dB"
     )
-    return PreparedRecordingTrack(path, times, prepared_dbfs)
+    return PreparedRecordingTrack(path, times, prepared_dbfs, verified_speech)
 
 
 def _detect_recording_speech(path: Path, threshold: float) -> list[tuple[float, float]]:

@@ -1917,6 +1917,9 @@ class JobQueue:
                     new_status.value,
                 )
             valid_targets = VALID_TRANSITIONS.get(current_status, set())
+            if current_action == "retry_mic" and current_status == JobStatus.TRANSCRIBING:
+                # 마이크 복구는 상대방 화자분리·병합을 실행하지 않고 검색 반영으로 간다.
+                valid_targets = valid_targets | {JobStatus.EMBEDDING, JobStatus.COMPLETED}
             if new_status not in valid_targets:
                 raise InvalidTransitionError(
                     job_id,
@@ -2231,6 +2234,43 @@ class JobQueue:
             current_status.value,
             requested_action,
         )
+        return self.get_job(job_id)
+
+    def queue_mic_retry(self, job_id: int, *, stt_model: str) -> Job:
+        """완료된 원문을 보존한 마이크 재시도만 원자적으로 접수한다."""
+        from core.mic_transcription import MIC_RETRY_ACTION
+
+        _validate_stt_snapshot("local", stt_model)
+        conn = self._ensure_connection()
+        with self._write_lock:
+            row = conn.execute(
+                "SELECT status, requested_action FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise JobNotFoundError(job_id)
+            if row["status"] not in {
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+                JobStatus.RECORDED.value,
+            }:
+                raise InvalidTransitionError(job_id, str(row["status"]), JobStatus.QUEUED.value)
+            cursor = conn.execute(
+                "UPDATE jobs SET status = ?, requested_action = ?, stt_provider = ?, stt_model = ?, error_message = '', updated_at = ? WHERE id = ? AND status = ? AND requested_action = ?",
+                (
+                    JobStatus.QUEUED.value,
+                    MIC_RETRY_ACTION,
+                    "local",
+                    stt_model,
+                    self._now_iso(),
+                    job_id,
+                    row["status"],
+                    row["requested_action"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise JobQueueError("마이크 재시도 접수가 다른 작업과 충돌했습니다")
+            conn.commit()
         return self.get_job(job_id)
 
     def queue_failed_job(

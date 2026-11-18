@@ -180,6 +180,7 @@ class TestRuntimeProfile:
     def test_desktop_기본값은_런타임_컴포넌트를_시작(self, tmp_path: Path) -> None:
         """기본 desktop 프로필이 기존 런타임 시작 동작을 유지하는지 확인한다."""
         from api.server import create_app
+        from ui.recording_notification import notify_recording_failure
 
         config = _make_test_config(tmp_path)
         app = create_app(config)
@@ -199,6 +200,7 @@ class TestRuntimeProfile:
         ):
             assert app.state.runtime_profile == "desktop"
             assert app.state.recorder is mocks["recorder"]
+            mocks["recorder"].on_capture_failure.assert_called_once_with(notify_recording_failure)
             assert app.state.zoom_detector is mocks["zoom"]
             assert app.state.folder_watcher is mocks["watcher"]
             assert app.state.job_processor is mocks["processor"]

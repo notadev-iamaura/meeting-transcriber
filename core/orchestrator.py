@@ -1271,6 +1271,12 @@ class JobProcessor:
               - input_size: 입력 크기 (단계별 단위)
               - elapsed: (complete 시) 실제 소요 시간
             """
+            if evt.get("event") == "mic_transcription_warning":
+                await self._broadcast_event(
+                    "mic_transcription_warning",
+                    {**evt, "job_id": job_id, "meeting_id": meeting_id},
+                )
+                return
             phase = evt.get("phase", "")
             step = evt.get("step", "")
             model_id = self._resolve_step_model_id(
@@ -1331,17 +1337,26 @@ class JobProcessor:
             # 파이프라인 실행: batch 가 명시한 실행 의도는 우선하고,
             # 빈 값이면 pipeline.run 내부에서 config.pipeline.skip_llm_steps 를 사용한다.
             extra_options = {} if stop_after is None else {"stop_after": stop_after}
-            result = await self._pipeline.run(
-                Path(audio_path),
-                meeting_id=meeting_id,
-                on_step_start=on_step_start,
-                on_step_progress=on_step_progress,
-                skip_llm_steps=skip_llm_steps_override,
-                should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
-                stt_provider=queued_stt_provider,
-                stt_model=queued_stt_model,
-                **extra_options,
-            )
+            if claimed_job.requested_action == "retry_mic":
+                result = await self._pipeline.retry_mic(
+                    Path(audio_path),
+                    meeting_id=meeting_id,
+                    stt_model=queued_stt_model,
+                    on_step_start=on_step_start,
+                    should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
+                )
+            else:
+                result = await self._pipeline.run(
+                    Path(audio_path),
+                    meeting_id=meeting_id,
+                    on_step_start=on_step_start,
+                    on_step_progress=on_step_progress,
+                    skip_llm_steps=skip_llm_steps_override,
+                    should_cancel=lambda: self._is_job_cancellation_requested(meeting_id, job_id),
+                    stt_provider=queued_stt_provider,
+                    stt_model=queued_stt_model,
+                    **extra_options,
+                )
             pipeline_completed = result.status == "completed"
 
             if self._is_job_cancellation_requested(meeting_id, job_id):

@@ -1675,6 +1675,7 @@ class PipelineManager:
         stt_provider: str | None = None,
         stt_model: str | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        on_mic_status: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> Any:
         """전사 단계: 선택된 로컬 또는 OpenAI STT를 수행한다.
 
@@ -1737,7 +1738,12 @@ class PipelineManager:
         ):
             self._assert_input_identity(wav_path, wav_identity)
             result = await self._transcribe_recording_tracks(
-                wav_path, wav_identity, selected_model=selected_model, should_cancel=should_cancel
+                wav_path,
+                wav_identity,
+                selected_model=selected_model,
+                should_cancel=should_cancel,
+                mic_status_path=checkpoint_path.with_name("mic_transcription.json"),
+                on_mic_status=on_mic_status,
             )
             if self._checkpoint_enabled:
                 self._save_result_checkpoint(result, checkpoint_path)
@@ -1759,14 +1765,47 @@ class PipelineManager:
         *,
         selected_model: str,
         should_cancel: Callable[[], bool] | None,
+        mic_status_path: Path | None = None,
+        on_mic_status: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> Any:
         """마이크·시스템을 순서대로 전사하고 입력 출처를 보존한다."""
+        from core.mic_transcription import PARTIAL_MESSAGE, uncovered_mic_speech, write_mic_status
         from steps.transcriber import (
             EmptyTranscriptError,
             LowVolumeAudioError,
             TranscriptResult,
             TranscriptSegment,
         )
+
+        def record_mic(status: str, detected: bool, **details: Any) -> None:
+            """전사 가능 음성의 처리 결과를 완료 여부와 별도로 보존한다."""
+            if mic_status_path is not None:
+                write_mic_status(
+                    mic_status_path, status, detected, model=selected_model, **details
+                )
+
+        async def warn_mic(status: str, **details: Any) -> None:
+            """상대방 전사가 끝나기 전에 관측한 누락을 알리며 기록을 진실 공급원으로 둔다."""
+            message = (
+                PARTIAL_MESSAGE
+                if status == "partial"
+                else "마이크에서 처리할 음성 구간을 찾았지만 내 발화를 전사하지 못했습니다. 회의 처리 후 마이크만 다시 시도할 수 있습니다."
+            )
+            record_mic(status, True, message=message, **details)
+            if on_mic_status is not None:
+                try:
+                    await on_mic_status(
+                        {
+                            "event": "mic_transcription_warning",
+                            "step": "transcribe",
+                            "status": status,
+                            "speech_detected": True,
+                            "retry_available": False,
+                            "message": message,
+                        }
+                    )
+                except Exception:
+                    logger.warning("마이크 전사 경고 전송 실패", exc_info=True)
 
         segments: list[TranscriptSegment] = []
         language = self._config.stt.language
@@ -1785,6 +1824,7 @@ class PipelineManager:
                 echo_settings=settings,
             )
             prepared = {}
+            record_mic("no_speech", False)
             for channel, track_path in tracks.items():
                 if should_cancel is not None and should_cancel():
                     raise asyncio.CancelledError("사용자가 전사를 취소했습니다.")
@@ -1793,6 +1833,8 @@ class PipelineManager:
                 )
                 if track is not None:
                     prepared[channel] = track
+                    if channel == MIC_CHANNEL:
+                        record_mic("processing", True)
                 else:
                     logger.info(f"전사할 활성 음성 구간 없음: 채널={channel}")
             async with self._model_manager.residency_scope(
@@ -1808,9 +1850,29 @@ class PipelineManager:
                             selected_model=selected_model,
                             prepared_track=track,
                         )
-                    except (LowVolumeAudioError, EmptyTranscriptError):
+                    except (LowVolumeAudioError, EmptyTranscriptError) as exc:
+                        if channel == MIC_CHANNEL:
+                            await warn_mic(
+                                "low_volume" if isinstance(exc, LowVolumeAudioError) else "empty"
+                            )
                         logger.info(f"전사 가능한 발화가 없는 채널 건너뜀: {channel}")
                         continue
+                    if channel == MIC_CHANNEL:
+                        if result.segments:
+                            missing = uncovered_mic_speech(
+                                track.speech_intervals,
+                                [
+                                    {"start": segment.start, "end": segment.end}
+                                    for segment in result.segments
+                                ],
+                                settings,
+                            )
+                            if missing:
+                                await warn_mic("partial", uncovered_intervals=missing)
+                            else:
+                                record_mic("complete", True)
+                        else:
+                            await warn_mic("empty")
                     language = result.language
                     speaker = SELF_SPEAKER if channel == MIC_CHANNEL else None
                     segments.extend(
@@ -2734,6 +2796,50 @@ class PipelineManager:
             # 9단계 결과 반영 — state 는 항상 저장 (성공/실패 무관)
             self._save_state(state, state_path)
 
+    async def retry_mic(
+        self,
+        audio_path: Path,
+        meeting_id: str,
+        *,
+        stt_model: str,
+        on_step_start: Callable[[str], Awaitable[None]] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> PipelineState:
+        """같은 회의의 편집·삭제와 직렬화해 마이크 트랙만 다시 전사한다."""
+        from core.mic_transcription import retry_mic_track
+
+        self._validate_meeting_id(meeting_id)
+        async with self._meeting_mutation_coordinator.lease(meeting_id):
+            try:
+                await retry_mic_track(
+                    self,
+                    audio_path,
+                    meeting_id,
+                    model=stt_model,
+                    on_step_start=on_step_start,
+                    should_cancel=should_cancel,
+                )
+                from core.search_revision import read_source
+
+                _, source = read_source(self._config, meeting_id)
+                if source.get("mic_retry_bootstrap"):
+                    recovered = PipelineState(
+                        meeting_id=meeting_id,
+                        audio_path=str(audio_path),
+                        status="completed",
+                        completed_steps=["transcribe", "chunk", "embed"],
+                        skipped_steps=["convert", "diarize", "merge", "correct", "summarize"],
+                        warnings=["마이크 트랙만 복구했습니다. 교정·요약은 실행하지 않았습니다."],
+                        stt_provider="local",
+                        stt_model=stt_model,
+                    )
+                    self._save_state(recovered, self._get_state_path(meeting_id))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise PipelineError(f"마이크 재전사 실패: {exc}") from exc
+        return PipelineState(meeting_id=meeting_id, audio_path=str(audio_path), status="completed")
+
     async def run(
         self,
         audio_path: Path,
@@ -3271,6 +3377,11 @@ class PipelineManager:
                             stt_provider=state.stt_provider,
                             stt_model=state.stt_model,
                             should_cancel=should_cancel,
+                            **(
+                                {"on_mic_status": on_step_progress}
+                                if on_step_progress is not None
+                                else {}
+                            ),
                         )
 
                     elif step == PipelineStep.DIARIZE:

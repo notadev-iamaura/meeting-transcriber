@@ -243,6 +243,7 @@ recording:
   max_duration_seconds: 14400                  # 최대 녹음 시간 (초, 4시간)
   min_duration_seconds: 30                     # 최소 녹음 시간 (미달 시 파기)
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
+  capture_stall_timeout_seconds: 5            # 분리 녹음 프레임이 끊기면 오류로 종료 (무음과 구분)
   multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음
   separate_mic_track: true                      # 확인된 Aggregate는 마이크/시스템을 한 WAV에 분리 저장
   split_track_processing:
@@ -254,6 +255,8 @@ recording:
     silence_gap_seconds: 5.0
     speech_verification: true                  # 로컬 CPU 모델로 말소리 없는 잡음 제외
     speech_threshold: 0.20                     # 작은 발화 보존을 위한 보수적인 문턱
+    missing_speech_min_seconds: 1.0            # 실제 음성이 연속해서 전사 시간에 없는 경우만 알림
+    transcript_time_tolerance_seconds: 0.35    # STT 시간 오차를 고려한 중복/누락 판정 여유
   silence_threshold_rms: 0.001                   # 무음 판정 RMS 임계값 (0.0~1.0)
   # Aggregate Device(3ch) 다운믹스 시 마이크 채널(c0) 가중치를 0.5로 올려 본인 목소리 저하 방지.
   # 비정형 채널 수(2/4ch) Aggregate 에서 ffmpeg 에러가 나면 false 로 비활성화.
