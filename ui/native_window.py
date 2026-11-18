@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -146,6 +147,17 @@ def run_webview_window(
         min_height: 최소 높이
     """
     import webview
+
+    icon_path = os.environ.get("RECAP_BUNDLE_ICON")
+    if icon_path and sys.platform == "darwin":
+        # 별도 Python 창 프로세스는 런처 번들의 Info.plist 아이콘을 상속하지 않는다.
+        from AppKit import NSApplication, NSImage
+
+        icon = NSImage.alloc().initWithContentsOfFile_(icon_path)
+        if icon is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(icon)
+        else:
+            logger.warning("앱 번들의 Dock 아이콘을 열 수 없습니다.")
 
     webview.create_window(
         title,

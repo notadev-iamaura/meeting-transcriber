@@ -85,6 +85,12 @@ def test_build_launcher_app_creates_valid_bundle(tmp_path: Path) -> None:
         plist = plistlib.load(fh)
     assert plist["CFBundlePackageType"] == "APPL"
     assert plist["CFBundleExecutable"] == "Recap Test"
+    assert plist["CFBundleIconFile"] == "Recap.icns"
+    assert plist["CFBundleIconName"] == "Recap"
+    assert (result.app_path / "Contents" / "Resources" / "Assets.car").is_file()
+    icon = (result.app_path / "Contents" / "Resources" / plist["CFBundleIconFile"]).read_bytes()
+    assert icon[:4] == b"icns"
+    assert len(icon) > 8 and int.from_bytes(icon[4:8], "big") == len(icon)
     assert plist["CFBundleIdentifier"] == "com.recap.test"
     assert plist["CFBundleShortVersionString"] == "1.2.3"
 
@@ -203,6 +209,30 @@ def test_build_launcher_app_generated_executable_preserves_runtime_spec_scalars(
     assert "host=server_host" in executable
     assert "port=int(server_port)" in executable
     assert "log_file=log_file" in executable
+
+
+@pytest.mark.parametrize("bundle_source", [False, True])
+def test_moved_launcher_uses_its_bundled_icon(tmp_path: Path, bundle_source: bool) -> None:
+    """앱을 빌드 경로 밖으로 옮겨도 창 프로세스에 현재 번들의 아이콘을 전달한다."""
+    from scripts.build_launcher_app import build_launcher_app
+
+    project_dir, python = _make_bundle_project(tmp_path)
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$RECAP_BUNDLE_ICON" "$@"\n', encoding="utf-8")
+    result = build_launcher_app(
+        output_dir=tmp_path / "dist",
+        project_dir=project_dir,
+        python_executable=python,
+        app_name="Recap Test",
+        bundle_source=bundle_source,
+    )
+    destination = tmp_path / "My Apps"
+    destination.mkdir()
+    moved = result.app_path.rename(destination / result.app_path.name)
+    executable = moved / result.executable_path.relative_to(result.app_path)
+    completed = subprocess.run([str(executable)], capture_output=True, text=True, check=True)
+    icon, *args = completed.stdout.splitlines()
+    assert len(args) == 7 and args[-1] == "Recap Test"
+    assert Path(icon).samefile(moved / "Contents" / "Resources" / "Recap.icns")
 
 
 def test_build_launcher_app_generated_executable_passes_bash_syntax(
@@ -568,6 +598,14 @@ def test_build_launcher_app_bundles_project_source_snapshot(tmp_path: Path) -> N
     executable = result.executable_path.read_text(encoding="utf-8")
 
     assert result.bundled_project_path == result.app_path / "Contents" / "Resources" / "project"
+    plist = plistlib.loads(result.info_plist_path.read_bytes())
+    icon_path = result.app_path / "Contents" / "Resources" / plist["CFBundleIconFile"]
+    source_icon = Path(__file__).resolve().parents[1] / "scripts" / "assets" / "Recap.icns"
+    assert icon_path.read_bytes() == source_icon.read_bytes()
+    assert (
+        icon_path.with_name("Assets.car").read_bytes()
+        == source_icon.with_name("Assets.car").read_bytes()
+    )
     assert result.bundled_file_count > 0
     assert (result.bundled_project_path / "main.py").is_file()
     assert (result.bundled_project_path / "pyproject.toml").is_file()

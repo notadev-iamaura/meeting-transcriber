@@ -24,6 +24,7 @@ from ui.launcher import LauncherSpec, build_launcher_spec, collect_launcher_pref
 DEFAULT_APP_NAME = "Recap"
 DEFAULT_BUNDLE_ID = "com.recap.local-launcher"
 DEFAULT_VERSION = "0.1.0"
+_APP_ICON = Path(__file__).with_name("assets") / "Recap.icns"
 BUNDLED_PROJECT_RELATIVE_PATH = "Contents/Resources/project"
 _BUNDLED_SOURCE_DIRS = ("api", "core", "steps", "search", "security", "ui")
 _BUNDLED_SOURCE_FILES = (
@@ -212,6 +213,8 @@ def _write_launcher_app_bundle(
     resources_dir = contents_dir / "Resources"
     macos_dir.mkdir(parents=True)
     resources_dir.mkdir(parents=True)
+    for asset in (_APP_ICON, _APP_ICON.with_name("Assets.car")):
+        shutil.copyfile(asset, resources_dir / asset.name)
 
     executable_path = macos_dir / app_name
     info_plist_path = contents_dir / "Info.plist"
@@ -464,6 +467,8 @@ def _write_info_plist(
         "CFBundleDevelopmentRegion": "ko",
         "CFBundleDisplayName": app_name,
         "CFBundleExecutable": app_name,
+        "CFBundleIconFile": _APP_ICON.name,
+        "CFBundleIconName": _APP_ICON.stem,
         "CFBundleIdentifier": bundle_id,
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": app_name,
@@ -493,7 +498,6 @@ def _write_launcher_executable(
     app_label = shlex.quote(app_name)
     bundled_project_probe = (
         """
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLED_PROJECT_DIR="$(cd "${SCRIPT_DIR}/../Resources/project" 2>/dev/null && pwd || true)"
 if [[ -n "${BUNDLED_PROJECT_DIR}" && -f "${BUNDLED_PROJECT_DIR}/main.py" ]]; then
   PROJECT_DIR="${BUNDLED_PROJECT_DIR}"
@@ -511,6 +515,8 @@ SERVER_HOST={host}
 SERVER_PORT={port}
 LOG_FILE={log_file}
 APP_NAME={app_label}
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+export RECAP_BUNDLE_ICON="${{SCRIPT_DIR}}/../Resources/{_APP_ICON.name}"
 {bundled_project_probe}
 
 if [[ -z "${{PROJECT_DIR}}" ]]; then
