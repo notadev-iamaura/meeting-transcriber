@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import Page, Route, expect, sync_playwright
 
 # 모든 테스트에 'e2e' 마커 적용 — pytest-playwright 와 pytest-asyncio 가
 # 동시에 활성화될 때 async 테스트가 깨지므로 이 파일은 기본 실행에서 제외되고
@@ -301,6 +301,195 @@ def page(server, browser, test_base_dir: Path, seeded_meeting_id: str):
 # =============================================================================
 # E2E 테스트
 # =============================================================================
+
+
+def test_self_speaker_assign_change_clear_and_export(
+    page: Page, seeded_meeting_id: str, test_base_dir: Path
+) -> None:
+    """화자 버튼에서 회의 단위 지정·변경·해제하며 새로고침과 내보내기에도 일치한다."""
+    url = f"{BASE_URL}/app/viewer/{seeded_meeting_id}"
+    page.goto(url)
+    names = page.locator(".utterance-speaker")
+    expect(names).to_have_text(["참석자 1", "참석자 2", "참석자 1"])
+    names.last.focus()
+    page.keyboard.press("Enter")
+    dialog = page.get_by_role("dialog", name="내 화자 지정")
+    expect(dialog.get_by_role("combobox")).to_have_value("SPEAKER_00")
+    dialog.get_by_role("button", name="나로 지정").click()
+    expect(names).to_have_text(["나", "참석자 2", "나"])
+    expect(names.last).to_be_focused()
+    expect(page.locator(".utterance-badge.is-self svg")).to_have_count(2)
+    expect(page.locator(".speaker-chip.is-self")).to_have_text("나직접 지정")
+    page.reload()
+    expect(names).to_have_text(["나", "참석자 2", "나"])
+    page.locator(".viewer-more-actions > summary").click()
+    # 외부 클립보드에는 접근하지 않고 제품 복사 버튼의 결과를 확인한다.
+    page.evaluate(
+        "MeetingApp.copyToClipboard = async text => {document.body.dataset.copied = text; return true}"
+    )
+    page.get_by_role("button", name="전사문을 클립보드로 복사").click()
+    with page.expect_download() as download:
+        page.get_by_role("button", name="전사문을 텍스트 파일로 다운로드").click()
+    downloaded = test_base_dir / "self-speaker-export.txt"
+    download.value.save_as(downloaded)
+    for contents in (downloaded.read_text(), page.locator("body").get_attribute("data-copied")):
+        assert contents and contents.count("[나]") == 2 and contents.count("[참석자 2]") == 1
+    page.locator(".viewer-more-actions > summary").click()
+    names.nth(1).click()
+    change = page.get_by_role("dialog", name="내 화자 변경")
+    expect(change.get_by_role("combobox")).to_have_value("SPEAKER_01")
+    change.get_by_role("button", name="나로 지정").click()
+    expect(names).to_have_text(["참석자 1", "나", "참석자 1"])
+    page.get_by_role("button", name="내 화자 변경", exact=True).click()
+    change.get_by_role("combobox").select_option("")
+    change.get_by_role("button", name="지정 해제").click()
+    page.reload()
+    expect(names).to_have_text(["참석자 1", "참석자 2", "참석자 1"])
+
+
+def test_self_speaker_dialog_refreshes_after_conflicting_change(
+    page: Page, test_base_dir: Path
+) -> None:
+    """다른 창이 먼저 바꾼 화자가 오래 열린 선택창에 의해 덮이지 않는다."""
+    meeting_id = "meeting_20260407_140010"
+    _seed_meeting(test_base_dir, meeting_id)
+    page.goto(f"{BASE_URL}/app/viewer/{meeting_id}")
+    page.locator(".utterance-speaker").first.click()
+    endpoint = f"{BASE_URL}/api/meetings/{meeting_id}"
+    transcript = page.request.get(f"{endpoint}/transcript").json()
+    response = page.request.put(
+        f"{endpoint}/self-speaker",
+        data={
+            "speaker_id": "SPEAKER_01",
+            "expected_self_speaker_id": None,
+            "expected_revision": transcript["self_speaker_revision"],
+        },
+    )
+    assert response.ok
+    page.get_by_role("button", name="나로 지정").click()
+    expect(page.get_by_role("dialog")).to_have_count(0)
+    expect(page.locator(".utterance-speaker")).to_have_text(["참석자 1", "나", "참석자 1"])
+
+
+def test_self_speaker_changes_preserve_an_open_utterance_editor(
+    page: Page, test_base_dir: Path
+) -> None:
+    """창 안팎의 화자 변경 시 미저장 발화 문구와 저장 동작을 유지한다."""
+    meeting_id = "meeting_20260407_140030"
+    _seed_meeting(test_base_dir, meeting_id)
+    page.goto(f"{BASE_URL}/app/viewer/{meeting_id}")
+    page.locator(".utterance-text").first.dblclick()
+    editor = page.locator(".utterance-textarea")
+    draft = "저장 전 회의록 수정 사항"
+    editor.fill(draft)
+    names = page.locator(".utterance-speaker")
+    names.nth(1).click()
+    page.get_by_role("button", name="나로 지정").click()
+    expect(names).to_have_text(["참석자 1", "나", "참석자 1"])
+    expect(editor).to_have_value(draft)
+    endpoint = f"{BASE_URL}/api/meetings/{meeting_id}"
+    transcript = page.request.get(f"{endpoint}/transcript").json()
+    response = page.request.put(
+        f"{endpoint}/self-speaker",
+        data={
+            "speaker_id": "SPEAKER_00",
+            "expected_self_speaker_id": "SPEAKER_01",
+            "expected_revision": transcript["self_speaker_revision"],
+        },
+    )
+    assert response.ok
+    page.evaluate(
+        "id => document.dispatchEvent(new CustomEvent('ws:pipeline_status', {detail: {meeting_id: id}}))",
+        meeting_id,
+    )
+    expect(names).to_have_text(["나", "참석자 2", "나"])
+    expect(editor).to_have_value(draft)
+    page.locator(".utterance-edit-actions").get_by_role("button", name="저장").click()
+    expect(page.locator(".utterance-text").first).to_have_text(draft)
+    page.reload()
+    expect(page.locator(".utterance-text").first).to_have_text(draft)
+    expect(names).to_have_text(["나", "참석자 2", "나"])
+
+
+@pytest.mark.parametrize("has_mic_rows", [True, False])
+def test_self_speaker_microphone_evidence_locks_identity(
+    page: Page, test_base_dir: Path, has_mic_rows: bool
+) -> None:
+    """분리 트랙에서 '나'를 자동 표시하고 마이크 발화가 없어도 상대방을 지정하지 않는다."""
+    meeting_id = f"meeting_20260407_14002{int(has_mic_rows)}"
+    _seed_meeting(test_base_dir, meeting_id)
+    path = test_base_dir / "checkpoints" / meeting_id / "correct.json"
+    transcript = json.loads(path.read_text())
+    transcript["separate_mic_track"] = True
+    if has_mic_rows:
+        transcript["utterances"][1]["speaker"] = "나"
+    path.write_text(json.dumps(transcript, ensure_ascii=False))
+    page.goto(f"{BASE_URL}/app/viewer/{meeting_id}")
+    expected = "나" if has_mic_rows else "참석자 2"
+    expect(page.locator(".utterance-speaker")).to_have_text(["참석자 1", expected, "참석자 1"])
+    expect(page.locator("button.utterance-speaker, .self-speaker-trigger")).to_have_count(0)
+    expect(page.locator(".utterance-badge.is-self svg")).to_have_count(int(has_mic_rows))
+    if has_mic_rows:
+        expect(page.locator(".speaker-chip.is-self")).to_have_text("나내 마이크")
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            for badge in page.locator(".utterance-badge.is-self, .speaker-badge.is-self").all():
+                icon_color = badge.evaluate("el => getComputedStyle(el).color")
+                expect(badge.locator("svg")).to_have_css("color", icon_color)
+
+
+def _seed_mic_echo_meeting(base_dir: Path, meeting_id: str) -> Path:
+    """같은 문장의 스피커 유입과 서로 다른 동시 발화를 한 회의에 시드한다."""
+    _seed_meeting(base_dir, meeting_id)
+    path = base_dir / "checkpoints" / meeting_id / "correct.json"
+    transcript = json.loads(path.read_text())
+    template = transcript["utterances"][0]
+    phrase = "다음 회의에서는 검색 화면을 먼저 검토하겠습니다."
+    transcript["utterances"] = [
+        {
+            **template,
+            "start": start,
+            "end": start + 3,
+            "speaker": speaker,
+            "text": text,
+            "original_text": text,
+        }
+        for start, speaker, text in (
+            (17.0, "나", phrase),
+            (18.0, "SPEAKER_01", phrase),
+            (25.0, "나", "저는 마이크 설정을 직접 확인해 보겠습니다."),
+            (25.0, "SPEAKER_01", "그동안 제가 자료를 정리하겠습니다."),
+        )
+    ]
+    transcript["separate_mic_track"] = True
+    path.write_text(json.dumps(transcript, ensure_ascii=False))
+    return path
+
+
+def test_mic_echo_review_fold_search_and_original(page: Page, test_base_dir: Path) -> None:
+    """중복 후보만 접고, 검색 시 원문 양쪽과 내용이 다른 동시 발화를 보존한다."""
+    meeting_id = "meeting_20260407_143051"
+    path = _seed_mic_echo_meeting(test_base_dir, meeting_id)
+    original = path.read_bytes()
+    page.goto(f"{BASE_URL}/app/viewer/{meeting_id}")
+    rows = page.locator("#viewerTimeline .utterance")
+    expect(rows).to_have_count(4)
+    expect(rows.nth(0).locator(".mic-echo-label")).to_contain_text("00:18")
+    toggle = page.locator("#viewerMicEchoToggle")
+    expect(toggle).to_have_text("중복 후보 1개 접기")
+    toggle.click()
+    expect(rows.nth(0)).to_be_hidden()
+    for i in (1, 2, 3):
+        expect(rows.nth(i)).to_be_visible()
+    page.locator("#viewerSearchInput").fill("검색 화면")
+    expect(toggle).to_be_disabled()
+    expect(rows.nth(0)).to_be_visible()
+    expect(page.locator("#viewerSearchInfo")).to_contain_text("2건")
+    page.locator("#viewerSearchClear").click()
+    expect(rows.nth(0)).to_be_hidden()
+    toggle.click()
+    expect(rows.nth(0)).to_be_visible()
+    assert path.read_bytes() == original
 
 
 def test_openai_failure_visible_with_partial_transcript(
@@ -713,6 +902,122 @@ class TestTranscriptEdit:
         textarea.press("Escape")
 
         expect(page.locator(".utterance-text").first).to_have_text(original or "")
+
+
+class TestInlineVocabulary:
+    """개별 발화 저장과 선택한 용어 등록을 실제 회의 API에서 검증한다."""
+
+    @staticmethod
+    def _save_first(page: Page, text: str) -> None:
+        """첫 문장의 편집기를 열고 키보드로 저장한다."""
+        page.locator(".utterance-text").first.dblclick()
+        editor = page.locator(".utterance-textarea")
+        editor.fill(text)
+        editor.press("Control+Enter")
+        expect(page.locator(".utterance-text").first).to_have_text(text)
+
+    def test_register_selected_change_and_preserve_other_utterances(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """두 개의 교정 후보 중 선택한 하나만 저장하고 다른 발화는 그대로 둔다."""
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+        rows = page.request.get(url).json()["utterances"]
+        rows[0]["text"] = "파이선 성능을 확인한 후 젠데시크 설정을 검토합니다."
+        assert page.request.put(url, data={"utterances": rows}).ok
+        vocab_url = f"{BASE_URL}/api/vocabulary"
+        before = page.request.get(vocab_url).json()
+        _open_viewer(page, seeded_meeting_id)
+        self._save_first(page, "파이썬 성능을 확인한 후 젠데스크 설정을 검토합니다.")
+        form = page.get_by_role("form", name="용어집에 추가할 표현")
+        expect(form.get_by_role("checkbox")).to_have_count(2)
+        expect(form.get_by_role("textbox", name="기존 표기 1")).to_have_value("파이선")
+        expect(form.get_by_role("textbox", name="정답 표기 1")).to_have_value("파이썬")
+        expect(form.get_by_role("textbox", name="기존 표기 2")).to_have_value("젠데시크")
+        assert page.request.get(vocab_url).json() == before
+        form.get_by_role("checkbox", name="표현 2 선택").uncheck()
+        form.get_by_role("textbox", name="정답 표기 1").fill("Python")
+        form.get_by_role("button", name="용어집에 추가").click()
+        expect(form).to_have_count(0)
+        terms = page.request.get(vocab_url).json()["terms"]
+        assert any(t["term"] == "Python" and "파이선" in t["aliases"] for t in terms)
+        assert not any("젠데시크" in t["aliases"] for t in terms)
+        page.reload()
+        expect(page.locator(".utterance-text").nth(1)).to_have_text(rows[1]["text"])
+        expect(page.locator(".utterance-text").first).to_contain_text("파이썬 성능")
+
+    def test_retry_vocabulary_without_resaving_transcript(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """용어집 오류 후 저장된 전사는 유지되고 용어만 다시 등록할 수 있다."""
+        _open_viewer(page, seeded_meeting_id)
+        original = page.locator(".utterance-text").first.inner_text()
+        updated = original.replace("파이선", "파이썬")
+        self._save_first(page, updated)
+        form = page.get_by_role("form", name="용어집에 추가할 표현")
+        expect(form).to_be_visible()
+        page.route("**/api/vocabulary/corrections", lambda route: route.abort(), times=1)
+        form.get_by_role("button", name="용어집에 추가").click()
+        expect(form.get_by_role("alert")).to_be_visible()
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+        saved = page.request.get(url).json()
+        assert saved["utterances"][0]["text"] == updated
+        form.get_by_role("button", name="용어집에 추가").click()
+        expect(form).to_have_count(0)
+        assert (
+            page.request.get(url).json()["self_speaker_revision"] == saved["self_speaker_revision"]
+        )
+        terms = page.request.get(f"{BASE_URL}/api/vocabulary").json()["terms"]
+        assert sum(t["term"] == "파이썬" and "파이선" in t["aliases"] for t in terms) == 1
+
+    def test_skip_and_punctuation_only_make_no_vocabulary_changes(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """후보를 건너뛰거나 문장부호만 고쳐도 문장은 저장된다."""
+        _open_viewer(page, seeded_meeting_id)
+        before = page.request.get(f"{BASE_URL}/api/vocabulary").json()
+        original = page.locator(".utterance-text").first.inner_text()
+        updated = original.replace("파이선", "파이썬")
+        self._save_first(page, updated)
+        form = page.get_by_role("form", name="용어집에 추가할 표현")
+        form.get_by_role("button", name="건너뛰기").click()
+        expect(form).to_have_count(0)
+        self._save_first(page, updated.rstrip(".") + "!")
+        expect(form).to_have_count(0)
+        assert page.request.get(f"{BASE_URL}/api/vocabulary").json() == before
+
+    def test_lost_transcript_response_keeps_editor_and_recovers_suggestions(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """서버 저장 직후 응답이 끊겨도 재시도로 후보를 복구하고 수정본을 유지한다."""
+        _open_viewer(page, seeded_meeting_id)
+        row = page.locator(".utterance-text").first
+        revised = row.inner_text().replace("파이선", "파이썬")
+        row.dblclick()
+        editor = page.get_by_role("textbox", name="발화 편집")
+        editor.fill(revised)
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+
+        def lose_response(route: Route) -> None:
+            """편집을 서버에 전달한 뒤 첫 응답의 네트워크 단절을 재현한다."""
+            if route.request.method != "PUT":
+                route.continue_()
+                return
+            assert route.fetch().ok
+            route.abort()
+
+        page.route(url, lose_response)
+        page.get_by_role("button", name="저장", exact=True).click()
+        expect(row.get_by_role("alert")).to_be_visible()
+        expect(editor).to_have_value(revised)
+        saved = page.request.get(url).json()
+        assert saved["utterances"][0]["text"] == revised
+        page.unroute(url, lose_response)
+        page.get_by_role("button", name="저장", exact=True).click()
+        form = page.get_by_role("form", name="용어집에 추가할 표현")
+        expect(form.get_by_role("textbox", name="정답 표기 1")).to_have_value("파이썬")
+        assert (
+            page.request.get(url).json()["self_speaker_revision"] == saved["self_speaker_revision"]
+        )
 
 
 class TestBulkReplaceAndVocabulary:

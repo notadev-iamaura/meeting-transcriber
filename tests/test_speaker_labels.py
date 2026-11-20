@@ -6,11 +6,13 @@ import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from starlette.requests import Request
+from starlette.testclient import TestClient
 
 from api.routers import meeting_detail, search_chat
 from config import AppConfig, PathsConfig
@@ -113,11 +115,13 @@ def test_read_priority_and_missing_or_unsafe_source_do_not_guess(config: AppConf
     assert read_speaker_labels(config, ["unsafe"]) == {"unsafe": {}}
 
 
-def test_each_meeting_is_read_once_per_label_request(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_meeting_is_read_once_per_label_request(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """청크 수가 늘어나도 같은 요청에서 전체 원문은 회의별 한 번만 읽는다."""
     reader = MagicMock(return_value=(Path("unused"), {"utterances": _utterances(ORDERS[0])}))
     monkeypatch.setattr("core.search_revision.read_source", reader)
-    labels = read_speaker_labels(object(), ["a", "a", "b", "a"])
+    labels = read_speaker_labels(config, ["a", "a", "b", "a"])
     assert reader.call_count == 2
     assert labels["a"]["SPEAKER_03"] == labels["b"]["SPEAKER_03"] == "참석자 9"
 
@@ -194,3 +198,161 @@ def test_missing_map_does_not_invent_prompt_alias() -> None:
     assert "SPEAKER_03" in _build_context_text([result])
     assert "참석자 4" not in _build_context_text([result])
     assert _build_references([result])[0].speaker_labels == {}
+
+
+def _client(config: AppConfig, status: str = "completed") -> TestClient:
+    """임시 원문과 회의 상태만 사용해 실제 라우트로 요청한다."""
+    job = SimpleNamespace(status=status, requested_action="", audio_path="missing.wav")
+    app = FastAPI()
+    app.state.config = config
+    app.state.job_queue = SimpleNamespace(
+        queue=SimpleNamespace(get_job_by_meeting_id=lambda _: job)
+    )
+    app.include_router(meeting_detail.router, prefix="/api")
+    return TestClient(app)
+
+
+def _selection(current: dict[str, Any], raw: str | None) -> dict[str, Any]:
+    """화면에 표시된 버전과 본인 ID를 함께 돌려준다."""
+    return {
+        "speaker_id": raw,
+        "expected_self_speaker_id": current["self_speaker_id"],
+        "expected_revision": current["self_speaker_revision"],
+    }
+
+
+def test_manual_self_is_durable_reversible_and_meeting_scoped(config: AppConfig) -> None:
+    """같은 화자의 반복 발화에 표시를 적용하고, 타 회의·번호·시간·본문을 보존한다."""
+    order = ["SPEAKER_09", "SPEAKER_03", "UNKNOWN", "SPEAKER_03"]
+    source = _source(config, "sample", order, output=True)
+    _source(config, "other", order)
+    before = source.read_bytes()
+    url = "/api/meetings/sample"
+    with _client(config) as client:
+        initial = client.get(url + "/transcript").json()
+        assert initial["self_speaker_id"] is None
+        assert initial["self_speaker_source"] is None and initial["can_set_self_speaker"]
+        payload = _selection(initial, "SPEAKER_03")
+        response = client.put(url + "/self-speaker", json=payload)
+        assert response.status_code == 200
+        mine = response.json()
+        assert mine["self_speaker_id"] == "SPEAKER_03" and mine["self_speaker_source"] == "manual"
+        assert mine["speaker_labels"] == {
+            "SPEAKER_09": "참석자 1",
+            "SPEAKER_03": "나",
+            "UNKNOWN": "참석자 ?",
+        }
+        assert mine["utterances"] == initial["utterances"]
+        assert client.put(url + "/self-speaker", json=payload).json() == mine
+        stale = client.put(url + "/self-speaker", json=_selection(initial, "SPEAKER_09"))
+        assert stale.status_code == 412
+        assert client.get("/api/meetings/other/transcript").json()["self_speaker_id"] is None
+        maps = read_speaker_labels(config, ["sample", "other"])
+        assert (
+            maps["sample"] == mine["speaker_labels"] and maps["other"] == initial["speaker_labels"]
+        )
+    with _client(config) as reopened:
+        assert reopened.get(url + "/transcript").json() == mine
+        changed = reopened.put(url + "/self-speaker", json=_selection(mine, "SPEAKER_09")).json()
+        assert changed["speaker_labels"]["SPEAKER_03"] == "참석자 2"
+        assert changed["speaker_labels"]["SPEAKER_09"] == "나"
+        cleared = reopened.put(url + "/self-speaker", json=_selection(changed, None))
+        assert cleared.json() == initial
+        assert read_speaker_labels(config, ["sample"])["sample"] == initial["speaker_labels"]
+    assert source.read_bytes() == before
+
+
+def test_selection_rejects_stale_layout_and_unknown_speakers(config: AppConfig) -> None:
+    """새로운 화자 배치·알 수 없는 ID·파싱할 수 없는 메타데이터를 덮어쓰지 않는다."""
+    source = _source(config, "sample", ["SPEAKER_00", "UNKNOWN"])
+    url = "/api/meetings/sample"
+    with _client(config) as client:
+        current = client.get(url + "/transcript").json()
+        for raw in ["UNKNOWN", " ", "SPEAKER_42"]:
+            assert (
+                client.put(url + "/self-speaker", json=_selection(current, raw)).status_code == 422
+            )
+        _source(config, "sample", ["UNKNOWN", "SPEAKER_00"])
+        assert (
+            client.put(url + "/self-speaker", json=_selection(current, "SPEAKER_00")).status_code
+            == 412
+        )
+        _source(config, "sample", ["UNKNOWN"])
+        assert not client.get(url + "/transcript").json()["can_set_self_speaker"]
+        _source(config, "sample", ["SPEAKER_00"])
+        marker = source.with_name("self_speaker.json")
+        marker.write_text('{"meeting_id":"other","speaker_id":"SPEAKER_00"}')
+        locked = client.get(url + "/transcript").json()
+        assert not locked["can_set_self_speaker"] and locked["self_speaker_id"] is None
+        assert read_speaker_labels(config, ["sample"])["sample"] == locked["speaker_labels"]
+        assert (
+            client.put(url + "/self-speaker", json=_selection(locked, "SPEAKER_00")).status_code
+            == 409
+        )
+    marker.unlink()
+    with _client(config, status="transcribing") as busy:
+        locked = busy.get(url + "/transcript").json()
+        assert not locked["can_set_self_speaker"]
+        assert (
+            busy.put(url + "/self-speaker", json=_selection(locked, "SPEAKER_00")).status_code
+            == 409
+        )
+
+
+@pytest.mark.parametrize(
+    ("order", "split", "own", "origin"),
+    [
+        (["SPEAKER_00", "나", "UNKNOWN"], True, "나", "microphone"),
+        (["SPEAKER_00", "UNKNOWN"], True, None, "microphone"),
+        (["SPEAKER_00", "나", "UNKNOWN"], False, "나", "label"),
+    ],
+)
+def test_mic_and_existing_self_have_precedence(
+    config: AppConfig, order: list[str], split: bool, own: str | None, origin: str
+) -> None:
+    """분리 마이크·기존 이름의 출처를 구분하며 원격 발화에 본인 이름을 덮어쓰지 않는다."""
+    source = _source(config, "sample", order)
+    source.with_name("transcribe.json").write_text(json.dumps({"separate_mic_track": split}))
+    source.with_name("self_speaker.json").write_text(
+        '{"meeting_id":"sample","speaker_id":"SPEAKER_00"}'
+    )
+    url = "/api/meetings/sample"
+    with _client(config) as client:
+        result = client.get(url + "/transcript").json()
+        assert (result["self_speaker_id"], result["self_speaker_source"]) == (own, origin)
+        assert not result["can_set_self_speaker"]
+        assert result["speaker_labels"]["SPEAKER_00"] == "참석자 1"
+        assert read_speaker_labels(config, ["sample"])["sample"] == result["speaker_labels"]
+        assert (
+            client.put(url + "/self-speaker", json=_selection(result, "SPEAKER_00")).status_code
+            == 409
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw", "split", "manual", "expected"),
+    [("나", True, False, {"0": 1}), ("나", False, False, {}), ("SPEAKER_09", False, True, {})],
+)
+def test_echo_review_uses_confirmed_mic_only(
+    config: AppConfig, raw: str, split: bool, manual: bool, expected: dict[str, int]
+) -> None:
+    """수동 본인 지정과 가져온 이름은 마이크 출처와 구별하고 전사는 그대로 응답한다."""
+    path = _source(config, "sample", [raw, "SPEAKER_02"])
+    data = json.loads(path.read_bytes())
+    for row in data["utterances"]:
+        row["text"] = "제품 출시 일정을 다음 주에 다시 확인하겠습니다."
+    path.write_text(json.dumps(data))
+    path.with_name("transcribe.json").write_text(json.dumps({"separate_mic_track": split}))
+    if manual:
+        path.with_name("self_speaker.json").write_text(
+            json.dumps({"meeting_id": "sample", "speaker_id": raw})
+        )
+    before = path.read_bytes()
+    with _client(config) as client:
+        response = client.get("/api/meetings/sample/transcript")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mic_echo_candidates"] == expected
+        assert [row["speaker"] for row in payload["utterances"]] == [raw, "SPEAKER_02"]
+        assert payload["total_utterances"] == 2
+    assert path.read_bytes() == before

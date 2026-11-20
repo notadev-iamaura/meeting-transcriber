@@ -75,7 +75,11 @@
             // 상태 변수
             self._speakerColorMap = {};
             self._speakerLabels = {};
+            self._transcriptReadVersion = 0;
             self._allUtterances = [];
+            self._micEchoCandidates = {};
+            self._foldMicEchoes = false;
+            self._vocabularyReviews = new Map();
             self._currentQuery = "";
             self._currentMatchIndex = -1;
             self._totalMatches = 0;
@@ -209,6 +213,10 @@
                 '    <button class="search-bar-clear" id="viewerSearchClear">초기화</button>',
                 '  </div>',
 
+                '  <div class="mic-echo-review" id="viewerMicEchoReview" hidden>',
+                '    <span>상대 발화와 시각·내용이 겹치는 내 마이크 발화</span>',
+                '    <button type="button" class="viewer-action-btn" id="viewerMicEchoToggle" aria-controls="viewerTimeline"></button>',
+                '  </div>',
                 '  <div class="timeline" id="viewerTimeline"></div>',
 
                 // 스켈레톤 로딩 (mockup §3.3 — 라인형 × 5, sr-only 텍스트 "전사 불러오는 중…")
@@ -295,6 +303,8 @@
                 logTable: document.getElementById("viewerLogTable"),
                 tabNav: document.getElementById("viewerTabNav"),
                 timeline: document.getElementById("viewerTimeline"),
+                micEchoReview: document.getElementById("viewerMicEchoReview"),
+                micEchoToggle: document.getElementById("viewerMicEchoToggle"),
                 transcriptLoading: document.getElementById("viewerTranscriptLoading"),
                 transcriptEmpty: document.getElementById("viewerTranscriptEmpty"),
                 pipelineProgress: document.getElementById("viewerPipelineProgress"),
@@ -418,6 +428,13 @@
                 btn.addEventListener("keydown", onTabKeydown);
                 self._listeners.push({ el: btn, type: "keydown", fn: onTabKeydown });
             });
+
+            var onEchoToggle = function () {
+                self._foldMicEchoes = !self._foldMicEchoes;
+                self._syncMicEchoVisibility();
+            };
+            els.micEchoToggle.addEventListener("click", onEchoToggle);
+            self._listeners.push({el: els.micEchoToggle, type: "click", fn: onEchoToggle});
 
             // 인라인 검색 (디바운스 300ms)
             var onSearchInput = function () {
@@ -754,6 +771,109 @@
             return this._speakerColorMap[speaker] || "var(--text-secondary)";
         };
 
+        ViewerView.prototype._makeSpeakerBadge = function (speaker, displayLabel, className) {
+            var badge = document.createElement("span");
+            badge.className = className;
+            badge.setAttribute("aria-hidden", "true");
+            if (speaker && speaker === this._selfSpeakerId) {
+                badge.classList.add("is-self");
+                badge.innerHTML = Icons.person || "나";
+            } else {
+                badge.style.setProperty("--speaker-color", this._getSpeakerColor(speaker));
+                badge.textContent = /^참석자 [\d?]+$/.test(displayLabel) ? displayLabel.slice(4) : displayLabel.slice(0, 1);
+            }
+            return badge;
+        };
+
+        ViewerView.prototype._openSelfSpeakerDialog = function (trigger, selectedSpeaker, utteranceIndex) {
+            var self = this;
+            if (!self._canSetSelfSpeaker || self._selfSpeakerDialog) return;
+            var previousId = self._selfSpeakerId;
+            var revision = self._selfSpeakerRevision;
+            var labels = App.buildSpeakerLabels(self._allUtterances);
+            var dialog = document.createElement("dialog");
+            dialog.className = "transcription-model-dialog self-speaker-dialog";
+            dialog.setAttribute("aria-labelledby", "selfSpeakerHeading");
+            dialog.setAttribute("aria-describedby", "selfSpeakerHelp");
+            dialog.innerHTML =
+                '<form class="transcription-model-dialog-content"><header class="transcription-model-dialog-header"><div>' +
+                '<h2 id="selfSpeakerHeading"></h2><p id="selfSpeakerHelp">선택한 화자의 모든 발화를 이 회의에서 ‘나’로 표시합니다.</p>' +
+                '</div></header><label for="selfSpeakerChoice">내 화자</label>' +
+                '<select id="selfSpeakerChoice" class="transcription-model-select"></select>' +
+                '<p role="alert" hidden></p><footer class="transcription-model-dialog-actions">' +
+                '<button type="button" class="transcription-dialog-cancel">취소</button>' +
+                '<button type="submit" class="transcription-dialog-submit"></button></footer></form>';
+            var form = dialog.querySelector("form");
+            var select = dialog.querySelector("select");
+            var cancel = dialog.querySelector("button[type=button]");
+            var submit = dialog.querySelector("button[type=submit]");
+            var error = dialog.querySelector("[role=alert]");
+            dialog.querySelector("h2").textContent = previousId ? "내 화자 변경" : "내 화자 지정";
+            var emptyChoice = new Option(previousId ? "지정 해제" : "화자 선택", "");
+            emptyChoice.disabled = !previousId;
+            select.add(emptyChoice);
+            Object.keys(labels).forEach(function (raw) {
+                if (raw !== "UNKNOWN") select.add(new Option(labels[raw] + (raw === previousId ? " (현재 나)" : ""), raw));
+            });
+            select.value = selectedSpeaker || previousId || "";
+            function updateSubmit() {
+                submit.textContent = select.value || !previousId ? "나로 지정" : "지정 해제";
+                submit.disabled = (select.value || null) === previousId;
+            }
+            updateSubmit();
+            select.addEventListener("change", updateSubmit);
+            cancel.addEventListener("click", function () { dialog.close(); });
+            dialog.addEventListener("cancel", function (event) {
+                if (select.disabled) event.preventDefault();
+            });
+            dialog.addEventListener("close", function () {
+                dialog.remove();
+                self._selfSpeakerDialog = null;
+                if (self._destroyed) return;
+                var returnTo = trigger;
+                if (!returnTo.isConnected && utteranceIndex !== undefined) {
+                    var row = self._els.timeline.children[utteranceIndex];
+                    returnTo = row && row.querySelector("button.utterance-speaker");
+                }
+                if (!returnTo || !returnTo.isConnected) returnTo = self._els.speakerLegend.querySelector("button");
+                if (returnTo) returnTo.focus({preventScroll: true});
+            });
+            form.addEventListener("submit", async function (event) {
+                event.preventDefault();
+                if (submit.disabled) return;
+                select.disabled = cancel.disabled = submit.disabled = true;
+                error.hidden = true;
+                try {
+                    var data = await App.apiRequest("/meetings/" + encodeURIComponent(self._meetingId) + "/self-speaker", {
+                        method: "PUT", headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({speaker_id: select.value || null,
+                            expected_self_speaker_id: previousId, expected_revision: revision}),
+                    });
+                    if (self._destroyed) return;
+                    self._transcriptReadVersion++;
+                    self._applyTranscriptResponse(data, {silent: true});
+                    dialog.close();
+                } catch (e) {
+                    if (self._destroyed) return;
+                    if (e.status === 409 || e.status === 412) {
+                        dialog.close();
+                        errorBanner.show("화자 정보가 변경되었습니다. 최신 전사문에서 다시 선택해 주세요.");
+                        await self._loadTranscript({silent: true});
+                        return;
+                    }
+                    error.textContent = e.message || "저장하지 못했습니다. 다시 시도해 주세요.";
+                    error.hidden = false;
+                    select.disabled = cancel.disabled = false;
+                    updateSubmit();
+                    submit.focus();
+                }
+            });
+            self._els.speakerLegend.parentNode.appendChild(dialog);
+            self._selfSpeakerDialog = dialog;
+            dialog.showModal();
+            select.focus();
+        };
+
         /**
          * 화자 범례를 렌더링한다.
          * @param {Array} speakers - 화자 배열
@@ -767,20 +887,58 @@
             speakers.forEach(function (speaker) {
                 var chip = document.createElement("span");
                 chip.className = "speaker-chip";
-
-                var badge = document.createElement("span");
-                badge.className = "speaker-badge";
-                badge.style.backgroundColor = self._getSpeakerColor(speaker);
                 var displayLabel = App.speakerLabel(speaker, self._speakerLabels);
-                badge.textContent = /^참석자 [\d?]+$/.test(displayLabel) ? displayLabel.slice(4) : displayLabel.slice(0, 1);
-
                 var label = document.createElement("span");
                 label.textContent = displayLabel;
-
-                chip.appendChild(badge);
+                chip.appendChild(self._makeSpeakerBadge(speaker, displayLabel, "speaker-badge"));
                 chip.appendChild(label);
+                if (speaker === self._selfSpeakerId) {
+                    chip.classList.add("is-self");
+                    var sourceText = {microphone: "내 마이크", manual: "직접 지정"}[self._selfSpeakerSource];
+                    if (sourceText) {
+                        var source = document.createElement("span");
+                        source.className = "speaker-source";
+                        source.textContent = sourceText;
+                        chip.appendChild(source);
+                    }
+                }
                 legendEl.appendChild(chip);
             });
+            if (self._canSetSelfSpeaker) {
+                var trigger = document.createElement("button");
+                trigger.type = "button";
+                trigger.className = "viewer-action-btn self-speaker-trigger";
+                trigger.setAttribute("aria-haspopup", "dialog");
+                trigger.textContent = self._selfSpeakerId ? "내 화자 변경" : "내 화자 지정";
+                trigger.addEventListener("click", function () { self._openSelfSpeakerDialog(trigger); });
+                legendEl.appendChild(trigger);
+            }
+        };
+
+        /** 화자만 바뀌어도 발화 편집기, 재생 버튼과 스크롤 위치는 그대로 둔다. */
+        ViewerView.prototype._renderRowSpeaker = function (row, speaker, index) {
+            var self = this;
+            var label = App.speakerLabel(speaker, self._speakerLabels);
+            row.classList.toggle("is-self", Boolean(speaker && speaker === self._selfSpeakerId));
+            var badge = self._makeSpeakerBadge(speaker, label, "utterance-badge");
+            var oldBadge = row.querySelector(".utterance-badge");
+            if (oldBadge) oldBadge.replaceWith(badge);
+            else row.prepend(badge);
+
+            var canChoose = self._canSetSelfSpeaker && speaker && speaker.trim() && speaker !== "UNKNOWN";
+            var name = document.createElement(canChoose ? "button" : "span");
+            name.className = "utterance-speaker";
+            name.textContent = label;
+            if (canChoose) {
+                name.type = "button";
+                name.title = self._selfSpeakerId ? "내 화자 변경" : "내 화자 지정";
+                name.setAttribute("aria-label", label + " · " + name.title);
+                name.setAttribute("aria-haspopup", "dialog");
+                name.addEventListener("click", function () { self._openSelfSpeakerDialog(name, speaker, index); });
+            }
+            var oldName = row.querySelector(".utterance-speaker");
+            if (oldName) oldName.replaceWith(name);
+            else row.querySelector(".utterance-header").prepend(name);
         };
 
         /**
@@ -796,17 +954,9 @@
             els.timeline.innerHTML = "";
             var matchCount = 0;
 
-            utterances.forEach(function (u) {
+            utterances.forEach(function (u, utteranceIndex) {
                 var el = document.createElement("div");
                 el.className = "utterance";
-                var color = self._getSpeakerColor(u.speaker);
-                var displayLabel = App.speakerLabel(u.speaker, self._speakerLabels);
-
-                // 좌측 번호 배지 (원형)
-                var badge = document.createElement("div");
-                badge.className = "utterance-badge";
-                badge.style.backgroundColor = color;
-                badge.textContent = /^참석자 [\d?]+$/.test(displayLabel) ? displayLabel.slice(4) : displayLabel.slice(0, 1);
 
                 // 우측 콘텐츠 영역
                 var content = document.createElement("div");
@@ -815,11 +965,6 @@
                 // 헤더 (화자명 + 타임스탬프)
                 var header = document.createElement("div");
                 header.className = "utterance-header";
-
-                var speakerEl = document.createElement("span");
-                speakerEl.className = "utterance-speaker";
-                speakerEl.textContent = displayLabel;
-                speakerEl.style.color = color;
 
                 var timeEl = document.createElement("span");
                 timeEl.className = "utterance-time";
@@ -838,15 +983,24 @@
                     '<svg class="stop-icon" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">' +
                     '<rect x="2.5" y="2.5" width="7" height="7" rx="1" fill="currentColor"/></svg>';
 
-                header.appendChild(speakerEl);
                 header.appendChild(timeEl);
                 header.appendChild(playBtn);
+                var remoteIndex = self._micEchoCandidates[utteranceIndex];
+                var remote = utterances[remoteIndex];
+                if (Number.isInteger(remoteIndex) && remote) {
+                    el.classList.add("mic-echo-candidate");
+                    var label = document.createElement("span");
+                    label.className = "mic-echo-label";
+                    label.textContent = "중복 후보 · " + (self._speakerLabels[remote.speaker] || remote.speaker)
+                        + " " + App.formatTime(remote.start);
+                    header.appendChild(label);
+                }
 
                 // 텍스트
                 var textEl = document.createElement("div");
                 textEl.className = "utterance-text";
                 textEl.title = self._canEditTranscript()
-                    ? "더블클릭하여 편집"
+                    ? "더블클릭 또는 Enter로 편집"
                     : "읽기 전용 전사문";
 
                 if (query) {
@@ -863,10 +1017,16 @@
 
                 // 더블클릭 → 인라인 편집 모드
                 // (단일 클릭은 텍스트 선택과 충돌하므로 더블클릭 사용)
-                var utteranceIndex = utterances.indexOf(u);
                 if (self._canEditTranscript()) {
+                    textEl.tabIndex = 0;
                     textEl.addEventListener("dblclick", function () {
                         self._beginEditUtterance(utteranceIndex, textEl);
+                    });
+                    textEl.addEventListener("keydown", function (event) {
+                        if (event.target === textEl && event.key === "Enter") {
+                            event.preventDefault();
+                            self._beginEditUtterance(utteranceIndex, textEl);
+                        }
                     });
                 }
 
@@ -880,12 +1040,21 @@
 
                 content.appendChild(header);
                 content.appendChild(textEl);
+                var review = self._vocabularyReviews.get(utteranceIndex);
+                if (review) {
+                    if (review.text === u.text && review.start === u.start && review.speaker === u.speaker) {
+                        content.appendChild(review.element);
+                    } else {
+                        self._vocabularyReviews.delete(utteranceIndex);
+                    }
+                }
 
-                el.appendChild(badge);
                 el.appendChild(content);
+                self._renderRowSpeaker(el, u.speaker, utteranceIndex);
                 els.timeline.appendChild(el);
             });
 
+            self._syncMicEchoVisibility();
             // 검색 정보 업데이트
             self._totalMatches = matchCount;
             if (query) {
@@ -1065,13 +1234,21 @@
             }
             if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
             if (textEl.classList.contains("editing")) return;
+            var openEditor = self._els.timeline.querySelector(".utterance-textarea");
+            if (openEditor) {
+                openEditor.focus();
+                return;
+            }
 
             var originalText = self._allUtterances[index].text;
+            textEl.removeAttribute("tabindex");
             textEl.classList.add("editing");
             textEl.innerHTML = "";
 
             var textarea = document.createElement("textarea");
             textarea.className = "utterance-textarea";
+            textarea.setAttribute("aria-label", "발화 편집");
+            textarea.maxLength = 10000;
             textarea.value = originalText;
             textarea.rows = Math.max(2, Math.ceil(originalText.length / 60));
             textEl.appendChild(textarea);
@@ -1089,29 +1266,54 @@
             actions.appendChild(cancelBtn);
             actions.appendChild(saveBtn);
             textEl.appendChild(actions);
+            var saveError = document.createElement("p");
+            saveError.className = "utterance-edit-error";
+            saveError.setAttribute("role", "alert");
+            saveError.hidden = true;
+            textEl.appendChild(saveError);
 
-            var done = false;
-            var restore = function () {
-                if (done) return;
-                done = true;
+            var conflict = false;
+            var restore = async function () {
+                if (saveBtn.disabled) return;
                 self._renderTimeline(self._allUtterances, self._currentQuery || "");
+                if (conflict) await self._loadTranscript({silent: true});
+                var row = self._els.timeline.children[index];
+                if (row && !self._destroyed) row.querySelector(".utterance-text").focus({preventScroll: true});
             };
             cancelBtn.addEventListener("click", restore);
-            saveBtn.addEventListener("click", function () {
-                if (done) return;
+            saveBtn.addEventListener("click", async function () {
+                if (saveBtn.disabled) return;
                 var next = textarea.value;
                 if (next === originalText) {
                     restore();
                     return;
                 }
-                done = true;
-                self._allUtterances[index] = Object.assign({}, self._allUtterances[index], {
-                    text: next,
-                    was_corrected: true,
-                });
-                self._saveTranscript();
+                saveBtn.disabled = cancelBtn.disabled = textarea.readOnly = true;
+                saveError.hidden = true;
+                try {
+                    var data = await self._saveTranscript(index, originalText, next);
+                    if (self._destroyed) return;
+                    self._transcriptReadVersion++;
+                    self._applyTranscriptResponse(data, {force: true, silent: true});
+                    var savedRow = self._els.timeline.children[index];
+                    if (!savedRow) return;
+                    if (data.vocabulary_suggestions && data.vocabulary_suggestions.length) {
+                        self._showVocabularyReview(index, savedRow, data.vocabulary_suggestions);
+                    } else {
+                        savedRow.querySelector(".utterance-text").focus({preventScroll: true});
+                    }
+                } catch (err) {
+                    if (self._destroyed) return;
+                    conflict = err.status === 409 || err.status === 412;
+                    if (conflict) cancelBtn.textContent = "최신 전사문 보기";
+                    saveError.textContent = "전사문 저장 실패 · " + err.message;
+                    saveError.hidden = false;
+                    saveBtn.disabled = cancelBtn.disabled = textarea.readOnly = false;
+                    textarea.focus({preventScroll: true});
+                }
             });
             textarea.addEventListener("keydown", function (e) {
+                if (e.isComposing) return;
                 if (e.key === "Escape") {
                     e.preventDefault();
                     restore();
@@ -1128,48 +1330,115 @@
         };
 
         /**
-         * 현재 self._allUtterances 를 서버에 PUT 한다 (인라인 편집 후 또는 bulk replace 후).
+         * 편집을 시작했을 때의 문장과 새 문장을 보낸다. 저장 전까지 화면의 원문은 유지한다.
          */
-        ViewerView.prototype._saveTranscript = async function () {
-            var self = this;
-            if (!self._canEditTranscript()) {
-                errorBanner.show("처리 중이거나 읽기 전용인 전사문은 수정할 수 없습니다.");
-                return;
-            }
-            try {
-                var payload = {
-                    utterances: self._allUtterances.map(function (u) {
-                        return {
-                            text: u.text,
-                            original_text: u.original_text || u.text,
-                            speaker: u.speaker,
-                            start: u.start,
-                            end: u.end,
-                            was_corrected: !!u.was_corrected,
-                        };
-                    }),
+        ViewerView.prototype._saveTranscript = function (index, before, after) {
+            if (!this._canEditTranscript()) throw new Error("처리 중이거나 읽기 전용인 전사문은 수정할 수 없습니다.");
+            var utterances = this._allUtterances.map(function (u, i) {
+                return {
+                    text: i === index ? after : u.text,
+                    original_text: u.original_text || u.text,
+                    speaker: u.speaker,
+                    start: u.start,
+                    end: u.end,
+                    was_corrected: i === index || !!u.was_corrected,
                 };
-                var resp = await fetch(
-                    "/api/meetings/" +
-                        encodeURIComponent(self._meetingId) +
-                        "/transcript",
-                    {
-                        method: "PUT",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
-                    }
-                );
-                if (!resp.ok) {
-                    var err = await resp.json().catch(function () { return {}; });
-                    throw new Error(err.detail || "HTTP " + resp.status);
-                }
-                var data = await resp.json();
-                self._applyTranscriptResponse(data, { silent: true, force: true });
-            } catch (e) {
-                errorBanner.show("전사문 저장 실패: " + (e.message || e));
-                // 실패 시 서버에서 재로드
-                self._loadTranscript();
+            });
+            return App.apiRequest("/meetings/" + encodeURIComponent(this._meetingId) + "/transcript", {
+                method: "PUT", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({utterances: utterances, vocabulary_edit: {utterance_index: index, before_text: before}}),
+            });
+        };
+
+        /** 저장한 발화의 변경 후보를 검토하고 선택한 표현만 용어집에 등록한다. */
+        ViewerView.prototype._showVocabularyReview = function (index, row, suggestions) {
+            var self = this;
+            var form = document.createElement("form");
+            form.className = "vocabulary-review";
+            form.setAttribute("aria-label", "용어집에 추가할 표현");
+            form.innerHTML =
+                '<div class="vocabulary-review-title"><strong>용어집에 추가할 표현</strong><span>전사문 저장됨</span></div>' +
+                '<div class="vocabulary-review-fields"></div>' +
+                '<p class="utterance-edit-error" role="alert" hidden></p>' +
+                '<div class="vocabulary-review-actions"><button type="button" class="viewer-action-btn">건너뛰기</button>' +
+                '<button type="submit" class="viewer-action-btn">용어집에 추가</button></div>';
+            var fields = form.querySelector(".vocabulary-review-fields");
+            var error = form.querySelector('[role="alert"]');
+            var skip = form.querySelector('button[type="button"]');
+            var submit = form.querySelector('button[type="submit"]');
+            var choices = suggestions.map(function (suggestion, i) {
+                var field = document.createElement("div");
+                field.className = "vocabulary-review-pair";
+                field.innerHTML =
+                    '<input type="checkbox" checked>' +
+                    '<label>기존 표기<input type="text" maxlength="100" required></label>' +
+                    '<span aria-hidden="true">→</span>' +
+                    '<label>정답 표기<input type="text" maxlength="100" required></label>';
+                var inputs = field.querySelectorAll("input");
+                var check = inputs[0], alias = inputs[1], term = inputs[2];
+                check.setAttribute("aria-label", "표현 " + (i + 1) + " 선택");
+                alias.setAttribute("aria-label", "기존 표기 " + (i + 1));
+                term.setAttribute("aria-label", "정답 표기 " + (i + 1));
+                alias.value = suggestion.alias;
+                term.value = suggestion.term;
+                fields.appendChild(field);
+                return {check: check, alias: alias, term: term};
+            });
+            function updateControls(saving) {
+                choices.forEach(function (choice) {
+                    choice.check.disabled = saving;
+                    choice.alias.disabled = choice.term.disabled = saving || !choice.check.checked;
+                });
+                skip.disabled = saving;
+                submit.disabled = saving || !choices.some(function (choice) { return choice.check.checked; });
+                submit.textContent = saving ? "추가 중…" : "용어집에 추가";
             }
+            form.addEventListener("change", function () { updateControls(false); });
+            skip.addEventListener("click", function () {
+                var text = form.parentElement.querySelector(".utterance-text");
+                self._vocabularyReviews.delete(index);
+                form.remove();
+                text.focus({preventScroll: true});
+            });
+            form.addEventListener("submit", async function (event) {
+                event.preventDefault();
+                if (submit.disabled) return;
+                var corrections = choices.filter(function (choice) { return choice.check.checked; }).map(function (choice) {
+                    return {alias: choice.alias.value.trim(), term: choice.term.value.trim()};
+                });
+                if (corrections.some(function (pair) { return !pair.alias || !pair.term || pair.alias === pair.term; })) {
+                    error.textContent = "기존 표기와 정답 표기를 서로 다르게 입력해 주세요.";
+                    error.hidden = false;
+                    return;
+                }
+                updateControls(true);
+                error.hidden = true;
+                try {
+                    var result = await App.apiPost("/vocabulary/corrections", {corrections: corrections});
+                    if (self._destroyed || !form.isConnected) return;
+                    self._vocabularyReviews.delete(index);
+                    var status = document.createElement("p");
+                    status.setAttribute("role", "status");
+                    status.className = "vocabulary-review-result";
+                    status.tabIndex = -1;
+                    form.replaceWith(status);
+                    var messages = [];
+                    if (result.added) messages.push("용어집에 " + result.added + "개 추가됨");
+                    if (result.existing) messages.push("이미 등록된 표현 " + result.existing + "개");
+                    status.textContent = messages.join(" · ");
+                    status.focus({preventScroll: true});
+                } catch (err) {
+                    if (self._destroyed || !form.isConnected) return;
+                    error.textContent = "용어집 등록 실패 · " + err.message;
+                    error.hidden = false;
+                    updateControls(false);
+                    submit.focus({preventScroll: true});
+                }
+            });
+            var utterance = self._allUtterances[index];
+            self._vocabularyReviews.set(index, {text: utterance.text, start: utterance.start, speaker: utterance.speaker, element: form});
+            row.querySelector(".utterance-content").appendChild(form);
+            choices[0].check.focus({preventScroll: true});
         };
 
         /**
@@ -1330,6 +1599,19 @@
                 (self._currentMatchIndex + 1) + " / " + highlights.length + "건 일치");
         };
 
+        ViewerView.prototype._syncMicEchoVisibility = function () {
+            var els = this._els;
+            var count = Object.keys(this._micEchoCandidates).length;
+            var searching = Boolean(this._currentQuery);
+            var folded = this._foldMicEchoes && !searching;
+            els.micEchoReview.hidden = !count;
+            els.timeline.classList.toggle("fold-mic-echoes", folded);
+            els.micEchoToggle.setAttribute("aria-expanded", String(!folded));
+            els.micEchoToggle.disabled = searching;
+            els.micEchoToggle.textContent = searching ? "검색 중 전체 표시" :
+                "중복 후보 " + count + "개 " + (folded ? "펼치기" : "접기");
+        };
+
         /**
          * 지정 타임스탬프에 가장 가까운 발화로 스크롤한다.
          * @param {number} targetTime - 타겟 시간 (초)
@@ -1350,6 +1632,10 @@
             });
 
             if (closestEl) {
+                if (self._foldMicEchoes && closestEl.classList.contains("mic-echo-candidate")) {
+                    self._foldMicEchoes = false;
+                    self._syncMicEchoVisibility();
+                }
                 closestEl.classList.add("highlighted");
                 closestEl.scrollIntoView({ behavior: "smooth", block: "center" });
             }
@@ -3214,22 +3500,38 @@
                 return true;
             }
 
-            var signature = self._buildTranscriptSignature(stage, readonly, utterances);
+            var candidates = data.mic_echo_candidates || {};
+            var signature = self._buildTranscriptSignature(stage, readonly, utterances) + JSON.stringify(candidates);
+            var speakerSignature = JSON.stringify([
+                data.self_speaker_revision, data.self_speaker_id, data.self_speaker_source, data.can_set_self_speaker
+            ]);
+            var sameTranscript = signature === self._transcriptSignature;
+            var speakersChanged = speakerSignature !== self._speakerSignature;
+            var onlySpeakersChanged = sameTranscript && speakersChanged;
             self._searchStatus = data.search_status || "legacy";
             self._summaryNeedsReview = Boolean(data.summary_needs_review);
             self._renderTranscriptSourceStatus();
-            if (options.silent && signature === self._transcriptSignature) {
+            if (options.silent && sameTranscript && !speakersChanged) {
                 return true;
             }
 
             self._transcriptSourceStage = stage;
+            self._micEchoCandidates = candidates;
             self._transcriptReadonly = readonly;
             self._transcriptSignature = signature;
-            self._allUtterances = utterances;
+            self._speakerSignature = speakerSignature;
+            if (!onlySpeakersChanged) self._allUtterances = utterances;
             self._speakerLabels = Object.assign(
                 App.buildSpeakerLabels(self._allUtterances),
                 data.speaker_labels && typeof data.speaker_labels === "object" ? data.speaker_labels : {}
             );
+            // 구 버전 응답에서는 원문 자체가 '나'인 경우만 본인으로 표시한다.
+            var legacySelf = data.self_speaker_id === undefined && utterances.some(function (u) { return u.speaker === "나"; });
+            self._selfSpeakerId = legacySelf ? "나" : data.self_speaker_id || null;
+            self._selfSpeakerRevision = data.self_speaker_revision;
+            self._selfSpeakerSource = data.self_speaker_source;
+            self._canSetSelfSpeaker = data.can_set_self_speaker === true;
+            if (self._selfSpeakerId) self._speakerLabels[self._selfSpeakerId] = "나";
 
             if (self._allUtterances.length === 0) {
                 return false;
@@ -3242,6 +3544,12 @@
 
             self._buildSpeakerColorMap(data.speakers || []);
             self._renderSpeakerLegend(data.speakers || []);
+            if (onlySpeakersChanged && els.timeline.children.length === utterances.length) {
+                utterances.forEach(function (u, index) {
+                    self._renderRowSpeaker(els.timeline.children[index], u.speaker, index);
+                });
+                return true;
+            }
 
             if (stage === "transcribe") {
                 els.metaSpeakers.innerHTML = Icons.person + ' <span>화자 구분 전</span>';
@@ -3296,6 +3604,7 @@
             var self = this;
             var els = self._els;
             var micEpoch = self._micStatusEpoch;
+            var readVersion = self._transcriptReadVersion;
             options = options || {};
             var showLoading = !options.silent;
             if (showLoading) {
@@ -3310,7 +3619,7 @@
                     "/meetings/" + encodeURIComponent(self._meetingId) + "/transcript"
                 );
                 // 재전사 완료 전에 시작한 응답이 복구된 발화를 다시 숨기지 않는다.
-                if (self._destroyed || micEpoch !== self._micStatusEpoch) return true;
+                if (self._destroyed || micEpoch !== self._micStatusEpoch || readVersion !== self._transcriptReadVersion) return true;
 
                 if (!self._applyTranscriptResponse(data, options)) {
                     els.transcriptEmpty.style.display = "block";
@@ -3320,7 +3629,7 @@
                 return true;
 
             } catch (e) {
-                if (self._destroyed || micEpoch !== self._micStatusEpoch) return true;
+                if (self._destroyed || micEpoch !== self._micStatusEpoch || readVersion !== self._transcriptReadVersion) return true;
                 if (e.status === 404) {
                     if (!options.silent) {
                         els.transcriptEmpty.style.display = "block";
@@ -3773,6 +4082,7 @@
          */
         ViewerView.prototype.destroy = function () {
             this._destroyed = true;
+            if (this._selfSpeakerDialog) this._selfSpeakerDialog.close();
             clearTimeout(this._micPollTimer);
             if (this._startTranscriptionCleanup) {
                 this._startTranscriptionCleanup(false);

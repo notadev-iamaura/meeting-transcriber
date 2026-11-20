@@ -13,7 +13,7 @@ from typing import Any
 
 from core.chat_scope import ChatSourceScope, source_scope_note
 from core.search_revision import read_source, revision_status
-from core.speaker_labels import build_speaker_labels
+from core.speaker_labels import meeting_speaker_labels
 from search.hybrid_search import SearchResult
 from search.source_query import content_terms
 
@@ -696,7 +696,15 @@ def build_source_candidates(
                 utterances = source.get("utterances")
                 if not isinstance(utterances, list):
                     raise ValueError("invalid_utterances")
-                sources[mid] = (utterances, build_speaker_labels(utterances))
+                labels = meeting_speaker_labels(
+                    config,
+                    mid,
+                    utterances,
+                    microphone_transcript=True
+                    if source.get("separate_mic_track") is True
+                    else None,
+                )
+                sources[mid] = (utterances, labels)
             except (OSError, ValueError, TypeError, AttributeError):
                 sources[mid] = ([], {})
         utterances, labels = sources[mid]

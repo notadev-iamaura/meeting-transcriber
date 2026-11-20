@@ -35,11 +35,21 @@ def test_transcript_edit_publishes_search_revision(
     """실제 API 저장과 모두 바꾸기가 최신성 버전을 원문과 함께 보존한다."""
     url = f"/api/meetings/{seeded_meeting}/transcript"
     original = client.get(url).json()
+    selection_url = f"/api/meetings/{seeded_meeting}/self-speaker"
+    selection = {
+        "speaker_id": "SPEAKER_01",
+        "expected_self_speaker_id": None,
+        "expected_revision": original["self_speaker_revision"],
+    }
+    assert client.put(selection_url, json=selection).status_code == 200
     utterances = original["utterances"]
     utterances[0]["text"] = "예산 100만원"
     response = client.put(url, json={"utterances": utterances})
     assert response.status_code == 200
     assert response.json()["search_status"] == "pending"
+    assert response.json()["speaker_labels"]["SPEAKER_01"] == "나"
+    assert response.json()["self_speaker_source"] == "manual"
+    assert client.put(selection_url, json=selection).status_code == 412
     cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
     before = json.loads(cp.read_text())
     response = client.post(url + "/replace", json={"find": "100만원", "replace": "200만원"})
@@ -366,6 +376,82 @@ class TestUpdateSummary:
 
 
 class TestUpdateTranscript:
+    def test_inline_edit_suggests_from_displayed_text_and_preserves_other_edits(
+        self, client: TestClient, seeded_meeting: str, isolated_base: Path
+    ) -> None:
+        """다른 창의 발화, 원래 STT 표기와 확장 필드를 보존하고 실제 수정어만 제안한다."""
+        url = f"/api/meetings/{seeded_meeting}/transcript"
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
+        source = json.loads(cp.read_text())
+        source["utterances"][0]["original_text"] = "이전 자동 보정 전의 다른 표기"
+        source["utterances"][0]["extra"] = "원문 확장 필드"
+        cp.write_text(json.dumps(source))
+        rows = client.get(url).json()["utterances"]
+        before = rows[0]["text"]
+        rows[0]["text"] = before.replace("파이선", "파이썬")
+        source["utterances"][1]["text"] = "다른 창에서 고친 내용"
+        cp.write_text(json.dumps(source))
+        vocab = us.load_vocabulary().model_dump()
+
+        result = client.put(
+            url,
+            json={
+                "utterances": rows,
+                "vocabulary_edit": {"utterance_index": 0, "before_text": before},
+            },
+        )
+        assert result.status_code == 200
+        assert result.json()["vocabulary_suggestions"] == [{"alias": "파이선", "term": "파이썬"}]
+        assert result.json()["utterances"][1]["text"] == "다른 창에서 고친 내용"
+        saved_row = json.loads(cp.read_text())["utterances"][0]
+        assert saved_row["original_text"] == "이전 자동 보정 전의 다른 표기"
+        assert saved_row["extra"] == "원문 확장 필드"
+        assert saved_row["was_corrected"] and saved_row["text"] == rows[0]["text"]
+        assert client.get(url).json()["vocabulary_suggestions"] == []
+        assert us.load_vocabulary().model_dump() == vocab
+
+        saved = cp.read_bytes()
+        with patch(
+            "api.routers.reindex.schedule_edited_reindex", new_callable=AsyncMock
+        ) as reindex:
+            retry = client.put(
+                url,
+                json={
+                    "utterances": rows,
+                    "vocabulary_edit": {"utterance_index": 0, "before_text": before},
+                },
+            )
+        assert retry.status_code == 200
+        assert retry.json() == result.json()
+        assert cp.read_bytes() == saved
+        reindex.assert_not_awaited()
+
+    @pytest.mark.parametrize("changed_field", ["text", "speaker", "start", "end"])
+    def test_inline_edit_conflict_keeps_newer_transcript(
+        self, client: TestClient, seeded_meeting: str, isolated_base: Path, changed_field: str
+    ) -> None:
+        """기준 문장이나 화자·시각이 바뀐 행을 다른 창에서 다시 덮을 수 없다."""
+        url = f"/api/meetings/{seeded_meeting}/transcript"
+        cp = isolated_base / "checkpoints" / seeded_meeting / "correct.json"
+        rows = client.get(url).json()["utterances"]
+        before = rows[0]["text"]
+        rows[0]["text"] = before.replace("파이선", "파이썬")
+        source = json.loads(cp.read_text())
+        source["utterances"][0][changed_field] = (
+            "변경된 값" if changed_field in {"text", "speaker"} else 0.5
+        )
+        cp.write_text(json.dumps(source))
+        stored = cp.read_bytes()
+        result = client.put(
+            url,
+            json={
+                "utterances": rows,
+                "vocabulary_edit": {"utterance_index": 0, "before_text": before},
+            },
+        )
+        assert result.status_code == 409
+        assert cp.read_bytes() == stored
+
     def test_전체_교체(
         self,
         client: TestClient,
@@ -714,6 +800,22 @@ class TestTranscriptReplace:
         assert len(terms) == 1
         assert "파이선" in terms[0].aliases
         assert "fastapi" in terms[0].aliases  # 기존 alias 유지
+
+    def test_모두_바꾸기로_기존_정답의_대소문자_교정(
+        self, client: TestClient, seeded_meeting: str
+    ) -> None:
+        """전사문의 대소문자 교정과 용어집의 정답 표기를 함께 맞춘다."""
+        url = f"/api/meetings/{seeded_meeting}/transcript/replace"
+        assert client.post(url, json={"find": "파이선", "replace": "openai"}).status_code == 200
+        before = us.add_vocabulary_term("openai", aliases=["오픈에이아이"])
+        response = client.post(
+            url, json={"find": "openai", "replace": "OpenAI", "add_to_vocabulary": True}
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert (result["changes"], result["vocabulary_term_id"]) == (2, before.id)
+        term = us.load_vocabulary(force_reload=True).terms[0]
+        assert (term.term, term.aliases) == ("OpenAI", ["오픈에이아이", "openai"])
 
     def test_용어집_중복_alias_재등록_무해(self, client: TestClient, seeded_meeting: str) -> None:
         """이미 같은 alias 가 있으면 alias_already_exists 반환."""

@@ -22,6 +22,7 @@ class RecordingErrorResponse(BaseModel):
     code: str
     error: str
     occurred_at: str
+    acknowledged: bool = False
     partial_files_preserved: bool
     partial_file_names: list[str]
 
@@ -77,6 +78,13 @@ class AudioDeviceItem(BaseModel):
     is_aggregate: bool = False
 
 
+class RecordingErrorAcknowledgement(BaseModel):
+    """사용자가 닫은 녹음 오류를 특정한다."""
+
+    meeting_id: str | None
+    occurred_at: str
+
+
 class RecordingStartRequest(BaseModel):
     """녹음 시작 요청 스키마.
 
@@ -102,6 +110,17 @@ async def get_recording_status(
     recorder = _get_recorder(request)
     status = recorder.get_status()
     return RecordingStatusResponse(**status)
+
+
+@router.post("/recording/error/acknowledge")
+async def acknowledge_recording_error(
+    request: Request, body: RecordingErrorAcknowledgement
+) -> dict[str, bool]:
+    """이전 창에서 늦게 도착한 닫기 요청이 새 오류를 닫지 않도록 한다."""
+    recorder = _get_recorder(request)
+    return {
+        "acknowledged": recorder.acknowledge_recording_error(body.meeting_id, body.occurred_at)
+    }
 
 
 @router.post("/recording/start")

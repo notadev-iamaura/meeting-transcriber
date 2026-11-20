@@ -1,6 +1,6 @@
 /* Recording HUD styles extracted from style.css. */
 
-/* 저장 장애는 일시적인 토스트와 분리해 새 녹음이 시작될 때까지 유지한다. */
+/* 사용자가 확인할 수 있도록 저장 장애는 자동으로 닫지 않는다. */
 .recording-failure,
 .recording-outcome {
   position: fixed;
@@ -35,6 +35,9 @@
 .recording-outcome p { margin: 3px 0 0; white-space: pre-line; }
 .recording-outcome a { display: inline-block; margin: 6px 12px 0 0; color: var(--accent-text); }
 #recordingOutcomeClose { position: absolute; top: 10px; right: 10px; }
+.recording-failure-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.recording-failure-heading button { flex-shrink: 0; }
+.recording-failure-time { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .recording-failure strong { font-size: 15px; }
 .recording-failure p { margin: 6px 0 0; }
 .recording-failure summary { cursor: pointer; margin-top: 8px; }

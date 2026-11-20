@@ -143,9 +143,9 @@ jobs:
           tests/ui/behavior/test_wiki_pipeline_progress.py
           tests/ui/behavior/test_speaker_labels.py
 
-      - name: 회의 요약 초안 저장과 복원 검사
+      - name: 회의 요약 초안 복원, 본인 화자 표시, 전사 편집 용어집 등록 검사
         timeout-minutes: 5
-        run: pytest -m e2e -q tests/test_e2e_edit_playwright.py::TestSummaryEdit
+        run: pytest -m e2e -q tests/test_e2e_edit_playwright.py -k 'TestSummaryEdit or self_speaker or TestInlineVocabulary or mic_echo_review'
 
       - name: 회의 일시와 제목 탐색 검사
         timeout-minutes: 5

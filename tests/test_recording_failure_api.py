@@ -153,3 +153,26 @@ def test_capture_error_http_response_does_not_expose_internal_path(tmp_path: Pat
         response = client.post("/api/recording/stop")
     assert response.status_code == 500
     assert str(tmp_path) not in response.text
+
+
+def test_acknowledgement_preserves_files_and_does_not_hide_new_failure(tmp_path: Path) -> None:
+    """같은 오류를 여러 번 닫아도 안전하고, 이전 창이 새 오류를 닫을 수 없다."""
+    recorder = AudioRecorder(config=AppConfig(paths=PathsConfig(base_dir=str(tmp_path))))
+    partial = tmp_path / "partial.wav"
+    partial.write_bytes(b"partial")
+    failure = recorder._remember_recording_error("capture", [partial])
+    identity = {key: failure[key] for key in ("meeting_id", "occurred_at")}
+    endpoint = "/api/recording/error/acknowledge"
+    with TestClient(_api(recorder)) as client:
+        wrong_meeting = {**identity, "meeting_id": "other"}
+        assert client.post(endpoint, json=wrong_meeting).json() == {"acknowledged": False}
+        for _ in range(2):
+            assert client.post(endpoint, json=identity).json() == {"acknowledged": True}
+        acknowledged = client.get("/api/recording/status").json()["last_error"]
+        assert acknowledged == {**failure, "acknowledged": True}
+        new = recorder._remember_recording_error("capture", [partial])
+        assert new["occurred_at"] != identity["occurred_at"]
+        assert client.post(endpoint, json=identity).json() == {"acknowledged": False}
+        assert client.get("/api/recording/status").json()["last_error"] == new
+        assert not new["acknowledged"]
+        assert partial.read_bytes() == b"partial"

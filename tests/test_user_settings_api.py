@@ -143,6 +143,86 @@ def test_get_vocabulary_initially_empty(client: TestClient) -> None:
     assert data["total"] == 0
 
 
+def test_corrections_merge_and_retry_preserving_existing_term(client: TestClient) -> None:
+    """여러 표기를 합치고 재접수에서도 비활성 여부·메모·기존 별칭을 유지한다."""
+    old = us.add_vocabulary_term("Python", ["파이손"], note="언어", enabled=False)
+    pairs = [
+        {"alias": "파이손", "term": "python"},
+        {"alias": " 파이선 ", "term": " Python "},
+        {"alias": "파이선", "term": "PYTHON"},
+        {"alias": "깃헙", "term": "GitHub"},
+    ]
+    url = "/api/vocabulary/corrections"
+    response = client.post(url, json={"corrections": pairs})
+    assert response.status_code == 200
+    assert response.json() == {"added": 2, "existing": 1}
+    assert client.post(url, json={"corrections": pairs}).json() == {"added": 0, "existing": 3}
+    us.invalidate_cache()
+    first, second = us.load_vocabulary().terms
+    assert first == old.model_copy(update={"aliases": ["파이손", "파이선"]})
+    assert second.term == "GitHub" and second.aliases == ["깃헙"]
+
+
+@pytest.mark.parametrize("aliases", [["오픈에이아이"], ["오픈에이아이", "OpenAI", "openai"]])
+def test_corrections_fix_existing_canonical_case(client: TestClient, aliases: list[str]) -> None:
+    """정답 자체의 영문 대소문자 편집을 반영하고 같은 alias를 재등록하지 않는다."""
+    before = us.add_vocabulary_term("openai", aliases, note="제품", enabled=False)
+    url = "/api/vocabulary/corrections"
+    edit = {"corrections": [{"alias": "openai", "term": "OpenAI"}]}
+    assert client.post(url, json=edit).json() == {"added": 1, "existing": 0}
+    assert client.post(url, json=edit).json() == {"added": 0, "existing": 1}
+    saved = us.load_vocabulary(force_reload=True).terms
+    assert saved == [
+        before.model_copy(update={"term": "OpenAI", "aliases": ["오픈에이아이", "openai"]})
+    ]
+
+
+def test_correction_batch_is_atomic_on_limit_or_io_failure(
+    client: TestClient, isolated_user_data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """한 쌍이 별칭 상한을 넘거나 쓰기가 실패해도 파일과 공개 캐시를 보존한다."""
+    us.add_vocabulary_term("부서", [f"표기{i}" for i in range(20)])
+    path = isolated_user_data / "vocabulary.json"
+    before = path.read_bytes()
+    new = {"alias": "파이선", "term": "Python"}
+    url = "/api/vocabulary/corrections"
+    assert (
+        client.post(
+            url, json={"corrections": [new, {"alias": "부써", "term": "부서"}]}
+        ).status_code
+        == 400
+    )
+    assert path.read_bytes() == before
+    assert [item.term for item in us.load_vocabulary().terms] == ["부서"]
+
+    def fail(path: Path, data: dict) -> None:
+        raise OSError("테스트 쓰기 실패")
+
+    monkeypatch.setattr(us, "_atomic_write_json", fail)
+    assert client.post(url, json={"corrections": [new]}).status_code == 500
+    assert path.read_bytes() == before
+    assert [item.term for item in us.load_vocabulary().terms] == ["부서"]
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        [],
+        [{"alias": " ", "term": "정답"}],
+        [{"alias": "오인식", "term": " "}],
+        [{"alias": "표기 ", "term": "표기"}],
+        [{"alias": "오" * 101, "term": "정답"}],
+        [{"alias": "오인식", "term": "정" * 101}],
+    ],
+)
+def test_corrections_reject_invalid_pairs(client: TestClient, pairs: list[dict[str, str]]) -> None:
+    """빈 입력이나 변경이 없는 입력은 저장 전에 거부한다."""
+    assert (
+        client.post("/api/vocabulary/corrections", json={"corrections": pairs}).status_code == 422
+    )
+    assert us.load_vocabulary().terms == []
+
+
 def test_post_vocabulary_term_creates_with_ulid(client: TestClient) -> None:
     """용어 추가 시 201과 ULID가 반환된다."""
     resp = client.post(
