@@ -75,6 +75,7 @@ def _make_test_config(tmp_path: Path) -> AppConfig:
         recording=RecordingConfig(
             enabled=True,
             auto_record_on_zoom=True,
+            zoom_process_tap=False,
             prefer_system_audio=True,
             sample_rate=16000,
             channels=1,

@@ -15,6 +15,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,7 @@ _BUNDLED_SOURCE_FILES = (
     "scripts/__init__.py",
     "scripts/backfill_wiki.py",
     "scripts/zoom_audio_activity.swift",
+    "scripts/assets/ZoomAudioHelper.plist",
 )
 _REQUIRED_RUNTIME_SCRIPTS = ("scripts/__init__.py", "scripts/backfill_wiki.py")
 _EXCLUDED_SOURCE_NAMES = frozenset(
@@ -260,6 +262,32 @@ def _write_launcher_app_bundle(
         bundle_id=bundle_id,
         version=version,
     )
+    if actual_bundled_project_path is not None and sys.platform == "darwin":
+        scripts = actual_bundled_project_path / "scripts"
+        usage = scripts / "assets" / "ZoomAudioHelper.plist"
+        if usage.is_file():
+            helpers = contents_dir / "Helpers"
+            helpers.mkdir()
+            subprocess.run(
+                [
+                    "swiftc",
+                    "-O",
+                    "-target",
+                    "arm64-apple-macos14.0",
+                    str(scripts / "zoom_audio_activity.swift"),
+                    "-Xlinker",
+                    "-sectcreate",
+                    "-Xlinker",
+                    "__TEXT",
+                    "-Xlinker",
+                    "__info_plist",
+                    "-Xlinker",
+                    str(usage),
+                    "-o",
+                    str(helpers / "RecapZoomAudio"),
+                ],
+                check=True,
+            )
     _write_launcher_executable(
         path=executable_path,
         app_name=app_name,
@@ -477,6 +505,8 @@ def _write_info_plist(
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": "14.0",
         "NSHighResolutionCapable": True,
+        "NSMicrophoneUsageDescription": "회의에서 내 목소리를 별도 채널에 녹음합니다.",
+        "NSAudioCaptureUsageDescription": "회의에서 Zoom 상대방의 음성을 녹음합니다.",
     }
     with path.open("wb") as fh:
         plistlib.dump(payload, fh, sort_keys=True)
@@ -502,10 +532,16 @@ BUNDLED_PROJECT_DIR="$(cd "${SCRIPT_DIR}/../Resources/project" 2>/dev/null && pw
 if [[ -n "${BUNDLED_PROJECT_DIR}" && -f "${BUNDLED_PROJECT_DIR}/main.py" ]]; then
   PROJECT_DIR="${BUNDLED_PROJECT_DIR}"
 fi
+LOG_FILE="${HOME}/.meeting-transcriber/logs/launcher-app.log"
 """
         if bundled_project
         else ""
     )
+    if bundled_project and spec.python_executable.is_relative_to(Path.home()):
+        relative_python = shlex.quote(str(spec.python_executable.relative_to(Path.home())))
+        bundled_project_probe += (
+            f'if [[ ! -x "${{PYTHON_BIN}}" ]]; then PYTHON_BIN="${{HOME}}"/{relative_python}; fi\n'
+        )
     script = f"""#!/bin/bash
 set -euo pipefail
 

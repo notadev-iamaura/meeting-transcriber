@@ -1825,6 +1825,32 @@ ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: in
   color: var(--accent-text);
 }
 
+.audio-midi-guide {
+  font-size: var(--fs-13);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.audio-midi-guide summary {
+  padding-block: var(--space-1);
+  color: var(--accent-text);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.audio-midi-guide :is(p, ol, details),
+.setup-check-copy > .audio-midi-guide {
+  margin-top: var(--space-2);
+}
+
+.audio-midi-guide ol {
+  padding-inline-start: 1.6em;
+}
+
+.audio-midi-guide li + li {
+  margin-top: var(--space-2);
+}
+
 .setup-check-actions-list {
   display: flex;
   flex-wrap: wrap;

@@ -496,6 +496,10 @@ setup_audio_environment() {
     fi
 
     local audio_script="${SCRIPT_DIR}/setup_audio.sh"
+    if (cd "${PROJECT_DIR}" && "${VENV_DIR}/bin/python" -c 'from config import get_config; from steps.zoom_activity import use_zoom_tap; raise SystemExit(0 if use_zoom_tap(get_config().recording) else 1)'); then
+        _info "Zoom은 Recap의 Core Audio Tap으로 녹음합니다. 첫 녹음 때 macOS 권한을 허용하세요."
+        return 0
+    fi
     if [[ ! -x "${audio_script}" ]]; then
         _warn "오디오 셋업 스크립트 누락 또는 실행 불가: ${audio_script}"
         _warn "수동 안내: docs/AGGREGATE_DEVICE_SETUP.md 참고"

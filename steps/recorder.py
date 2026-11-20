@@ -32,7 +32,7 @@ from config import AppConfig, get_config
 from core.coreaudio_helper import get_aggregate_device_names
 from core.recording_channels import RECORDING_TRACK_COMMENT, has_sustained_recording_signal
 from core.zoom_topic import ZoomTopicObservation, save_recording_topic
-from steps.zoom_activity import ZoomAudioActivityChecker
+from steps.zoom_activity import ZoomActivityError, ZoomAudioActivityChecker, use_zoom_tap
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +201,7 @@ class AudioRecorder:
         self._stop_reason = ""
         self._capture_failure_callback: Callable[[], None] | None = None
         self._split_level_meter = False
+        self._capture_start_error: str | None = None
         self._audio_levels: dict[str, float] | None = None
         self._audio_levels_at = 0.0
         self._first_audio_levels = asyncio.Event()
@@ -591,6 +592,7 @@ class AudioRecorder:
         meeting_id: str | None = None,
         *,
         observe_manual_zoom_topic: bool = False,
+        zoom_meeting: bool = False,
     ) -> None:
         """녹음을 시작한다.
 
@@ -625,6 +627,8 @@ class AudioRecorder:
                 # 멀티트랙 vs 싱글트랙 분기
                 if self._multi_track:
                     await self._start_multitrack_recording(meeting_id)
+                elif zoom_meeting and use_zoom_tap(self._recording_config):
+                    await self._start_zoom_capture(meeting_id)
                 else:
                     await self._start_singletrack_recording(meeting_id)
 
@@ -679,10 +683,17 @@ class AudioRecorder:
                     else {"single": self._process.pid if self._process else None}
                 )
                 logger.info(f"녹음 시작 완료: PIDs={pids}")
-            except BaseException:
+            except BaseException as exc:
                 # start 도중 취소/예외가 발생하면 다음 요청이 IDLE 상태와 고아 없는
                 # 프로세스를 보도록 원자적으로 되돌린다.
+                failure = None
+                if isinstance(exc, AudioDeviceError) and zoom_meeting:
+                    failure = self._remember_recording_error(
+                        meeting_id, self._partial_recording_files(), message=str(exc)
+                    )
                 await self._cleanup_failed_start()
+                if failure:
+                    await self._broadcast_event("recording_error", failure)
                 raise
 
     async def _drain_pipe(self, stream: asyncio.StreamReader) -> None:
@@ -729,7 +740,7 @@ class AudioRecorder:
         )
 
     def _remember_recording_error(
-        self, meeting_id: str | None, paths: list[Path]
+        self, meeting_id: str | None, paths: list[Path], *, message: str | None = None
     ) -> dict[str, Any]:
         """절대 경로와 시스템 오류를 제외한 사용자용 실패 상태를 보존한다."""
         names: list[str] = []
@@ -747,7 +758,8 @@ class AudioRecorder:
         self._last_recording_error = {
             "meeting_id": meeting_id,
             "code": "capture_failed",
-            "error": f"녹음을 정상적으로 완료하지 못했습니다. {preservation} 전사는 시작하지 않았습니다.",
+            "error": message
+            or f"녹음을 정상적으로 완료하지 못했습니다. {preservation} 전사는 시작하지 않았습니다.",
             "occurred_at": datetime.now().isoformat(),
             "partial_files_preserved": bool(names),
             "partial_file_names": names,
@@ -807,6 +819,15 @@ class AudioRecorder:
         try:
             while line := await stream.readline():
                 key, _, value = line.strip().partition(b"=")
+                if key == b"capture-error":
+                    self._capture_start_error = {
+                        b"permission": "시스템 설정에서 Recap의 마이크 권한을 허용해 주세요.",
+                        b"microphone": "Recap에서 Mac의 내장 마이크를 찾지 못했습니다.",
+                        b"layout": "Core Audio에서 마이크와 Zoom 입력 채널을 열 수 없습니다.",
+                    }.get(
+                        value,
+                        "Zoom 소리를 열 수 없습니다. Recap의 시스템 오디오 녹음 권한을 확인해 주세요.",
+                    )
                 if key.startswith(b"frame:"):
                     frame.clear()
                 if key not in meters:
@@ -848,6 +869,11 @@ class AudioRecorder:
         Args:
             meeting_id: 회의 식별자
         """
+        if use_zoom_tap(self._recording_config):
+            checker = ZoomAudioActivityChecker(self._config.zoom.process_name)
+            if await checker.is_active():
+                await self._start_zoom_capture(meeting_id)
+                return
         device = await self._select_audio_device()
         self._current_device = device
 
@@ -911,16 +937,37 @@ class AudioRecorder:
             f"출력={output_file}"
         )
 
+        await self._launch_capture(cmd, mic_channel is not None, native_capture)
+
+    async def _start_zoom_capture(self, meeting_id: str) -> None:
+        """출력 장치와 독립된 Zoom 탭을 녹음 세션 전체에서 유지한다."""
+        output = self._temp_dir / f"{meeting_id}.wav"
+        checker = ZoomAudioActivityChecker(self._config.zoom.process_name)
+        try:
+            cmd = await checker.tap_command(output, self._sample_rate)
+        except (ZoomActivityError, OSError) as exc:
+            raise AudioDeviceError("Recap의 Zoom 오디오 모듈을 준비할 수 없습니다.") from exc
+        self._current_device = AudioDevice(
+            -1, "내장 마이크 + Zoom (Core Audio Tap)", is_aggregate=True
+        )
+        self._current_file = output
+        await self._launch_capture(cmd, True, True, self._recording_config.permission_wait_seconds)
+
+    async def _launch_capture(
+        self, cmd: list[str], split_meter: bool, native_capture: bool, timeout: float = 4.0
+    ) -> None:
+        """첫 입력 프레임을 확인한 뒤에만 네이티브 녹음 시작을 알린다."""
         try:
             self._first_audio_levels.clear()
             self._audio_levels = None
+            self._capture_start_error = None
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._split_level_meter = mic_channel is not None
+            self._split_level_meter = split_meter
             self._start_pipe_drain(self._process, split_meter=self._split_level_meter)
         except FileNotFoundError as e:
             if native_capture:
@@ -932,11 +979,15 @@ class AudioRecorder:
             raise FFmpegRecordError(f"녹음 프로세스 시작 실패: {e}") from e
         if native_capture:
             try:
-                await asyncio.wait_for(self._first_audio_levels.wait(), timeout=4.0)
+                await asyncio.wait_for(self._first_audio_levels.wait(), timeout=timeout)
             except TimeoutError as e:
-                raise AudioDeviceError("CoreAudio 녹음에서 입력을 받지 못했습니다.") from e
+                raise AudioDeviceError(
+                    "CoreAudio 녹음에서 입력을 받지 못했습니다. 마이크와 시스템 오디오 녹음 권한을 확인해 주세요."
+                ) from e
             if self._audio_levels is None or self._process.returncode is not None:
-                raise AudioDeviceError("CoreAudio 녹음이 입력을 받기 전에 종료됐습니다.")
+                raise AudioDeviceError(
+                    self._capture_start_error or "CoreAudio 녹음이 입력을 받기 전에 종료됐습니다."
+                )
 
     async def _select_devices_multitrack(self) -> dict[str, AudioDevice]:
         """멀티트랙 녹음용 장치를 선택한다.

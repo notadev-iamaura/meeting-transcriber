@@ -41,6 +41,7 @@ def _make_config(
         diarization=DiarizationConfig(engine="community-1", huggingface_token=token),
         recording=RecordingConfig(
             enabled=True,
+            zoom_process_tap=False,
             prefer_system_audio=prefer_system_audio,
             multi_track=multi_track,
         ),

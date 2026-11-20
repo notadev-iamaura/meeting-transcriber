@@ -27,6 +27,28 @@ def capture_failure_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert entrypoint in source
     declarations = source.split(entrypoint)[0]
     harness = r"""
+if CommandLine.arguments[1] == "--route-test" {
+    let speaker = ListeningDevice(id: 4, headphones: false, builtIn: true)
+    let usb = ListeningDevice(id: 9, headphones: true, builtIn: false)
+    precondition(listeningDevice([speaker], preferred: 88) == speaker.id)
+    precondition(listeningDevice([speaker, usb], preferred: speaker.id) == usb.id)
+    precondition(listeningDevice([speaker], preferred: usb.id) == speaker.id)
+    precondition(isZoomProcess(bundleID: "us.zoom.xos", path: ""))
+    precondition(!isZoomProcess(bundleID: "org.example.notzoom", path: "/tmp/zoom-test"))
+    // 실제 채널 복사 함수가 마이크와 좌우 상대 신호를 순서대로 전달하는지 확인한다.
+    let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 3)!
+    let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channelLayout: layout)
+    var samples: [Float] = [1.0, 0.25, -0.25, 0.5, 0.125, -0.125]
+    try samples.withUnsafeMutableBytes { bytes in
+        var input = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(
+            mNumberChannels: 3, mDataByteSize: UInt32(bytes.count), mData: bytes.baseAddress))
+        let frame = try copyTapFrame(&input, format: format)!
+        precondition(frame.frameLength == 2)
+        let values = frame.floatChannelData!
+        precondition(values[0][0] == 1 && values[1][0] == 0.25 && values[2][1] == -0.125)
+    }
+    exit(0)
+}
 let target = CommandLine.arguments[1]
 let descriptor = open(target, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
 guard descriptor >= 0 else { fatalError("temporary file creation failed") }
@@ -85,6 +107,11 @@ exit(2)
     )
     assert result.returncode == 0, result.stderr
     return binary
+
+
+def test_native_usb_route_and_tap_channels(capture_failure_binary: Path) -> None:
+    """가상 출력이 기본일 때도 이어폰의 연결·분리와 세 입력의 순서를 확인한다."""
+    subprocess.run([str(capture_failure_binary), "--route-test"], check=True, timeout=5)
 
 
 def test_native_write_failure_exits_without_q_and_finalizes_partial_wav(

@@ -600,6 +600,7 @@
                 setupActionHint(check.action_hint),
                 setupActionList(check.actions),
                 setupDetails(check),
+                check.id === "audio_devices" ? document.getElementById("audioMidiGuideTemplate").innerHTML : "",
                 '    </div>',
                 '  </div>',
                 '</article>',
@@ -773,6 +774,8 @@
             ) {
                 parts.push("환경변수 " + details.environment_variables_present.join(", "));
             }
+        } else if (check.id === "audio_devices" && details.selected_mode === "zoom_process_tap") {
+            parts.push("내장 마이크 + Zoom");
         } else if (check.id === "audio_devices") {
             parts.push(details.has_blackhole ? "BlackHole 감지" : "BlackHole 없음");
             parts.push(details.has_aggregate ? "Aggregate 감지" : "Aggregate 없음");

@@ -235,6 +235,8 @@ recording:
   enabled: true                                # 녹음 기능 활성화
   auto_record_on_zoom: true                    # Zoom 감지 시 자동 녹음
   prefer_system_audio: true                    # BlackHole 설치 시 시스템 오디오 우선
+  zoom_process_tap: true                       # macOS 14.2+의 Zoom 녹음은 앱에서 직접 처리
+  permission_wait_seconds: 90                  # 최초 권한 창을 포함한 캡처 시작 대기
   # (옵션) 녹음에 쓸 장치 이름. 비워두면 자동 선택: Aggregate > BlackHole > 물리 마이크.
   # 정확 매칭 실패 시 부분 매칭. 예: "Meeting Transcriber Aggregate"
   preferred_device_name: ""

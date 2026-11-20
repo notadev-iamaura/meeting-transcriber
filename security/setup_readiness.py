@@ -21,6 +21,7 @@ from core.stt_model_status import (
     get_effective_model_path,
     get_model_status,
 )
+from steps.zoom_activity import use_zoom_tap
 from ui.launcher import (
     LAUNCHER_PROJECT_DIR_ENV,
     LAUNCHER_PYTHON_EXECUTABLE_ENV,
@@ -607,6 +608,10 @@ def check_audio_devices(config: AppConfig) -> ReadinessCheck:
         "probe_status": "not_run",
     }
 
+    direct_zoom = recording.enabled and use_zoom_tap(recording)
+    if direct_zoom:
+        base_details["selected_mode"] = "zoom_process_tap"
+
     if sys.platform != "darwin":
         return ReadinessCheck(
             id="audio_devices",
@@ -646,6 +651,21 @@ def check_audio_devices(config: AppConfig) -> ReadinessCheck:
     has_aggregate = ("aggregate" in lower_output) or any(
         name.lower() in lower_output for name in aggregate_names
     )
+    if direct_zoom:
+        return ReadinessCheck(
+            id="audio_devices",
+            status="pass",
+            ready=True,
+            message="Zoom 직접 녹음을 지원합니다. 첫 녹음 때 macOS에서 오디오 권한을 확인합니다.",
+            action_hint="",
+            details=base_details
+            | {
+                "has_blackhole": has_blackhole,
+                "has_aggregate": has_aggregate,
+                "probe_status": "os_supported",
+                "permissions_verified": False,
+            },
+        )
     full_capture_ready = bool(
         not recording.prefer_system_audio or recording.multi_track or has_aggregate
     )

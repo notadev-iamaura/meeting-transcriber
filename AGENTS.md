@@ -114,6 +114,10 @@ chmod 700 ~/.meeting-transcriber
 
 ### 오디오 녹음 환경 자동 셋업 (Aggregate Device)
 
+macOS 14.2 이상 MacBook의 Zoom 데스크톱 녹음은 기본적으로 Recap의 Core Audio Tap을
+사용한다. 마이크·시스템 오디오 권한은 사용자가 macOS 창에서 승인한다. 아래 가상 장치
+설정은 다른 회의 앱이나 구버전 macOS 및 명시적인 기존 입력 구성에 적용한다.
+
 > 본인 마이크 + 시스템 오디오(상대방 목소리) 를 하나의 WAV 로 동시 녹음하려면
 > macOS **Aggregate Device** 가 필요하다. 이 절차는 `scripts/install.sh` 실행
 > 시 9단계에서 자동으로 수행되며, 별도 스크립트로도 실행 가능하다.

@@ -271,6 +271,24 @@
     </button>
   </div>
 
+  <template id="audioMidiGuideTemplate">
+    <details class="audio-midi-guide">
+      <summary>오디오 MIDI 설정 안내</summary>
+      <p><strong>Zoom 직접 녹음</strong>을 쓰는 MacBook(macOS 14.2 이상)에서는 오디오 MIDI 설정을 건너뛰세요. 이미 만든 통합 기기와 다중 출력 기기, Zoom의 스피커 설정도 그대로 두세요.</p>
+      <p>첫 녹음 때 Recap에 마이크와 시스템 오디오 녹음 권한을 허용하세요. 녹음 중 이어폰을 꽂으면 이어폰으로, 빼면 MacBook 스피커로 상대방 목소리가 들리고 녹음은 같은 파일에 이어집니다.</p>
+      <p>녹음 화면에서 내가 말할 때 <strong>내 마이크</strong>, 상대방이 말할 때 <strong>Zoom·시스템</strong> 음량 표시가 움직이는지 확인할 수 있습니다.</p>
+      <details>
+        <summary>다른 회의 앱이나 구버전 macOS에서 BlackHole로 녹음하기</summary>
+        <ol>
+          <li><strong>녹음 입력을 묶으세요.</strong> BlackHole 2ch를 설치한 뒤 Mac에서 ‘오디오 MIDI 설정’을 여세요. 왼쪽 아래 <strong>+ → 통합 기기 생성</strong>을 누르고 이름을 <strong>Meeting Transcriber Aggregate</strong>로 지정하세요. 이미 있으면 그 기기를 선택하세요.</li>
+          <li>‘사용’에서 <strong>MacBook 내장 마이크</strong>와 <strong>BlackHole 2ch</strong>만 선택하세요. ‘클럭 소스’는 내장 마이크로 지정하고 ‘드리프트 보정’은 BlackHole에만 체크하세요.</li>
+          <li><strong>듣는 장치를 고르세요.</strong> <strong>+ → 다중 출력 기기 생성</strong>을 누르거나 기존 다중 출력 기기를 여세요. ‘사용’에서 <strong>BlackHole 2ch</strong>와 지금 들을 장치 <strong>하나</strong>를 선택하세요. 이어폰으로 들을 때는 이어폰을 체크하고 MacBook 스피커의 체크를 해제하세요. 스피커로 들을 때는 두 체크를 바꾸세요.</li>
+          <li><strong>회의 앱에 연결하세요.</strong> 회의 앱의 스피커는 <strong>다중 출력 기기</strong>, 마이크는 <strong>MacBook 내장 마이크</strong>로 선택하세요. Recap은 통합 기기에서 내 목소리와 회의 소리를 함께 받습니다.</li>
+        </ol>
+      </details>
+    </details>
+  </template>
+
   <!-- 녹음 Full-viewport HUD (레퍼런스 RecordingOverlay.jsx) — 녹음 시작 시 표시 -->
   <div id="recordingOverlay" class="recording-overlay" role="dialog" aria-modal="true" aria-labelledby="recordingOverlayTitle" aria-hidden="true" hidden inert>
     <div class="recording-scrim" data-recording-action="minimize"></div>

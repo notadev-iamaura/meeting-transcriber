@@ -55,7 +55,12 @@ async def test_native_recording_failure_does_not_announce_recording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """장치 입력이 오기 전에 캡처가 종료되면 녹음 중 상태를 만들지 않는다."""
-    recorder = AudioRecorder(AppConfig(paths=PathsConfig(base_dir=str(tmp_path))))
+    recorder = AudioRecorder(
+        AppConfig(
+            paths=PathsConfig(base_dir=str(tmp_path)),
+            recording=RecordingConfig(zoom_process_tap=False),
+        )
+    )
     device = AudioDevice(index=2, name="Test Aggregate", is_aggregate=True)
     monkeypatch.setattr(recorder, "_select_audio_device", AsyncMock(return_value=device))
     monkeypatch.setattr(

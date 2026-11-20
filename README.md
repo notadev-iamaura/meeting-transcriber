@@ -56,7 +56,7 @@ Wiki 정리가 진행 중이면 별도로 표시하고, Wiki 실패는 기존 �
 - **Decision Wiki**: 회의 결정사항과 액션아이템을 원문 timestamp 근거가 있는 Markdown Wiki로 정리
 - **하이브리드 검색**: 전사문은 ChromaDB + SQLite FTS5 RAG로, Wiki는 BM25/FTS5 + e5-small 벡터 검색으로 탐색
 - **AI 채팅**: 회의 원문과 Wiki 지식을 기반으로 질의응답
-- **Zoom 자동 녹음**: Zoom 회의 감지 시 ffmpeg로 자동 녹음 시작/종료
+- **Zoom 자동 녹음**: macOS 14.2 이상에서 Zoom 데스크톱의 상대 음성과 MacBook 내장 마이크를 WAV의 별도 채널에 저장합니다. 첫 녹음 때 macOS 권한을 허용합니다.
 - **BlackHole 지원**: 시스템 오디오 캡처 (BlackHole 설치 시 자동 전환, 미설치 시 마이크 사용)
 - **macOS 메뉴바 앱**: rumps 기반 메뉴바 상주, 녹음 상태 실시간 표시
 - **웹 UI**: macOS 네이티브 스타일 SPA (회의 목록 + 뷰어 + 검색 + Wiki + AI 채팅 + 준비 상태 + 설정)
@@ -186,9 +186,9 @@ bash scripts/install.sh
 
 > **MLX 기본 환경에서는 LLM 모델이 첫 실행 시 HuggingFace 에서 자동 다운로드** 되므로 `install.sh` 의 7단계(EXAONE pull) 는 건너뛰어도 됩니다. Ollama 백엔드를 명시적으로 선택한 경우에만 필요합니다.
 
-### 4-2. 양방향 회의 녹음 셋업 (Zoom·Teams 사용 시 권장)
+### 4-2. 양방향 회의 녹음 셋업
 
-본인 마이크 + 시스템 오디오(상대방 목소리) 를 하나의 WAV 로 녹음하려면 macOS **Aggregate Device** 가 필요합니다. 자동 셋업 스크립트:
+MacBook의 macOS 14.2 이상에서 Zoom 데스크톱은 Recap이 직접 캡처합니다. Teams 등 다른 앱이나 구버전 macOS에서 가상 장치로 양방향 녹음을 구성할 때는 아래 스크립트를 사용하세요.
 
 ```bash
 bash scripts/setup_audio.sh
@@ -615,26 +615,33 @@ stt:
 Zoom 회의를 감지하면 자동으로 녹음을 시작하고, 회의 종료 시 전사 파이프라인까지 자동 실행합니다.
 
 ```
-Zoom 회의 시작 감지 → ffmpeg 녹음 시작 (recordings_temp/)
+Zoom 회의 시작 감지 → 녹음 시작 (recordings_temp/)
                    → 메뉴바 🔴 녹음 표시
                    → WebSocket "recording_started" 이벤트
 
-Zoom 회의 종료 감지 → ffmpeg 녹음 정지 (stdin 'q' → graceful 종료)
+Zoom 회의 종료 감지 → 녹음 정지 및 WAV 마감
                    → 녹음 파일을 audio_input/으로 이동
                    → FolderWatcher 감지 → 전사 파이프라인 자동 시작
 ```
 
-**오디오 캡처 방식 — 3가지 옵션:**
+**오디오 캡처 방식**
 
 | 설정 | 녹음 내용 | 용도 |
 |------|----------|------|
-| **마이크만 (기본)** | 본인 목소리 + 공기 중 상대방 소리 (에코 위험) | 단순 자기 녹음 |
+| **Zoom Core Audio Tap** | 내장 마이크와 Zoom 출력 분리 | MacBook, macOS 14.2 이상, Zoom 데스크톱 기본 |
+| **마이크만** | 본인 목소리 + 공기 중 상대방 소리 (에코 위험) | 단순 자기 녹음 |
 | **BlackHole 2ch** | 시스템 오디오 출력만 (Zoom 상대방 목소리) | 본인 마이크 입력은 안 들어감 ⚠️ |
-| **Aggregate Device** ⭐ 권장 | 본인 마이크 + 시스템 오디오 동시 | Zoom·Teams 양방향 회의 녹음 |
+| **Aggregate Device** | 본인 마이크 + 시스템 오디오 동시 | Teams 등 다른 앱 또는 구버전 macOS |
 
-#### 권장: Aggregate Device 자동 셋업
+#### Zoom 데스크톱 자동 녹음
 
-본인 + 상대방을 모두 한 WAV 파일로 녹음하려면 macOS **Aggregate Device** 를 만들어야 합니다. 자동 셋업 스크립트를 제공합니다:
+macOS 14.2 이상 MacBook에서는 첫 녹음 때 마이크와 시스템 오디오 녹음을 허용하면 됩니다.
+Recap이 이어폰 연결 상태에 따라 Zoom 소리를 재생하고, 내장 마이크와 상대방 소리를 한 파일의 별도 채널에 녹음합니다.
+기존 Zoom 스피커가 BlackHole이나 다중 출력 기기로 설정돼 있어도 이 경로를 사용합니다.
+
+#### 다른 앱과 구버전 macOS에서 Aggregate Device 구성
+
+Teams 등 다른 앱이나 구버전 macOS에서 마이크와 시스템 출력을 함께 녹음할 때는 아래 스크립트로 Aggregate Device를 구성할 수 있습니다.
 
 ```bash
 # 1) 상태 점검 (BlackHole 설치 여부 + Aggregate 존재 여부)

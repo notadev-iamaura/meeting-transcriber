@@ -95,6 +95,7 @@ class ZoomDetector:
 
         # 상태 관리
         self._is_meeting_active: bool = False
+        self._awaiting_inactive_sample = False
         self._is_running: bool = False
         self._poll_task: asyncio.Task[None] | None = None
 
@@ -165,6 +166,12 @@ class ZoomDetector:
             )
             if result.source == "pgrep-timeout":
                 return self._is_meeting_active
+            if result.source == "coreaudio" and self._is_meeting_active and not result.active:
+                # 이어폰을 분리하며 Zoom이 I/O를 다시 여는 한 번의 공백은 같은 회의다.
+                if not self._awaiting_inactive_sample:
+                    self._awaiting_inactive_sample = True
+                    return True
+            self._awaiting_inactive_sample = False
             return result.active
         except Exception as e:
             raise ProcessCheckError(
@@ -350,6 +357,7 @@ class ZoomDetector:
 
         # 다음 start() 호출 시 단락 방지를 위해 내부 상태 초기화
         self._is_meeting_active = False
+        self._awaiting_inactive_sample = False
         self.meeting_started_event.clear()
         self.meeting_ended_event.clear()
 

@@ -10,15 +10,40 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import platform
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config import RecordingConfig
+
 logger = logging.getLogger(__name__)
+
+
+def supports_zoom_tap() -> bool:
+    """프로세스 탭을 제공하는 macOS 버전인지 확인한다."""
+    version = platform.mac_ver()[0] if sys.platform == "darwin" else ""
+    return bool(version) and tuple(int(v) for v in version.split(".")[:2]) >= (14, 2)
+
+
+def use_zoom_tap(recording: RecordingConfig) -> bool:
+    """명시적인 입력 선택과 구버전 macOS의 녹음 방식을 보존한다."""
+    return (
+        recording.zoom_process_tap
+        and recording.prefer_system_audio
+        and recording.preferred_device_name.strip().casefold()
+        in {"", "meeting transcriber aggregate", "blackhole 2ch"}
+        and recording.separate_mic_track
+        and recording.split_track_processing.native_capture
+        and not recording.multi_track
+        and supports_zoom_tap()
+    )
 
 
 class ZoomActivityError(Exception):
@@ -65,9 +90,24 @@ class ZoomAudioActivityChecker:
         self._strict_process_errors = strict_process_errors
         repo_root = Path(__file__).resolve().parent.parent
         self._helper_source = helper_source or repo_root / "scripts" / "zoom_audio_activity.swift"
-        self._helper_binary = helper_binary or Path(
-            "/private/tmp/meeting-transcriber-zoom-audio-activity"
+        self._usage = self._helper_source.parent / "assets" / "ZoomAudioHelper.plist"
+        bundled = repo_root.parent.parent / "Helpers" / "RecapZoomAudio"
+        self._bundled = (
+            helper_binary is None and repo_root.parent.name == "Resources" and bundled.is_file()
         )
+        self._helper_binary = helper_binary or bundled
+        if helper_binary is None and not self._bundled:
+            # 서로 다른 checkout과 앱 버전이 실행 중인 바이너리를 교체하지 않는다.
+            digest = hashlib.sha256()
+            for source in (self._helper_source, self._usage):
+                if source.is_file():
+                    digest.update(source.read_bytes())
+            self._helper_binary = (
+                Path.home()
+                / "Library/Caches/com.recap.zoom-audio"
+                / digest.hexdigest()
+                / "RecapZoomAudio"
+            )
         self._compile_lock = asyncio.Lock()
         self._coreaudio_warning_logged = False
 
@@ -173,8 +213,15 @@ class ZoomAudioActivityChecker:
             raise ZoomActivityError(str(payload.get("error", "CoreAudio helper 실패")))
         return payload
 
+    async def tap_command(self, output: Path, sample_rate: int) -> list[str]:
+        """Zoom 프로세스 탭과 내장 마이크를 함께 여는 명령을 준비한다."""
+        await self._ensure_helper_compiled()
+        return [str(self._helper_binary), "--record-zoom", str(output), str(sample_rate)]
+
     async def _ensure_helper_compiled(self) -> None:
         """Swift helper 바이너리가 없거나 오래되었으면 컴파일한다."""
+        if self._bundled:
+            return
         if not self._helper_source.exists():
             raise ZoomActivityError(f"CoreAudio helper 소스가 없습니다: {self._helper_source}")
 
@@ -185,34 +232,54 @@ class ZoomAudioActivityChecker:
                 if binary_mtime >= source_mtime:
                     return
 
-            self._helper_binary.parent.mkdir(parents=True, exist_ok=True)
+            self._helper_binary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             env = dict(os.environ)
             env.setdefault(
                 "CLANG_MODULE_CACHE_PATH",
                 "/private/tmp/meeting-transcriber-clang-module-cache",
             )
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "swiftc",
-                    str(self._helper_source),
-                    "-o",
-                    str(self._helper_binary),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-                _, stderr = await _read_helper_output(proc, timeout=30.0)
-            except TimeoutError as e:
-                raise ZoomActivityError("CoreAudio helper 컴파일 타임아웃") from e
-            except FileNotFoundError as e:
-                raise ZoomActivityError("swiftc 명령을 찾을 수 없습니다") from e
-            except OSError as e:
-                raise ZoomActivityError(f"CoreAudio helper 컴파일 실패: {e}") from e
+            with tempfile.TemporaryDirectory(dir=self._helper_binary.parent) as staging:
+                await self._compile(Path(staging) / self._helper_binary.name, env)
 
-            if proc.returncode != 0:
-                message = stderr.decode("utf-8", errors="replace").strip()
-                raise ZoomActivityError(message or f"swiftc 종료 코드 {proc.returncode}")
+    async def _compile(self, target: Path, env: dict[str, str]) -> None:
+        """완성된 실행 파일만 게시해 동시 실행 중인 다른 helper를 보존한다."""
+        linker = (
+            [
+                "-Xlinker",
+                "-sectcreate",
+                "-Xlinker",
+                "__TEXT",
+                "-Xlinker",
+                "__info_plist",
+                "-Xlinker",
+                str(self._usage),
+            ]
+            if self._usage.is_file()
+            else []
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "swiftc",
+                str(self._helper_source),
+                *linker,
+                "-o",
+                str(target),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            _, stderr = await _read_helper_output(proc, timeout=30.0)
+        except TimeoutError as e:
+            raise ZoomActivityError("CoreAudio helper 컴파일 타임아웃") from e
+        except FileNotFoundError as e:
+            raise ZoomActivityError("swiftc 명령을 찾을 수 없습니다") from e
+        except OSError as e:
+            raise ZoomActivityError(f"CoreAudio helper 컴파일 실패: {e}") from e
+        if proc.returncode != 0:
+            message = stderr.decode("utf-8", errors="replace").strip()
+            raise ZoomActivityError(message or f"swiftc 종료 코드 {proc.returncode}")
+        target.replace(self._helper_binary)
 
     async def _check_process_fallback(self) -> ZoomActivityResult:
         """기존 pgrep 기반 감지로 폴백한다."""

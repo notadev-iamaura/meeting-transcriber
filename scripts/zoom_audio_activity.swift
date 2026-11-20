@@ -8,6 +8,7 @@
 import AppKit
 import ApplicationServices
 import AudioToolbox
+import AVFoundation
 import CoreAudio
 import Darwin
 import Foundation
@@ -20,10 +21,11 @@ struct AudioProcessStatus {
     let output: Bool
 }
 
-func getObjectIDs(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) throws -> [AudioObjectID] {
+func getObjectIDs(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                  scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) throws -> [AudioObjectID] {
     var address = AudioObjectPropertyAddress(
         mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain
     )
 
@@ -56,7 +58,7 @@ func getObjectIDs(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySele
     guard status == noErr else {
         throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
     }
-    return objectIDs
+    return Array(objectIDs.prefix(Int(dataSize) / MemoryLayout<AudioObjectID>.stride))
 }
 
 func getStringProperty(_ objectID: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String {
@@ -107,10 +109,10 @@ func getBoolProperty(_ objectID: AudioObjectID, _ selector: AudioObjectPropertyS
     return (getUInt32Property(objectID, selector) ?? 0) != 0
 }
 
-func getInputChannelCount(_ deviceID: AudioObjectID) -> Int? {
+func getChannelCount(_ deviceID: AudioObjectID, _ scope: AudioObjectPropertyScope) -> Int? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyStreamConfiguration,
-        mScope: kAudioObjectPropertyScopeInput,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain
     )
     var size: UInt32 = 0
@@ -127,6 +129,10 @@ func getInputChannelCount(_ deviceID: AudioObjectID) -> Int? {
     }
     let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
     return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
+}
+
+func getInputChannelCount(_ deviceID: AudioObjectID) -> Int? {
+    getChannelCount(deviceID, kAudioObjectPropertyScopeInput)
 }
 
 func aggregateSourceUIDs(_ deviceID: AudioObjectID) -> [String]? {
@@ -199,11 +205,8 @@ func getProcessPath(_ pid: pid_t) -> String {
 }
 
 func isZoomProcess(bundleID: String, path: String) -> Bool {
-    let haystack = "\(bundleID) \(path)".lowercased()
-    return haystack.contains("zoom.us")
-        || haystack.contains("us.zoom")
-        || haystack.contains("/zoom")
-        || haystack.contains("/cpt")
+    return bundleID.lowercased().hasPrefix("us.zoom.")
+        || path.lowercased().contains("/zoom.us.app/contents/")
 }
 
 func jsonStringLiteral(_ value: String) -> String {
@@ -300,11 +303,14 @@ private final class SplitRecording {
 
     func append(_ buffer: AudioQueueBufferRef) throws {
         let count = Int(buffer.pointee.mAudioDataByteSize) / 6
+        try append(buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self), frames: count)
+    }
+
+    func append(_ input: UnsafePointer<Int16>, frames count: Int) throws {
         guard count > 0 else { return }
         guard UInt64(frames) + UInt64(count) <= (UInt64(UInt32.max) - 128) / 4 else {
             throw CocoaError(.fileWriteOutOfSpace)
         }
-        let input = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
         let rx = mic == 0 ? 1 : 0
         var stereo = [Int16](repeating: 0, count: count * 2)
         for frame in 0..<count {
@@ -354,15 +360,20 @@ private func waitForRecordingStop(failureDescriptor: Int32) throws {
     }
 }
 
+private func audioCheck(_ status: OSStatus) throws {
+    if status != noErr { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+}
+
 private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws {
-    func audioCheck(_ status: OSStatus) throws {
-        if status != noErr { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
-    }
     let devices = try getObjectIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices)
     guard (8000...48000).contains(rate), let mic = try aggregateMicChannel(name),
         let device = devices.first(where: { getStringProperty($0, kAudioObjectPropertyName) == name }) else {
         throw CocoaError(.featureUnsupported)
     }
+    try recordDevice(device, mic: mic, path: path, rate: rate)
+}
+
+private func recordDevice(_ device: AudioObjectID, mic: Int, path: String, rate: UInt32) throws {
     let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
     guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
     let output = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -412,6 +423,306 @@ private func splitRecord(_ name: String, _ path: String, _ rate: UInt32) throws 
     if let failure = waitFailure ?? finishFailure { throw failure }
     try audioCheck(stopStatus)
 }
+
+// Zoom의 실제 출력 스트림만 선택한다. 일반 앱 이름에 포함된 "zoom"은 대상이 아니다.
+private func zoomAudioObjects() throws -> [AudioObjectID] {
+    try getObjectIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList)
+        .filter { object in
+            let bundle = getStringProperty(object, kAudioProcessPropertyBundleID).lowercased()
+            return isZoomProcess(bundleID: bundle, path: getProcessPath(getPIDProperty(object)))
+        }.sorted()
+}
+
+private struct ListeningDevice {
+    let id: AudioObjectID
+    let headphones: Bool
+    let builtIn: Bool
+}
+
+private func listeningDevice(_ devices: [ListeningDevice], preferred: AudioObjectID?) -> AudioObjectID? {
+    let current = devices.first { $0.id == preferred }
+    if current?.headphones == true { return preferred }
+    return devices.first { $0.headphones }?.id ?? current?.id ?? devices.first { $0.builtIn }?.id
+}
+
+private func physicalOutputs() throws -> [ListeningDevice] {
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    return try getObjectIDs(system, kAudioHardwarePropertyDevices).compactMap { id in
+        guard let transport = getUInt32Property(id, kAudioDevicePropertyTransportType),
+              ![kAudioDeviceTransportTypeVirtual, kAudioDeviceTransportTypeAggregate].contains(transport),
+              (getChannelCount(id, kAudioObjectPropertyScopeOutput) ?? 0) > 0 else { return nil }
+        let name = getStringProperty(id, kAudioObjectPropertyName).lowercased()
+        let streams = try getObjectIDs(id, kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeOutput)
+        let phones = streams.contains {
+            getUInt32Property($0, kAudioStreamPropertyTerminalType) == kAudioStreamTerminalTypeHeadphones
+        } || ["earphone", "headphone", "headset", "airpods", "이어폰", "헤드폰", "헤드셋"].contains {
+            name.contains($0)
+        }
+        return ListeningDevice(id: id, headphones: phones, builtIn: transport == kAudioDeviceTransportTypeBuiltIn)
+    }
+}
+
+// Zoom이 가상 출력이나 다른 물리 출력에 고정된 동안에만 상대 음성을 직접 재생한다.
+private final class ZoomMonitor {
+    let engine = AVAudioEngine()
+    let player = AVAudioPlayerNode()
+    let format: AVAudioFormat
+    let device: AudioObjectID
+    private let slots = DispatchSemaphore(value: 4)
+
+    init(device: AudioObjectID, rate: Double) throws {
+        self.device = device
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 2),
+              let unit = engine.outputNode.audioUnit else { throw CocoaError(.featureUnsupported) }
+        self.format = format
+        var output = device
+        try audioCheck(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                            kAudioUnitScope_Global, 0, &output, UInt32(MemoryLayout.size(ofValue: output))))
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        try engine.start()
+        player.play()
+    }
+
+    func play(_ input: AVAudioPCMBuffer) {
+        guard let source = input.floatChannelData,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: input.frameLength),
+              let pcm = buffer.floatChannelData, slots.wait(timeout: .now()) == .success else { return }
+        buffer.frameLength = input.frameLength
+        pcm[0].update(from: source[1], count: Int(input.frameLength))
+        pcm[1].update(from: source[2], count: Int(input.frameLength))
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [slots] _ in slots.signal() }
+    }
+
+    deinit { player.stop(); engine.stop() }
+}
+
+@available(macOS 14.2, *)
+private final class ZoomTapRoute {
+    let tap: AudioObjectID
+    let description: CATapDescription
+    let rate: Double
+    var objects: [AudioObjectID]
+    private let lock = NSLock()
+    private var monitor: ZoomMonitor?
+
+    init(_ tap: AudioObjectID, _ description: CATapDescription, _ objects: [AudioObjectID], rate: Double) {
+        self.tap = tap
+        self.description = description
+        self.objects = objects
+        self.rate = rate
+    }
+
+    func play(_ input: AVAudioPCMBuffer) {
+        // 장치 재구성 때문에 파일 기록 콜백을 지연시키지 않는다.
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        monitor?.play(input)
+    }
+
+    func refresh() throws {
+        let current = try zoomAudioObjects()
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let desired = listeningDevice(try physicalOutputs(),
+                                      preferred: getUInt32Property(system, kAudioHardwarePropertyDefaultOutputDevice))
+        let destinations = Set(try current.flatMap {
+            try getObjectIDs($0, kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeOutput)
+        })
+        try update(current: current, destinations: destinations, desired: desired)
+    }
+
+    func update(current: [AudioObjectID], destinations: Set<AudioObjectID>, desired: AudioObjectID?) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let old = monitor
+        let relay: AudioObjectID?
+        if current.isEmpty || destinations == Set([desired].compactMap { $0 }) {
+            relay = nil
+        } else if destinations.isEmpty {
+            relay = old == nil ? nil : desired
+        } else {
+            relay = desired
+        }
+        let next: ZoomMonitor?
+        if let device = relay, old?.device != device || old?.engine.isRunning != true {
+            // 장치 전환 도중 출력 열기에 실패하면 Zoom의 원래 재생을 즉시 복원한다.
+            next = try? ZoomMonitor(device: device, rate: rate)
+        } else {
+            next = relay == nil ? nil : old
+        }
+        let mute: CATapMuteBehavior = next == nil ? .unmuted : .mutedWhenTapped
+        if current != objects || mute != description.muteBehavior {
+            let oldMute = description.muteBehavior
+            description.processes = current
+            description.muteBehavior = mute
+            var value = Unmanaged.passUnretained(description).toOpaque()
+            var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            do {
+                try audioCheck(AudioObjectSetPropertyData(tap, &address, 0, nil,
+                    UInt32(MemoryLayout.size(ofValue: value)), &value))
+            } catch {
+                description.processes = objects
+                description.muteBehavior = oldMute
+                throw error
+            }
+            objects = current
+        }
+        monitor = next
+    }
+}
+
+private func tapInputFormat(_ device: AudioObjectID) throws -> AVAudioFormat {
+    let streams = try getObjectIDs(device, kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput)
+    var channels: UInt32 = 0
+    var rate = 0.0
+    for stream in streams {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyVirtualFormat,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout.size(ofValue: asbd))
+        try audioCheck(AudioObjectGetPropertyData(stream, &address, 0, nil, &size, &asbd))
+        guard asbd.mFormatID == kAudioFormatLinearPCM, asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              asbd.mBitsPerChannel == 32, asbd.mSampleRate > 0,
+              rate == 0 || rate == asbd.mSampleRate else { throw CaptureProblem.layout }
+        rate = asbd.mSampleRate
+        channels += asbd.mChannelsPerFrame
+    }
+    guard channels == 3, let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | channels)
+    else { throw CaptureProblem.layout }
+    return AVAudioFormat(standardFormatWithSampleRate: rate, channelLayout: layout)
+}
+
+// HAL의 버퍼는 콜백 동안만 유효하다. 데이터만 복사하고 변환·디스크 쓰기는 직렬 큐에서 한다.
+private func copyTapFrame(_ buffers: UnsafePointer<AudioBufferList>, format: AVAudioFormat) throws -> AVAudioPCMBuffer? {
+    let inputs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffers))
+    guard let first = inputs.first, first.mNumberChannels > 0 else { return nil }
+    let frames = first.mDataByteSize / (4 * first.mNumberChannels)
+    guard frames > 0 else { return nil }
+    guard let frame = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+          let planes = frame.floatChannelData else { throw CaptureProblem.layout }
+    frame.frameLength = frames
+    var channel = 0
+    for buffer in inputs {
+        let n = Int(buffer.mNumberChannels)
+        guard n > 0, channel + n <= 3, Int(buffer.mDataByteSize) == Int(frames) * n * 4,
+              let samples = buffer.mData?.assumingMemoryBound(to: Float.self) else { throw CaptureProblem.layout }
+        for c in 0..<n {
+            if n == 1 { planes[channel].update(from: samples, count: Int(frames)) }
+            else { for i in 0..<Int(frames) { planes[channel][i] = samples[i * n + c] } }
+            channel += 1
+        }
+    }
+    guard channel == 3 else { throw CaptureProblem.layout }
+    return frame
+}
+
+private func recordTapDevice(_ device: AudioObjectID, format: AVAudioFormat, path: String,
+                            rate: UInt32, playback: @escaping (AVAudioPCMBuffer) -> Void) throws {
+    guard let layout = format.channelLayout else { throw CaptureProblem.layout }
+    let pcm = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(rate),
+                            interleaved: true, channelLayout: layout)
+    guard let converter = AVAudioConverter(from: format, to: pcm) else { throw CaptureProblem.layout }
+    let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    let state = try SplitRecording(output: file, rate: rate, mic: 0)
+    try file.write(contentsOf: wavHeader(rate: rate, frames: 0))
+    let io = DispatchQueue(label: "recap.zoom.input", qos: .userInteractive)
+    let writer = DispatchQueue(label: "recap.zoom.wav", qos: .userInitiated)
+    let slots = DispatchSemaphore(value: 32)
+    func convert(_ input: AVAudioPCMBuffer?) throws {
+        let capacity = ceil(Double(input?.frameLength ?? 1024) * Double(rate) / format.sampleRate) + 1024
+        guard let out = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(capacity))
+        else { throw CaptureProblem.layout }
+        var supplied = false
+        var error: NSError?
+        let result = converter.convert(to: out, error: &error) { _, status in
+            if let input, !supplied { supplied = true; status.pointee = .haveData; return input }
+            status.pointee = input == nil ? .endOfStream : .noDataNow
+            return nil
+        }
+        if let error { throw error }
+        guard result != .error, let pointer = out.int16ChannelData else { throw CaptureProblem.layout }
+        try state.append(pointer[0], frames: Int(out.frameLength))
+    }
+    var proc: AudioDeviceIOProcID?
+    try audioCheck(AudioDeviceCreateIOProcIDWithBlock(&proc, device, io) { _, buffers, _, _, _ in
+        do {
+            guard let frame = try copyTapFrame(buffers, format: format) else { return }
+            guard slots.wait(timeout: .now()) == .success else { throw CocoaError(.fileWriteUnknown) }
+            writer.async {
+                defer { slots.signal() }
+                guard state.failure == nil else { return }
+                do { playback(frame); try convert(frame) } catch { state.recordFailure(error) }
+            }
+        } catch { writer.async { state.recordFailure(error) } }
+    })
+    guard let proc else { throw CaptureProblem.layout }
+    defer { AudioDeviceDestroyIOProcID(device, proc) }
+    try audioCheck(AudioDeviceStart(device, proc))
+    let stop = Result { try waitForRecordingStop(failureDescriptor: state.failureDescriptor) }
+    let status = AudioDeviceStop(device, proc)
+    io.sync {}
+    writer.sync { if state.failure == nil { do { try convert(nil) } catch { state.recordFailure(error) } } }
+    try state.finish()
+    if let failure = state.failure { throw failure }
+    try stop.get()
+    try audioCheck(status)
+}
+
+@available(macOS 14.2, *)
+private func recordZoomTap(path: String, rate: UInt32) throws {
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    let devices = try getObjectIDs(system, kAudioHardwarePropertyDevices)
+    // 이어폰의 마이크가 분리되어도 같은 입력 클록을 유지한다.
+    guard let mic = devices.first(where: {
+        getUInt32Property($0, kAudioDevicePropertyTransportType) == kAudioDeviceTransportTypeBuiltIn
+            && getInputChannelCount($0) == 1
+    }) else { throw CaptureProblem.microphone }
+    let access = DispatchSemaphore(value: 0)
+    AVCaptureDevice.requestAccess(for: .audio) { _ in access.signal() }
+    access.wait()
+    guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CaptureProblem.permission }
+    let objects = try zoomAudioObjects()
+    let description = CATapDescription(stereoMixdownOfProcesses: objects)
+    description.name = "Recap Zoom"
+    description.isPrivate = true
+    description.muteBehavior = .unmuted
+    var tap = AudioObjectID(kAudioObjectUnknown)
+    try audioCheck(AudioHardwareCreateProcessTap(description, &tap))
+    defer { AudioHardwareDestroyProcessTap(tap) }
+    let micUID = getStringProperty(mic, kAudioDevicePropertyDeviceUID)
+    let tapUID = getStringProperty(tap, kAudioTapPropertyUID)
+    guard !micUID.isEmpty, !tapUID.isEmpty else { throw CaptureProblem.layout }
+    let composition: [String: Any] = [
+        kAudioAggregateDeviceUIDKey: UUID().uuidString,
+        kAudioAggregateDeviceNameKey: "Recap Zoom Input",
+        kAudioAggregateDeviceIsPrivateKey: true,
+        kAudioAggregateDeviceMainSubDeviceKey: micUID,
+        kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: micUID]],
+        kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: tapUID, kAudioSubTapDriftCompensationKey: true]],
+    ]
+    var aggregate = AudioObjectID(kAudioObjectUnknown)
+    try audioCheck(AudioHardwareCreateAggregateDevice(composition as CFDictionary, &aggregate))
+    defer { AudioHardwareDestroyAggregateDevice(aggregate) }
+    for _ in 0..<50 {
+        if getInputChannelCount(aggregate) == 3 { break }
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    guard getInputChannelCount(aggregate) == 3 else { throw CaptureProblem.layout }
+    let format = try tapInputFormat(aggregate)
+    let route = ZoomTapRoute(tap, description, objects, rate: format.sampleRate)
+    let control = DispatchQueue(label: "recap.zoom.playback")
+    let timer = DispatchSource.makeTimerSource(queue: control)
+    timer.schedule(deadline: .now(), repeating: .milliseconds(300))
+    timer.setEventHandler { do { try route.refresh() } catch { /* 장치 변경 중에는 다음 주기에 재시도 */ } }
+    timer.resume()
+    defer { timer.cancel(); control.sync {} }
+    try recordTapDevice(aggregate, format: format, path: path, rate: rate, playback: route.play)
+}
+
+private enum CaptureProblem: Error { case permission, microphone, layout }
 
 // 회의 창의 명시적 주제 필드만 본다. 창을 열거나 권한을 요청하지 않는다.
 private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -524,6 +835,26 @@ if CommandLine.arguments.contains("--self-test-json") {
     )
     print(renderJSON(statuses: [status]))
     exit(0)
+}
+
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--record-zoom",
+   let rate = UInt32(CommandLine.arguments[3]), (8000...48000).contains(rate) {
+    do {
+        guard #available(macOS 14.2, *) else { throw CocoaError(.featureUnsupported) }
+        try recordZoomTap(path: CommandLine.arguments[2], rate: rate)
+        exit(0)
+    } catch {
+        let reason: String
+        switch error {
+        case CaptureProblem.permission: reason = "permission"
+        case CaptureProblem.microphone: reason = "microphone"
+        case CaptureProblem.layout: reason = "layout"
+        default: reason = "coreaudio"
+        }
+        print("capture-error=\(reason)")
+        fputs("Recap CoreAudio: \(error)\n", stderr)
+        exit(2)
+    }
 }
 
 if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--aggregate-layout" {

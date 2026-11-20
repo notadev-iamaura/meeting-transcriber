@@ -41,6 +41,7 @@ _BUNDLED_RUNTIME_SCRIPT_FILES = frozenset(
         "scripts/__init__.py",
         "scripts/backfill_wiki.py",
         "scripts/zoom_audio_activity.swift",
+        "scripts/assets/ZoomAudioHelper.plist",
     }
 )
 _BUNDLED_SOURCE_REQUIRED_DIRS = ("api", "core", "steps", "search", "security", "ui")
@@ -757,7 +758,10 @@ def _find_excluded_bundled_source_items(project_dir: Path) -> list[str]:
         relative_name = path.relative_to(project_dir).as_posix()
         excluded_script = relative_parts[0] == "scripts" and (
             path.is_symlink()
-            or (relative_name != "scripts" and relative_name not in _BUNDLED_RUNTIME_SCRIPT_FILES)
+            or (
+                relative_name not in {"scripts", "scripts/assets"}
+                and relative_name not in _BUNDLED_RUNTIME_SCRIPT_FILES
+            )
         )
         symlink_escape = False
         if path.is_symlink():

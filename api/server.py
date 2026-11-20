@@ -190,7 +190,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         auto_zoom_session = None
                         logger.info("Zoom 회의 감지 → 자동 녹음 시작")
                         try:
-                            await recorder.start_recording()
+                            await recorder.start_recording(zoom_meeting=True)
                             auto_zoom_session = zoom_detector.observe_recording_topic()
                             recorder.track_zoom_topic(auto_zoom_session)
                         except Exception as e:

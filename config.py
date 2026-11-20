@@ -834,6 +834,8 @@ class RecordingConfig(BaseModel):
     enabled: bool = True
     auto_record_on_zoom: bool = True
     prefer_system_audio: bool = True  # BlackHole 설치 시 시스템 오디오 우선
+    zoom_process_tap: bool = True  # 지원하는 macOS에서 Zoom 출력을 직접 캡처
+    permission_wait_seconds: float = Field(default=90.0, ge=4, le=300)
     # 명시적 장치명. 빈 문자열이면 자동 선택(Aggregate > BlackHole > 물리 마이크).
     # 정확 매칭 우선, 없으면 부분 매칭. 예: "Meeting Transcriber Aggregate"
     preferred_device_name: str = ""

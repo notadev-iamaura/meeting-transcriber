@@ -624,6 +624,7 @@
         GeneralSettingsPanel.prototype._render = function () {
             this._host.innerHTML = [
                 '<div class="settings-content">',
+                document.getElementById("audioMidiGuideTemplate").innerHTML,
                 '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">LLM 모델</h3>',
                 '    <div class="settings-group">',
