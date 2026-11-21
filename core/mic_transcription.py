@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from core.io_utils import atomic_write_json_pinned, read_text_no_follow
+from core.io_utils import atomic_write_json_pinned, ensure_directory_no_follow, read_text_no_follow
 from core.recording_channels import (
     MIC_CHANNEL,
     SELF_SPEAKER,
@@ -358,9 +358,9 @@ async def retry_mic_track(
                 original = await asyncio.to_thread(read_text_no_follow, source_path)
             except FileNotFoundError:
                 original = None
-            with TemporaryDirectory(
-                prefix=".recap-mic-retry-", dir=audio_path.parent
-            ) as directory:
+            # 강제 종료로 임시 채널이 남더라도 회의 소유와 45일 보관 기한을 판별할 수 있다.
+            ensure_directory_no_follow(cp)
+            with TemporaryDirectory(prefix=".recap-mic-retry-", dir=cp) as directory:
                 tracks = await asyncio.to_thread(
                     extract_recording_tracks,
                     audio_path,

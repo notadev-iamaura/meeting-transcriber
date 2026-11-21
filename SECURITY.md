@@ -92,7 +92,7 @@
 ### 데이터 보안
 
 - **암호화 정책**: 이 프로젝트는 파일 시스템 수준의 암호화를 별도로 구현하지 않습니다. macOS의 FileVault(전체 디스크 암호화)를 활성화하여 저장 데이터를 보호할 것을 권장합니다.
-- **데이터 수명주기**: `security/lifecycle.py`를 통해 회의 데이터의 보관 기간과 삭제 정책을 관리합니다. hot(활성) → warm(보관) → cold(아카이브) 단계별 정책을 `config.yaml`에서 설정할 수 있습니다.
+- **데이터 수명주기**: Hot/Warm/Cold 보존 점검은 회의를 경과 일수로 분류합니다. 별도 설정 `lifecycle.audio_retention_enabled`를 켜면 보관 기간 45일이 지난 회의에서 앱이 관리하는 음성만 정리합니다. 회의 기록과 전사문·요약·검색 색인은 보존합니다.
 - **HuggingFace 토큰**: pyannote 화자분리 모델의 초기 다운로드에 필요한 HuggingFace 토큰은 환경변수(`HUGGINGFACE_TOKEN`)로만 관리합니다. 토큰을 코드나 설정 파일에 직접 기록하지 마십시오.
 - **OpenAI API 키**: 일반 사용에서는 별도 자격 증명 API를 통해 macOS Keychain에 저장합니다. 키 값은 설정 응답, DOM 재표시, YAML, SQLite, 체크포인트, 로그에 기록하지 않습니다. `OPENAI_API_KEY`는 개발/CI용 읽기 전용 폴백입니다.
 - **OpenAI 업로드 최소화**: 원본 파일명·회의 ID·제목·로컬 prompt를 보내지 않고 generic MP3 파일과 `model`, `response_format=diarized_json`, `chunking_strategy=auto` multipart 필드만 전송합니다. 지원되지 않는 `language`, `prompt`, `timestamp_granularities` 필드는 보내지 않으며, 25MB 제한보다 작은 로컬 청크를 고정 HTTPS endpoint로 순차 업로드합니다.

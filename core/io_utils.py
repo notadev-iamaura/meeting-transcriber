@@ -155,19 +155,20 @@ def _write_all(file_fd: int, content: str, *, target: Path) -> os.stat_result:
     return written_stat
 
 
-def _rename_exchange(parent_fd: int, source_name: str, target_name: str) -> None:
-    """두 directory entry를 플랫폼 원자 교환 syscall로 맞바꾼다."""
+def _rename_atomic(parent_fd: int, source_name: str, target_name: str, *, exchange: bool) -> None:
+    """지원 플랫폼에서 같은 디렉터리 entry를 교환하거나 덮어쓰기 없이 이동한다."""
     libc = ctypes.CDLL(None, use_errno=True)
     source = os.fsencode(source_name)
     target = os.fsencode(target_name)
-    exchange_flag = 0x00000002  # Darwin RENAME_SWAP / Linux RENAME_EXCHANGE
     system = platform.system()
 
     if system == "Darwin":
+        flag = 2 if exchange else 4  # RENAME_SWAP / RENAME_EXCL
         rename_exchange = getattr(libc, "renameatx_np", None)
         if rename_exchange is None:
             raise OSError(errno.ENOTSUP, "renameatx_np를 지원하지 않습니다")
     elif system == "Linux":
+        flag = 2 if exchange else 1  # RENAME_EXCHANGE / RENAME_NOREPLACE
         rename_exchange = getattr(libc, "renameat2", None)
         if rename_exchange is None:
             raise OSError(errno.ENOTSUP, "renameat2를 지원하지 않습니다")
@@ -182,13 +183,23 @@ def _rename_exchange(parent_fd: int, source_name: str, target_name: str) -> None
         ctypes.c_uint,
     ]
     rename_exchange.restype = ctypes.c_int
-    if rename_exchange(parent_fd, source, parent_fd, target, exchange_flag) != 0:
+    if rename_exchange(parent_fd, source, parent_fd, target, flag) != 0:
         error_number = ctypes.get_errno()
         raise OSError(
             error_number,
             os.strerror(error_number),
             f"{source_name}<->{target_name}",
         )
+
+
+def _rename_exchange(parent_fd: int, source_name: str, target_name: str) -> None:
+    """두 directory entry를 원자 교환한다."""
+    _rename_atomic(parent_fd, source_name, target_name, exchange=True)
+
+
+def rename_no_replace(parent_fd: int, source_name: str, target_name: str) -> None:
+    """기존 목적지를 덮어쓰지 않고 같은 디렉터리 안에서 원자적으로 이동한다."""
+    _rename_atomic(parent_fd, source_name, target_name, exchange=False)
 
 
 def read_text_no_follow(path: Path) -> str:

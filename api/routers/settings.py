@@ -92,6 +92,7 @@ class SettingsResponse(BaseModel):
     hf_repetition_threshold: int = 3
     # 데이터 라이프사이클
     lifecycle_enabled: bool = False
+    lifecycle_audio_retention_enabled: bool = False
     lifecycle_hot_days: int = 30
     lifecycle_warm_days: int = 90
     lifecycle_cold_action: str = "delete_audio"
@@ -139,6 +140,7 @@ class SettingsUpdateRequest(BaseModel):
     hf_repetition_threshold: int | None = None
     # 데이터 라이프사이클
     lifecycle_enabled: bool | None = None
+    lifecycle_audio_retention_enabled: bool | None = Field(default=None, strict=True)
     lifecycle_hot_days: int | None = None
     lifecycle_warm_days: int | None = None
     lifecycle_cold_action: str | None = None
@@ -189,6 +191,7 @@ def _build_settings_response(config: Any) -> SettingsResponse:
         hf_compression_ratio_threshold=config.hallucination_filter.compression_ratio_threshold,
         hf_repetition_threshold=config.hallucination_filter.repetition_threshold,
         lifecycle_enabled=config.lifecycle.enabled,
+        lifecycle_audio_retention_enabled=config.lifecycle.audio_retention_enabled,
         lifecycle_hot_days=config.lifecycle.hot_days,
         lifecycle_warm_days=config.lifecycle.warm_days,
         lifecycle_cold_action=config.lifecycle.cold_action,
@@ -481,6 +484,8 @@ async def _update_settings_locked(
         changed_fields.append("hf_repetition_threshold")
     if "lifecycle_enabled" in updates:
         changed_fields.append("lifecycle_enabled")
+    if "lifecycle_audio_retention_enabled" in updates:
+        changed_fields.append("lifecycle_audio_retention_enabled")
     if "lifecycle_hot_days" in updates:
         changed_fields.append("lifecycle_hot_days")
     if "lifecycle_warm_days" in updates:
@@ -579,6 +584,9 @@ async def _update_settings_locked(
         if "lifecycle_enabled" in updates:
             val = "true" if updates["lifecycle_enabled"] else "false"
             content = _replace_yaml_value(content, "lifecycle", "enabled", val)
+        if "lifecycle_audio_retention_enabled" in updates:
+            val = "true" if updates["lifecycle_audio_retention_enabled"] else "false"
+            content = _replace_yaml_value(content, "lifecycle", "audio_retention_enabled", val)
         if "lifecycle_hot_days" in updates:
             content = _replace_yaml_value(
                 content, "lifecycle", "hot_days", str(updates["lifecycle_hot_days"])
@@ -707,6 +715,8 @@ async def _update_settings_locked(
     lifecycle_updates: dict[str, Any] = {}
     if "lifecycle_enabled" in updates:
         lifecycle_updates["enabled"] = updates["lifecycle_enabled"]
+    if "lifecycle_audio_retention_enabled" in updates:
+        lifecycle_updates["audio_retention_enabled"] = updates["lifecycle_audio_retention_enabled"]
     if "lifecycle_hot_days" in updates:
         lifecycle_updates["hot_days"] = updates["lifecycle_hot_days"]
     if "lifecycle_warm_days" in updates:

@@ -15,6 +15,7 @@ from core.recording_channels import (
     RECORDING_TRACK_COMMENT,
     SYSTEM_CHANNEL,
     extract_recording_tracks,
+    prepare_recording_track,
 )
 from steps.transcriber import open_audio_path_no_symlinks
 
@@ -131,3 +132,127 @@ def test_filtered_room_echo_leaves_quiet_near_speech_intact_in_both_extraction_p
                 # 잡음 우세 구간에는 차감을 보류할 수 있으므로 근거리 원 파형의 오차를 측정한다.
                 assert error < 0.08 * np.linalg.norm(near[segment])
     assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("switch_time", "shorter_delay"),
+    [(9.37, False), (23.87, False), (24.06, False), (22.15, True)],
+)
+def test_quiet_double_talk_survives_a_render_delay_change(
+    tmp_path: Path, switch_time: float, shorter_delay: bool
+) -> None:
+    """재생 경로가 블록 안·경계 양쪽에서 바뀌어도 작은 발화와 출력 시간을 보존한다."""
+    duration = 31 * RATE
+    far = _bandlimited(772, duration)
+    far *= (0.6 + 0.4 * np.sin(np.arange(duration) * 7 / RATE)).astype(np.float32)
+    room = np.zeros(850)
+    room[217:224] = np.array([1, 3, 4, 5, 4, 3, 1]) / 34
+    room[812:816] = [0.07, 0.12, 0.11, 0.03]
+    original_echo = np.convolve(far, room)[:duration]
+    pivot = round(switch_time * RATE)
+    shift = round(0.0734 * RATE)
+    delayed = np.pad(original_echo, (shift, 0))[:duration]
+    before, after = (delayed, original_echo) if shorter_delay else (original_echo, delayed)
+    echo = np.concatenate((before[:pivot], after[pivot:]))
+    near = np.zeros(duration)
+    overlap = slice(pivot - RATE, pivot + 3 * RATE)
+    near[overlap] = 0.047 * _bandlimited(827, 4 * RATE)
+    source = tmp_path / "switch.wav"
+    with sf.SoundFile(source, "w", channels=2, samplerate=RATE, subtype="PCM_16") as f:
+        f.comment = RECORDING_TRACK_COMMENT
+        f.write(np.column_stack((echo + near, far)))
+    original = source.read_bytes()
+    with open_audio_path_no_symlinks(source) as (_, identity):
+        tracks = extract_recording_tracks(
+            source,
+            tmp_path,
+            (MIC_CHANNEL, SYSTEM_CHANNEL),
+            identity,
+            echo_settings=SplitTrackProcessingConfig(),
+        )
+    cleaned, _ = sf.read(tracks[MIC_CHANNEL])
+    played, _ = sf.read(tracks[SYSTEM_CHANNEL], dtype="int16")
+    raw, _ = sf.read(source, dtype="int16")
+    np.testing.assert_array_equal(played, raw[:, SYSTEM_CHANNEL])
+    assert source.read_bytes() == original
+    # 경계 바로 바깥의 2초는 새 지연 추정이 적용됐음을 원 파형과 비교한다.
+    steady = slice(pivot + RATE // 20, pivot + 2 * RATE)
+    assert np.linalg.norm(cleaned[steady] - near[steady]) < 0.20 * np.linalg.norm(near[steady])
+    gain = np.dot(cleaned[overlap], near[overlap]) / np.dot(near[overlap], near[overlap])
+    assert gain == pytest.approx(1.0, abs=0.025)
+    far_only = slice(RATE, min(5 * RATE, overlap.start))
+    assert np.linalg.norm(cleaned[far_only]) < 0.002 * np.linalg.norm(echo[far_only])
+
+
+def test_post_gain_vad_cannot_restore_below_floor_replay_between_two_quiet_turns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정규화 후 VAD가 전 구간을 선택해도 마이크 잔향만 있는 시간은 다시 전사하지 않는다."""
+    far = _bandlimited(398, 10 * RATE)
+    echo = np.pad(far, (511, 0))[: len(far)] * 0.71
+    mic = echo.copy()
+    for start in (2, 5):
+        mic[start * RATE : (start + 1) * RATE] += 0.07 * _bandlimited(start, RATE)
+    source = tmp_path / "two-turns.wav"
+    with sf.SoundFile(source, "w", channels=2, samplerate=RATE, subtype="PCM_16") as f:
+        f.comment = RECORDING_TRACK_COMMENT
+        f.write(np.column_stack((mic, far)))
+    settings = SplitTrackProcessingConfig()
+    with open_audio_path_no_symlinks(source) as (_, identity):
+        tracks = extract_recording_tracks(
+            source, tmp_path, (MIC_CHANNEL, SYSTEM_CHANNEL), identity, echo_settings=settings
+        )
+    monkeypatch.setattr(
+        "core.recording_channels._detect_recording_speech", lambda *_: [(0.0, 10.0)]
+    )
+    local = prepare_recording_track(tracks[MIC_CHANNEL], settings, -40)
+    remote = prepare_recording_track(tracks[SYSTEM_CHANNEL], settings, -40)
+    assert local is not None and remote is not None
+    assert local.clip_timestamps == pytest.approx((1.55, 3.45, 4.55, 6.45), abs=0.03)
+    assert remote.clip_timestamps == (0.0, 10.0)
+
+
+def test_reflected_speech_drops_below_colored_noise_after_silent_delay_change() -> None:
+    """약한 배경 소음을 보존하면서 소음과 비슷하게 남던 상대 발화 잔향을 줄인다."""
+    size = 24 * RATE
+    t = np.arange(size) / RATE
+    rng = np.random.default_rng(458)
+
+    def voiced(seed: int, pitch: int) -> np.ndarray:
+        """음높이·음절 에너지·숨소리가 변하는 광대역 유성음을 만든다."""
+        phase = 2 * np.pi * np.cumsum(pitch + 16 * np.sin(t * 2.4) + 8 * np.sin(t * 5.12)) / RATE
+        harmonics = sum(np.sin(phase * i + 0.1 * i) / i**0.9 for i in range(1, 23)) * 0.09
+        breath = np.convolve(
+            np.random.default_rng(seed).normal(0, 0.014, size),
+            [0.15, 0.3, 0.45, 0.3, 0.15],
+            "same",
+        )
+        syllables = 0.10 + 0.90 * (0.5 + 0.5 * np.sin(t * 14.4 + np.sin(t * 3))) ** 1.5
+        return ((harmonics + breath) * syllables).astype(np.float32)
+
+    far = voiced(31, 183)
+    far[(t < 1) | ((t >= 7) & (t < 10)) | (t >= 23)] = 0
+    near = 0.14 * voiced(8, 132)
+    overlap = (t >= 10) & (t < 17.8)
+    near[~overlap] = 0
+    noise = np.convolve(rng.standard_normal(size), 0.76 ** np.arange(44), "same")
+    noise *= np.linalg.norm(near[overlap]) / np.linalg.norm(noise[overlap]) * 10 ** (-14 / 20)
+    reflected = np.zeros(size)
+    for offset, gain in ((0, 0.49), (361, 0.14), (819, -0.09)):
+        impulse = np.array([0.14, 0.36, 0.36, 0.14]) * gain
+        reflected[offset:] += np.convolve(far, impulse)[: size - offset]
+    switch = 9 * RATE
+    echo = np.concatenate(
+        (np.pad(reflected, (432, 0))[:switch], np.pad(reflected, (1904, 0))[switch:size])
+    )
+    cleaned, applied = suppress_recording_echo(
+        (near + noise + echo).astype(np.float32),
+        np.pad(far, (HISTORY, 0)),
+        RATE,
+    )
+    assert applied
+    error = cleaned - near - noise
+    only_remote = (t >= 1) & (t < 7)
+    assert np.linalg.norm(error[only_remote]) < 0.15 * np.linalg.norm(noise[only_remote])
+    assert np.linalg.norm(error[overlap]) < 0.18 * np.linalg.norm(near[overlap])

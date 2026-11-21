@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
@@ -31,6 +31,7 @@ from api.dependencies import (
     get_meeting_mutation_coordinator as _get_meeting_mutation_coordinator,
 )
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
+from api.dependencies import require_unexpired_audio
 from core.audio_quality import (
     AudioFailureKind,
     AudioQualityStatus,
@@ -59,6 +60,7 @@ from core.job_queue import (
     retranscribe_staging_paths,
     rollback_retranscribe_staging,
 )
+from core.meeting_progress import recording_start
 from core.mic_echo_review import find_mic_echo_candidates
 from core.recording_channels import SELF_SPEAKER
 from core.user_settings import VocabularyCorrection
@@ -1134,17 +1136,6 @@ def _write_retranscribe_recovery_marker(
         os.close(root_fd)
 
 
-def recording_start(meeting_id: str) -> datetime | None:
-    """녹음기와 Zoom 가져오기가 파일명에 보존한 로컬 시작 시각을 읽는다."""
-    match = re.match(r"^meeting_(\d{8}_\d{6})(?:_| \(\d+\)$|$)", meeting_id)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match[1], "%Y%m%d_%H%M%S")
-    except ValueError:
-        return None
-
-
 def _build_meeting_item(
     job: Any,
     *,
@@ -1198,6 +1189,8 @@ def _build_meeting_item(
         id=job.id,
         meeting_id=job.meeting_id,
         audio_path=job.audio_path,
+        audio_expired_at=getattr(job, "audio_expired_at", ""),
+        audio_retention_pending=getattr(job, "audio_retention_pending", False) is True,
         status=response_status,
         retry_count=job.retry_count,
         error_message=(pipeline_state or {}).get("error_message", "")
@@ -1300,6 +1293,8 @@ class MeetingItem(BaseModel):
     meeting_id: str
     audio_path: str
     status: str
+    audio_expired_at: str = ""
+    audio_retention_pending: bool = False
     retry_count: int = 0
     error_message: str = ""
     created_at: str = ""
@@ -1515,6 +1510,7 @@ async def open_meeting_audio_folder(request: Request, meeting_id: str) -> Meetin
     job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
     if job is None:
         raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    require_unexpired_audio(job)
     path = _require_audio_in_config_base(config, Path(job.audio_path))
     try:
         await asyncio.to_thread(inspect_audio_path_no_symlinks, path)
@@ -1748,6 +1744,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
             require_loopback_server(config, request)
 
         # 완료 산출물 복구가 아니라 실제 파이프라인 재실행일 때만 admission을 요구한다.
+        require_unexpired_audio(job)
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # 재시도 실행 (job_id 기반)
@@ -1915,6 +1912,7 @@ async def transcribe_meeting(
             from api.routers.transcription_models import require_loopback_server
 
             require_loopback_server(config, request)
+        require_unexpired_audio(job)
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # failed → queued 를 한 번의 조건부 UPDATE로 수행해 recorded 중간 상태를
@@ -2167,6 +2165,7 @@ async def re_transcribe_meeting(
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
+        require_unexpired_audio(job)
         allowed_statuses = {JobStatus.COMPLETED.value, JobStatus.FAILED.value}
         if job.status not in allowed_statuses:
             raise HTTPException(
@@ -2527,12 +2526,19 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
         HTTPException: 잘못된 ID 형식 (400), 음성 파일 없음 (404), 설정 미초기화 (503)
     """
     from fastapi.responses import FileResponse, Response, StreamingResponse
+    from starlette.background import BackgroundTask
 
     _validate_meeting_id(meeting_id)
     config = getattr(request.app.state, "config", None)
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
+    queue = getattr(request.app.state, "job_queue", None)
+    if queue is not None:
+        raw_queue = getattr(queue, "queue", queue)
+        require_unexpired_audio(
+            await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+        )
     audio_path = await asyncio.to_thread(_find_meeting_audio_path, config, meeting_id)
     if audio_path is None:
         raise HTTPException(
@@ -2540,14 +2546,31 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
             detail=f"재생 가능한 음성 파일이 없습니다: {meeting_id}",
         )
 
-    file_size = audio_path.stat().st_size
+    # 보관 점검이 동시에 실행돼도 이미 열린 재생 요청은 같은 파일의 끝까지 읽는다.
+    try:
+        source = audio_path.open("rb")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="재생 가능한 음성 파일이 없습니다.") from exc
+    source_stat = os.fstat(source.fileno())
+    file_size = source_stat.st_size
     media_type = _AUDIO_MIME_BY_EXT.get(audio_path.suffix.lower(), "application/octet-stream")
+    headers = dict(
+        FileResponse(audio_path, media_type=media_type, stat_result=source_stat).headers
+    )
+    headers["accept-ranges"] = "bytes"
+    headers["cache-control"] = (
+        "private, no-store"
+        if getattr(getattr(config, "lifecycle", None), "audio_retention_enabled", False) is True
+        else "private, max-age=3600"
+    )
+    length = file_size
 
     # Range 요청 처리
     range_header = request.headers.get("range") or request.headers.get("Range")
     if range_header:
         parsed = _parse_range_header(range_header, file_size)
         if parsed is None:
+            source.close()
             # 416 Range Not Satisfiable — 클라이언트가 잘못된 범위를 요청
             return Response(
                 status_code=416,
@@ -2556,41 +2579,26 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
 
         start, end = parsed
         length = end - start + 1
+        source.seek(start)
+        headers["content-range"] = f"bytes {start}-{end}/{file_size}"
+        headers["content-length"] = str(length)
 
-        def _iter_range():
-            """파일을 64KB 청크로 부분 스트리밍한다."""
-            with open(audio_path, "rb") as f:
-                f.seek(start)
-                remaining = length
-                chunk_size = 64 * 1024
-                while remaining > 0:
-                    chunk = f.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
+    def _iter_audio() -> Iterator[bytes]:
+        """시작 시점에 연 파일에서 요청한 바이트만 보낸다."""
+        with source:
+            remaining = length
+            while remaining:
+                chunk = source.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
 
-        return StreamingResponse(
-            _iter_range(),
-            status_code=206,
-            media_type=media_type,
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(length),
-                # 같은 파일에 대한 반복 seek 시 브라우저 캐시 활용
-                "Cache-Control": "private, max-age=3600",
-            },
-        )
-
-    # 전체 파일 응답 (Range 헤더 없는 첫 요청 또는 단순 다운로드)
-    return FileResponse(
-        path=audio_path,
-        media_type=media_type,
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=3600",
-        },
+    return StreamingResponse(
+        _iter_audio(),
+        status_code=206 if range_header else 200,
+        headers=headers,
+        background=BackgroundTask(source.close),
     )
 
 
@@ -2909,6 +2917,7 @@ async def retry_mic_transcription(request: Request, meeting_id: str) -> dict[str
     if job is None:
         raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
     try:
+        require_unexpired_audio(job)
         state = await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
         if not state["retry_available"]:
             raise HTTPException(

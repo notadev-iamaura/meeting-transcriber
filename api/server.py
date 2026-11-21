@@ -349,7 +349,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 try:
                     from security.lifecycle_scheduler import LifecycleScheduler
 
-                    lifecycle_scheduler = LifecycleScheduler(runtime_config)
+                    lifecycle_scheduler = LifecycleScheduler(
+                        runtime_config,
+                        queue=async_queue,
+                        coordinator=app.state.meeting_mutation_coordinator,
+                    )
                     await lifecycle_scheduler.start()
                     app.state.lifecycle_scheduler = lifecycle_scheduler
                     logger.info("LifecycleScheduler 초기화 완료")

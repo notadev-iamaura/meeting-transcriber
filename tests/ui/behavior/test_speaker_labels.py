@@ -58,14 +58,9 @@ def test_all_views_use_whole_meeting_aliases(
                 const Router={getContentEl:()=>document.querySelector('#fixture'),navigate:()=>{}};
                 const deps={App:MeetingApp,Router,ListPanel:{}};
                 const V=MeetingViewerView.create(deps);
-                const viewer=Object.create(V.prototype);
-                Object.assign(viewer, {_meetingId:'synthetic',_allUtterances:[],_speakerLabels:{},
-                    _speakerColorMap:{},_transcriptSourceStage:'corrected',_transcriptSignature:'',
-                    _initialTimestamp:NaN,_currentQuery:'',_initialQuery:'',_lastMeetingData:null,
-                    _stopUtterancePlayback:()=>{},_renderTranscriptSourceStatus:()=>{}});
-                viewer._els={};
-                ['speakerLegend','timeline','searchInfo','searchPrev','searchNext','transcriptEmpty',
-                 'metaSpeakers','metaUtterances','tabNav','searchBar','searchInput'].forEach(k=>viewer._els[k]=make());
+                // 합성 API 응답을 직접 적용하고 뷰의 상태와 DOM은 앱과 동일하게 초기화한다.
+                V.prototype._loadData=()=>{};
+                const viewer=new V('synthetic');
                 // API speakers의 임의 순서가 전체 발화에 결합된 번호를 바꾸지 않아야 한다.
                 const speakers=Object.keys(labels).filter(s=>s!=='UNKNOWN').reverse();
                 const data={utterances,speakers,source_stage:'corrected'};

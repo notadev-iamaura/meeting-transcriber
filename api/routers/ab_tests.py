@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from api.dependencies import get_config as _get_config
 from api.dependencies import get_job_queue as _get_job_queue
+from api.dependencies import require_unexpired_audio
 from core import ab_test_store
 from core.ab_test_runner import (
     LlmScope,
@@ -467,6 +468,7 @@ async def start_stt_ab_test(
             status_code=404,
             detail=f"회의를 찾을 수 없습니다: {body.source_meeting_id}",
         )
+    require_unexpired_audio(source_job)
     if str(getattr(source_job, "status", "") or "") != "completed":
         raise HTTPException(
             status_code=409,

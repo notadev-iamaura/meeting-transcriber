@@ -541,7 +541,7 @@ def test_viewer_recorded_meeting_has_one_off_transcription_model_selection() -> 
         ) : viewer_view.index("ViewerView.prototype._transcribeMeeting")
     ]
 
-    assert 'if (data.status === "recorded") {' in viewer_view
+    assert 'if (data.status === "recorded" && !data.audio_expired_at) {' in viewer_view
     assert 'transcribeBtn.setAttribute("aria-haspopup", "dialog")' in viewer_view
     assert "이 회의 전사 시작" in start_flow
     assert "이 선택은 이 회의에만 적용되며 기본 전사 모델은 바뀌지 않습니다." in start_flow

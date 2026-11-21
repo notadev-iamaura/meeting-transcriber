@@ -638,7 +638,8 @@
             var pending = this._micRequestPending || status === "retry_queued" || status === "retrying";
             var failed = ["empty", "low_volume", "partial", "retry_failed"].indexOf(status) !== -1;
             var finished = this._micRetryObserved && (status === "complete" || status === "no_speech");
-            var visible = pending || failed || finished || Boolean(this._micRequestError);
+            var visible = !(this._lastMeetingData && this._lastMeetingData.audio_expired_at) &&
+                (pending || failed || finished || Boolean(this._micRequestError));
             var uncovered = Array.isArray(data.uncovered_intervals) ? data.uncovered_intervals.filter(function (interval) {
                 return Array.isArray(interval) && interval.length === 2 &&
                     Number.isFinite(interval[0]) && Number.isFinite(interval[1]) &&
@@ -984,7 +985,7 @@
                     '<rect x="2.5" y="2.5" width="7" height="7" rx="1" fill="currentColor"/></svg>';
 
                 header.appendChild(timeEl);
-                header.appendChild(playBtn);
+                if (!self._lastMeetingData || !self._lastMeetingData.audio_expired_at) header.appendChild(playBtn);
                 var remoteIndex = self._micEchoCandidates[utteranceIndex];
                 var remote = utterances[remoteIndex];
                 if (Number.isInteger(remoteIndex) && remote) {
@@ -1671,7 +1672,15 @@
                 els.meetingStatus.className = "viewer-status " + data.status;
                 App.safeText(els.meetingStatus, App.getStatusLabel(data));
 
-                els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(App.getFileName(data.audio_path)) + '</span>';
+                var audioLabel = App.getFileName(data.audio_path);
+                if (data.audio_expired_at) {
+                    audioLabel = "음성 보관 기간 45일 만료" + (data.audio_retention_pending ? " · 정리 대기" : "");
+                }
+                els.metaFile.innerHTML = Icons.mic + ' <span>' + App.escapeHtml(audioLabel) + '</span>';
+                if (data.audio_expired_at) {
+                    self._renderMicTranscription();
+                    els.timeline.querySelectorAll(".utterance-play-btn").forEach(function (btn) { btn.remove(); });
+                }
                 if (data.stt_provider) {
                     var processingLocation = data.stt_provider === "openai"
                         ? "OpenAI 서버"
@@ -1936,7 +1945,7 @@
             });
 
             // 부분 전사문이 있어도 실패 원인과 복구 안내를 숨기지 않는다.
-            if (data.status === "failed") {
+            if (data.status === "failed" && !data.audio_expired_at) {
                 var failure = document.createElement("div");
                 failure.className = "viewer-failure-notice";
                 failure.setAttribute("role", "alert");
@@ -2008,7 +2017,7 @@
             morePanel.appendChild(secondaryGroup);
             morePanel.appendChild(dangerGroup);
             var micState = self._micTranscription;
-            if (micState && micState.retry_available === true && !self._micRequestPending &&
+            if (!data.audio_expired_at && micState && micState.retry_available === true && !self._micRequestPending &&
                     (micState.status === "complete" || micState.status === "unknown")) {
                 var micRetryBtn = document.createElement("button");
                 micRetryBtn.type = "button";
@@ -2025,7 +2034,7 @@
             folderBtn.disabled = self._audioFolderPending || !data.audio_path;
             folderBtn.title = "원본 녹음 파일이 있는 폴더를 Finder에서 엽니다.";
             folderBtn.addEventListener("click", function () { self._openAudioFolder(); });
-            primaryGroup.appendChild(folderBtn);
+            if (!data.audio_expired_at) primaryGroup.appendChild(folderBtn);
 
             var aiTitleBtn = document.createElement("button");
             aiTitleBtn.type = "button";
@@ -2059,7 +2068,7 @@
             }
 
             // 녹음 완료 시 전사 시작 버튼
-            if (data.status === "recorded") {
+            if (data.status === "recorded" && !data.audio_expired_at) {
                 var transcribeBtn = document.createElement("button");
                 transcribeBtn.className = "viewer-action-btn transcribe";
                 transcribeBtn.innerHTML = Icons.play + ' 전사 시작';
@@ -2072,7 +2081,7 @@
             }
 
             // 실패 시 이어서 재시도 버튼
-            if (data.status === "failed") {
+            if (data.status === "failed" && !data.audio_expired_at) {
                 var retryBtn = document.createElement("button");
                 retryBtn.className = "viewer-action-btn retry";
                 retryBtn.textContent = "\u21BB " + (data.retry_label || "실패한 단계부터 다시 시도");
@@ -2089,7 +2098,7 @@
             }
 
             // 재전사 버튼 (완료/실패 회의를 처음부터 다시 전사)
-            if (data.status === "completed" || data.status === "failed") {
+            if (!data.audio_expired_at && (data.status === "completed" || data.status === "failed")) {
                 var reBtn = document.createElement("button");
                 reBtn.className = "viewer-action-btn retranscribe";
                 reBtn.innerHTML = "↻ 처음부터 다시 전사";
@@ -2106,7 +2115,7 @@
             }
 
             // 기존 결과를 보존하고 로컬/OpenAI 전사 결과를 별도 A/B 작업으로 비교한다.
-            if (data.status === "completed") {
+            if (data.status === "completed" && !data.audio_expired_at) {
                 var alternateModelBtn = document.createElement("button");
                 alternateModelBtn.className = "viewer-action-btn alternate-transcription";
                 alternateModelBtn.textContent = "다른 모델로 텍스트 변환하기…";
@@ -3667,6 +3676,10 @@
                 els.pipelineStatus.classList.remove("error");
             }
 
+            if (meeting && meeting.audio_expired_at) {
+                setEmpty("저장된 전사문이 없습니다", "녹음 보관 기간 45일이 지나 새로 전사할 수 없습니다.");
+                return;
+            }
             if (status === "recorded") {
                 setEmpty(
                     "전사 시작 대기 중",

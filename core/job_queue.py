@@ -20,6 +20,7 @@ import os
 import sqlite3
 import stat
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -130,10 +131,14 @@ class Job:
     stt_provider: str = ""
     stt_model: str = ""
     last_nightly_window: str = ""
+    audio_expired_at: str = ""
+    audio_retention_pending: bool = False
 
 
 def nightly_transcription_exclusion(job: Job, window: str) -> str:
     """현재 저장된 작업을 이 예약 창에서 등록할 수 없는 이유를 반환한다."""
+    if getattr(job, "audio_expired_at", ""):
+        return "음성 보관 기간 만료"
     if job.error_message.startswith("사용자가 취소함"):
         return "사용자 취소"
     if job.last_nightly_window == window:
@@ -1388,7 +1393,9 @@ class JobQueue:
         requested_action TEXT NOT NULL DEFAULT '',
         stt_provider TEXT NOT NULL DEFAULT '',
         stt_model TEXT NOT NULL DEFAULT '',
-        last_nightly_window TEXT NOT NULL DEFAULT ''
+        last_nightly_window TEXT NOT NULL DEFAULT '',
+        audio_expired_at TEXT NOT NULL DEFAULT '',
+        audio_retention_plan TEXT NOT NULL DEFAULT ''
     )
     """
 
@@ -1569,6 +1576,9 @@ class JobQueue:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN last_nightly_window TEXT NOT NULL DEFAULT ''"
             )
+        for column in ("audio_expired_at", "audio_retention_plan"):
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         """sqlite3.Row를 Job 데이터 클래스로 변환한다.
@@ -1600,6 +1610,7 @@ class JobQueue:
             last_nightly_window = row["last_nightly_window"]
         except (KeyError, IndexError):
             last_nightly_window = ""
+        fields = frozenset(row.keys())
 
         return Job(
             id=row["id"],
@@ -1616,6 +1627,10 @@ class JobQueue:
             stt_provider=stt_provider or "",
             stt_model=stt_model or "",
             last_nightly_window=last_nightly_window or "",
+            audio_expired_at=row["audio_expired_at"] if "audio_expired_at" in fields else "",
+            audio_retention_pending=bool(row["audio_retention_plan"])
+            if "audio_retention_plan" in fields
+            else False,
         )
 
     def add_job(
@@ -1765,6 +1780,61 @@ class JobQueue:
         rows = conn.execute("SELECT * FROM jobs ORDER BY meeting_id DESC").fetchall()
 
         return [self._row_to_job(row) for row in rows]
+
+    def claim_audio_retention(self, job: Job, expired_at: str, plan: str) -> bool:
+        """음성 작업과 경합 없이 대상 파일 지문을 먼저 확정한다. 기존 작업 상태는 보존한다."""
+        if job.status not in {JobStatus.RECORDED, JobStatus.FAILED, JobStatus.COMPLETED}:
+            return False
+        if _has_durable_requested_action(job.requested_action):
+            return False
+        conn = self._ensure_connection()
+        with self._write_lock, conn:
+            changed = conn.execute(
+                "UPDATE jobs SET audio_expired_at=?, audio_retention_plan=? "
+                "WHERE id=? AND meeting_id=? AND audio_path=? AND created_at=? "
+                "AND status=? AND requested_action=? AND audio_expired_at=''",
+                (
+                    expired_at,
+                    plan,
+                    job.id,
+                    job.meeting_id,
+                    job.audio_path,
+                    job.created_at,
+                    job.status,
+                    job.requested_action,
+                ),
+            )
+            return changed.rowcount == 1
+
+    def finish_audio_retention(
+        self, job: Job, remove_audio: Callable[[str, list[tuple[str, str]]], str]
+    ) -> bool:
+        """새 참조·상태 변경을 막고 확정된 파일만 제거한다. 실패 시 지문은 DB에 남긴다."""
+        conn = self._ensure_connection()
+        with self._write_lock, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT audio_retention_plan, requested_action FROM jobs WHERE id=? "
+                "AND meeting_id=? AND audio_path=? AND audio_expired_at<>'' "
+                "AND status IN ('completed','failed','recorded')",
+                (job.id, job.meeting_id, job.audio_path),
+            ).fetchone()
+            if (
+                not row
+                or not row["audio_retention_plan"]
+                or _has_durable_requested_action(row["requested_action"])
+            ):
+                return False
+            remaining_recordings = [
+                (other["meeting_id"], other["audio_path"])
+                for other in conn.execute(
+                    "SELECT meeting_id, audio_path FROM jobs WHERE id<>? AND audio_expired_at=''",
+                    (job.id,),
+                )
+            ]
+            remaining = remove_audio(row["audio_retention_plan"], remaining_recordings)
+            conn.execute("UPDATE jobs SET audio_retention_plan=? WHERE id=?", (remaining, job.id))
+            return not remaining
 
     def update_title(self, meeting_id: str, title: str) -> Job:
         """회의의 사용자 정의 제목을 업데이트한다.
@@ -1989,7 +2059,7 @@ class JobQueue:
                             requested_action = '',
                             error_message = '',
                             updated_at = ?
-                        WHERE id = ? AND status = ? AND requested_action = ?
+                        WHERE id = ? AND status = ? AND requested_action = ? AND audio_expired_at=''
                         """,
                         (
                             new_status.value,
@@ -2257,6 +2327,7 @@ class JobQueue:
                     updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ? AND error_message = ?
                     AND retry_count = ? AND last_nightly_window = ? AND stt_provider = ?
+                    AND audio_expired_at=''
                 """,
                 (
                     JobStatus.QUEUED.value,
@@ -2307,7 +2378,7 @@ class JobQueue:
             }:
                 raise InvalidTransitionError(job_id, str(row["status"]), JobStatus.QUEUED.value)
             cursor = conn.execute(
-                "UPDATE jobs SET status = ?, requested_action = ?, stt_provider = ?, stt_model = ?, error_message = '', updated_at = ? WHERE id = ? AND status = ? AND requested_action = ?",
+                "UPDATE jobs SET status = ?, requested_action = ?, stt_provider = ?, stt_model = ?, error_message = '', updated_at = ? WHERE id = ? AND status = ? AND requested_action = ? AND audio_expired_at=''",
                 (
                     JobStatus.QUEUED.value,
                     MIC_RETRY_ACTION,
@@ -2364,6 +2435,7 @@ class JobQueue:
                     error_message = '',
                     updated_at = ?
                 WHERE id = ? AND status = ?
+                    AND audio_expired_at=''
                 """,
                 (
                     JobStatus.QUEUED.value,
@@ -2433,7 +2505,7 @@ class JobQueue:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
-                    f"SELECT id, status FROM jobs WHERE id IN ({placeholders})",
+                    f"SELECT id, status FROM jobs WHERE id IN ({placeholders}) AND audio_expired_at=''",
                     tuple(unique_ids),
                 ).fetchall()
                 if len(rows) != len(unique_ids) or any(
@@ -2585,6 +2657,7 @@ class JobQueue:
                 UPDATE jobs
                 SET status = ?, requested_action = ?, error_message = '', updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ?
+                    AND audio_expired_at=''
                 """,
                 (
                     JobStatus.RECORDED.value,
@@ -2717,6 +2790,7 @@ class JobQueue:
                 UPDATE jobs
                 SET status = ?, requested_action = ?, error_message = '', updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ?
+                    AND audio_expired_at=''
                 """,
                 (
                     JobStatus.RECORDING.value,
@@ -2836,6 +2910,7 @@ class JobQueue:
                         WHEN 'nightly_transcribe' THEN 'transcribe' ELSE requested_action END,
                     error_message = '', updated_at = ?
                 WHERE id = ? AND status = ? AND retry_count = ?
+                    AND audio_expired_at=''
                 """,
                 (
                     JobStatus.QUEUED.value,
@@ -2917,6 +2992,7 @@ class JobQueue:
                     UPDATE jobs
                     SET status = ?, error_message = ?, updated_at = ?
                     WHERE id = ? AND status = ? AND requested_action = ?
+                        AND (audio_expired_at='' OR ? IN ('completed','failed'))
                     """,
                     (
                         new_status.value,
@@ -2925,6 +3001,7 @@ class JobQueue:
                         job_id,
                         current_status,
                         current_action,
+                        new_status.value,
                     ),
                 )
             if cursor.rowcount != 1:
@@ -2969,6 +3046,7 @@ class JobQueue:
                 UPDATE jobs
                 SET status = ?, requested_action = ?, error_message = '', updated_at = ?
                 WHERE id = ? AND status = ? AND requested_action = ?
+                    AND audio_retention_plan=''
                 """,
                 (
                     JobStatus.RECORDING.value,
@@ -3214,7 +3292,7 @@ class JobQueue:
                 """
                 UPDATE jobs
                 SET status = ?, requested_action = ?, error_message = '', updated_at = ?
-                WHERE id = ? AND status = ? AND requested_action = ?
+                WHERE id = ? AND status = ? AND requested_action = ? AND audio_expired_at=''
                 """,
                 (
                     JobStatus.RECORDING.value,
@@ -3375,7 +3453,7 @@ class JobQueue:
                 """
                 UPDATE jobs
                 SET status = ?, requested_action = ?, updated_at = ?
-                WHERE id = ? AND status = ? AND requested_action = ?
+                WHERE id = ? AND status = ? AND requested_action = ? AND audio_expired_at=''
                 """,
                 (
                     JobStatus.RECORDING.value,
@@ -3515,7 +3593,7 @@ class JobQueue:
             rows = conn.execute(
                 """
                 SELECT id FROM jobs
-                WHERE status = ? AND retry_count < max_retries
+                WHERE status = ? AND retry_count < max_retries AND audio_expired_at=''
                 """,
                 (JobStatus.FAILED.value,),
             ).fetchall()
@@ -3533,7 +3611,7 @@ class JobQueue:
                             WHEN 'nightly_transcribe' THEN 'transcribe' ELSE requested_action END,
                         error_message = '',
                         updated_at = ?
-                    WHERE status = ? AND retry_count < max_retries
+                    WHERE status = ? AND retry_count < max_retries AND audio_expired_at=''
                     """,
                     (JobStatus.QUEUED.value, now, JobStatus.FAILED.value),
                 )

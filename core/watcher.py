@@ -928,6 +928,9 @@ class FolderWatcher:
         """legacy row가 자동 audit 대상인지 확인하고 queued 실행을 일시 보류한다."""
         from core.job_queue import JobStatus
 
+        if getattr(job, "audio_expired_at", ""):
+            return False
+
         # 재전사 claim은 startup recovery가 staging·DB를 함께 복구해야
         # 하는 durable transaction이다. nominal ``recording`` 상태뿐 아니라
         # 이전 버전/부분 마이그레이션의 다른 상태에 남아도

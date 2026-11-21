@@ -1,5 +1,7 @@
 """DB 상태와 완료 단계로 목록·상세·접수 기록의 공통 표시를 만든다."""
 
+import re
+from datetime import datetime
 from typing import Any
 
 STEP_LABELS = {
@@ -26,6 +28,17 @@ STATUS_LABELS = {
     "cancelled": "사용자가 취소함",
     "blocked": "입력 검증으로 실행 보류",
 }
+
+
+def recording_start(meeting_id: str) -> datetime | None:
+    """녹음기와 Zoom 가져오기가 파일명에 보존한 로컬 시작 시각을 읽는다."""
+    match = re.match(r"^meeting_(\d{8}_\d{6})(?:_| \(\d+\)$|$)", meeting_id)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match[1], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
 
 
 def effective_meeting_status(status: str, state: dict[str, Any] | None = None) -> str:

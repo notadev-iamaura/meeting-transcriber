@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from config import AppConfig
+from core.job_queue import AsyncJobQueue
+from core.meeting_mutation import MeetingMutationCoordinator
+from security.audio_retention import expire_recording_audio
 from security.lifecycle import LifecycleManager, LifecycleResult
 
 logger = logging.getLogger(__name__)
@@ -24,8 +27,18 @@ class LifecycleScheduler:
     값을 바꾸면 ``update_config`` 로 현재 태스크를 재시작해 새 주기를 즉시 반영한다.
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        queue: AsyncJobQueue | None = None,
+        coordinator: MeetingMutationCoordinator | None = None,
+    ) -> None:
         self._config = config
+        self._queue = queue
+        self._coordinator = coordinator
+        self._retention_task: asyncio.Task[None] | None = None
+        self._config_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._run_lock = asyncio.Lock()
         self.last_started_at: datetime | None = None
@@ -46,6 +59,7 @@ class LifecycleScheduler:
 
     async def start(self, *, run_on_startup: bool | None = None) -> None:
         """설정이 활성화되어 있으면 백그라운드 태스크를 시작한다."""
+        self._start_audio_retention()
         if not self._config.lifecycle.enabled:
             logger.info("LifecycleScheduler 비활성화 (lifecycle.enabled=false)")
             return
@@ -62,6 +76,11 @@ class LifecycleScheduler:
 
     async def stop(self) -> None:
         """백그라운드 태스크를 중지한다."""
+        await self._stop_audio_retention()
+        await self._stop_classification()
+
+    async def _stop_classification(self) -> None:
+        """등급 분류 타이머를 중지한다."""
         if self._task is None:
             return
         self._task.cancel()
@@ -75,12 +94,47 @@ class LifecycleScheduler:
 
     async def update_config(self, config: AppConfig) -> None:
         """새 설정을 반영하고 필요하면 태스크를 재시작한다."""
-        was_running = self.is_running
-        self._config = config
-        if was_running:
-            await self.stop()
-        # run_on_startup은 실제 서버 startup 경로에서만 적용한다.
-        await self.start(run_on_startup=False)
+        async with self._config_lock:
+            self._config = config
+            if not config.lifecycle.audio_retention_enabled:
+                await self._stop_audio_retention()
+            await self._stop_classification()
+            await self.start(run_on_startup=False)
+
+    def _start_audio_retention(self) -> None:
+        """사용자가 활성화한 삭제 점검을 분류 주기와 독립적으로 시작한다."""
+        if not self._config.lifecycle.audio_retention_enabled:
+            return
+        if self._queue is None or self._coordinator is None:
+            raise RuntimeError("음성 보관 기간을 적용할 공유 작업 큐와 회의별 잠금이 필요합니다.")
+        if self._retention_task is None or self._retention_task.done():
+            self._retention_task = asyncio.create_task(
+                self._run_audio_retention(self._queue, self._coordinator),
+                name="audio-retention",
+            )
+
+    async def _stop_audio_retention(self) -> None:
+        """해제 또는 종료 시 진행 중인 파일 작업이 마무리될 때까지 기다린다."""
+        if self._retention_task is None:
+            return
+        self._retention_task.cancel()
+        try:
+            await self._retention_task
+        except asyncio.CancelledError:
+            pass
+        self._retention_task = None
+
+    async def _run_audio_retention(
+        self, queue: AsyncJobQueue, coordinator: MeetingMutationCoordinator
+    ) -> None:
+        """시작·활성화 시 먼저 점검하고, 이후 매시간 보류된 회의까지 재확인한다."""
+        while self._config.lifecycle.audio_retention_enabled:
+            try:
+                result = await expire_recording_audio(self._config, queue, coordinator)
+                logger.info(f"45일 음성 보관 점검 완료: {result}")
+            except Exception:
+                logger.exception("음성 보관 점검 실패. 다음 주기에 다시 확인합니다.")
+            await asyncio.sleep(timedelta(hours=1).total_seconds())
 
     async def run_once(self) -> LifecycleResult:
         """라이프사이클 관리를 1회 실행한다."""

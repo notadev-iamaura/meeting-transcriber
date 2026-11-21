@@ -266,7 +266,8 @@ recording:
 
 # === 데이터 라이프사이클 설정 ===
 lifecycle:
-  enabled: false                            # 자동 분류·보존 점검 여부 (파일은 변경하지 않음)
+  enabled: false                             # 회의 보존 등급 자동 분류
+  audio_retention_enabled: false             # 녹음 후 45일이 지난 회의 음성만 자동 삭제
   hot_days: 30                               # Warm 분류 시작 기준 (일)
   warm_days: 90                              # Cold 분류 시작 기준 (일)
   cold_action: "delete_audio"                # 레거시 수동 정책(자동 실행에서는 미사용)

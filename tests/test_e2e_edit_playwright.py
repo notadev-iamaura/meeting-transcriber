@@ -492,6 +492,67 @@ def test_mic_echo_review_fold_search_and_original(page: Page, test_base_dir: Pat
     assert path.read_bytes() == original
 
 
+def test_audio_retention_settings_persist_and_retry(page: Page) -> None:
+    """실패한 삭제 설정을 재시도하고 다른 창에서 끈 정책을 덮어쓰지 않는다."""
+    setting = "lifecycle_audio_retention_enabled"
+    page.goto(f"{BASE_URL}/app/settings")
+    toggle = page.get_by_role("checkbox", name="녹음 45일 후 음성 자동 삭제")
+    expect(toggle).to_be_enabled()
+    expect(toggle).not_to_be_checked()
+    expect(page.locator("#settingsAudioRetentionHelp")).to_contain_text("기존 녹음")
+    page.locator('label[for="settingsAudioRetention"]').click()
+    expect(toggle).to_be_checked()
+    save = page.get_by_role("button", name="변경사항 저장")
+    page.route("**/api/settings", lambda route: route.fulfill(status=503), times=1)
+    save.click()
+    expect(page.locator("#settingsSaveStatus")).to_contain_text("저장 실패")
+    expect(toggle).to_be_enabled()
+    expect(toggle).to_be_checked()
+    assert page.request.get(f"{BASE_URL}/api/settings").json()[setting] is False
+    save.click()
+    expect(page.locator("#settingsSaveStatus")).to_contain_text("저장 완료")
+    page.reload()
+    expect(toggle).to_be_checked()
+    expect(page.locator("#settingsLifecycleEnabled")).not_to_be_checked()
+
+    # 다른 창에서 자동 삭제를 해제한 뒤 현재 창에서 일반 설정만 저장한다.
+    assert page.request.put(f"{BASE_URL}/api/settings", data={setting: False}).ok
+    page.locator("#settingsTemp").dispatch_event("input")
+    with page.expect_request(
+        lambda req: req.method == "PUT" and req.url.endswith("/api/settings")
+    ) as request:
+        save.click()
+    assert setting not in request.value.post_data_json
+    expect(toggle).not_to_be_checked()
+    assert page.request.get(f"{BASE_URL}/api/settings").json()[setting] is False
+
+
+def test_audio_retention_viewer_keeps_transcript_and_minutes(
+    page: Page, test_base_dir: Path
+) -> None:
+    """음성 만료 후 전사 편집·요약 열람은 허용하고 재생·재전사 동작은 숨긴다."""
+    import sqlite3
+
+    meeting_id = "meeting_20240307_163117"
+    _seed_meeting(test_base_dir, meeting_id)
+    with sqlite3.connect(test_base_dir / "pipeline.db") as connection:
+        connection.execute(
+            "UPDATE jobs SET audio_expired_at=? WHERE meeting_id=?",
+            ("2024-04-21T16:31:17", meeting_id),
+        )
+    page.goto(f"{BASE_URL}/app/viewer/{meeting_id}")
+    expect(page.locator("#viewerMetaFile")).to_contain_text("보관 기간 45일")
+    expect(page.locator("#viewerTimeline .utterance-text")).to_have_count(3)
+    expect(page.locator(".utterance-play-btn, .viewer-action-btn.retranscribe")).to_have_count(0)
+    page.locator(".viewer-more-actions > summary").click()
+    expect(page.get_by_role("button", name="전사문을 클립보드로 복사")).to_be_visible()
+    page.locator(".viewer-more-actions > summary").click()
+    expect(page.locator(".utterance-text").first).to_have_attribute("tabindex", "0")
+    page.get_by_role("tab", name="요약").click()
+    expect(page.locator("#viewerPanelSummary")).to_contain_text("파이선 최신 버전 성능 개선 검토")
+    assert page.request.get(f"{BASE_URL}/api/meetings/{meeting_id}/audio").status == 410
+
+
 def test_openai_failure_visible_with_partial_transcript(
     page: Page, test_base_dir: Path, seeded_meeting_id: str
 ) -> None:

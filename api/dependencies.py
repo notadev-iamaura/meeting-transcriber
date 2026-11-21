@@ -50,6 +50,13 @@ def get_job_queue(request: Request) -> Any:
     return require_state(request, "job_queue", "작업 큐가 초기화되지 않았습니다.")
 
 
+def require_unexpired_audio(job: Any) -> None:
+    """음성 보관 기한이 지난 회의의 재생 및 음성 처리 요청을 거절한다."""
+    expired_at = getattr(job, "audio_expired_at", "")
+    if isinstance(expired_at, str) and expired_at:
+        raise HTTPException(status_code=410, detail="45일 보관 기간이 만료된 음성입니다.")
+
+
 def get_model_manager(request: Request) -> Any:
     """앱의 공유 매니저를 반환하며 오래된 수동 앱 구성도 같은 객체로 연결한다."""
     state = request.app.state

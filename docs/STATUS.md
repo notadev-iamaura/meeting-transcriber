@@ -686,6 +686,9 @@ mlx-vlm은 변경하지 않았습니다. 재현 도구는 `scripts/benchmark_bul
   삭제하지 않는 preserve-only 계약입니다. 동일 UID 프로세스가 namespace를 바꾸는 경쟁에서
   검증한 inode와 제거할 entry를 원자적으로 결합할 수 없으므로 Warm/Cold는 명시적 사유와 함께
   보존합니다. 파괴적 수동 메서드는 별도 capability 없이는 거부합니다.
+- 별도 옵트인 설정 `lifecycle.audio_retention_enabled`는 녹음 시각(알 수 없으면 등록 시각)에서
+  45일이 경과한 회의의 음성을 정리합니다. 분류 점검의 활성화·일수와 독립적으로 앱 시작과
+  설정 활성화 때, 이후 매시간 실행합니다. 음성 만료 후에도 전사·요약 조회와 검색 색인은 유지합니다.
 - 기존 요약 산출물의 `force=true` 재생성도 같은 compare-and-unlink 한계 때문에 어떤 파일도
   삭제하지 않고 산출물 존재 여부와 무관하게 `409 SECURITY_BLOCKED`로 거부합니다.
   웹 UI는 기존 요약에 편집 동작만 노출합니다.

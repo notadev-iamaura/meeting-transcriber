@@ -478,6 +478,7 @@ auto_processing:
         ),
         lifecycle=SimpleNamespace(
             enabled=False,
+            audio_retention_enabled=False,
             hot_days=30,
             warm_days=90,
             cold_action="delete_audio",
@@ -654,6 +655,7 @@ class TestLifecycleSettings:
         assert resp.status_code == 200
         data = resp.json()
         assert data["lifecycle_enabled"] is False
+        assert data["lifecycle_audio_retention_enabled"] is False
         assert data["lifecycle_hot_days"] == 30
         assert data["lifecycle_warm_days"] == 90
         assert data["lifecycle_cold_action"] == "delete_audio"
@@ -686,12 +688,46 @@ class TestLifecycleSettings:
         }.issubset(changed)
         settings = body["settings"]
         assert settings["lifecycle_enabled"] is True
+        assert settings["lifecycle_audio_retention_enabled"] is False
         assert settings["lifecycle_hot_days"] == 14
         assert settings["lifecycle_warm_days"] == 60
         assert settings["lifecycle_interval_hours"] == 12
         assert settings["lifecycle_run_on_startup"] is True
 
-    def test_lifecycle_설정_변경시_scheduler_갱신(self, client: TestClient) -> None:
+    def test_audio_retention_is_independent_and_survives_restart(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """예전 설정을 읽고 삭제 토글만 켜거나 끈 뒤 디스크에서 다시 읽는다."""
+        from config import load_config
+
+        path = tmp_path / "config.yaml"
+        assert load_config(path).lifecycle.audio_retention_enabled is False
+        key = "lifecycle_audio_retention_enabled"
+        for enabled in (True, False):
+            saved = client.put("/api/settings", json={key: enabled})
+            assert saved.status_code == 200, saved.text
+            assert saved.json()["changed_fields"] == [key]
+            assert client.get("/api/settings").json()[key] is enabled
+            config = load_config(path)
+            assert config.lifecycle.audio_retention_enabled is enabled
+            assert config.lifecycle.enabled is False
+
+    def test_audio_retention_rejects_ambiguous_values_and_failed_save(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """잘못된 입력과 디스크 저장 실패로 삭제가 활성화되지 않는다."""
+        key = "lifecycle_audio_retention_enabled"
+        path = tmp_path / "config.yaml"
+        original = path.read_bytes()
+        for value in ("true", 1):
+            assert client.put("/api/settings", json={key: value}).status_code == 422
+        with patch("api.routers.settings._atomic_write_text", side_effect=OSError("disk full")):
+            assert client.put("/api/settings", json={key: True}).status_code == 500
+        assert client.get("/api/settings").json()[key] is False
+        assert path.read_bytes() == original
+
+    @pytest.mark.parametrize("field", ["enabled", "audio_retention_enabled"])
+    def test_lifecycle_설정_변경시_scheduler_갱신(self, client: TestClient, field: str) -> None:
         class _Scheduler:
             def __init__(self) -> None:
                 self.updated = False
@@ -703,11 +739,14 @@ class TestLifecycleSettings:
         scheduler = _Scheduler()
         client.app.state.lifecycle_scheduler = scheduler
 
-        resp = client.put("/api/settings", json={"lifecycle_enabled": True})
+        resp = client.put("/api/settings", json={f"lifecycle_{field}": True})
 
         assert resp.status_code == 200, resp.text
         assert scheduler.updated is True
-        assert scheduler.config.lifecycle.enabled is True
+        assert scheduler.config.lifecycle.audio_retention_enabled is (
+            field == "audio_retention_enabled"
+        )
+        assert scheduler.config.lifecycle.enabled is (field == "enabled")
 
     @pytest.mark.parametrize(
         "payload,expected_detail",

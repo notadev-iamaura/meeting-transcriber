@@ -73,6 +73,79 @@ class TestLifecycleScheduler:
         assert scheduler.last_error is None
 
     @pytest.mark.asyncio
+    async def test_opt_in_expires_audio_and_keeps_searchable_meeting(self, tmp_path: Path) -> None:
+        """실제 설정 전환과 만료 작업 후에도 전사·요약 HTTP 조회와 FTS 검색이 된다."""
+        import json
+
+        import httpx
+        from fastapi import FastAPI
+
+        from api.routes import router
+        from core.job_queue import AsyncJobQueue, JobQueue
+        from core.meeting_mutation import MeetingMutationCoordinator
+        from search.hybrid_search import _search_fts
+        from steps.embedder import EmbeddedChunk, _ensure_fts_table, _store_chunks_fts
+
+        config = _make_config(tmp_path, LifecycleConfig())
+        queue = AsyncJobQueue(JobQueue(config.paths.resolved_pipeline_db))
+        await queue.initialize()
+        lock = MeetingMutationCoordinator()
+        scheduler = LifecycleScheduler(config, queue=queue, coordinator=lock)
+        meeting = "meeting_20200101_090000"
+        source = config.paths.resolved_audio_input_dir / f"{meeting}.wav"
+        source.parent.mkdir()
+        source.write_bytes(b"local retention fixture")
+        await queue.add_job(meeting, str(source), initial_status="completed")
+        checkpoint = config.paths.resolved_checkpoints_dir / meeting
+        checkpoint.mkdir(parents=True)
+        phrase = "예산안을 검토했습니다."
+        (checkpoint / "correct.json").write_text(
+            json.dumps(
+                {"utterances": [{"text": phrase, "start": 0, "end": 2, "speaker": "나"}]},
+                ensure_ascii=False,
+            )
+        )
+        output = config.paths.resolved_outputs_dir / meeting
+        output.mkdir()
+        (output / "meeting_minutes.md").write_text("예산안 검토 완료")
+        database = config.paths.resolved_meetings_db
+        _ensure_fts_table(database)
+        chunk = EmbeddedChunk("retention-fixture", phrase, [], meeting, "2020-01-01", ["나"], 0, 2)
+        _store_chunks_fts([chunk], database, meeting)
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.job_queue = queue
+        app.state.meeting_mutation_coordinator = lock
+        app.state.config = config
+        url = f"/api/meetings/{meeting}"
+        try:
+            await scheduler.start()
+            assert source.exists()
+            enabled = config.model_copy(
+                update={"lifecycle": LifecycleConfig(audio_retention_enabled=True)}
+            )
+            await scheduler.update_config(enabled)
+            async with asyncio.timeout(10):
+                while source.exists():
+                    await asyncio.sleep(0.01)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                assert (await client.get(url)).json()["audio_expired_at"]
+                assert (await client.get(f"{url}/audio")).status_code == 410
+                assert (await client.get(f"{url}/transcript")).json()["utterances"][0][
+                    "text"
+                ] == phrase
+                assert (await client.get(f"{url}/summary")).json()[
+                    "markdown"
+                ] == "예산안 검토 완료"
+            assert _search_fts("예산안을", database, 1, strict=True)[0]["meeting_id"] == meeting
+        finally:
+            await scheduler.stop()
+            await queue.close()
+
+    @pytest.mark.asyncio
     async def test_update_config_does_not_run_startup_cleanup_immediately(
         self,
         tmp_path: Path,

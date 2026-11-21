@@ -40,6 +40,11 @@ async def finish_nightly_write(write: Coroutine[Any, Any, T]) -> T:
     """이미 시작한 WAV·검색 저장은 실제 완료나 복구까지 회의의 쓰기 잠금을 유지한다."""
     if not _in_nightly_run.get():
         return await write
+    return await finish_started_write(write)
+
+
+async def finish_started_write(write: Coroutine[Any, Any, T]) -> T:
+    """취소돼도 이미 시작한 쓰기가 끝날 때까지 호출자가 소유한 회의 잠금을 보존한다."""
     task = asyncio.create_task(write)
     try:
         return await asyncio.shield(task)
