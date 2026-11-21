@@ -218,6 +218,7 @@ async def test_recording_flows_into_one_meeting_and_keeps_speaker_sources(
         (sample,) = _read_pcm_sample(audio_path, channels=1, seconds=34)
         stt_inputs.append(sample)
         assert sample in {8000, 4000}
+        assert bool(kwargs.get("remote_recording_track")) == (sample == 4000)
         prefix = "마이크" if sample == 8000 else "상대방"
         return TranscriptResult(
             segments=[

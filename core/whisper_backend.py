@@ -79,7 +79,12 @@ class ThreadBoundWhisperBackend:
             return False
 
     def transcribe(
-        self, audio: str, *, disjoint_recording_clips: bool = False, **kwargs: Any
+        self,
+        audio: str,
+        *,
+        disjoint_recording_clips: bool = False,
+        remote_recording_track: bool = False,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """호출자 스레드와 무관하게 동일 worker에서 추론한다."""
         if self._closed:
@@ -88,6 +93,12 @@ class ThreadBoundWhisperBackend:
         def run() -> dict[str, Any]:
             logger.debug(f"Whisper 추론 thread={threading.get_ident()}")
             try:
+                if remote_recording_track:
+                    from core.remote_recording_decode import transcribe_remote_recording
+
+                    return transcribe_remote_recording(
+                        self._module.transcribe, audio, kwargs.pop("clip_timestamps"), **kwargs
+                    )
                 if disjoint_recording_clips:
                     return _transcribe_recording_clips(
                         self._module.transcribe, audio, kwargs.pop("clip_timestamps"), **kwargs

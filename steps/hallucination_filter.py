@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
+from bisect import bisect_right
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ def detect_repetition(text: str, threshold: int = 3) -> bool:
 def filter_hallucinations(
     segments: list[Any],
     config: Any,
+    *,
+    speech_intervals: tuple[tuple[float, float], ...] = (),
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """전사 세그먼트에서 환각을 필터링한다.
 
@@ -65,6 +69,7 @@ def filter_hallucinations(
     Args:
         segments: TranscriptSegment 리스트
         config: AppConfig 인스턴스 (hallucination_filter 설정 포함)
+        speech_intervals: 상대 트랙에서 확인한 개별 음성 구간(초)
 
     Returns:
         (필터링된 세그먼트 리스트, 제거된 세그먼트 정보 리스트) 튜플
@@ -98,7 +103,7 @@ def filter_hallucinations(
 
     # 크로스 세그먼트 반복 제거: 연속으로 동일 텍스트가 N회 이상 등장하면 환각
     filtered, cross_removed = _remove_cross_segment_repetitions(
-        filtered, filter_config.repetition_threshold
+        filtered, filter_config.repetition_threshold, speech_intervals
     )
     removed.extend(cross_removed)
 
@@ -111,9 +116,28 @@ def filter_hallucinations(
     return filtered, removed
 
 
+def _independent_repetitions(
+    run: list[Any], speech_intervals: tuple[tuple[float, float], ...]
+) -> set[int]:
+    """별도 음성 구간 안에 한 번만 온전히 들어간 반복 문장의 위치를 찾는다."""
+    if not speech_intervals:
+        return set()
+    by_interval: dict[int, list[int]] = {}
+    for index, seg in enumerate(run):
+        start = getattr(seg, "start", 0.0)
+        end = getattr(seg, "end", start)
+        interval = bisect_right(speech_intervals, (start, math.inf)) - 1
+        if interval >= 0 and start < end <= speech_intervals[interval][1]:
+            by_interval.setdefault(interval, []).append(index)
+    if len(by_interval) < 2:
+        return set()
+    return {indices[0] for indices in by_interval.values() if len(indices) == 1}
+
+
 def _remove_cross_segment_repetitions(
     segments: list[Any],
     threshold: int,
+    speech_intervals: tuple[tuple[float, float], ...] = (),
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """연속으로 동일한 텍스트가 반복되는 세그먼트를 제거한다.
 
@@ -123,12 +147,19 @@ def _remove_cross_segment_repetitions(
     Args:
         segments: 세그먼트 리스트
         threshold: 연속 반복 임계값 (이 수 이상이면 제거)
+        speech_intervals: 시간순으로 분리된 상대 음성 구간
 
     Returns:
         (정리된 세그먼트 리스트, 제거된 세그먼트 정보 리스트) 튜플
     """
     if not segments or threshold < 2:
         return segments, []
+    if any(
+        not (0 <= start < end and math.isfinite(end))
+        or (index > 0 and start <= speech_intervals[index - 1][1])
+        for index, (start, end) in enumerate(speech_intervals)
+    ):
+        speech_intervals = ()
 
     def _normalize(text: str) -> str:
         return " ".join(text.strip().split())
@@ -148,8 +179,12 @@ def _remove_cross_segment_repetitions(
 
         run_length = run_end - i
         if run_length >= threshold:
-            # 연속 반복 구간 전체 제거
-            for seg in segments[i:run_end]:
+            run = segments[i:run_end]
+            spoken = _independent_repetitions(run, speech_intervals)
+            for index, seg in enumerate(run):
+                if index in spoken:
+                    result.append(seg)
+                    continue
                 removed.append(
                     {
                         "text": getattr(seg, "text", ""),
@@ -158,12 +193,13 @@ def _remove_cross_segment_repetitions(
                         "reason": f"cross_segment_repetition(run={run_length}>=threshold={threshold})",
                     }
                 )
-            logger.warning(
-                f"크로스 세그먼트 반복 제거: {run_length}회 연속 동일 텍스트 "
-                f"[{getattr(segments[i], 'start', 0.0):.1f}"
-                f"~{getattr(segments[run_end - 1], 'end', 0.0):.1f}s] "
-                f'"{current_text[:50]}"'
-            )
+            if len(spoken) < run_length:
+                logger.warning(
+                    f"크로스 세그먼트 반복 제거: {run_length}회 연속 중 {run_length - len(spoken)}개 "
+                    f"[{getattr(segments[i], 'start', 0.0):.1f}"
+                    f"~{getattr(segments[run_end - 1], 'end', 0.0):.1f}s] "
+                    f'"{current_text[:50]}"'
+                )
         else:
             result.extend(segments[i:run_end])
 
