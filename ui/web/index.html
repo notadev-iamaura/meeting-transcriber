@@ -197,7 +197,10 @@
           <strong>내 마이크 발화를 확인해 주세요</strong>
           <p id="micGlobalWarningMessage"></p>
         </div>
-        <button id="micGlobalWarningOpen" class="viewer-action-btn" type="button">해당 회의 확인</button>
+        <div class="mic-global-actions">
+          <button id="micGlobalWarningOpen" class="viewer-action-btn" type="button">해당 회의 확인</button>
+          <button id="micGlobalWarningClose" class="btn-secondary" type="button" aria-label="마이크 알림 닫기">닫기</button>
+        </div>
       </section>
 
       <main id="content">
@@ -230,9 +233,12 @@
     <button class="toast-close" id="errorClose" aria-label="닫기">&#x2715;</button>
   </div>
 
-  <!-- 녹음 상태 플로팅 pill (HUD 최소화 상태) — overlay 가 최소화되었을 때 표시 -->
   <section id="recordingFailure" class="recording-failure" role="alert" aria-live="assertive" aria-labelledby="recordingFailureTitle" hidden>
-    <strong id="recordingFailureTitle">오류로 녹음이 중단됐습니다</strong>
+    <div class="recording-failure-heading">
+      <strong id="recordingFailureTitle">오류로 녹음이 중단됐습니다</strong>
+      <button type="button" class="btn-secondary" id="recordingFailureClose" aria-label="녹음 오류 닫기">닫기</button>
+    </div>
+    <p class="recording-failure-time" id="recordingFailureTime" hidden></p>
     <p id="recordingFailureMessage"></p>
     <p id="recordingFailurePreserved"></p>
     <details id="recordingFailureFiles" hidden>

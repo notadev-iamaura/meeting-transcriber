@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -254,6 +256,29 @@ def test_add_vocabulary_term(isolated_user_data: Path) -> None:
     vocab = us.load_vocabulary(force_reload=True)
     assert len(vocab.terms) == 1
     assert vocab.terms[0].term == "FastAPI"
+
+
+def test_parallel_vocab_forms_and_transcript_saves_keep_every_edit(
+    isolated_user_data: Path,
+) -> None:
+    """동시에 편집기와 설정창에서 등록해도 각 쌍과 수동 항목이 누락되지 않는다."""
+    editors = 8
+    start = threading.Barrier(editors)
+
+    def save(index: int) -> None:
+        start.wait(timeout=5)
+        if index % 2:
+            us.add_vocabulary_term(f"수동용어{index}")
+        else:
+            us.register_vocabulary_corrections(
+                [us.VocabularyCorrection(alias=f"표기{index}", term="정답")]
+            )
+
+    with ThreadPoolExecutor(max_workers=editors) as pool:
+        list(pool.map(save, range(editors)))
+    terms = {item.term: item for item in us.load_vocabulary(force_reload=True).terms}
+    assert set(terms) == {"정답", "수동용어1", "수동용어3", "수동용어5", "수동용어7"}
+    assert set(terms["정답"].aliases) == {"표기0", "표기2", "표기4", "표기6"}
 
 
 def test_add_vocabulary_term_rejects_duplicate(isolated_user_data: Path) -> None:

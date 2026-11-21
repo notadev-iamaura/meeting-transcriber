@@ -38,6 +38,7 @@ aria-label="합성 검증 도구">
 <button data-fixture="record-complete">전사 완료</button>
 <button data-fixture="record-auto-stop">자동 녹음 종료</button>
 <button data-fixture="record-failed">저장 오류</button>
+<button data-fixture="replay-failure">같은 오류 다시 알림</button>
 <button data-fixture="record-stop-failed">정지 오류 준비</button>
 <button data-fixture="late-duration">지연 음량 이벤트</button>
 <button data-fixture="old-failure">이전 녹음 오류</button>
@@ -194,6 +195,8 @@ class AudioRecoveryFixture:
                 "recording_duration",
                 {"meeting_id": f"capture_{self.record_number}", "duration_seconds": 999},
             )
+        elif name == "replay-failure":
+            event("recording_error", dict(reversed(self.failure().items())))
         elif name == "old-failure":
             event("recording_error", {**self.failure(), "meeting_id": "capture_0"})
             event("recording_stopped", {"meeting_id": "capture_0"})
@@ -214,7 +217,9 @@ class AudioRecoveryFixture:
         self.recording = {"is_recording": False, "state": "idle", "last_stop": result}
         return result
 
-    def api(self, path: str, method: str) -> tuple[int, dict[str, Any]]:
+    def api(
+        self, path: str, method: str, payload: dict[str, Any] | None = None
+    ) -> tuple[int, dict[str, Any]]:
         """실제 앱·모델·오디오 파일을 호출하지 않는 합성 응답을 만든다."""
         if path.startswith("/__fixture/"):
             return 200, self.control(path.rsplit("/", 1)[1])
@@ -229,6 +234,12 @@ class AudioRecoveryFixture:
             return 200, self.mic
         if path == "/api/recording/status":
             return 200, self.recording
+        if path == "/api/recording/error/acknowledge":
+            failure = self.recording.get("last_error") or {}
+            matched = payload == {k: failure.get(k) for k in ("meeting_id", "occurred_at")}
+            if matched:
+                failure["acknowledged"] = True
+            return 200, {"acknowledged": matched}
         if path == "/api/recording/stop":
             self.stop_posts += 1
             if self.stop_error:
@@ -283,7 +294,10 @@ def audio_recovery_server(mic_status: str = "empty") -> Iterator[AudioRecoveryFi
             """합성 API 또는 실제 정적 UI를 제공한다."""
             route = urlsplit(self.path).path
             if route.startswith(("/api/", "/__fixture/")):
-                status, data = fixture.api(route, self.command)
+                payload = None
+                if route == "/api/recording/error/acknowledge":
+                    payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                status, data = fixture.api(route, self.command, payload)
                 body, content_type = json.dumps(data).encode(), "application/json"
             elif route.startswith("/static/"):
                 target = (WEB / route.removeprefix("/static/")).resolve()

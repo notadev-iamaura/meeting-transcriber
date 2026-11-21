@@ -818,17 +818,26 @@
                 '  </section>',
                 '  <section class="settings-section">',
                 '    <h3 class="settings-section-title">저장소 관리</h3>',
-                '    <p class="settings-section-desc">오디오를 변경하지 않고 오래된 회의를 Hot/Warm/Cold로 분류해 보존 상태만 점검합니다.</p>',
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleEnabled">자동 보존 점검</label>',
+                '        <label class="setting-label" for="settingsAudioRetention">녹음 45일 후 음성 자동 삭제</label>',
+                '        <label class="setting-toggle">',
+                '          <input type="checkbox" id="settingsAudioRetention" aria-describedby="settingsAudioRetentionHelp" disabled>',
+                '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
+                '        </label>',
+                '      </div>',
+                '    </div>',
+                '    <p class="settings-section-desc" id="settingsAudioRetentionHelp">켜고 저장하면 기존 녹음과 미전사 녹음도 삭제 대상에 포함됩니다. 녹음일을 알 수 없는 가져온 파일은 등록일로 계산합니다. 전사문과 요약은 계속 열고 검색할 수 있습니다. 삭제된 음성은 재생하거나 다시 전사할 수 없습니다.</p>',
+                '    <div class="settings-group">',
+                '      <div class="setting-row">',
+                '        <label class="setting-label" for="settingsLifecycleEnabled">회의 보존 등급 자동 분류</label>',
                 '        <label class="setting-toggle">',
                 '          <input type="checkbox" id="settingsLifecycleEnabled">',
                 '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
                 '        </label>',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleInterval">점검 주기</label>',
+                '        <label class="setting-label" for="settingsLifecycleInterval">분류 주기</label>',
                 '        <div class="setting-number-group">',
                 '          <input type="number" class="setting-input" id="settingsLifecycleInterval" min="1" max="168" step="1">',
                 '          <span class="setting-unit">시간</span>',
@@ -849,7 +858,7 @@
                 '        </div>',
                 '      </div>',
                 '      <div class="setting-row">',
-                '        <label class="setting-label" for="settingsLifecycleRunOnStartup">시작 시 점검</label>',
+                '        <label class="setting-label" for="settingsLifecycleRunOnStartup">시작 시 분류</label>',
                 '        <label class="setting-toggle">',
                 '          <input type="checkbox" id="settingsLifecycleRunOnStartup">',
                 '          <span class="toggle-track"><span class="toggle-thumb"></span></span>',
@@ -913,6 +922,7 @@
                 hfRepetition: document.getElementById("settingsHfRepetition"),
                 hfRepetitionValue: document.getElementById("settingsHfRepetitionValue"),
                 lifecycleEnabled: document.getElementById("settingsLifecycleEnabled"),
+                audioRetention: document.getElementById("settingsAudioRetention"),
                 lifecycleInterval: document.getElementById("settingsLifecycleInterval"),
                 lifecycleHotDays: document.getElementById("settingsLifecycleHotDays"),
                 lifecycleWarmDays: document.getElementById("settingsLifecycleWarmDays"),
@@ -1028,7 +1038,7 @@
             [
                 els.model, els.backend, els.temp, els.skipLlm, els.lang, els.diarizationEngine,
                 els.hfEnabled, els.hfNoSpeech, els.hfCompRatio, els.hfRepetition,
-                els.lifecycleEnabled, els.lifecycleInterval, els.lifecycleHotDays,
+                els.lifecycleEnabled, els.audioRetention, els.lifecycleInterval, els.lifecycleHotDays,
                 els.lifecycleWarmDays, els.lifecycleRunOnStartup,
                 els.autoProcessingEnabled, els.autoProcessingRunAt, els.autoProcessingStopAt,
                 els.autoProcessingRecentHours, els.autoProcessingMaxItems,
@@ -1131,6 +1141,8 @@
                     els.hfRepetitionValue.textContent = data.hf_repetition_threshold;
                 }
                 els.lifecycleEnabled.checked = !!data.lifecycle_enabled;
+                els.audioRetention.checked = data.lifecycle_audio_retention_enabled === true;
+                els.audioRetention.disabled = typeof data.lifecycle_audio_retention_enabled !== "boolean";
                 if (data.lifecycle_interval_hours !== undefined && data.lifecycle_interval_hours !== null) {
                     els.lifecycleInterval.value = data.lifecycle_interval_hours;
                 }
@@ -1535,9 +1547,15 @@
                 auto_processing_action: els.autoProcessingAction.value,
                 auto_processing_run_on_startup_if_missed: els.autoProcessingRunOnStartup.checked,
             };
+            // 다른 창에서 변경된 삭제 정책을 관련 없는 설정 저장으로 덮어쓰지 않는다.
+            if (!els.audioRetention.disabled &&
+                this._settingsData.lifecycle_audio_retention_enabled !== els.audioRetention.checked) {
+                payload.lifecycle_audio_retention_enabled = els.audioRetention.checked;
+            }
+            els.audioRetention.disabled = true;
 
             try {
-                await App.apiRequest("/settings", {
+                var saved = await App.apiRequest("/settings", {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
@@ -1545,7 +1563,8 @@
                 els.saveStatus.textContent = "저장 완료";
                 els.saveStatus.className = "settings-save-status success";
                 this._dirty = false;
-                this._settingsData = Object.assign({}, this._settingsData || {}, payload);
+                this._settingsData = Object.assign({}, this._settingsData || {}, payload, saved && saved.settings);
+                els.audioRetention.checked = this._settingsData.lifecycle_audio_retention_enabled === true;
                 await this._loadAutoProcessingStatus();
                 setTimeout(function () {
                     els.saveStatus.textContent = "변경 전";
@@ -1555,6 +1574,8 @@
                 els.saveStatus.textContent = "저장 실패: " + (err.message || String(err));
                 els.saveStatus.className = "settings-save-status error";
             } finally {
+                els.audioRetention.disabled = !this._settingsData ||
+                    typeof this._settingsData.lifecycle_audio_retention_enabled !== "boolean";
                 els.saveBtn.disabled = false;
                 els.saveBtn.textContent = "변경사항 저장";
             }

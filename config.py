@@ -860,11 +860,16 @@ class RecordingConfig(BaseModel):
 
 
 class LifecycleConfig(BaseModel):
-    """데이터 라이프사이클 분류·보존 점검 설정."""
+    """보존 상태 분류 및 녹음 후 45일 음성 삭제 설정."""
 
     enabled: bool = Field(
         default=False,
         description="자동 라이프사이클 분류·보존 점검 실행 여부.",
+    )
+    audio_retention_enabled: bool = Field(
+        default=False,
+        strict=True,
+        description="녹음 후 45일이 지난 회의 음성 파일을 자동 삭제한다.",
     )
     hot_days: int = Field(default=30, ge=1)
     warm_days: int = Field(default=90, ge=1)

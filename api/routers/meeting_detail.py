@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -17,10 +18,10 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -30,6 +31,7 @@ from api.dependencies import (
     get_meeting_mutation_coordinator as _get_meeting_mutation_coordinator,
 )
 from api.dependencies import get_pipeline_manager as _get_pipeline_manager
+from api.dependencies import require_unexpired_audio
 from core.audio_quality import (
     AudioFailureKind,
     AudioQualityStatus,
@@ -58,7 +60,11 @@ from core.job_queue import (
     retranscribe_staging_paths,
     rollback_retranscribe_staging,
 )
+from core.meeting_progress import recording_start
+from core.mic_echo_review import find_mic_echo_candidates
 from core.recording_channels import SELF_SPEAKER
+from core.user_settings import VocabularyCorrection
+from core.vocabulary_suggestions import suggest_vocabulary_edits
 from steps.embedder import IndexPurgeError, IndexPurgeResult, purge_meeting_index
 from steps.transcriber import (
     AudioAdmissionError,
@@ -1130,17 +1136,6 @@ def _write_retranscribe_recovery_marker(
         os.close(root_fd)
 
 
-def recording_start(meeting_id: str) -> datetime | None:
-    """녹음기와 Zoom 가져오기가 파일명에 보존한 로컬 시작 시각을 읽는다."""
-    match = re.match(r"^meeting_(\d{8}_\d{6})(?:_| \(\d+\)$|$)", meeting_id)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match[1], "%Y%m%d_%H%M%S")
-    except ValueError:
-        return None
-
-
 def _build_meeting_item(
     job: Any,
     *,
@@ -1194,6 +1189,8 @@ def _build_meeting_item(
         id=job.id,
         meeting_id=job.meeting_id,
         audio_path=job.audio_path,
+        audio_expired_at=getattr(job, "audio_expired_at", ""),
+        audio_retention_pending=getattr(job, "audio_retention_pending", False) is True,
         status=response_status,
         retry_count=job.retry_count,
         error_message=(pipeline_state or {}).get("error_message", "")
@@ -1296,6 +1293,8 @@ class MeetingItem(BaseModel):
     meeting_id: str
     audio_path: str
     status: str
+    audio_expired_at: str = ""
+    audio_retention_pending: bool = False
     retry_count: int = 0
     error_message: str = ""
     created_at: str = ""
@@ -1382,12 +1381,18 @@ class TranscriptResponse(BaseModel):
     num_speakers: int = 0
     speakers: list[str] = Field(default_factory=list)
     speaker_labels: dict[str, str] = Field(default_factory=dict)
+    self_speaker_id: str | None = None
+    self_speaker_source: Literal["microphone", "manual", "label"] | None = None
+    self_speaker_revision: str = ""
+    can_set_self_speaker: bool = False
     total_utterances: int = 0
     source_stage: str = "corrected"
     readonly: bool = False
     search_status: str = "legacy"
     summary_needs_review: bool = False
     mic_transcription: dict[str, Any] | None = None
+    mic_echo_candidates: dict[int, int] = Field(default_factory=dict)
+    vocabulary_suggestions: list[VocabularyCorrection] = Field(default_factory=list)
 
 
 class SummaryResponse(BaseModel):
@@ -1505,6 +1510,7 @@ async def open_meeting_audio_folder(request: Request, meeting_id: str) -> Meetin
     job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
     if job is None:
         raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    require_unexpired_audio(job)
     path = _require_audio_in_config_base(config, Path(job.audio_path))
     try:
         await asyncio.to_thread(inspect_audio_path_no_symlinks, path)
@@ -1738,6 +1744,7 @@ async def retry_meeting(request: Request, meeting_id: str) -> MeetingItem:
             require_loopback_server(config, request)
 
         # 완료 산출물 복구가 아니라 실제 파이프라인 재실행일 때만 admission을 요구한다.
+        require_unexpired_audio(job)
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # 재시도 실행 (job_id 기반)
@@ -1905,6 +1912,7 @@ async def transcribe_meeting(
             from api.routers.transcription_models import require_loopback_server
 
             require_loopback_server(config, request)
+        require_unexpired_audio(job)
         await _require_audio_quality_accept(config, Path(job.audio_path))
 
         # failed → queued 를 한 번의 조건부 UPDATE로 수행해 recorded 중간 상태를
@@ -2157,6 +2165,7 @@ async def re_transcribe_meeting(
                 detail=f"회의를 찾을 수 없습니다: {meeting_id}",
             )
 
+        require_unexpired_audio(job)
         allowed_statuses = {JobStatus.COMPLETED.value, JobStatus.FAILED.value}
         if job.status not in allowed_statuses:
             raise HTTPException(
@@ -2517,12 +2526,19 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
         HTTPException: 잘못된 ID 형식 (400), 음성 파일 없음 (404), 설정 미초기화 (503)
     """
     from fastapi.responses import FileResponse, Response, StreamingResponse
+    from starlette.background import BackgroundTask
 
     _validate_meeting_id(meeting_id)
     config = getattr(request.app.state, "config", None)
     if config is None:
         raise HTTPException(status_code=503, detail="서버 설정이 초기화되지 않았습니다.")
 
+    queue = getattr(request.app.state, "job_queue", None)
+    if queue is not None:
+        raw_queue = getattr(queue, "queue", queue)
+        require_unexpired_audio(
+            await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+        )
     audio_path = await asyncio.to_thread(_find_meeting_audio_path, config, meeting_id)
     if audio_path is None:
         raise HTTPException(
@@ -2530,14 +2546,31 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
             detail=f"재생 가능한 음성 파일이 없습니다: {meeting_id}",
         )
 
-    file_size = audio_path.stat().st_size
+    # 보관 점검이 동시에 실행돼도 이미 열린 재생 요청은 같은 파일의 끝까지 읽는다.
+    try:
+        source = audio_path.open("rb")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="재생 가능한 음성 파일이 없습니다.") from exc
+    source_stat = os.fstat(source.fileno())
+    file_size = source_stat.st_size
     media_type = _AUDIO_MIME_BY_EXT.get(audio_path.suffix.lower(), "application/octet-stream")
+    headers = dict(
+        FileResponse(audio_path, media_type=media_type, stat_result=source_stat).headers
+    )
+    headers["accept-ranges"] = "bytes"
+    headers["cache-control"] = (
+        "private, no-store"
+        if getattr(getattr(config, "lifecycle", None), "audio_retention_enabled", False) is True
+        else "private, max-age=3600"
+    )
+    length = file_size
 
     # Range 요청 처리
     range_header = request.headers.get("range") or request.headers.get("Range")
     if range_header:
         parsed = _parse_range_header(range_header, file_size)
         if parsed is None:
+            source.close()
             # 416 Range Not Satisfiable — 클라이언트가 잘못된 범위를 요청
             return Response(
                 status_code=416,
@@ -2546,41 +2579,26 @@ async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
 
         start, end = parsed
         length = end - start + 1
+        source.seek(start)
+        headers["content-range"] = f"bytes {start}-{end}/{file_size}"
+        headers["content-length"] = str(length)
 
-        def _iter_range():
-            """파일을 64KB 청크로 부분 스트리밍한다."""
-            with open(audio_path, "rb") as f:
-                f.seek(start)
-                remaining = length
-                chunk_size = 64 * 1024
-                while remaining > 0:
-                    chunk = f.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
+    def _iter_audio() -> Iterator[bytes]:
+        """시작 시점에 연 파일에서 요청한 바이트만 보낸다."""
+        with source:
+            remaining = length
+            while remaining:
+                chunk = source.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
 
-        return StreamingResponse(
-            _iter_range(),
-            status_code=206,
-            media_type=media_type,
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(length),
-                # 같은 파일에 대한 반복 seek 시 브라우저 캐시 활용
-                "Cache-Control": "private, max-age=3600",
-            },
-        )
-
-    # 전체 파일 응답 (Range 헤더 없는 첫 요청 또는 단순 다운로드)
-    return FileResponse(
-        path=audio_path,
-        media_type=media_type,
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=3600",
-        },
+    return StreamingResponse(
+        _iter_audio(),
+        status_code=206 if range_header else 200,
+        headers=headers,
+        background=BackgroundTask(source.close),
     )
 
 
@@ -2855,28 +2873,25 @@ async def delete_meeting(request: Request, meeting_id: str) -> dict[str, str]:
 @router.get("/meetings/{meeting_id}/mic-transcription")
 async def get_mic_transcription(request: Request, meeting_id: str) -> dict[str, Any]:
     """전사문 유무와 무관하게 마이크 처리 결과와 재시도 상태를 반환한다."""
-    from core.mic_transcription import mic_transcription_status
-
     _validate_meeting_id(meeting_id)
     config = _get_config(request)
     queue = _get_job_queue(request)
     job = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, meeting_id)
     if job is None:
         raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    return await _read_meeting_mic_status(config, meeting_id, job)
+
+
+async def _read_meeting_mic_status(config: Any, meeting_id: str, job: Any) -> dict[str, Any]:
+    """이미 조회한 회의 작업으로 분리 녹음의 처리 결과를 읽는다."""
+    from core.mic_transcription import mic_transcription_status
+
     try:
         return await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
     except (OSError, ValueError, AudioAdmissionError) as exc:
         raise HTTPException(
             status_code=409, detail="마이크 처리 기록을 확인할 수 없습니다."
         ) from exc
-
-
-async def _mic_transcription_for_view(request: Request, meeting_id: str) -> dict[str, Any] | None:
-    """과거 DB 없는 전사도 읽을 수 있도록 보조 상태의 부재를 분리한다."""
-    try:
-        return await get_mic_transcription(request, meeting_id)
-    except HTTPException:
-        return None
 
 
 @router.post(
@@ -2902,6 +2917,7 @@ async def retry_mic_transcription(request: Request, meeting_id: str) -> dict[str
     if job is None:
         raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
     try:
+        require_unexpired_audio(job)
         state = await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
         if not state["retry_available"]:
             raise HTTPException(
@@ -2919,7 +2935,11 @@ async def retry_mic_transcription(request: Request, meeting_id: str) -> dict[str
         await asyncio.to_thread(
             atomic_write_json_pinned,
             status_path,
-            dict(saved, request_id=uuid.uuid4().hex),
+            dict(
+                saved,
+                request_id=uuid.uuid4().hex,
+                separate_mic_transcribed=state["separate_mic_transcribed"],
+            ),
             backup=True,
         )
         try:
@@ -3093,8 +3113,47 @@ async def get_transcript(
                 speakers.append(u.speaker)
 
         from core.search_revision import revision_status
-        from core.speaker_labels import build_speaker_labels
+        from core.speaker_labels import build_speaker_labels, meeting_speaker_labels
 
+        mic = None
+        job = None
+        completed = False
+        try:
+            queue = _get_job_queue(request)
+            raw_queue = getattr(queue, "queue", queue)
+            job = await asyncio.to_thread(raw_queue.get_job_by_meeting_id, meeting_id)
+        except (HTTPException, JobQueueError):
+            # DB가 없는 과거 원문도 계속 읽을 수 있다.
+            pass
+        split = data.get("separate_mic_track") is True
+        mic_known = split
+        try:
+            mic = await _read_meeting_mic_status(config, meeting_id, job)
+            split = split or bool(mic.get("separate_mic_transcribed"))
+            mic_known = split or isinstance(mic.get("separate_mic_transcribed"), bool)
+            completed = mic_known and job is not None and job.status == "completed"
+        except HTTPException:
+            # 마이크 상태가 손상된 회의는 표시만 허용한다.
+            pass
+        try:
+            labels = await asyncio.to_thread(
+                meeting_speaker_labels,
+                config,
+                meeting_id,
+                utterances,
+                microphone_transcript=split if mic_known else None,
+                require_readable=True,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(f"본인 화자 지정 조회 실패: {meeting_id} ({type(exc).__name__})")
+            labels = build_speaker_labels(utterances)
+            completed = False
+        own = next((raw for raw, label in labels.items() if label == SELF_SPEAKER), None)
+        origin: Literal["microphone", "manual", "label"] | None = None
+        if split or (own == SELF_SPEAKER and data.get("mic_retry_id")):
+            origin = "microphone"
+        elif own is not None:
+            origin = "label" if own == SELF_SPEAKER else "manual"
         return TranscriptResponse(
             utterances=utterances,
             meeting_id=meeting_id,
@@ -3104,13 +3163,28 @@ async def get_transcript(
                 else data.get("num_speakers", len(speakers))
             ),
             speakers=speakers,
-            speaker_labels=build_speaker_labels(utterances),
+            speaker_labels=labels,
+            self_speaker_id=own,
+            self_speaker_source=origin,
+            mic_echo_candidates=(
+                await asyncio.to_thread(find_mic_echo_candidates, utterances)
+                if origin == "microphone" and own == SELF_SPEAKER
+                else {}
+            ),
+            self_speaker_revision=hashlib.sha256(raw_candidate.encode()).hexdigest(),
+            can_set_self_speaker=(
+                completed
+                and any(raw != "UNKNOWN" for raw in labels)
+                and source_stage != "transcribe"
+                and not split
+                and SELF_SPEAKER not in labels
+            ),
             total_utterances=len(utterances),
             source_stage=source_stage,
             readonly=readonly,
             search_status=revision_status(config, meeting_id),
             summary_needs_review=bool(data.get("search_revision")),
-            mic_transcription=await _mic_transcription_for_view(request, meeting_id),
+            mic_transcription=mic if job is not None else None,
         )
     except HTTPException:
         raise
@@ -3120,6 +3194,49 @@ async def get_transcript(
             status_code=500,
             detail=f"전사문 조회 중 오류가 발생했습니다: {e}",
         ) from e
+
+
+class SelfSpeakerRequest(BaseModel):
+    """사용자가 본 화자 배치와 지정 상태에 근거해 한 회의의 표시를 바꾼다."""
+
+    speaker_id: str | None
+    expected_self_speaker_id: str | None
+    expected_revision: str
+
+
+@router.put(
+    "/meetings/{meeting_id}/self-speaker",
+    response_model=TranscriptResponse,
+    dependencies=[Depends(_meeting_mutation_lease)],
+)
+async def set_self_speaker(
+    request: Request, meeting_id: str, body: SelfSpeakerRequest
+) -> TranscriptResponse:
+    """원본 발화·검색 인덱스를 유지하고, 완료된 회의에 한해 본인 표시를 지정하거나 해제한다."""
+    from core.speaker_labels import save_self_speaker
+
+    current = await get_transcript(request, meeting_id)
+    if not current.can_set_self_speaker:
+        raise HTTPException(
+            status_code=409, detail="이 전사문에서는 본인 화자를 변경할 수 없습니다."
+        )
+    selected = body.speaker_id
+    if selected is not None and (selected not in current.speaker_labels or selected == "UNKNOWN"):
+        raise HTTPException(status_code=422, detail="전사문에서 확인되는 화자를 선택해 주세요.")
+    if body.expected_revision != current.self_speaker_revision or (
+        body.expected_self_speaker_id != current.self_speaker_id
+        and selected != current.self_speaker_id
+    ):
+        raise HTTPException(
+            status_code=412, detail="전사문 또는 본인 화자가 변경됐습니다. 새로 확인해 주세요."
+        )
+    if selected == current.self_speaker_id:
+        return current
+    try:
+        await asyncio.to_thread(save_self_speaker, _get_config(request), meeting_id, selected)
+    except OSError as exc:
+        raise _artifact_io_http_exception("본인 화자 지정", exc) from exc
+    return await get_transcript(request, meeting_id)
 
 
 @router.get(
@@ -3373,10 +3490,18 @@ class TranscriptUtterancePatch(BaseModel):
     was_corrected: bool = False
 
 
+class VocabularyEditContext(BaseModel):
+    """더블클릭으로 연 발화와 사용자가 편집을 시작한 시점의 문장."""
+
+    utterance_index: int = Field(ge=0)
+    before_text: str = Field(max_length=10000)
+
+
 class TranscriptUpdateRequest(BaseModel):
     """PUT /api/meetings/{meeting_id}/transcript 요청."""
 
     utterances: list[TranscriptUtterancePatch] = Field(..., min_length=1)
+    vocabulary_edit: VocabularyEditContext | None = None
 
 
 class TranscriptReplaceRequest(BaseModel):
@@ -3511,13 +3636,44 @@ async def update_transcript(
 
         existing = await asyncio.to_thread(_load)
 
-        # 발화 목록 교체
-        new_utterances = [u.model_dump() for u in body.utterances]
+        suggestions: list[VocabularyCorrection] = []
+        if body.vocabulary_edit is None:
+            new_utterances = [u.model_dump() for u in body.utterances]
+            existing["num_speakers"] = len(
+                {u["speaker"] for u in new_utterances if u["speaker"] != "UNKNOWN"}
+            )
+        else:
+            # 인라인 저장은 한 행만 바꾼다. 오래 열린 화면의 나머지 행으로
+            # 다른 창의 편집이나 체크포인트의 추가 메타데이터를 덮지 않는다.
+            edit = body.vocabulary_edit
+            index = edit.utterance_index
+            if index >= len(body.utterances):
+                raise HTTPException(status_code=422, detail="수정할 발화가 요청에 없습니다.")
+            new_utterances = existing["utterances"]
+            patch = body.utterances[index]
+            current = new_utterances[index] if index < len(new_utterances) else {}
+            if (
+                current.get("text") not in (edit.before_text, patch.text)
+                or current.get("speaker", "UNKNOWN") != patch.speaker
+                or current.get("start", 0.0) != patch.start
+                or current.get("end", 0.0) != patch.end
+            ):
+                raise HTTPException(
+                    status_code=409, detail="발화가 변경되었습니다. 최신 전사문을 확인해 주세요."
+                )
+            suggestions = suggest_vocabulary_edits(edit.before_text, patch.text)
+            if current["text"] == patch.text:
+                # 응답을 잃어 재시도해도 전사를 다시 쓰거나 재색인을 반복하지 않는다.
+                result = await get_transcript(request, meeting_id)
+                result.vocabulary_suggestions = suggestions
+                return result
+            new_utterances[index] = {
+                **current,
+                "original_text": current.get("original_text", current["text"]),
+                "text": patch.text,
+                "was_corrected": True,
+            }
         existing["utterances"] = new_utterances
-
-        # 화자 수 재계산
-        speakers = sorted({u["speaker"] for u in new_utterances if u["speaker"] != "UNKNOWN"})
-        existing["num_speakers"] = len(speakers)
 
         from core.search_revision import meeting_date
 
@@ -3550,27 +3706,9 @@ async def update_transcript(
         len(new_utterances),
     )
 
-    return TranscriptResponse(
-        utterances=[
-            TranscriptUtteranceItem(
-                text=u["text"],
-                original_text=u.get("original_text", u["text"]),
-                speaker=u["speaker"],
-                start=u["start"],
-                end=u["end"],
-                was_corrected=u.get("was_corrected", False),
-            )
-            for u in new_utterances
-        ],
-        meeting_id=meeting_id,
-        num_speakers=existing.get("num_speakers", 0),
-        speakers=speakers,
-        total_utterances=len(new_utterances),
-        source_stage="corrected" if target.name == "corrected.json" else "correct",
-        readonly=False,
-        search_status="pending",
-        summary_needs_review=True,
-    )
+    result = await get_transcript(request, meeting_id)
+    result.vocabulary_suggestions = suggestions
+    return result
 
 
 @router.post(
@@ -3592,9 +3730,8 @@ async def replace_transcript_pattern(
         1. 편집 대상 전사 파일(correct.json 또는 corrected.json) 로드
         2. 각 발화의 text 에서 `find` 를 `replace` 로 문자열 치환 (대소문자 구분)
         3. 변경된 발화의 `was_corrected=True` 로 마크
-        4. `add_to_vocabulary=True` 면 `core.user_settings.add_vocabulary_term` 또는
-           기존 동일 term 의 aliases 에 find 추가
-        5. 원자적 파일 저장 + 결과 요약 반환
+        4. 수정한 전사 파일을 원자적으로 저장
+        5. `add_to_vocabulary=True`면 바뀐 표기를 용어집에 합치고 결과를 반환
 
     Raises:
         HTTPException 400: 유효하지 않은 meeting_id 또는 빈 find/replace
@@ -3677,30 +3814,13 @@ async def replace_transcript_pattern(
             try:
                 from core import user_settings as _us
 
-                vocab = _us.load_vocabulary(force_reload=True)
-                # 기존에 같은 term 이 있으면 alias 에 find 추가
-                existing_term = None
-                for t in vocab.terms:
-                    if t.term.strip().lower() == body.replace.strip().lower():
-                        existing_term = t
-                        break
-
-                if existing_term is not None:
-                    if body.find not in existing_term.aliases:
-                        new_aliases = list(existing_term.aliases) + [body.find]
-                        _us.update_vocabulary_term(term_id=existing_term.id, aliases=new_aliases)
-                        vocab_action = "alias_added"
-                    else:
-                        vocab_action = "alias_already_exists"
-                    vocab_term_id = existing_term.id
-                else:
-                    new_term = _us.add_vocabulary_term(
-                        term=body.replace,
-                        aliases=[body.find],
-                        note=f"'{meeting_id}' 전사 편집에서 자동 등록",
-                    )
-                    vocab_action = "term_created"
-                    vocab_term_id = new_term.id
+                pairs = [_us.VocabularyCorrection(alias=body.find, term=body.replace)]
+                results = await asyncio.to_thread(
+                    _us.register_vocabulary_corrections,
+                    pairs,
+                    note=f"'{meeting_id}' 전사 편집에서 자동 등록",
+                )
+                vocab_action, vocab_term_id = results[0]
                 logger.info(
                     "용어집 자동 등록: action=%s, term=%s, alias=%s",
                     vocab_action,

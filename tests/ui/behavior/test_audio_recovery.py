@@ -35,6 +35,26 @@ def test_home_mic_warning_opens_the_affected_meeting(browser: Browser) -> None:
             context.close()
 
 
+def test_global_mic_warning_can_close_or_yield_to_the_meeting_sidebar(browser: Browser) -> None:
+    """홈 알림을 닫거나 목록으로 회의에 진입해도 회의별 복구 안내는 보존한다."""
+    with audio_recovery_server() as fixture:
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(f"{fixture.url}/app")
+            _control(page, "mic-warning")
+            page.get_by_role("button", name="마이크 알림 닫기").press("Enter")
+            notice = page.locator("#micGlobalWarning")
+            expect(notice).to_be_hidden()
+            _control(page, "mic-warning")
+            expect(notice).to_be_visible()
+            page.locator(f'.meeting-item[data-meeting-id="{MEETING_ID}"]').click()
+            expect(page.locator("#viewerMicTranscription")).to_be_visible()
+            expect(notice).to_be_hidden()
+        finally:
+            context.close()
+
+
 @pytest.mark.parametrize("initial_status", ["empty", "low_volume"])
 def test_mic_retry_preserves_remote_text_and_refreshes_only_after_success(
     browser: Browser, initial_status: str
@@ -239,7 +259,7 @@ def test_mic_notice_does_not_invent_missing_speech(browser: Browser, initial_sta
 def test_recording_failure_is_persistent_and_late_events_cannot_restart_timer(
     browser: Browser,
 ) -> None:
-    """저장 오류·부분 파일 안내가 유지되고 다음 녹음 성공 시에만 해제된다."""
+    """확인 전에는 새로고침 후에도 오류를 알리고, 새 녹음에서는 과거 이벤트를 무시한다."""
     with audio_recovery_server() as fixture:
         context = browser.new_context()
         page = context.new_page()
@@ -269,6 +289,56 @@ def test_recording_failure_is_persistent_and_late_events_cannot_restart_timer(
             _control(page, "old-failure")
             expect(alert).to_be_hidden()
             expect(page.locator("#recordingOverlay")).to_have_class("recording-overlay visible")
+        finally:
+            context.close()
+
+
+def test_dismissing_a_recording_failure_acknowledges_only_that_incident(browser: Browser) -> None:
+    """닫기는 동일 오류의 재조회·다른 창·재진입에 적용하고 새 오류는 즉시 알린다."""
+    with audio_recovery_server() as fixture:
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.goto(f"{fixture.url}/app")
+            _control(page, "record-start")
+            _control(page, "record-failed")
+            alert = page.locator("#recordingFailure")
+            expect(alert).to_be_visible()
+            expect(alert.locator("#recordingFailureTime")).to_contain_text("중단 시각")
+            other = context.new_page()
+            other.goto(f"{fixture.url}/app/viewer/{MEETING_ID}")
+            expect(other.locator("#recordingFailure")).to_be_visible()
+            with page.expect_response("**/api/recording/error/acknowledge") as ack:
+                alert.get_by_role("button", name="녹음 오류 닫기").click()
+            assert ack.value.json() == {"acknowledged": True}
+            expect(alert).to_be_hidden()
+            expect(other.locator("#recordingFailure")).to_be_hidden()
+            other.close()
+            _control(page, "replay-failure")
+            expect(alert).to_be_hidden()
+            with browser.new_context() as private_window:
+                fresh = private_window.new_page()
+                with fresh.expect_response("**/api/recording/status") as status:
+                    fresh.goto(f"{fixture.url}/app")
+                assert status.value.json()["last_error"]["acknowledged"]
+                expect(fresh.locator("#recordingFailure")).to_be_hidden()
+            with page.expect_response("**/api/recording/status"):
+                page.goto(f"{fixture.url}/app/viewer/{MEETING_ID}")
+            expect(page.locator("#viewerMicTranscription")).to_be_visible()
+            expect(alert).to_be_hidden()
+            assert fixture.recording["last_error"]["partial_files_preserved"]
+            # 동일 회의 식별자라도 다른 시각에 일어난 장애는 다시 알려야 한다.
+            fixture.recording["last_error"]["occurred_at"] = "2026-11-18T12:01:00+09:00"
+            fixture.recording["last_error"]["acknowledged"] = False
+            with page.expect_response("**/api/recording/status"):
+                page.reload()
+            expect(alert).to_be_visible()
+            alert.locator("summary").press("Escape")
+            expect(alert).to_be_hidden()
+            _control(page, "record-start")
+            _control(page, "record-failed")
+            expect(alert).to_be_visible()
+            expect(page.locator("#recordingOutcome")).to_be_hidden()
         finally:
             context.close()
 

@@ -8,8 +8,11 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-_MIN_CORRELATION = 0.73
+# 지연 후보는 주파수 응답이 달라진 스피커 신호까지 찾는다. 실제 차감은 뒤의
+# 독립 검증에서 필터가 마이크 파형을 재현했을 때만 허용한다.
+_MIN_CORRELATION = 0.30
 _MIN_WINDOWS = 4  # 경로 추정과 독립 검증에 각각 두 구간 이상 필요
+_MIN_EXPLAINED_POWER = 0.97  # 파형에 독립적인 음성이 섞이면 경로와 이득을 고정한다.
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,15 @@ class _Window:
     start: int
     delay: int
     sign: float
+
+
+@dataclass(frozen=True)
+class EchoPath:
+    """독립 구간에서 검증된 재생 전달 필터와 그때의 기준 지연."""
+
+    taps: NDArray[np.float64]
+    start_delay: int
+    anchor_delay: int
 
 
 def _fft_size(size: int) -> int:
@@ -54,20 +66,31 @@ def _match_windows(
         )
         if absolute[peak] >= _MIN_CORRELATION and absolute[peak] - alternate >= 0.09:
             windows.append(_Window(start, history - peak, float(np.sign(normalized[peak]))))
-    if len(windows) < _MIN_WINDOWS:
-        return []
+    return windows
+
+
+def _delay_groups(windows: list[_Window], rate: int) -> list[list[_Window]]:
+    """재생 중 경로가 바뀐 시점의 지연 후보도 별도로 검증한다."""
     tolerance = max(1, rate // 500)
-    return max(
-        (
-            [
-                window
-                for window in windows
-                if window.sign == anchor.sign and abs(window.delay - anchor.delay) <= tolerance
-            ]
-            for anchor in windows
-        ),
-        key=len,
-    )
+    groups: list[list[_Window]] = []
+    while len(windows) >= _MIN_WINDOWS and len(groups) < 3:
+        group = max(
+            (
+                [
+                    w
+                    for w in windows
+                    if w.sign == anchor.sign and abs(w.delay - anchor.delay) <= tolerance
+                ]
+                for anchor in windows
+            ),
+            key=len,
+        )
+        if len(group) < _MIN_WINDOWS:
+            break
+        groups.append(group)
+        selected = set(group)
+        windows = [w for w in windows if w not in selected]
+    return groups
 
 
 def _predict(
@@ -87,14 +110,14 @@ def _predict(
     return convolution[start : start + samples]
 
 
-def _fit_sparse_path(
+def _fit_sparse_paths(
     reference: NDArray[np.float32],
     captured: NDArray[np.float64],
     train: list[_Window],
     width: int,
     history: int,
     direct_gain: float,
-) -> NDArray[np.float64]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """뚜렷한 직접음과 소수 반사 지연을 고르고 같은 훈련 구간에서 계수를 다시 맞춘다."""
     played = np.stack(
         [reference[span.start : span.start + width + history] for span in train]
@@ -131,25 +154,85 @@ def _fit_sparse_path(
         )
         residual = (target - design @ coefficients).reshape(captured.shape)
     taps = np.zeros(history + 1, dtype=np.float64)
+    grouped = np.zeros_like(taps)
     if positions and np.sum(np.abs(coefficients)) <= 3.2:
         taps[history - np.array(positions)] = coefficients
+        # 스피커 응답 한 갈래가 여러 샘플에 걸치면 한 점만 추정한 필터에 말소리 잔향이
+        # 남는다. 뚜렷한 갈래의 이웃만 같이 맞춰 독립 잡음·겹말을 학습하는 자유도를 줄인다.
+        grouped = _fit_reflection_clusters(played, captured, residual, positions)
+    return taps, grouped
+
+
+def _fit_reflection_clusters(
+    played: NDArray[np.float64],
+    captured: NDArray[np.float64],
+    residual: NDArray[np.float64],
+    positions: list[int],
+) -> NDArray[np.float64]:
+    """훈련 잔차가 낮은 창에서 인접 반사 계수를 함께 추정한다."""
+    width = captured.shape[1]
+    history = played.shape[1] - width
+    radius = max(1, width // 2000)
+    offsets = np.unique(
+        np.clip(np.array(positions)[:, None] + np.arange(-radius, radius + 1), 0, history)
+    )
+    errors = np.sum(residual**2, axis=1) / np.maximum(np.sum(captured**2, axis=1), 1e-12)
+    order = np.argsort(errors)
+    count = max(2, np.count_nonzero(errors <= max(0.02, 4 * errors[order[0]])))
+    gram = np.zeros((len(offsets), len(offsets)))
+    rhs = np.zeros(len(offsets))
+    for i in order[:count]:
+        design = np.stack([played[i, p : p + width] for p in offsets], axis=1)
+        gram += design.T @ design
+        rhs += design.T @ captured[i]
+    ridge = 1e-5 * max(float(np.trace(gram)) / len(offsets), 1e-9)
+    solution = np.linalg.solve(gram + np.eye(len(offsets)) * ridge, rhs)
+    taps = np.zeros(history + 1, dtype=np.float64)
+    if np.sum(np.abs(solution)) <= 3.2:
+        taps[history - offsets] = solution
     return taps
 
 
-def suppress_recording_echo(
-    mic: NDArray[np.float32], reference: NDArray[np.float32], rate: int
-) -> tuple[NDArray[np.float32], bool]:
-    """검증된 재생 성분만 빼고, 불확실하면 마이크 샘플을 그대로 반환한다.
+def _track_replay_gain(
+    mic: NDArray[np.float32],
+    prediction: NDArray[np.float64],
+    rate: int,
+    training: list[_Window] | None = None,
+) -> NDArray[np.float64]:
+    """예측 신호가 마이크 에너지 대부분을 설명하는 구간을 바탕으로 출력 음량을 추적한다."""
+    frame = max(1, rate // 8)
+    starts = np.arange(0, len(mic), frame)
+    energy = np.add.reduceat(prediction**2, starts)
+    captured = np.add.reduceat(mic.astype(np.float64) ** 2, starts)
+    cross = np.add.reduceat(mic * prediction, starts)
+    gain = cross / np.maximum(1e-15, energy)
+    # 예측한 성분에만 계수를 적용하며 독립된 겹말·잡음에서 계수를 다시 맞추지 않는다.
+    valid = (
+        (cross**2 >= _MIN_EXPLAINED_POWER * captured * energy)
+        & (energy > frame * 1e-9)
+        & (gain >= 0.25)
+        & (gain <= 4.0)
+    )
+    if training is not None:
+        # 검증 파형은 이득 보간의 기준점으로도 쓰지 않는다.
+        valid &= np.logical_or.reduce(
+            [(starts >= w.start) & (starts + frame <= w.start + rate // 2) for w in training]
+        )
+    if not np.any(valid):
+        return prediction
+    return prediction * np.interp(np.arange(len(mic)), starts[valid] + frame / 2, gain[valid])
 
-    reference 앞부분에는 지연 검색에 필요한 이전 샘플이 있다. 필터는 누설이
-    지배적인 후보의 일부에서만 추정하고, 별도 후보에서 검증한 뒤 고정한다.
-    재생·마이크가 함께 커지는 순간에 적응하거나 마이크 전체를 감쇠하지 않는다.
-    """
+
+def _validated_path(
+    mic: NDArray[np.float32],
+    reference: NDArray[np.float32],
+    rate: int,
+    windows: list[_Window],
+    previous: list[EchoPath],
+) -> EchoPath | None:
+    """같은 지연의 후보 중 일부에서 추정하고 나머지에서 전달 경로를 검증한다."""
     history = len(reference) - len(mic)
     width = rate // 2
-    windows = _match_windows(mic, reference, rate, width)
-    if len(windows) < _MIN_WINDOWS:
-        return mic, False
     train, holdout = windows[::2], windows[1::2]
     delay = int(np.median([window.delay for window in train]))
     offset = history - delay
@@ -158,8 +241,8 @@ def suppress_recording_echo(
     ).astype(np.float64)
     captured = np.stack([mic[w.start : w.start + width] for w in train]).astype(np.float64)
     gain = float(np.sum(played * captured) / max(1e-12, np.sum(played**2)))
-    if not 0.01 <= abs(gain) <= 2.5 or np.sign(gain) != train[0].sign:
-        return mic, False
+    if not 0.01 <= abs(gain) <= 2.5:
+        return None
 
     # 직접 성분 외에 방의 짧은 반사도 후보에 넣되, 검증 구간에서 더 나은 경우만 쓴다.
     window = np.hanning(width)
@@ -168,36 +251,142 @@ def suppress_recording_echo(
     y = np.fft.rfft(captured * window, n=size)
     power = np.sum(np.abs(x) ** 2, axis=0)
     transfer = np.sum(np.conj(x) * y, axis=0) / (power + max(1e-12, float(power.mean()) * 0.002))
-    response = np.fft.irfft(transfer, n=size)
-    earlier = min(delay, rate // 125)
-    later = min(history - delay, rate // 10)
-    reflected = np.concatenate((response[size - earlier :], response[: later + 1]))
-    sparse = _fit_sparse_path(reference, captured, train, width, history, gain)
-    candidates = [(np.array([gain]), delay), (reflected, delay - earlier), (sparse, 0)]
-    prediction = None
-    best_error = 0.52
+    # 가장 뚜렷한 상관점이 늦은 반사음일 수 있어 그 앞의 직접음도 함께 추정한다.
+    earlier = min(delay, rate // 10)
+    later = min(history - delay, rate // 5)
+
+    def room_taps(spectrum: NDArray[np.complex128]) -> NDArray[np.float64]:
+        """방의 짧은 선행·후행 반사만 전사용 필터에 포함한다."""
+        response = np.fft.irfft(spectrum, n=size)
+        return np.concatenate((response[size - earlier :], response[: later + 1]))
+
+    reflected = room_taps(transfer)
+    sparse, grouped = _fit_sparse_paths(reference, captured, train, width, history, gain)
+    candidates = [
+        (np.array([gain]), delay),
+        (reflected, delay - earlier),
+        (sparse, 0),
+        (grouped, 0),
+    ]
+
+    # 초기 필터가 설명하는 훈련 구간만 사용해 창 경계에서 어긋난 반사음을 보완한다.
+    # 겹말을 포함한 구간과 검증 구간은 추가 학습에서 제외한다.
+    for _ in range(8):
+        coarse = _predict(reference, reflected, delay - earlier, history, len(mic))
+        fitted = np.stack([coarse[w.start : w.start + width] for w in train])
+        cross = np.sum(captured * fitted, axis=1)
+        fit_power = np.sum(fitted**2, axis=1)
+        ratio = cross / np.maximum(1e-12, fit_power)
+        trusted = (
+            (cross**2 >= _MIN_EXPLAINED_POWER * np.sum(captured**2, axis=1) * fit_power)
+            & (ratio >= 0.25)
+            & (ratio <= 4.0)
+        )
+        if np.count_nonzero(trusted) < 2:
+            break
+        # 잔차가 작은 훈련 구간을 우선해 아주 작은 겹말도 필터에 섞이지 않게 한다.
+        variance = np.sum((captured - ratio[:, None] * fitted) ** 2, axis=1) / np.maximum(
+            fit_power, 1e-12
+        )
+        limit = np.median(variance[trusted])
+        if np.count_nonzero(trusted & (variance <= limit)) >= 2:
+            trusted &= variance <= limit
+        residual = captured[trusted] / ratio[trusted, None] - fitted[trusted]
+        residual_spectrum = np.fft.rfft(residual * window, n=size)
+        basis = x[trusted]
+        power = np.sum(np.abs(basis) ** 2, axis=0)
+        reflected = reflected + room_taps(
+            np.sum(np.conj(basis) * residual_spectrum, axis=0)
+            / (power + max(1e-12, power.mean() * 0.002))
+        )
+    candidates.append((reflected, delay - earlier))
+    # 동일한 방에서 기기 지연만 바뀐 경우, 이전 필터의 시간 위치를 다시 맞춰 검증한다.
+    for path in previous:
+        shift = path.start_delay + delay - path.anchor_delay
+        # 짧아진 경로에서 0초보다 앞에 놓인 필터 여백은 물리적으로 도착할 수 없다.
+        taps = path.taps[max(0, -shift) :]
+        shift = max(0, shift)
+        if len(taps) and shift <= history:
+            estimate = _predict(reference, taps, shift, history, len(mic))
+            candidates.append(
+                (taps, _align_replayed_path(estimate, captured, train, shift, history, rate))
+            )
+    best_path = None
+    best_error = float("inf")
     for taps, start_delay in candidates:
         estimate = _predict(reference, taps, start_delay, history, len(mic))
+        validation = _track_replay_gain(mic, estimate, rate, training=train)
         errors = []
         for span in holdout:
             raw = mic[span.start : span.start + width]
-            residual = raw - estimate[span.start : span.start + width]
+            residual = raw - validation[span.start : span.start + width]
             errors.append(float(np.dot(residual, residual) / max(1e-12, np.dot(raw, raw))))
-        error = float(np.mean(errors))
-        if error < best_error and max(errors) <= 0.80:
-            prediction, best_error = estimate, error
-    if prediction is None:
-        return mic, False
+        # 겹말 한 구간에 우연히 더 맞는 복잡한 필터가 단순한 직접음을 밀어내지 않게 한다.
+        error = float(np.median(errors))
+        if error < best_error * 0.98 and np.mean(errors) < 0.52 and max(errors) <= 0.80:
+            best_path, best_error = EchoPath(taps, start_delay, delay), error
+    return best_path
 
-    # 지연·출력 변경 등으로 빼는 쪽이 신호를 키우는 구간에서는 원본으로 돌아간다.
-    # 비교는 적용 여부에만 사용하며, 겹말에서 필터를 다시 학습하지 않는다.
-    frame = max(1, rate // 8)
+
+def _align_replayed_path(
+    estimate: NDArray[np.float64],
+    captured: NDArray[np.float64],
+    train: list[_Window],
+    shift: int,
+    history: int,
+    rate: int,
+) -> int:
+    """상관 최대점의 미세한 흔들림을 훈련 구간의 차분 파형으로 샘플 단위 보정한다."""
+    margin = max(1, rate // 4000)
+    width = captured.shape[1]
+    target = np.diff(captured[:, margin:-margin], axis=1)
+    best_shift = shift
+    best_score = 0.0
+    for delta in range(max(-margin, -shift), min(margin, history - shift) + 1):
+        probe = np.stack(
+            [estimate[w.start + margin - delta : w.start + width - margin - delta] for w in train]
+        )
+        gradient = np.diff(probe, axis=1)
+        score = np.sum(target * gradient) / np.sqrt(max(1e-15, float(np.sum(gradient**2))))
+        if score > best_score:
+            best_score = score
+            best_shift = shift + delta
+    return best_shift
+
+
+def suppress_recording_echo(
+    mic: NDArray[np.float32],
+    reference: NDArray[np.float32],
+    rate: int,
+    previous: list[EchoPath] | None = None,
+) -> tuple[NDArray[np.float32], bool]:
+    """검증된 재생 필터를 시간별로 선택하고 독립된 마이크 발화는 그대로 유지한다."""
+    groups = _delay_groups(_match_windows(mic, reference, rate, rate // 2), rate)
+    history = len(reference) - len(mic)
+    paths: list[EchoPath] = []
+    for windows in groups:
+        path = _validated_path(mic, reference, rate, windows, paths + (previous or []))
+        if path is not None:
+            paths.append(path)
+    if not paths:
+        return mic, False
+    if previous is not None:
+        previous[:] = paths
+
+    frame = max(1, rate // 50)
     boundaries = np.arange(0, len(mic), frame)
-    compatible = 2 * np.add.reduceat(mic * prediction, boundaries) >= np.add.reduceat(
-        prediction * prediction, boundaries
-    )
     samples = np.arange(len(mic))
-    envelope = np.interp(samples, boundaries + frame / 2, compatible.astype(np.float64))
-    fade = max(1, rate // 40)
-    envelope *= np.minimum(1, np.minimum(samples, len(mic) - 1 - samples) / fade)
-    return (mic - prediction * envelope).astype(np.float32), True
+    centers = np.minimum(boundaries + frame / 2, len(mic) - 1)
+    errors = [np.add.reduceat(mic.astype(np.float64) ** 2, boundaries)]
+    predictions = []
+    for path in paths:
+        estimate = _predict(reference, path.taps, path.start_delay, history, len(mic))
+        estimate = _track_replay_gain(mic, estimate, rate)
+        errors.append(np.add.reduceat((mic - estimate) ** 2, boundaries))
+        predictions.append(estimate)
+    chosen = np.argmin(errors, axis=0)
+    cleaned = mic.astype(np.float64)
+    for index, estimate in enumerate(predictions, 1):
+        weight = np.interp(samples, centers, (chosen == index).astype(np.float64))
+        cleaned -= estimate * weight
+    return cleaned.astype(np.float32), True

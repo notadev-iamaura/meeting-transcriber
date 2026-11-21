@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from core.io_utils import atomic_write_json_pinned, read_text_no_follow
+from core.io_utils import atomic_write_json_pinned, ensure_directory_no_follow, read_text_no_follow
 from core.recording_channels import (
     MIC_CHANNEL,
     SELF_SPEAKER,
@@ -50,6 +50,7 @@ def write_mic_status(
             "model": model,
             "message": message,
             "request_id": previous.get("request_id", ""),
+            "separate_mic_transcribed": previous.get("separate_mic_transcribed"),
             **details,
         },
         backup=False,
@@ -169,12 +170,34 @@ def mic_transcription_status(config: Any, meeting_id: str, job: Any) -> dict[str
     except FileNotFoundError:
         saved = {}
     status = saved.get("status", "not_applicable")
-    if not saved:
+    if not isinstance(status, str):
+        raise ValueError("마이크 전사 상태 값이 올바르지 않습니다.")
+    # 최초 분리 전사의 결과와, 혼합 전사에도 요청할 수 있는 마이크 재시도를 구분한다.
+    original_split_status = not saved.get("request_id") and status in {
+        "complete",
+        "partial",
+        "empty",
+        "low_volume",
+        "no_speech",
+        "processing",
+    }
+    separate_mic_transcribed: bool | None = saved.get("separate_mic_transcribed")
+    if original_split_status:
+        separate_mic_transcribed = True
+    elif not isinstance(separate_mic_transcribed, bool):
         try:
             prior = _read_json(path.with_name("transcribe.json"))
         except FileNotFoundError:
-            prior = {}
-        if prior.get("separate_mic_track") is True:
+            separate_mic_transcribed = False
+        except (OSError, ValueError):
+            if not saved:
+                raise
+            # 보조 근거가 없어도 보존된 마이크 재시도 진행 상태는 제공한다.
+            separate_mic_transcribed = None
+        else:
+            separate_mic_transcribed = prior.get("separate_mic_track") is True
+    if not saved:
+        if separate_mic_transcribed:
             status = "unknown"
         elif str(getattr(job, "status", "")) in {"completed", "failed", "recorded"}:
             try:
@@ -182,8 +205,6 @@ def mic_transcription_status(config: Any, meeting_id: str, job: Any) -> dict[str
                     status = "unknown"
             except (OSError, ValueError, AudioAdmissionError):
                 pass
-    if not isinstance(status, str):
-        raise ValueError("마이크 전사 상태 값이 올바르지 않습니다.")
     detected = saved.get("speech_detected") is True
     action = str(getattr(job, "requested_action", ""))
     job_status = str(getattr(job, "status", ""))
@@ -217,6 +238,7 @@ def mic_transcription_status(config: Any, meeting_id: str, job: Any) -> dict[str
     return {
         "meeting_id": meeting_id,
         "status": status,
+        "separate_mic_transcribed": separate_mic_transcribed,
         "speech_detected": detected,
         "retry_available": available,
         "message": (saved.get("message") if status == saved.get("status") else "")
@@ -336,9 +358,9 @@ async def retry_mic_track(
                 original = await asyncio.to_thread(read_text_no_follow, source_path)
             except FileNotFoundError:
                 original = None
-            with TemporaryDirectory(
-                prefix=".recap-mic-retry-", dir=audio_path.parent
-            ) as directory:
+            # 강제 종료로 임시 채널이 남더라도 회의 소유와 45일 보관 기한을 판별할 수 있다.
+            ensure_directory_no_follow(cp)
+            with TemporaryDirectory(prefix=".recap-mic-retry-", dir=cp) as directory:
                 tracks = await asyncio.to_thread(
                     extract_recording_tracks,
                     audio_path,

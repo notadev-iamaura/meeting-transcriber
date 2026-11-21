@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from api.routers.search_chat import _build_chat_references
 from config import AppConfig, ChatConfig, PathsConfig
 from core.chat_scope import ChatSourceScope
+from core.speaker_labels import save_self_speaker
 from search.chat import ChatEngine
 from search.hybrid_search import SearchResponse, SearchResult
 from search.source_answers import (
@@ -1777,6 +1778,30 @@ def test_selector_cannot_add_prose_citations_duplicates_or_unknown_ids(
     _write(config, u)
     candidates = build_source_candidates(config, [_chunk(0, u)])
     assert select_ids(raw, candidates, 3, 1000) is None
+
+
+def test_source_quotes_follow_self_label_without_changing_the_index(config: AppConfig) -> None:
+    """본인 지정과 해제를 색인 재생성 없이 인용에 반영하고 원문 화자 ID를 보존한다."""
+    turns = [
+        _utterance("SPEAKER_07", "회의실은 제가 예약합니다.", 24),
+        _utterance("SPEAKER_02", "자료는 오후에 공유합니다.", 30),
+    ]
+    source = _write(config, turns)
+    original = source.read_bytes()
+    hits = [_chunk(0, turns)]
+
+    save_self_speaker(config, "sample", "SPEAKER_07")
+    candidates = build_source_candidates(config, hits)
+    assert [(c.quote.speaker, c.display_speaker) for c in candidates] == [
+        ("SPEAKER_07", "나"),
+        ("SPEAKER_02", "참석자 2"),
+    ]
+    save_self_speaker(config, "sample", None)
+    assert [c.display_speaker for c in build_source_candidates(config, hits)] == [
+        "참석자 1",
+        "참석자 2",
+    ]
+    assert source.read_bytes() == original
 
 
 async def test_selection_owns_its_parent_and_real_actor_not_mentioned_recipient(

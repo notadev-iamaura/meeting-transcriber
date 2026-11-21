@@ -198,21 +198,24 @@
                 }
 
                 // WebSocket 이벤트 리스닝 — 회의 목록 자동 갱신
-                var micWarningMeetingId = null;
                 var micWarning = document.getElementById("micGlobalWarning");
                 var micWarningOpen = document.getElementById("micGlobalWarningOpen");
+                var micWarningClose = document.getElementById("micGlobalWarningClose");
                 document.addEventListener("ws:mic_transcription_warning", function (event) {
                     var detail = event.detail || {};
                     if (!detail.meeting_id || !micWarning) return;
                     // 상세 화면에서는 같은 이벤트를 받아 전용 상태·복구 버튼을 갱신한다.
                     if (_activeId === detail.meeting_id) return;
-                    micWarningMeetingId = detail.meeting_id;
+                    micWarning.dataset.meetingId = detail.meeting_id;
                     App.safeText(document.getElementById("micGlobalWarningMessage"), detail.message || "마이크 음성을 감지했지만 텍스트를 만들지 못했습니다. 해당 회의에서 처리 상태를 확인해 주세요.");
                     micWarning.hidden = false;
                 });
                 if (micWarningOpen) micWarningOpen.addEventListener("click", function () {
-                    if (!micWarningMeetingId) return;
-                    Router.navigate("/app/viewer/" + encodeURIComponent(micWarningMeetingId));
+                    if (micWarning.dataset.meetingId) {
+                        Router.navigate("/app/viewer/" + encodeURIComponent(micWarning.dataset.meetingId));
+                    }
+                });
+                if (micWarningClose) micWarningClose.addEventListener("click", function () {
                     micWarning.hidden = true;
                 });
                 document.addEventListener("ws:job_completed", function () {
@@ -252,6 +255,38 @@
                 var _recEpoch = 0;
                 var _recStatusPending = null;
                 var _recFailureSignature = "";
+                var failureIdentity = null;
+                var failureNotice = document.getElementById("recordingFailure");
+                var failureDismissKey = "recap.dismissedRecordingFailure";
+                var dismissedFailure = "";
+                try { dismissedFailure = localStorage.getItem(failureDismissKey) || ""; } catch (_) {}
+                function _dismissRecordingFailure() {
+                    dismissedFailure = _recFailureSignature;
+                    failureNotice.hidden = true;
+                    try { localStorage.setItem(failureDismissKey, dismissedFailure); } catch (_) {}
+                    if (failureIdentity && failureIdentity.occurred_at) {
+                        // 네이티브 창의 웹 저장소는 창을 닫으면 초기화된다.
+                        App.apiRequest("/recording/error/acknowledge", {
+                            method: "POST",
+                            headers: {"Content-Type": "application/json"},
+                            body: JSON.stringify(failureIdentity),
+                            keepalive: true,
+                        }).catch(function () { /* 오프라인에서도 이 창에서는 확인 상태를 유지한다. */ });
+                    }
+                }
+                var closeFailure = document.getElementById("recordingFailureClose");
+                if (closeFailure) closeFailure.addEventListener("click", _dismissRecordingFailure);
+                if (failureNotice) failureNotice.addEventListener("keydown", function (event) {
+                    if (event.key === "Escape") {
+                        event.stopPropagation();
+                        _dismissRecordingFailure();
+                    }
+                });
+                window.addEventListener("storage", function (event) {
+                    if (event.key !== failureDismissKey) return;
+                    dismissedFailure = event.newValue || "";
+                    if (failureNotice && dismissedFailure === _recFailureSignature) failureNotice.hidden = true;
+                });
                 var outcomeNotice = document.getElementById("recordingOutcome");
                 var outcome = null;
                 var outcomeQuery = null;
@@ -469,14 +504,27 @@
 
                 function _renderRecordingFailure(detail) {
                     detail = detail || {};
+                    // 상태 조회와 실시간 알림은 같은 실패를 서로 다른 필드 순서로 전달할 수 있다.
+                    var identity = {meeting_id: detail.meeting_id || null, occurred_at: detail.occurred_at || ""};
+                    var signature = JSON.stringify(identity);
+                    if (detail.acknowledged) dismissedFailure = signature;
+                    if (_recFailureSignature === signature) {
+                        if (failureNotice && detail.acknowledged) failureNotice.hidden = true;
+                        return;
+                    }
+                    failureIdentity = identity;
+                    _recFailureSignature = signature;
                     _hideOutcome();
                     _finishRecHUD();
                     _recMeetingId = detail.meeting_id || _recMeetingId;
-                    var signature = JSON.stringify(detail);
-                    if (_recFailureSignature === signature) return;
-                    _recFailureSignature = signature;
-                    var notice = document.getElementById("recordingFailure");
-                    if (!notice) return;
+                    if (!failureNotice) return;
+                    if (dismissedFailure === signature) {
+                        failureNotice.hidden = true;
+                        return;
+                    }
+                    var failureTime = document.getElementById("recordingFailureTime");
+                    failureTime.hidden = !detail.occurred_at;
+                    App.safeText(failureTime, detail.occurred_at ? "중단 시각 " + App.formatDate(detail.occurred_at) : "");
                     App.safeText(document.getElementById("recordingFailureMessage"), detail.error || detail.message || "녹음 파일을 정상적으로 저장하지 못했습니다.");
                     App.safeText(document.getElementById("recordingFailurePreserved"), detail.partial_files_preserved
                         ? "중단 전 부분 파일을 보존했습니다. 불완전할 수 있어 자동 전사하지 않았습니다."
@@ -489,8 +537,10 @@
                         item.textContent = String(name);
                         list.appendChild(item);
                     });
-                    document.getElementById("recordingFailureFiles").hidden = names.length === 0;
-                    notice.hidden = false;
+                    var files = document.getElementById("recordingFailureFiles");
+                    files.open = false;
+                    files.hidden = names.length === 0;
+                    failureNotice.hidden = false;
                 }
 
                 function _beginRecHUD(detail, mode) {
@@ -499,9 +549,9 @@
                     _recTerminal = false;
                     _recMeetingId = detail.meeting_id || null;
                     _recFailureSignature = "";
+                    failureIdentity = null;
                     _hideOutcome();
-                    var failure = document.getElementById("recordingFailure");
-                    if (failure) failure.hidden = true;
+                    if (failureNotice) failureNotice.hidden = true;
                     _showRecHUD(mode);
                     _startRecTicker(detail.duration_seconds || 0);
                     _renderRecLevels(detail.audio_levels);
@@ -603,7 +653,11 @@
                 });
                 document.addEventListener("ws:recording_error", function (e) {
                     var detail = e.detail || {};
-                    if (!_currentRecEvent(detail)) return;
+                    if (!_currentRecEvent(detail)) {
+                        // 시작 이벤트를 놓쳤을 수도 있으므로 현재 녹음의 서버 상태로 확인한다.
+                        _refreshRecordingStatus();
+                        return;
+                    }
                     _renderRecordingFailure(detail);
                     loadMeetings();
                 });
@@ -1428,6 +1482,8 @@
              */
             function setActive(meetingId) {
                 _activeId = meetingId;
+                var warning = document.getElementById("micGlobalWarning");
+                if (warning && warning.dataset.meetingId === meetingId) warning.hidden = true;
                 // 라우팅 active 표시. 다중 선택의 aria-checked 와는 별도 차원.
                 var items = _listEl.querySelectorAll(".meeting-item");
                 items.forEach(function (item) {

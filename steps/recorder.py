@@ -761,6 +761,7 @@ class AudioRecorder:
             "error": message
             or f"녹음을 정상적으로 완료하지 못했습니다. {preservation} 전사는 시작하지 않았습니다.",
             "occurred_at": datetime.now().isoformat(),
+            "acknowledged": False,
             "partial_files_preserved": bool(names),
             "partial_file_names": names,
         }
@@ -770,6 +771,17 @@ class AudioRecorder:
             except Exception:
                 logger.exception("녹음 실패 알림 콜백 오류")
         return self._last_recording_error.copy()
+
+    def acknowledge_recording_error(self, meeting_id: str | None, occurred_at: str) -> bool:
+        """사용자가 실제로 본 오류에만 확인을 표시하고 부분 파일과 오류 상세를 보존한다."""
+        failure = self._last_recording_error
+        if not failure or (failure.get("meeting_id"), failure.get("occurred_at")) != (
+            meeting_id,
+            occurred_at,
+        ):
+            return False
+        failure["acknowledged"] = True
+        return True
 
     async def _capture_watchdog(self) -> None:
         """캡처 장애를 사용자 정지 없이 알리고 부분 파일과 실패 상태를 보존한다."""

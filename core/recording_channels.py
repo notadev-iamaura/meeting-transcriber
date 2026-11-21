@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 RECORDING_TRACK_COMMENT = "recap-microphone-system-v1"
+_ECHO_REDUCED_MIC_COMMENT = "recap-echo-reduced-microphone-v1"
 SELF_SPEAKER = "나"
 MIC_CHANNEL = 0
 SYSTEM_CHANNEL = 1
@@ -119,7 +120,7 @@ def extract_recording_tracks(
     import soundfile as sf
 
     from core.audio_quality import AudioFailureKind
-    from core.echo_suppression import suppress_recording_echo
+    from core.echo_suppression import EchoPath, suppress_recording_echo
     from steps.transcriber import AudioAdmissionError, open_audio_path_no_symlinks
 
     paths = {channel: output_dir / f"channel-{channel}.wav" for channel in channels}
@@ -143,7 +144,6 @@ def extract_recording_tracks(
             if suppress and echo_settings is not None
             else 0
         )
-        history = np.zeros(delay, dtype=np.float32)
         outputs = {}
         for channel, path in paths.items():
             file = stack.enter_context(path.open("xb"))
@@ -159,20 +159,32 @@ def extract_recording_tracks(
             )
         read_frames = 0
         echo_blocks = 0
-        for block in source.blocks(
-            blocksize=source.samplerate * 24 if suppress else 65536,
-            dtype="float32" if suppress else "int16",
-            always_2d=True,
-        ):
-            read_frames += len(block)
+        previous_paths: list[EchoPath] = []
+        block_size = source.samplerate * 24 if suppress else 65536
+        for start in range(0, source.frames, block_size):
+            stop = min(source.frames, start + block_size)
             if suppress:
-                reference = np.concatenate((history, block[:, SYSTEM_CHANNEL]))
-                history = reference[-delay:].copy()
+                # 경계 직전 기기 지연이 바뀌거나 마지막 블록이 짧아도 양쪽에서
+                # 검증 구간을 확보한다. 중앙 구간만 기록해 샘플이 겹치지 않는다.
+                context = 3 * source.samplerate
+                left = max(0, start - context)
+                right = min(source.frames, stop + context)
+                ref_start = max(0, left - delay)
+                source.seek(ref_start)
+                audio = source.read(right - ref_start, dtype="float32", always_2d=True)
+                reference = np.pad(audio[:, SYSTEM_CHANNEL], (delay - (left - ref_start), 0))
                 cleaned, applied = suppress_recording_echo(
-                    block[:, MIC_CHANNEL], reference, source.samplerate
+                    audio[left - ref_start :, MIC_CHANNEL],
+                    reference,
+                    source.samplerate,
+                    previous_paths,
                 )
-                block[:, MIC_CHANNEL] = cleaned
+                block = audio[start - ref_start : stop - ref_start]
+                block[:, MIC_CHANNEL] = cleaned[start - left : stop - left]
                 echo_blocks += int(applied)
+            else:
+                block = source.read(stop - start, dtype="int16", always_2d=True)
+            read_frames += len(block)
             for channel, output in outputs.items():
                 samples = block[:, channel]
                 if channel not in audible and samples.any():
@@ -181,6 +193,7 @@ def extract_recording_tracks(
         if read_frames != source.frames:
             raise ValueError("분리 녹음의 모든 샘플을 읽을 수 없습니다.")
         if echo_blocks:
+            outputs[MIC_CHANNEL].comment = _ECHO_REDUCED_MIC_COMMENT
             logger.info(f"마이크 전사용 사본에서 검증된 스피커 누설 감소: {echo_blocks}개 구간")
 
     return {channel: path for channel, path in paths.items() if channel in audible}
@@ -235,6 +248,7 @@ def prepare_recording_track(
 
     windows = []
     with sf.SoundFile(path) as audio:
+        echo_reduced = audio.comment == _ECHO_REDUCED_MIC_COMMENT
         rate = audio.samplerate
         duration = audio.frames / rate
         frame = max(1, round(rate * 0.020))
@@ -276,6 +290,11 @@ def prepare_recording_track(
         # 에너지만으로는 선풍기·키보드·순간 잡음과 말소리를 구별할 수 없다.
         # 작은 목소리를 먼저 보정한 사본에서 검사하고, 원본은 변경하지 않는다.
         speech = _detect_recording_speech(path, settings.speech_threshold)
+        if echo_reduced:
+            # 잔향이 증폭 뒤 말소리처럼 들려도 실제 마이크 사본에서 발화 최저 음량을
+            # 넘는 부분에만 STT를 허용한다. 조용한 말의 시작·끝을 위한 여백은 보존한다.
+            audible = _active_ranges(powers >= floor, frame / rate, duration, 0.0)
+            speech = _supported_speech(speech, audible)
         if not speech:
             return None
         verified_speech = tuple(speech)
@@ -285,6 +304,9 @@ def prepare_recording_track(
                 regions[-1] = (regions[-1][0], max(regions[-1][1], right))
             else:
                 regions.append((left, right))
+        if echo_reduced:
+            # 앞뒤 문장을 묶더라도 두 문장 사이에 제외된 에코만 있는 구간을 다시 열지 않는다.
+            regions = _supported_speech(regions, audible)
     times = tuple(time for region in regions for time in region)
     included = sum(end - start for start, end in regions)
     logger.info(
@@ -292,6 +314,25 @@ def prepare_recording_track(
         f"활성 음량 {active_dbfs:.1f}dBFS, 보정 {gain_db:.1f}dB"
     )
     return PreparedRecordingTrack(path, times, prepared_dbfs, verified_speech)
+
+
+def _supported_speech(
+    detected: list[tuple[float, float]],
+    audible: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """정렬된 두 구간 목록에서 원음과 음성 감지 양쪽이 지지하는 시간대를 반환한다."""
+    supported = []
+    i = j = 0
+    while i < len(detected) and j < len(audible):
+        left = max(detected[i][0], audible[j][0])
+        right = min(detected[i][1], audible[j][1])
+        if left < right:
+            supported.append((left, right))
+        if detected[i][1] < audible[j][1]:
+            i += 1
+        else:
+            j += 1
+    return supported
 
 
 def _detect_recording_speech(path: Path, threshold: float) -> list[tuple[float, float]]:

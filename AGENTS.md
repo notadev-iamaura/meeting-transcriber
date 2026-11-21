@@ -586,7 +586,8 @@ meeting-transcriber/
 │
 ├── security/                # 보안
 │   ├── secure_dir.py        # 디렉토리 권한 설정 (chmod 700)
-│   ├── lifecycle.py         # 데이터 수명주기 분류 (자동 실행은 preserve-only)
+│   ├── lifecycle.py         # 회의 보존 등급 분류
+│   ├── audio_retention.py   # 사용자가 활성화한 45일 음성 보관 정책
 │   ├── health_check.py      # 시스템 상태 점검
 │   ├── openai_keychain.py   # OpenAI API 키 Keychain 저장/조회
 │   └── setup_readiness.py   # 최초 설정 마법사용 read-only 준비 상태

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -16,6 +17,7 @@ from core.user_settings import (
     UserSettingsIOError,
     UserSettingsLockError,
     UserSettingsValidationError,
+    VocabularyCorrection,
     VocabularyTerm,
 )
 
@@ -103,6 +105,19 @@ class VocabularyUpdateRequest(BaseModel):
     category: str | None = Field(default=None, max_length=50)
     note: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
+
+
+class VocabularyCorrectionsRequest(BaseModel):
+    """전사문에서 사용자가 선택한 교정 쌍."""
+
+    corrections: list[VocabularyCorrection] = Field(min_length=1, max_length=20)
+
+
+class VocabularyCorrectionsResponse(BaseModel):
+    """새로 추가한 쌍과 기존에 등록된 쌍의 수."""
+
+    added: int
+    existing: int
 
 
 # --- 변환 헬퍼 ---
@@ -224,6 +239,21 @@ async def reset_prompts() -> PromptsResponse:
 # --- 용어집 엔드포인트 ---
 
 
+@router.post("/vocabulary/corrections", response_model=VocabularyCorrectionsResponse)
+async def register_vocabulary_corrections(
+    body: VocabularyCorrectionsRequest,
+) -> VocabularyCorrectionsResponse:
+    """전사문을 다시 쓰지 않고 선택된 오인식·정답 쌍만 용어집에 저장한다."""
+    try:
+        results = await asyncio.to_thread(
+            _user_settings.register_vocabulary_corrections, body.corrections
+        )
+    except UserSettingsError as exc:
+        raise _map_user_settings_error(exc) from exc
+    existing = sum(action == "alias_already_exists" for action, _ in results)
+    return VocabularyCorrectionsResponse(added=len(results) - existing, existing=existing)
+
+
 @router.get("/vocabulary", response_model=VocabularyResponse)
 async def get_vocabulary() -> VocabularyResponse:
     """전체 용어집을 조회한다.
@@ -262,7 +292,8 @@ async def add_vocabulary_term_endpoint(
         HTTPException: 중복·최대 개수 초과·검증 실패(400), 저장 실패(500)
     """
     try:
-        new_term = _user_settings.add_vocabulary_term(
+        new_term = await asyncio.to_thread(
+            _user_settings.add_vocabulary_term,
             term=body.term,
             aliases=body.aliases,
             category=body.category,
@@ -292,7 +323,8 @@ async def update_vocabulary_term_endpoint(
         HTTPException: 대상 없음/중복/검증 실패(400), 저장 실패(500)
     """
     try:
-        updated = _user_settings.update_vocabulary_term(
+        updated = await asyncio.to_thread(
+            _user_settings.update_vocabulary_term,
             term_id=term_id,
             term=body.term,
             aliases=body.aliases,
@@ -316,7 +348,7 @@ async def delete_vocabulary_term_endpoint(term_id: str) -> None:
         HTTPException: 대상 없음(400), 저장 실패(500)
     """
     try:
-        _user_settings.delete_vocabulary_term(term_id)
+        await asyncio.to_thread(_user_settings.delete_vocabulary_term, term_id)
     except UserSettingsError as e:
         raise _map_user_settings_error(e) from e
 
@@ -329,7 +361,7 @@ async def reset_vocabulary_endpoint() -> VocabularyResponse:
         복원된 VocabularyResponse
     """
     try:
-        data = _user_settings.reset_vocabulary_to_default()
+        data = await asyncio.to_thread(_user_settings.reset_vocabulary_to_default)
     except UserSettingsError as e:
         raise _map_user_settings_error(e) from e
     return VocabularyResponse(

@@ -2858,6 +2858,13 @@ ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: in
 
 /* --- 12-0. 뷰어 헤더 (spa.js ViewerView) --- */
 
+#viewerMeetingInfo,
+#viewerTabNav,
+#viewerPanelTranscript,
+#viewerPanelSummary {
+  width: 100%;
+}
+
 .viewer-header {
   padding: 20px 24px 16px;
   max-width: 960px;
@@ -2944,6 +2951,7 @@ ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: in
 .mic-transcription-notice.is-error { border-left-color: var(--error); }
 .mic-transcription-notice.is-complete { border-left-color: var(--success); }
 .mic-global-warning { margin: 12px 20px; flex-shrink: 0; }
+.mic-global-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 .mic-transcription-copy { min-width: 0; overflow-wrap: anywhere; }
 .mic-transcription-copy p { margin: 4px 0 0; }
 .mic-transcription-error { font-weight: 500; }
@@ -3611,6 +3619,24 @@ dialog.transcription-model-dialog::backdrop {
   outline: none;
 }
 
+.mic-echo-review:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.mic-echo-review, .mic-echo-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.fold-mic-echoes .mic-echo-candidate:not(.playing):not(:has(.utterance-textarea, .vocabulary-review)) {
+  display: none;
+}
+
 .search-bar-input::placeholder {
   color: var(--text-muted);
 }
@@ -3670,7 +3696,7 @@ dialog.transcription-model-dialog::backdrop {
   --utt-text-lh: 1.6;
 }
 
-/* 개별 발화 항목: Clova Note 스타일 (번호 배지 + 콘텐츠) */
+/* 개별 발화 항목 */
 .utterance {
   display: flex;
   align-items: flex-start;
@@ -3698,10 +3724,8 @@ dialog.transcription-model-dialog::backdrop {
   justify-content: center;
   font-size: var(--utt-badge-fs);
   font-weight: 700;
-  color: #fff;
   flex-shrink: 0;
   margin-top: 2px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
 /* 우측 콘텐츠 영역 */
@@ -3719,6 +3743,7 @@ dialog.transcription-model-dialog::backdrop {
 }
 
 .utterance-speaker {
+  color: var(--text-primary);
   font-size: var(--utt-speaker-fs);
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -3832,7 +3857,6 @@ dialog.transcription-model-dialog::backdrop {
   border-radius: 50%;
   font-size: 11px;
   font-weight: 700;
-  color: #fff;
   flex-shrink: 0;
 }
 
@@ -3846,6 +3870,74 @@ dialog.transcription-model-dialog::backdrop {
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+.speaker-badge,
+.utterance-badge {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  background: color-mix(in srgb, var(--speaker-color) 19%, var(--bg-card));
+}
+
+.speaker-badge.is-self,
+.utterance-badge.is-self {
+  color: var(--bg-card);
+  background: var(--accent-text);
+  border-radius: 30%;
+}
+
+.utterance-badge.is-self .icon,
+.speaker-badge.is-self .icon { color: inherit; }
+.utterance-badge.is-self .icon { width: 60%; height: 60%; }
+.speaker-badge.is-self .icon { width: 14px; height: 14px; }
+
+.speaker-chip.is-self,
+.utterance.is-self .utterance-speaker {
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.speaker-chip.is-self {
+  background: var(--bg-secondary);
+  background: color-mix(in srgb, var(--accent-text) 9%, var(--bg-card));
+}
+
+.speaker-source {
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+button.utterance-speaker {
+  padding: 2px 3px;
+  margin: -2px -3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.utterance-speaker::after {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin: 0 2px 3px 6px;
+  border: solid var(--text-secondary);
+  border-width: 0 1px 1px 0;
+  transform: rotate(45deg);
+}
+
+button.utterance-speaker:hover { background: var(--bg-secondary); }
+button.utterance-speaker:focus-visible,
+.self-speaker-trigger:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+
+dialog.self-speaker-dialog { width: min(380px, calc(100vw - 32px)); }
+.self-speaker-dialog label { color: var(--text-secondary); font-size: 12px; }
+.self-speaker-dialog select { display: block; width: 100%; margin-top: 5px; }
+.self-speaker-dialog [role="alert"] { color: var(--error); }
 
 
 /* --- 12-6. 요약 콘텐츠 --- */
@@ -5421,6 +5513,74 @@ dialog.transcription-model-dialog::backdrop {
   gap: 6px;
   margin-top: 6px;
 }
+
+.utterance-text[tabindex]:focus-visible,
+.vocabulary-review :focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+
+.vocabulary-review {
+  box-sizing: border-box;
+  max-width: 34rem;
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.vocabulary-review-title,
+.vocabulary-review-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vocabulary-review-title span,
+.vocabulary-review-pair label,
+.vocabulary-review-result {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.vocabulary-review-pair {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.vocabulary-review-pair input[type="checkbox"],
+.vocabulary-review-pair > span {
+  align-self: end;
+  margin: 0 0 8px;
+  accent-color: var(--accent-text);
+}
+
+.vocabulary-review-pair input[type="text"] {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.vocabulary-review-actions { justify-content: flex-end; margin-top: 12px; }
+.vocabulary-review-actions button[type="submit"] { background: var(--accent-text); color: var(--bg-canvas); }
+.vocabulary-review :disabled { opacity: 0.55; cursor: default; }
+.utterance-edit-error { color: var(--text-primary); font-size: 12px; margin: 8px 0 0; }
+.vocabulary-review-result { margin: 8px 0 0; }
 
 .btn-icon-primary {
   background: var(--accent);

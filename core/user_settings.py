@@ -27,14 +27,15 @@ import secrets
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from filelock import FileLock, Timeout
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config import get_config
 
@@ -244,6 +245,22 @@ class VocabularyTerm(BaseModel):
         return cleaned
 
 
+class VocabularyCorrection(BaseModel):
+    """전사 편집에서 사용자가 확인한 오인식 표기와 정답 표기 한 쌍."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    alias: str = Field(min_length=1, max_length=_VOCAB_ALIAS_MAX_LEN)
+    term: str = Field(min_length=1, max_length=_VOCAB_TERM_MAX_LEN)
+
+    @model_validator(mode="after")
+    def _require_change(self) -> VocabularyCorrection:
+        """같은 표기를 오인식과 정답에 동시에 등록하지 않는다."""
+        if self.alias == self.term:
+            raise ValueError("오인식 표기와 정답 표기는 서로 달라야 합니다.")
+        return self
+
+
 class VocabularyData(BaseModel):
     """용어집 전체.
 
@@ -316,6 +333,7 @@ class _CacheEntry:
 # 모듈 수준 캐시 (키: 파일 절대경로 문자열)
 _cache: dict[str, _CacheEntry] = {}
 _cache_lock = threading.RLock()
+_vocabulary_write_lock = threading.RLock()
 
 
 def _now_utc_iso() -> str:
@@ -729,19 +747,73 @@ def save_vocabulary(data: VocabularyData) -> VocabularyData:
     except ValueError as e:
         raise UserSettingsValidationError(f"용어집 검증 실패: {e}") from e
 
-    _save_generic(_vocabulary_path(), data)
-    return load_vocabulary(force_reload=False)
+    with _vocabulary_write_lock:
+        _save_generic(_vocabulary_path(), data)
+        return load_vocabulary()
 
 
 def reset_vocabulary_to_default() -> VocabularyData:
     """용어집을 공장 기본값(빈 목록)으로 복원한다."""
     default = _load_default_vocabulary()
-    _save_generic(_vocabulary_path(), default)
+    saved = save_vocabulary(default)
     logger.info("용어집을 기본값으로 복원")
-    return load_vocabulary(force_reload=True)
+    return saved
 
 
 # === 용어집 CRUD 헬퍼 (API 계층에서 호출) ===
+
+
+@contextmanager
+def _edit_vocabulary() -> Iterator[VocabularyData]:
+    """한 프로세스에서 용어집 변경을 직렬화하고 성공 시에만 편집본을 게시한다."""
+    with _vocabulary_write_lock:
+        original = load_vocabulary()
+        edited = original.model_copy(deep=True)
+        yield edited
+        if edited != original:
+            save_vocabulary(edited)
+
+
+def register_vocabulary_corrections(
+    corrections: list[VocabularyCorrection], *, note: str | None = None
+) -> list[tuple[str, str]]:
+    """선택한 쌍을 한 번에 합치고 쌍별 등록 결과 및 용어 ID를 반환한다."""
+    results: list[tuple[str, str]] = []
+    with _edit_vocabulary() as vocab:
+        by_term = {item.term.lower(): item for item in vocab.terms}
+        seen: set[tuple[str, str]] = set()
+        for correction in corrections:
+            term_key = correction.term.lower()
+            key = (term_key, correction.alias)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = by_term.get(term_key)
+            if item is None:
+                item = VocabularyTerm(
+                    id=_generate_ulid(),
+                    term=correction.term,
+                    aliases=[correction.alias],
+                    note=note,
+                    created_at=_now_utc_iso(),
+                )
+                vocab.terms.append(item)
+                by_term[term_key] = item
+                action = "term_created"
+            elif item.term == correction.alias:
+                # 사용자가 기존 정답 표기 자체의 대소문자를 고쳤다.
+                item.term = correction.term
+                item.aliases = [alias for alias in item.aliases if alias != item.term]
+                if correction.alias not in item.aliases:
+                    item.aliases.append(correction.alias)
+                action = "alias_added"
+            elif correction.alias in item.aliases:
+                action = "alias_already_exists"
+            else:
+                item.aliases.append(correction.alias)
+                action = "alias_added"
+            results.append((action, item.id))
+    return results
 
 
 def add_vocabulary_term(
@@ -766,36 +838,35 @@ def add_vocabulary_term(
     Raises:
         UserSettingsValidationError: 중복, 최대 개수 초과, 검증 실패 등
     """
-    vocab = load_vocabulary()
-    normalized_term = term.strip().lower()
+    with _edit_vocabulary() as vocab:
+        normalized_term = term.strip().lower()
 
-    # 중복 검사
-    for existing in vocab.terms:
-        if existing.term.strip().lower() == normalized_term:
-            raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
+        # 중복 검사
+        for existing in vocab.terms:
+            if existing.term.strip().lower() == normalized_term:
+                raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
 
-    # 최대 개수 검사
-    if len(vocab.terms) >= _VOCAB_MAX_TERMS:
-        raise UserSettingsValidationError(
-            f"용어집은 최대 {_VOCAB_MAX_TERMS}개까지 등록할 수 있습니다."
-        )
+        # 최대 개수 검사
+        if len(vocab.terms) >= _VOCAB_MAX_TERMS:
+            raise UserSettingsValidationError(
+                f"용어집은 최대 {_VOCAB_MAX_TERMS}개까지 등록할 수 있습니다."
+            )
 
-    try:
-        new_term = VocabularyTerm(
-            id=_generate_ulid(),
-            term=term,
-            aliases=aliases or [],
-            category=category,
-            note=note,
-            enabled=enabled,
-            created_at=_now_utc_iso(),
-        )
-    except ValueError as e:
-        raise UserSettingsValidationError(f"용어 검증 실패: {e}") from e
+        try:
+            new_term = VocabularyTerm(
+                id=_generate_ulid(),
+                term=term,
+                aliases=aliases or [],
+                category=category,
+                note=note,
+                enabled=enabled,
+                created_at=_now_utc_iso(),
+            )
+        except ValueError as e:
+            raise UserSettingsValidationError(f"용어 검증 실패: {e}") from e
 
-    vocab.terms.append(new_term)
-    save_vocabulary(vocab)
-    return new_term
+        vocab.terms.append(new_term)
+        return new_term
 
 
 def update_vocabulary_term(
@@ -820,49 +891,48 @@ def update_vocabulary_term(
     Raises:
         UserSettingsValidationError: 대상 없음, 중복, 검증 실패 등
     """
-    vocab = load_vocabulary()
-    target: VocabularyTerm | None = None
-    target_idx: int = -1
+    with _edit_vocabulary() as vocab:
+        target: VocabularyTerm | None = None
+        target_idx: int = -1
 
-    for i, t in enumerate(vocab.terms):
-        if t.id == term_id:
-            target = t
-            target_idx = i
-            break
+        for i, t in enumerate(vocab.terms):
+            if t.id == term_id:
+                target = t
+                target_idx = i
+                break
 
-    if target is None:
-        raise UserSettingsValidationError(f"용어를 찾을 수 없습니다: {term_id}")
+        if target is None:
+            raise UserSettingsValidationError(f"용어를 찾을 수 없습니다: {term_id}")
 
-    # term 변경 시 중복 검사
-    if term is not None and term.strip().lower() != target.term.strip().lower():
-        normalized = term.strip().lower()
-        for other in vocab.terms:
-            if other.id != term_id and other.term.strip().lower() == normalized:
-                raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
+        # term 변경 시 중복 검사
+        if term is not None and term.strip().lower() != target.term.strip().lower():
+            normalized = term.strip().lower()
+            for other in vocab.terms:
+                if other.id != term_id and other.term.strip().lower() == normalized:
+                    raise UserSettingsValidationError(f"이미 등록된 용어입니다: {term}")
 
-    # 부분 업데이트
-    updates: dict[str, Any] = {}
-    if term is not None:
-        updates["term"] = term
-    if aliases is not None:
-        updates["aliases"] = aliases
-    if category is not None:
-        updates["category"] = category
-    if note is not None:
-        updates["note"] = note
-    if enabled is not None:
-        updates["enabled"] = enabled
+        # 부분 업데이트
+        updates: dict[str, Any] = {}
+        if term is not None:
+            updates["term"] = term
+        if aliases is not None:
+            updates["aliases"] = aliases
+        if category is not None:
+            updates["category"] = category
+        if note is not None:
+            updates["note"] = note
+        if enabled is not None:
+            updates["enabled"] = enabled
 
-    try:
-        updated = target.model_copy(update=updates)
-        # 재검증 (validator 실행)
-        updated = VocabularyTerm.model_validate(updated.model_dump())
-    except ValueError as e:
-        raise UserSettingsValidationError(f"용어 검증 실패: {e}") from e
+        try:
+            updated = target.model_copy(update=updates)
+            # 재검증 (validator 실행)
+            updated = VocabularyTerm.model_validate(updated.model_dump())
+        except ValueError as e:
+            raise UserSettingsValidationError(f"용어 검증 실패: {e}") from e
 
-    vocab.terms[target_idx] = updated
-    save_vocabulary(vocab)
-    return updated
+        vocab.terms[target_idx] = updated
+        return updated
 
 
 def delete_vocabulary_term(term_id: str) -> None:
@@ -874,12 +944,11 @@ def delete_vocabulary_term(term_id: str) -> None:
     Raises:
         UserSettingsValidationError: 대상을 찾을 수 없을 때
     """
-    vocab = load_vocabulary()
-    before = len(vocab.terms)
-    vocab.terms = [t for t in vocab.terms if t.id != term_id]
-    if len(vocab.terms) == before:
-        raise UserSettingsValidationError(f"용어를 찾을 수 없습니다: {term_id}")
-    save_vocabulary(vocab)
+    with _edit_vocabulary() as vocab:
+        before = len(vocab.terms)
+        vocab.terms = [t for t in vocab.terms if t.id != term_id]
+        if len(vocab.terms) == before:
+            raise UserSettingsValidationError(f"용어를 찾을 수 없습니다: {term_id}")
 
 
 # === 스냅샷 빌드 (파이프라인용) ===
