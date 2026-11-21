@@ -1849,6 +1849,7 @@ class PipelineManager:
                             selected_provider="local",
                             selected_model=selected_model,
                             prepared_track=track,
+                            remote_recording_track=channel == SYSTEM_CHANNEL,
                         )
                     except (LowVolumeAudioError, EmptyTranscriptError) as exc:
                         if channel == MIC_CHANNEL:
@@ -1902,6 +1903,7 @@ class PipelineManager:
         expected_identity: AudioFileIdentity | None = None,
         should_cancel: Callable[[], bool] | None = None,
         prepared_track: PreparedRecordingTrack | None = None,
+        remote_recording_track: bool = False,
     ) -> Any:
         """WAV 하나를 전사하고 일반 작업에만 기존 체크포인트를 작성한다."""
         from steps.transcriber import Transcriber
@@ -1919,6 +1921,10 @@ class PipelineManager:
         if prepared_track is not None:
             assert prepared_track.path == wav_path and selected_provider == "local"
             vad_clip_timestamps = list(prepared_track.clip_timestamps)
+            if remote_recording_track and prepared_track.speech_intervals:
+                # 확인한 상대 발화 사이의 무음을 다시 넣으면 짧은 무음 꼬리와
+                # 같은 문장 반복이 Whisper의 단일 30초 창에 묶일 수 있다.
+                vad_clip_timestamps = [t for span in prepared_track.speech_intervals for t in span]
         elif vad_enabled and selected_provider == "local":
             try:
                 from steps.vad_detector import VoiceActivityDetector
@@ -2000,13 +2006,19 @@ class PipelineManager:
                 vad_clip_timestamps=vad_clip_timestamps,
                 timeout_override=timeout_override,
                 **({"prepared_recording_track": True} if prepared_track is not None else {}),
+                **({"remote_recording_track": True} if remote_recording_track else {}),
             )
 
         # 환각 필터링 (hallucination_filter 설정에 따라)
         try:
             from steps.hallucination_filter import filter_hallucinations
 
-            filtered_segments, removed = filter_hallucinations(result.segments, self._config)
+            if remote_recording_track and prepared_track is not None:
+                filtered_segments, removed = filter_hallucinations(
+                    result.segments, self._config, speech_intervals=prepared_track.speech_intervals
+                )
+            else:
+                filtered_segments, removed = filter_hallucinations(result.segments, self._config)
             result.segments = filtered_segments
             if removed:
                 # 환각 제거 시 전체 텍스트 재구성

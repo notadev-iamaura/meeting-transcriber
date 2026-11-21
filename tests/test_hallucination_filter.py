@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+import pytest
+
 from steps.hallucination_filter import (
     detect_repetition,
     filter_hallucinations,
@@ -87,6 +89,44 @@ class TestDetectRepetition:
 
 class TestFilterHallucinations:
     """환각 필터링 함수 테스트."""
+
+    @pytest.mark.parametrize(
+        ("intervals", "kept"),
+        [
+            (((0.5, 2.5), (19.5, 21.5), (119.5, 121.5)), [1.0, 20.0, 120.0]),
+            ((), []),
+            (((0.5, 121.5),), []),
+            (((0.5, 2.5), (1.5, 22.0), (119.5, 121.5)), []),
+            (((0.5, 2.5), (19.5, 20.5), (119.5, 121.5)), [1.0, 120.0]),
+        ],
+    )
+    def test_같은_인사말은_확인된_별도_발화일_때_보존(
+        self, intervals: tuple[tuple[float, float], ...], kept: list[float]
+    ) -> None:
+        """같은 문장을 서로 다른 음성 구간에서 한 번씩 실제로 말한 경우를 보존한다."""
+        segments = [MockSegment("감사합니다.", t, t + 1) for t in (1.0, 20.0, 120.0)]
+        config = MagicMock(hallucination_filter=MockFilterConfig())
+        filtered, removed = filter_hallucinations(segments, config, speech_intervals=intervals)
+        assert [seg.start for seg in filtered] == kept
+        assert [x["start"] for x in removed] == [
+            seg.start for seg in segments if seg.start not in kept
+        ]
+
+    def test_음성_근거가_겹치는_반복과_저신뢰_문장은_계속_제거(self) -> None:
+        """같은 위치에 붙은 중복이나 저신뢰 문장이 독립 구간의 인사말과 함께 복구되지 않는다."""
+        segments = [
+            MockSegment("감사합니다.", 1.0, 2.0),
+            MockSegment("감사합니다.", 1.3, 2.0),
+            MockSegment("감사합니다.", 6.0, 7.0),
+            MockSegment("감사합니다.", 12.0, 13.0, avg_logprob=-1.7),
+        ]
+        config = MagicMock(hallucination_filter=MockFilterConfig())
+        filtered, removed = filter_hallucinations(
+            segments, config, speech_intervals=((0.5, 2.5), (5.5, 7.5), (11.5, 13.5))
+        )
+        assert filtered == [segments[2]]
+        assert len(removed) == 3
+        assert any("avg_logprob" in seg["reason"] for seg in removed)
 
     def test_비활성_시_원본_반환(self) -> None:
         """필터 비활성 시 원본 세그먼트를 그대로 반환한다."""

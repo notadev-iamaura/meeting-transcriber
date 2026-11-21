@@ -691,6 +691,7 @@ class Transcriber:
         *,
         timeout_override: int | None = None,
         prepared_recording_track: bool = False,
+        remote_recording_track: bool = False,
     ) -> TranscriptResult:
         """오디오 파일을 한국어로 전사한다.
 
@@ -748,6 +749,7 @@ class Transcriber:
                             whisper_module.transcribe,
                             str(audio_path),
                             disjoint_recording_clips=len(vad_clip_timestamps or []) > 2,
+                            remote_recording_track=remote_recording_track,
                             **kwargs,
                         ),
                         timeout=transcribe_timeout,
