@@ -21,17 +21,20 @@ import logging
 import math
 import shutil
 import time
+import wave
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Union, cast
 
 from config import AppConfig, get_config
 from core.coreaudio_helper import get_aggregate_device_names
+from core.quarantine import QuarantineError
 from core.recording_channels import RECORDING_TRACK_COMMENT, has_sustained_recording_signal
 from core.zoom_topic import ZoomTopicObservation, save_recording_topic
+from security.audio_retention import preserve_short_recording
 from steps.zoom_activity import ZoomActivityError, ZoomAudioActivityChecker, use_zoom_tap
 
 logger = logging.getLogger(__name__)
@@ -94,6 +97,7 @@ class RecordingResult:
     file_size_bytes: int
     file_paths: dict[str, Path] | None = None  # 멀티트랙: {"system": Path, "mic": Path}
     is_multitrack: bool = False
+    short_recording: bool = False
 
 
 @dataclass
@@ -167,7 +171,10 @@ class AudioRecorder:
         self._sample_rate = self._recording_config.sample_rate
         self._channels = self._recording_config.channels
         self._max_duration = self._recording_config.max_duration_seconds
-        self._min_duration = self._recording_config.min_duration_seconds
+        self._min_duration = max(
+            self._recording_config.min_duration_seconds,
+            self._config.audio_quality.min_duration_seconds,
+        )
         self._graceful_timeout = self._recording_config.ffmpeg_graceful_timeout_seconds
         self._multi_track = self._recording_config.multi_track
         self._silence_threshold = self._recording_config.silence_threshold_rms
@@ -662,6 +669,7 @@ class AudioRecorder:
                         "meeting_id": meeting_id,
                         "device": device_name,
                         "is_multitrack": bool(self._processes),
+                        "min_duration_seconds": self._min_duration,
                     },
                 )
                 self._capture_watchdog_task = asyncio.create_task(
@@ -1171,7 +1179,7 @@ class AudioRecorder:
             zoom_session: Zoom 종료 이벤트가 시작했던 녹음에만 정지를 적용한다.
 
         Returns:
-            녹음 결과 (RecordingResult) 또는 최소 시간 미달 시 None
+            저장된 녹음 결과 또는 저장할 오디오가 없으면 None
 
         Raises:
             FFmpegRecordError: ffmpeg 종료 처리 실패 시
@@ -1226,6 +1234,7 @@ class AudioRecorder:
                 "ended_at": result.ended_at if result else datetime.now().isoformat(),
                 "saved": bool(paths),
                 "discarded": not paths,
+                "short_recording": bool(result and result.short_recording),
                 "reason": self._stop_reason,
                 "files": [path.name for path in paths],
                 "expected_files": expected_files,
@@ -1294,7 +1303,8 @@ class AudioRecorder:
             # 완료 콜백은 다음 녹음을 시작할 수 있다. stopped 이벤트를 먼저
             # 전달해야 새 recording_started 뒤에 이전 회의의 stopped 이벤트가
             # 도착해 UI가 새 녹음을 숨기는 역전이 생기지 않는다.
-            await self._fire_callbacks(result)
+            if not result.short_recording:
+                await self._fire_callbacks(result)
             return
 
         await self._broadcast_event("recording_stopped", outcome)
@@ -1396,11 +1406,40 @@ class AudioRecorder:
         if drain_tasks:
             await asyncio.gather(*drain_tasks, return_exceptions=True)
 
+    def _is_short_recording(self, elapsed: float, paths: list[Path]) -> bool:
+        """장치 준비 지연으로 실제 PCM이 짧은 녹음도 전사 없이 보관한다."""
+        if elapsed < self._min_duration:
+            return True
+        durations = []
+        for path in paths:
+            try:
+                with wave.open(str(path), "rb") as wav:
+                    durations.append(wav.getnframes() / wav.getframerate())
+            except (OSError, EOFError, wave.Error, ZeroDivisionError):
+                continue  # 나머지 검사와 저장 오류 처리는 기존 경로에서 수행한다.
+        return bool(durations) and max(durations) < self._min_duration
+
+    def _publish_recording(self, source: Path, *, short: bool) -> Path:
+        """짧은 녹음은 보관 전용 폴더에, 나머지는 감시되는 입력 폴더에 게시한다."""
+        if short:
+            recorded_at = datetime.fromtimestamp(self._start_time or time.time(), UTC)
+            try:
+                return preserve_short_recording(
+                    source, self._config.paths.short_recordings_dir, recorded_at
+                )
+            except QuarantineError as exc:
+                raise OSError("짧은 녹음 원본을 보관 폴더로 옮기지 못했습니다") from exc
+        self._audio_input_dir.mkdir(parents=True, exist_ok=True)
+        dest = self._audio_input_dir / source.name
+        self._save_zoom_topic(source, dest)
+        shutil.move(str(source), str(dest))
+        return dest
+
     async def _terminate_ffmpeg(self) -> RecordingResult | None:
         """ffmpeg 프로세스를 종료하고 녹음 결과를 반환한다.
 
         Returns:
-            녹음 결과 또는 최소 시간 미달 시 None
+            저장된 녹음 결과 또는 저장할 오디오가 없으면 None
 
         Raises:
             FFmpegRecordError: 프로세스 종료 실패 시
@@ -1420,16 +1459,7 @@ class AudioRecorder:
         # 실패 파일은 짧거나 비어 있어도 삭제하지 않고 임시 위치에 보존한다.
         await self._terminate_one_ffmpeg(self._process, "recording")
 
-        # 최소 시간 미달 체크
-        if duration < self._min_duration:
-            self._stop_reason = f"최소 녹음 시간({self._min_duration:g}초)보다 짧습니다."
-            logger.info(
-                f"녹음 시간 {duration:.1f}초 < 최소 {self._min_duration}초. "
-                f"파일 파기: {self._current_file}"
-            )
-            if self._current_file.exists():
-                self._current_file.unlink()
-            return None
+        short = self._is_short_recording(duration, [self._current_file])
 
         # 파일 유효성 확인
         if not self._current_file.exists():
@@ -1443,7 +1473,7 @@ class AudioRecorder:
             return None
 
         # 무음 감지: RMS 에너지가 임계값 미만이면 무음 파일로 판정
-        if not self._check_audio_energy(self._current_file):
+        if not short and not self._check_audio_energy(self._current_file):
             self._stop_reason = "녹음에서 소리가 감지되지 않았습니다."
             logger.warning(
                 f"무음 녹음 파일 파기: {self._current_file} "
@@ -1452,12 +1482,9 @@ class AudioRecorder:
             self._current_file.unlink()
             return None
 
-        # audio_input으로 파일 이동
-        self._audio_input_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = self._audio_input_dir / self._current_file.name
-
-        self._save_zoom_topic(self._current_file, dest_file)
-        shutil.move(str(self._current_file), str(dest_file))
+        dest_file = self._publish_recording(self._current_file, short=short)
+        if short:
+            self._stop_reason = f"{self._min_duration:g}초 미만이어서 자동 전사하지 않습니다."
         logger.info(f"녹음 파일 이동: {self._current_file} → {dest_file}")
 
         return RecordingResult(
@@ -1467,6 +1494,7 @@ class AudioRecorder:
             started_at=started_at,
             ended_at=ended_at,
             file_size_bytes=file_size,
+            short_recording=short,
         )
 
     async def _terminate_one_ffmpeg(
@@ -1527,7 +1555,7 @@ class AudioRecorder:
         """멀티트랙 ffmpeg 프로세스를 모두 종료하고 결과를 반환한다.
 
         Returns:
-            녹음 결과 또는 최소 시간 미달 시 None
+            저장된 녹음 결과 또는 저장할 오디오가 없으면 None
         """
         duration = self.current_duration
         ended_at = datetime.now().isoformat()
@@ -1543,19 +1571,9 @@ class AudioRecorder:
         for track_name, proc in self._processes.items():
             await self._terminate_one_ffmpeg(proc, track_name)
 
-        # 최소 시간 미달 체크
-        if duration < self._min_duration:
-            self._stop_reason = f"최소 녹음 시간({self._min_duration:g}초)보다 짧습니다."
-            logger.info(
-                f"녹음 시간 {duration:.1f}초 < 최소 {self._min_duration}초. 멀티트랙 파일 파기"
-            )
-            for file_path in self._current_files.values():
-                if file_path.exists():
-                    file_path.unlink()
-            return None
-
-        # 파일 유효성 확인 및 audio_input으로 이동
-        self._audio_input_dir.mkdir(parents=True, exist_ok=True)
+        short = self._is_short_recording(duration, list(self._current_files.values()))
+        if short:
+            self._stop_reason = f"{self._min_duration:g}초 미만이어서 자동 전사하지 않습니다."
         moved_files: dict[str, Path] = {}
         total_size = 0
         failed_files: list[str] = []
@@ -1570,9 +1588,7 @@ class AudioRecorder:
                     logger.warning(f"멀티트랙 파일 비어있음: {track_name}={file_path}")
                     file_path.unlink()
                     continue
-                dest = self._audio_input_dir / file_path.name
-                self._save_zoom_topic(file_path, dest)
-                shutil.move(str(file_path), str(dest))
+                dest = self._publish_recording(file_path, short=short)
             except OSError:
                 logger.exception(f"멀티트랙 파일 저장 실패: {track_name}")
                 failed_files.append(file_path.name)
@@ -1584,7 +1600,8 @@ class AudioRecorder:
         if failed_files and not moved_files:
             raise FFmpegRecordError("녹음 트랙을 저장하지 못했습니다.")
         if failed_files:
-            self._stop_reason = f"저장하지 못한 파일({', '.join(failed_files)})은 임시 녹음 폴더에서 확인해 주세요."
+            warning = f"저장하지 못한 파일({', '.join(failed_files)})은 임시 녹음 폴더에서 확인해 주세요."
+            self._stop_reason = f"{self._stop_reason} {warning}".strip()
         if not moved_files:
             self._stop_reason = "저장할 오디오 트랙이 없습니다."
             logger.warning("유효한 멀티트랙 파일이 없습니다.")
@@ -1603,6 +1620,7 @@ class AudioRecorder:
             file_size_bytes=total_size,
             file_paths=moved_files,
             is_multitrack=True,
+            short_recording=short,
         )
 
     async def _cleanup_multitrack_processes(self) -> None:
@@ -1767,6 +1785,8 @@ class AudioRecorder:
             "state": self._state.value,
             "is_recording": self.is_recording,
             "duration_seconds": round(self.current_duration, 1),
+            "min_duration_seconds": self._min_duration,
+            "has_short_recordings": self._config.paths.short_recordings_dir.is_dir(),
             "meeting_id": self._meeting_id,
             "device": self._current_device.name if self._current_device else None,
             "last_stop": self._last_stop,

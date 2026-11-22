@@ -965,6 +965,111 @@ class TestTranscriptEdit:
         expect(page.locator(".utterance-text").first).to_have_text(original or "")
 
 
+class TestTranscriptDraft:
+    def test_conflict_keeps_draft_when_reading_latest(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """다른 창이 먼저 저장하면 최신 원문과 내 초안을 함께 확인한 뒤 적용한다."""
+        _open_viewer(page, seeded_meeting_id)
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+        row = page.locator(".utterance-text").first
+        row.dblclick()
+        editor = page.get_by_role("textbox", name="발화 편집")
+        editor.fill("내가 편집하고 있던 문장입니다.")
+        rows = page.request.get(url).json()["utterances"]
+        rows[0]["text"] = "다른 창에서 저장한 문장입니다."
+        assert page.request.put(url, data={"utterances": rows}).ok
+        editor.press("Control+Enter")
+        row.get_by_role("button", name="최신 전사문 보기").click()
+        expect(row.get_by_role("alert")).to_contain_text(rows[0]["text"])
+        expect(editor).to_have_value("내가 편집하고 있던 문장입니다.")
+        assert page.request.get(url).json()["utterances"][0]["text"] == rows[0]["text"]
+        row.get_by_role("button", name="현재 문장을 초안으로 바꾸기").click()
+        expect(row).to_have_text("내가 편집하고 있던 문장입니다.")
+
+    @pytest.mark.parametrize("fail", [False, True], ids=["saved", "failed"])
+    def test_search_and_return_while_saving(
+        self, page: Page, seeded_meeting_id: str, test_base_dir: Path, fail: bool
+    ) -> None:
+        """PUT 응답을 보류한 동안 검색·다른 회의 이동 후 돌아와도 저장 결과를 확인한다."""
+        other = "meeting_20260408_100000"
+        _seed_meeting(test_base_dir, other)
+        _open_viewer(page, seeded_meeting_id)
+        row = page.locator(".utterance-text").first
+        row.dblclick()
+        editor = page.get_by_role("textbox", name="발화 편집")
+        revised = "응답을 기다리는 동안에도 보존해야 하는 발화입니다."
+        editor.fill(revised)
+        pending: list[Route] = []
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+
+        def delay_save(route: Route) -> None:
+            """PUT 하나만 보류하고 나머지 요청은 실제 서버에 전달한다."""
+            if route.request.method == "PUT":
+                pending.append(route)
+            else:
+                route.continue_()
+
+        page.route(url, delay_save)
+        editor.press("Control+Enter")
+        query = page.get_by_role("textbox", name="전사문 내 검색")
+        query.fill("파이선")
+        expect(page.get_by_text("편집 초안 복원됨")).to_be_visible()
+        expect(row.get_by_role("button", name="저장 중…")).to_be_disabled()
+        expect(editor).to_have_value(revised)
+        page.locator(f'.meeting-item[data-meeting-id="{other}"]').press("Enter")
+        expect(page).to_have_url(f"{BASE_URL}/app/viewer/{other}")
+        expect(row).to_be_visible()
+        expect(editor).to_have_count(0)
+        page.locator(f'.meeting-item[data-meeting-id="{seeded_meeting_id}"]').press("Enter")
+        expect(page).to_have_url(f"{BASE_URL}/app/viewer/{seeded_meeting_id}")
+        assert len(pending) == 1
+        if fail:
+            pending[0].fulfill(status=503, json={"detail": "테스트 저장 중단"})
+            expect(row.get_by_role("alert")).to_contain_text("테스트 저장 중단")
+            expect(editor).to_have_value(revised)
+            page.unroute(url, delay_save)
+            editor.press("Control+Enter")
+        else:
+            pending[0].continue_()
+        expect(row).to_have_text(revised)
+        assert page.request.get(url).json()["utterances"][0]["text"] == revised
+
+    def test_search_switch_reload_save(
+        self, page: Page, seeded_meeting_id: str, test_base_dir: Path
+    ) -> None:
+        """검색과 회의 이동 뒤 같은 발화의 초안을 복원하고 명시적 저장 때만 게시한다."""
+        other = "meeting_20260408_100000"
+        _seed_meeting(test_base_dir, other)
+        _open_viewer(page, seeded_meeting_id)
+        original = page.locator(".utterance-text").first.inner_text()
+        draft = original + " 수정한 초안입니다."
+        editor = page.get_by_role("textbox", name="발화 편집")
+        page.locator(".utterance-text").first.dblclick()
+        editor.fill(draft)
+        query = page.get_by_role("textbox", name="전사문 내 검색")
+        query.fill("파이선")
+        expect(page.get_by_text("편집 초안 복원됨")).to_be_visible()
+        expect(query).to_be_focused()
+        expect(editor).to_have_value(draft)
+        page.locator(f'.meeting-item[data-meeting-id="{other}"]').press("Enter")
+        expect(page).to_have_url(f"{BASE_URL}/app/viewer/{other}")
+        expect(page.locator(".utterance-text").first).to_have_text(original)
+        expect(editor).to_have_count(0)
+        page.locator(f'.meeting-item[data-meeting-id="{seeded_meeting_id}"]').press("Enter")
+        expect(editor).to_have_value(draft)
+        page.reload()
+        expect(editor).to_have_value(draft)
+        url = f"{BASE_URL}/api/meetings/{seeded_meeting_id}/transcript"
+        assert page.request.get(url).json()["utterances"][0]["text"] == original
+        editor.press("Control+Enter")
+        expect(editor).to_have_count(0)
+        assert page.request.get(url).json()["utterances"][0]["text"] == draft
+        page.reload()
+        expect(page.locator(".utterance-text").first).to_have_text(draft)
+        expect(editor).to_have_count(0)
+
+
 class TestInlineVocabulary:
     """개별 발화 저장과 선택한 용어 등록을 실제 회의 API에서 검증한다."""
 

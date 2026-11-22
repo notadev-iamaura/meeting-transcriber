@@ -34,6 +34,7 @@ class RecordingStopOutcome(BaseModel):
     ended_at: str
     saved: bool
     discarded: bool
+    short_recording: bool = False
     reason: str
     files: list[str]
     expected_files: int
@@ -54,6 +55,8 @@ class RecordingStatusResponse(BaseModel):
     state: str
     is_recording: bool = False
     duration_seconds: float = 0.0
+    min_duration_seconds: float = 0.0
+    has_short_recordings: bool = False
     meeting_id: str | None = None
     device: str | None = None
     is_system_audio: bool = False

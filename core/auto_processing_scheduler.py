@@ -97,7 +97,9 @@ class AutoProcessingScheduler:
         if self._run_lock.locked():
             return None
         await self._run_lock.acquire()
-        config_snapshot = self._config
+        config_snapshot = self._config.model_copy(
+            update={"auto_processing": self._config.auto_processing.model_copy()}
+        )
         started = False
 
         async def _reserved_wrapper() -> AutoProcessingResult:

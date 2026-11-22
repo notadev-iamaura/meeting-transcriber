@@ -611,6 +611,10 @@
             self._els = {};
             self._listeners = [];
             self._dirty = false;
+            self._otherDirty = false;
+            self._otherEditVersion = 0;
+            self._settingsSavePending = false;
+            self._nightRequestPending = false;
             self._settingsData = null;
             self._transcriptionCatalog = null;
             self._openAIKeyStatus = { configured: false, source: "none" };
@@ -718,7 +722,8 @@
                 '      </div>',
                 '      <div class="setting-row">',
                 '        <div class="setting-label">수동 실행</div>',
-                '        <button type="button" class="btn-secondary" id="settingsAutoProcessingRunNow">지금 실행</button>',
+                '        <span class="setting-inline-status" id="settingsAutoProcessingPreview"></span>',
+                '        <button type="button" class="btn-secondary" id="settingsAutoProcessingRunNow" aria-describedby="settingsAutoProcessingPreview" disabled>지금 실행</button>',
                 '      </div>',
                 '    </div>',
                 '  </section>',
@@ -727,13 +732,13 @@
                 '    <div class="settings-group">',
                 '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsDiarizationEngine">화자분리 엔진</label>',
-                '        <select class="setting-select" id="settingsDiarizationEngine">',
+                '        <select class="setting-select" id="settingsDiarizationEngine" aria-describedby="settingsEngineDescription">',
                 '          <option value="senko">Senko (CoreML, 기본)</option>',
                 '          <option value="community-1">community-1 (pyannote CPU)</option>',
                 '          <option value="speakrs">speakrs (CoreML)</option>',
                 '        </select>',
                 '      </div>',
-                '      <p class="setting-help">Senko·speakrs는 Apple Silicon Mac이 필요합니다. Senko는 앱 venv에 설치하고, speakrs는 recap-speakrs 바이너리를 설치하세요 (README 화자분리 엔진). 설치되지 않으면 오류로 중단합니다. 화자 수 제한은 community-1에만 적용됩니다.</p>',
+                '      <p class="settings-section-desc engine-description" id="settingsEngineDescription">Senko와 speakrs는 Apple Silicon Mac에서 실행됩니다. 선택한 엔진이 설치되어 있어야 하며, 화자 수 제한은 community-1에서 설정할 수 있습니다.</p>',
                 '      <div class="setting-row">',
                 '        <label class="setting-label" for="settingsLang">전사 언어</label>',
                 '        <select class="setting-select" id="settingsLang">',
@@ -936,6 +941,7 @@
                 autoProcessingRunOnStartup: document.getElementById("settingsAutoProcessingRunOnStartup"),
                 autoProcessingStatus: document.getElementById("settingsAutoProcessingStatus"),
                 autoProcessingRunNow: document.getElementById("settingsAutoProcessingRunNow"),
+                autoProcessingPreview: document.getElementById("settingsAutoProcessingPreview"),
             };
             // 모델별 description 캐시 (툴팁 갱신용)
             this._modelDescriptions = {};
@@ -1032,8 +1038,8 @@
                 fn: onOpenAIKeyDelete,
             });
 
-            var markDirty = function () {
-                self._setDirty(true);
+            var markDirty = function (event) {
+                self._setDirty(true, event.target.id.startsWith("settingsAutoProcessing"));
             };
             [
                 els.model, els.backend, els.temp, els.skipLlm, els.lang, els.diarizationEngine,
@@ -1440,14 +1446,17 @@
             }
         };
 
-        GeneralSettingsPanel.prototype._setDirty = function (dirty) {
-            this._dirty = !!dirty;
+        GeneralSettingsPanel.prototype._setDirty = function (dirty, nightly) {
+            if (!nightly) this._otherDirty = !!dirty;
+            if (dirty && !nightly) this._otherEditVersion++;
+            this._dirty = this._otherDirty || this._nightChanged();
             var els = this._els;
+            this._syncNightButton();
             if (!els.saveStatus || !els.saveBtn) return;
             if (this._dirty) {
                 els.saveStatus.textContent = "저장되지 않은 변경";
                 els.saveStatus.className = "settings-save-status warning";
-                els.saveBtn.disabled = false;
+                els.saveBtn.disabled = this._nightRequestPending || this._settingsSavePending;
             } else {
                 els.saveStatus.textContent = "변경 전";
                 els.saveStatus.className = "settings-save-status";
@@ -1471,6 +1480,7 @@
 
         GeneralSettingsPanel.prototype._saveSettings = async function () {
             var els = this._els;
+            if (this._settingsSavePending || this._nightRequestPending || els.saveBtn.disabled) return;
             var selectedTranscriptionModel = this._getSelectedTranscriptionModel();
             if (!selectedTranscriptionModel) {
                 els.saveStatus.textContent = "저장 실패: 기본 전사 모델을 선택해 주세요.";
@@ -1500,6 +1510,9 @@
                 return;
             }
 
+            var otherEditVersion = this._otherEditVersion;
+            this._settingsSavePending = true;
+            this._syncNightButton();
             els.saveBtn.disabled = true;
             els.saveBtn.textContent = "저장 중…";
             els.saveStatus.textContent = "";
@@ -1539,14 +1552,8 @@
                 lifecycle_hot_days: parseInt(els.lifecycleHotDays.value, 10),
                 lifecycle_warm_days: parseInt(els.lifecycleWarmDays.value, 10),
                 lifecycle_run_on_startup: els.lifecycleRunOnStartup.checked,
-                auto_processing_enabled: els.autoProcessingEnabled.checked,
-                auto_processing_run_at: els.autoProcessingRunAt.value || "01:00",
-                auto_processing_stop_at: els.autoProcessingStopAt.value || "06:00",
-                auto_processing_recent_hours: parseInt(els.autoProcessingRecentHours.value, 10),
-                auto_processing_max_items_per_run: parseInt(els.autoProcessingMaxItems.value, 10),
-                auto_processing_action: els.autoProcessingAction.value,
-                auto_processing_run_on_startup_if_missed: els.autoProcessingRunOnStartup.checked,
             };
+            Object.assign(payload, this._nightSettings());
             // 다른 창에서 변경된 삭제 정책을 관련 없는 설정 저장으로 덮어쓰지 않는다.
             if (!els.audioRetention.disabled &&
                 this._settingsData.lifecycle_audio_retention_enabled !== els.audioRetention.checked) {
@@ -1560,20 +1567,20 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
                 });
-                els.saveStatus.textContent = "저장 완료";
-                els.saveStatus.className = "settings-save-status success";
-                this._dirty = false;
                 this._settingsData = Object.assign({}, this._settingsData || {}, payload, saved && saved.settings);
+                this._setDirty(this._otherEditVersion !== otherEditVersion);
+                if (!this._dirty) {
+                    els.saveStatus.textContent = "저장 완료";
+                    els.saveStatus.className = "settings-save-status success";
+                }
                 els.audioRetention.checked = this._settingsData.lifecycle_audio_retention_enabled === true;
                 await this._loadAutoProcessingStatus();
-                setTimeout(function () {
-                    els.saveStatus.textContent = "변경 전";
-                    els.saveStatus.className = "settings-save-status";
-                }, 3000);
             } catch (err) {
                 els.saveStatus.textContent = "저장 실패: " + (err.message || String(err));
                 els.saveStatus.className = "settings-save-status error";
             } finally {
+                this._settingsSavePending = false;
+                this._syncNightButton();
                 els.audioRetention.disabled = !this._settingsData ||
                     typeof this._settingsData.lifecycle_audio_retention_enabled !== "boolean";
                 els.saveBtn.disabled = false;
@@ -1589,7 +1596,7 @@
                 this._renderAutoProcessingStatus(data);
             } catch (err) {
                 els.autoProcessingStatus.textContent = "상태 조회 실패";
-                if (els.autoProcessingRunNow) els.autoProcessingRunNow.disabled = false;
+                this._syncNightButton();
             }
         };
 
@@ -1650,23 +1657,71 @@
             }
 
             els.autoProcessingStatus.textContent = parts.join(" · ");
-            if (els.autoProcessingRunNow) {
-                els.autoProcessingRunNow.disabled = !!data.processing;
-                els.autoProcessingRunNow.textContent = data.processing ? "실행 중…" : "지금 실행";
-            }
+            this._nightProcessing = !!data.processing;
+            this._syncNightButton();
+        };
+
+        GeneralSettingsPanel.prototype._nightSettings = function () {
+            var e = this._els;
+            return {
+                auto_processing_enabled: e.autoProcessingEnabled.checked,
+                auto_processing_run_at: e.autoProcessingRunAt.value,
+                auto_processing_stop_at: e.autoProcessingStopAt.value,
+                auto_processing_recent_hours: e.autoProcessingRecentHours.valueAsNumber,
+                auto_processing_max_items_per_run: e.autoProcessingMaxItems.valueAsNumber,
+                auto_processing_action: e.autoProcessingAction.value,
+                auto_processing_run_on_startup_if_missed: e.autoProcessingRunOnStartup.checked,
+            };
+        };
+        GeneralSettingsPanel.prototype._nightChanged = function () {
+            if (!this._settingsData) return false;
+            return Object.entries(this._nightSettings()).some(([key, value]) => this._settingsData[key] !== value);
+        };
+        GeneralSettingsPanel.prototype._syncNightButton = function () {
+            var e = this._els;
+            if (!e.autoProcessingRunNow) return;
+            var busy = this._nightRequestPending || this._nightProcessing;
+            e.autoProcessingRunNow.disabled = !!busy || this._settingsSavePending || !this._settingsData;
+            e.autoProcessingRunNow.textContent = busy ? "실행 중…" : this._nightChanged() ? "저장 후 실행" : "지금 실행";
+            var limit = e.autoProcessingMaxItems.valueAsNumber;
+            var hours = e.autoProcessingRecentHours.valueAsNumber;
+            e.autoProcessingPreview.textContent = Number.isInteger(limit) && Number.isInteger(hours)
+                ? "최근 " + hours + "시간 · " + (limit === 0 ? "건수 제한 없음" : "최대 " + limit + "건") +
+                    " · " + e.autoProcessingAction.selectedOptions[0].textContent
+                : "대상 기간과 건수를 입력해 주세요.";
         };
 
         GeneralSettingsPanel.prototype._runAutoProcessingNow = async function () {
             var els = this._els;
-            if (!els.autoProcessingRunNow) return;
-            els.autoProcessingRunNow.disabled = true;
-            els.autoProcessingRunNow.textContent = "실행 중…";
+            if (!this._settingsData || this._nightRequestPending || this._nightProcessing || els.saveBtn.disabled) return;
+            var fields = [els.autoProcessingRecentHours, els.autoProcessingMaxItems, els.autoProcessingRunAt, els.autoProcessingStopAt];
+            var invalid = fields.find(function (input) { return !input.value || !input.checkValidity(); });
+            if (invalid) {
+                els.autoProcessingStatus.textContent = "대상 기간·시간과 처리 상한을 확인해 주세요.";
+                invalid.focus();
+                return;
+            }
+            var options = this._nightSettings();
+            var changes = Object.fromEntries(Object.entries(options).filter(([key, value]) => this._settingsData[key] !== value));
+            this._nightRequestPending = true;
+            this._syncNightButton();
+            els.saveBtn.disabled = true;
             if (els.autoProcessingStatus) {
                 els.autoProcessingStatus.textContent = "처리 중";
             }
             try {
+                if (Object.keys(changes).length) {
+                    await App.apiRequest("/settings", {
+                        method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(changes)
+                    });
+                    Object.assign(this._settingsData, changes);
+                    this._setDirty(this._otherDirty);
+                }
                 var data = await App.apiRequest("/auto-processing/run-now", {
                     method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(Object.fromEntries(Object.entries(options).map(([key, value]) =>
+                        [key.slice("auto_processing_".length), value]))),
                 });
                 var result = data.result || {};
                 if (els.autoProcessingStatus) {
@@ -1699,8 +1754,9 @@
                     els.autoProcessingStatus.textContent = "실행 실패: " + (err.message || err);
                 }
             } finally {
-                els.autoProcessingRunNow.disabled = false;
-                els.autoProcessingRunNow.textContent = "지금 실행";
+                this._nightRequestPending = false;
+                els.saveBtn.disabled = false;
+                this._syncNightButton();
             }
         };
 

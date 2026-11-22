@@ -31,6 +31,35 @@
         // 이 창의 화면 이동은 메모리에서 복원하고, 같은 탭의 새로고침은 sessionStorage로 복원한다.
         var summaryDrafts = new Map();
         var summarySaves = new Map();
+        var transcriptDrafts = new Map();
+        var transcriptSaves = new Map();
+        function meetingDrafts(id) {
+            if (!transcriptDrafts.has(id)) {
+                var entries = [];
+                try {
+                    entries = JSON.parse(sessionStorage.getItem("recap:transcript-drafts:" + id)) || [];
+                } catch (_) { /* 창 메모리만 사용한다. */ }
+                transcriptDrafts.set(id, new Map(Array.isArray(entries) ? entries.filter(function (pair) {
+                    return Array.isArray(pair) && typeof pair[0] === "string" && pair[1] &&
+                        typeof pair[1].base === "string" && typeof pair[1].text === "string";
+                }) : []));
+            }
+            return transcriptDrafts.get(id);
+        }
+        function persistUtteranceDraft(id, key, draft) {
+            var drafts = meetingDrafts(id);
+            if (draft) drafts.set(key, draft);
+            else drafts.delete(key);
+            var storageKey = "recap:transcript-drafts:" + id;
+            try {
+                if (drafts.size) sessionStorage.setItem(storageKey, JSON.stringify(Array.from(drafts)));
+                else sessionStorage.removeItem(storageKey);
+                return true;
+            } catch (_) {
+                try { sessionStorage.removeItem(storageKey); } catch (_) { /* 메모리로 유지 */ }
+                return false;
+            }
+        }
         function getSummaryDraft(id) {
             if (summaryDrafts.has(id)) return summaryDrafts.get(id);
             try {
@@ -86,12 +115,10 @@
             self._searchTimeout = null;
             self._pipelinePollTimer = null;
 
-            // 발화 음성 재생 상태 (lazy 초기화 — 첫 재생 시 audio element 생성)
+            // 발화 또는 누락 구간 하나만 재생한다.
             self._audioElement = null;
-            self._currentPlayingIdx = -1;   // 재생 중 발화의 _allUtterances 인덱스
-            self._currentPlayingEnd = 0;    // 재생 정지 기준 시각 (초)
-            self._currentPlayingEl = null;  // .utterance DOM (.playing 토글 대상)
-            self._currentPlayingBtn = null; // ▶ 버튼 DOM
+            self._playingInterval = null;
+            self._splitPlayback = false;
 
             // 실시간 처리 로그 상태 — 단계별 { elapsed, eta, status, anomaly, startedAt }
             // status: "pending" | "running" | "completed" | "failed" | "skipped"
@@ -169,6 +196,10 @@
                 '  <div class="transcript-source-status" id="viewerTranscriptSourceStatus"',
                 '       role="status" aria-live="polite" style="display:none;"></div>',
                 '  <div class="speaker-legend" id="viewerSpeakerLegend"></div>',
+                '  <label class="viewer-track-choice" id="viewerTrackChoice" hidden>재생 트랙',
+                '    <select id="viewerPlaybackTrack"><option value="mix">함께 듣기</option>',
+                '      <option value="mic">내 마이크만</option><option value="system">상대만</option></select>',
+                '  </label>',
                 '  <div class="viewer-actions" id="viewerActions"></div>',
                 '  <details class="viewer-log-panel" id="viewerLogPanel" style="display:none;">',
                 '    <summary>처리 로그 <span class="log-total" id="viewerLogTotal"></span></summary>',
@@ -181,7 +212,8 @@
                 '  <div class="mic-transcription-copy">',
                 '    <strong id="viewerMicTitle"></strong>',
                 '    <p id="viewerMicMessage"></p>',
-                '    <p id="viewerMicIntervals" hidden></p>',
+                '    <details id="viewerMicIntervals" hidden><summary></summary>',
+                '      <ul aria-label="확인이 필요한 마이크 구간"></ul></details>',
                 '    <p class="mic-transcription-error" id="viewerMicError" hidden></p>',
                 '  </div>',
                 '  <button type="button" class="viewer-action-btn" id="viewerMicRetry">내 마이크만 다시 전사</button>',
@@ -294,6 +326,8 @@
                 micTitle: document.getElementById("viewerMicTitle"),
                 micMessage: document.getElementById("viewerMicMessage"),
                 micIntervals: document.getElementById("viewerMicIntervals"),
+                trackChoice: document.getElementById("viewerTrackChoice"),
+                playbackTrack: document.getElementById("viewerPlaybackTrack"),
                 micError: document.getElementById("viewerMicError"),
                 micRetry: document.getElementById("viewerMicRetry"),
                 speakerLegend: document.getElementById("viewerSpeakerLegend"),
@@ -362,6 +396,11 @@
             var els = self._els;
 
             var onMicRetry = function () { self._retryMicTranscription(); };
+            var onTrackChange = function () {
+                if (self._playingInterval) self._playInterval(self._playingInterval);
+            };
+            els.playbackTrack.addEventListener("change", onTrackChange);
+            self._listeners.push({ el: els.playbackTrack, type: "change", fn: onTrackChange });
             els.micRetry.addEventListener("click", onMicRetry);
             self._listeners.push({ el: els.micRetry, type: "click", fn: onMicRetry });
             var onMicProgress = function (event) {
@@ -634,6 +673,9 @@
         ViewerView.prototype._renderMicTranscription = function () {
             var els = this._els;
             var data = this._micTranscription || {};
+            var expired = Boolean(this._lastMeetingData && this._lastMeetingData.audio_expired_at);
+            els.trackChoice.hidden = expired || !this._splitPlayback;
+            if (expired && this._playingInterval) this._stopUtterancePlayback();
             var status = data.status || "not_applicable";
             var pending = this._micRequestPending || status === "retry_queued" || status === "retrying";
             var failed = ["empty", "low_volume", "partial", "retry_failed"].indexOf(status) !== -1;
@@ -649,7 +691,12 @@
             if (signature === this._micNoticeSignature) return;
             this._micNoticeSignature = signature;
             els.micNotice.hidden = !visible;
-            if (!visible) return;
+            if (!visible) {
+                if (this._playingInterval && els.micIntervals.contains(this._playingInterval.btn)) {
+                    this._stopUtterancePlayback();
+                }
+                return;
+            }
             els.micNotice.classList.toggle("is-error", (!pending && failed) || Boolean(this._micRequestError));
             els.micNotice.classList.toggle("is-complete", !pending && finished && status === "complete");
             els.micNotice.setAttribute("aria-busy", pending ? "true" : "false");
@@ -668,10 +715,23 @@
             els.micError.hidden = !this._micRequestError;
             els.micError.textContent = this._micRequestError;
             els.micIntervals.hidden = pending || status !== "partial" || uncovered.length === 0;
-            els.micIntervals.textContent = uncovered.length
-                ? "확인이 필요한 구간: " + App.formatTime(uncovered[0][0]) + "–" + App.formatTime(uncovered[0][1]) +
-                    (uncovered.length > 1 ? " 외 " + (uncovered.length - 1) + "구간" : "")
-                : "";
+            var self = this;
+            var list = els.micIntervals.querySelector("ul");
+            if (self._playingInterval && list.contains(self._playingInterval.btn)) self._stopUtterancePlayback();
+            els.micIntervals.querySelector("summary").textContent = "의심 구간 " + uncovered.length + "개 듣기";
+            list.replaceChildren();
+            uncovered.forEach(function (bounds) {
+                var item = document.createElement("li");
+                var button = document.createElement("button");
+                button.type = "button";
+                button.className = "viewer-action-btn";
+                button.textContent = App.formatTime(bounds[0]) + "–" + App.formatTime(bounds[1]) + " 듣기";
+                button.addEventListener("click", function () {
+                    self._toggleInterval(bounds[0], bounds[1], item, button);
+                });
+                item.appendChild(button);
+                list.appendChild(item);
+            });
             els.micRetry.hidden = !failed && !pending;
             els.micRetry.disabled = pending || data.retry_available !== true;
             els.micRetry.textContent = pending ? "재전사 처리 중…" : "내 마이크만 다시 전사";
@@ -683,6 +743,10 @@
             var pending = data.status === "retry_queued" || data.status === "retrying";
             if (pending) this._micRetryObserved = true;
             this._micTranscription = data;
+            // WebSocket 진행 이벤트에는 원본 검사 결과가 없을 수 있다.
+            if (typeof data.split_playback_available === "boolean") {
+                this._splitPlayback = data.split_playback_available;
+            }
             this._renderMicTranscription();
             if (this._lastMeetingData) this._renderActions(this._lastMeetingData);
             clearTimeout(this._micPollTimer);
@@ -951,9 +1015,13 @@
             var self = this;
             var els = self._els;
             // 재렌더 직전 재생 상태를 정리 (이전 DOM 참조가 끊어지므로)
-            self._stopUtterancePlayback();
+            if (self._playingInterval && els.timeline.contains(self._playingInterval.btn)) {
+                self._stopUtterancePlayback();
+            }
             els.timeline.innerHTML = "";
             var matchCount = 0;
+            var draftRows = new Map();
+            var drafts = meetingDrafts(self._meetingId);
 
             utterances.forEach(function (u, utteranceIndex) {
                 var el = document.createElement("div");
@@ -1000,6 +1068,10 @@
                 // 텍스트
                 var textEl = document.createElement("div");
                 textEl.className = "utterance-text";
+                var anchor = JSON.stringify([u.speaker, u.start, u.end]);
+                var occurrence = draftRows.get(anchor) || 0;
+                draftRows.set(anchor, occurrence + 1);
+                textEl.dataset.draftKey = anchor + "/" + occurrence;
                 textEl.title = self._canEditTranscript()
                     ? "더블클릭 또는 Enter로 편집"
                     : "읽기 전용 전사문";
@@ -1053,6 +1125,8 @@
                 el.appendChild(content);
                 self._renderRowSpeaker(el, u.speaker, utteranceIndex);
                 els.timeline.appendChild(el);
+                var draft = drafts.get(textEl.dataset.draftKey);
+                if (draft) self._beginEditUtterance(utteranceIndex, textEl, draft);
             });
 
             self._syncMicEchoVisibility();
@@ -1085,142 +1159,87 @@
             }
         };
 
-        /**
-         * 발화 음성 재생용 audio element 를 lazy 하게 만든다.
-         *
-         * 한 ViewerView 인스턴스에서 단일 audio 만 사용한다 (여러 발화가
-         * 같은 audio 를 공유하고 currentTime 만 옮긴다). 첫 ▶ 클릭에서만
-         * 메타데이터 로드가 일어나도록 preload="metadata".
-         *
-         * @returns {HTMLAudioElement}
-         */
-        ViewerView.prototype._ensureAudioPlayer = function () {
-            var self = this;
-            if (self._audioElement) return self._audioElement;
-
-            var audio = document.createElement("audio");
-            audio.preload = "metadata";
-            audio.src = "/api/meetings/" + encodeURIComponent(self._meetingId) + "/audio";
-            audio.style.display = "none";
-
-            // 발화 종료 시각에 도달하면 자동 정지 (구간 재생)
-            audio.addEventListener("timeupdate", function () {
-                if (self._currentPlayingIdx < 0) return;
-                if (audio.currentTime >= self._currentPlayingEnd) {
-                    try { audio.pause(); } catch (e) { /* no-op */ }
-                    self._stopUtterancePlayback();
-                }
-            });
-
-            // 파일 끝까지 재생된 경우
-            audio.addEventListener("ended", function () {
-                self._stopUtterancePlayback();
-            });
-
-            // 404·네트워크·코덱 오류 → 사용자 알림
-            audio.addEventListener("error", function () {
-                // 처음 한 번만 알리고 정지 (각 발화마다 알림 폭탄 방지)
-                if (self._currentPlayingIdx >= 0) {
-                    errorBanner.show(
-                        "이 회의의 음성 파일을 재생할 수 없어요 " +
-                        "(보존 기간이 지났거나 파일이 손상되었을 수 있어요)."
-                    );
-                }
-                self._stopUtterancePlayback();
-            });
-
-            document.body.appendChild(audio);
-            self._audioElement = audio;
-            return audio;
-        };
-
-        /**
-         * 특정 발화의 음성 구간을 재생/정지 토글한다 (▶ 버튼 핸들러).
-         *
-         * 같은 발화에서 다시 누르면 정지, 다른 발화를 누르면 그 발화로 점프.
-         * Whisper 시작 시각이 살짝 늦은 경우가 잦아 0.2초 백오프하여 seek 한다.
-         *
-         * @param {number} index - self._allUtterances 인덱스
-         * @param {HTMLElement} utteranceEl - .utterance 컨테이너 (.playing 클래스 토글용)
-         * @param {HTMLElement} btnEl - ▶ 버튼 (.playing 클래스 토글용)
-         */
-        ViewerView.prototype._toggleUtterancePlayback = function (index, utteranceEl, btnEl) {
-            var self = this;
-            if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
-            var u = self._allUtterances[index];
-            if (typeof u.start !== "number" || typeof u.end !== "number") return;
-
-            var audio = self._ensureAudioPlayer();
-
-            // 같은 발화 재생 중 → 정지 (토글)
-            if (self._currentPlayingIdx === index && !audio.paused) {
-                try { audio.pause(); } catch (e) { /* no-op */ }
-                self._stopUtterancePlayback();
+        /** 같은 시각·같은 버튼을 다시 선택하면 정지한다. */
+        ViewerView.prototype._toggleInterval = function (start, end, el, btn) {
+            if (this._playingInterval && this._playingInterval.btn === btn) {
+                this._stopUtterancePlayback();
                 return;
             }
-
-            // 이전 발화 재생 중이면 정리 후 새 발화로 전환
-            self._stopUtterancePlayback();
-
-            self._currentPlayingIdx = index;
-            self._currentPlayingEnd = u.end;
-            self._currentPlayingEl = utteranceEl;
-            self._currentPlayingBtn = btnEl;
-
-            utteranceEl.classList.add("playing");
-            btnEl.classList.add("playing");
-            btnEl.setAttribute("aria-label", "재생 정지");
-
-            // Whisper 타임스탬프 보정 (시작 시각에서 0.2초 앞으로 백오프)
-            var seekTo = Math.max(0, (u.start || 0) - 0.2);
-
-            var startPlayback = function () {
-                try {
-                    audio.currentTime = seekTo;
-                    var playPromise = audio.play();
-                    if (playPromise && typeof playPromise.catch === "function") {
-                        playPromise.catch(function (err) {
-                            self._stopUtterancePlayback();
-                            errorBanner.show(
-                                "음성 재생에 실패했어요: " + (err && err.message ? err.message : err)
-                            );
-                        });
-                    }
-                } catch (err) {
-                    self._stopUtterancePlayback();
-                }
-            };
-
-            // 메타데이터(duration) 로드 전이면 로드 완료 후 재생 시작
-            if (audio.readyState < 1) {
-                var onLoaded = function () {
-                    audio.removeEventListener("loadedmetadata", onLoaded);
-                    // 사이에 사용자가 다른 버튼을 누르거나 정지했는지 확인
-                    if (self._currentPlayingIdx === index) startPlayback();
-                };
-                audio.addEventListener("loadedmetadata", onLoaded);
-            } else {
-                startPlayback();
-            }
+            if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) return;
+            this._playInterval({ start: Math.max(0, start), end: end, el: el, btn: btn,
+                label: btn.getAttribute("aria-label"), caption: btn.textContent });
         };
 
-        /**
-         * 현재 발화 재생 상태를 모두 정리한다 (UI 클래스 + 내부 인덱스).
-         * audio 요소 자체는 유지 (다음 재생에 재사용).
-         */
-        ViewerView.prototype._stopUtterancePlayback = function () {
+        /** 직접 녹음은 서버가 고른 구간 WAV, 일반 파일은 하나의 회의 음원에서 재생한다. */
+        ViewerView.prototype._playInterval = function (interval) {
             var self = this;
-            if (self._currentPlayingEl) {
-                self._currentPlayingEl.classList.remove("playing");
+            self._stopUtterancePlayback();
+            if (self._lastMeetingData && self._lastMeetingData.audio_expired_at) return;
+            var audio = document.createElement("audio");
+            var split = self._splitPlayback;
+            var url = "/api/meetings/" + encodeURIComponent(self._meetingId) + "/audio";
+            if (split) {
+                url += "/clip?" + new URLSearchParams({ track: self._els.playbackTrack.value,
+                    start: String(interval.start), end: String(interval.end) }).toString();
             }
-            if (self._currentPlayingBtn) {
-                self._currentPlayingBtn.classList.remove("playing");
-                self._currentPlayingBtn.setAttribute("aria-label", "이 발화 음성 재생");
+            self._audioElement = audio;
+            self._playingInterval = interval;
+            interval.btn.classList.add("playing");
+            interval.el.classList.add("playing");
+            interval.btn.setAttribute("aria-label", "재생 정지");
+            if (!interval.label) interval.btn.textContent = interval.caption.replace(/듣기$/, "정지");
+            var stop = function () {
+                if (self._audioElement === audio) self._stopUtterancePlayback();
+            };
+            var fail = function () {
+                if (self._audioElement !== audio) return;
+                stop();
+                errorBanner.show("이 구간을 재생할 수 없습니다. 음성 파일의 보관 상태를 확인해 주세요.");
+            };
+            audio.addEventListener("ended", stop);
+            audio.addEventListener("error", fail);
+            if (!split) {
+                audio.addEventListener("loadedmetadata", function () {
+                    if (self._audioElement === audio) audio.currentTime = interval.start;
+                }, { once: true });
+                audio.addEventListener("timeupdate", function () {
+                    if (audio.currentTime >= interval.end) stop();
+                });
             }
-            self._currentPlayingIdx = -1;
-            self._currentPlayingEnd = 0;
-            self._currentPlayingEl = null;
-            self._currentPlayingBtn = null;
+            audio.src = url;
+            audio.hidden = true;
+            document.body.appendChild(audio);
+            try {
+                if (!split) audio.currentTime = interval.start;
+                var playing = audio.play();
+                if (playing) playing.catch(fail);
+            } catch (_) { fail(); }
+        };
+
+        ViewerView.prototype._toggleUtterancePlayback = function (index, el, btn) {
+            var row = this._allUtterances[index];
+            if (row) this._toggleInterval(Math.max(0, row.start - 0.2), row.end, el, btn);
+        };
+
+        ViewerView.prototype._stopUtterancePlayback = function () {
+            var interval = this._playingInterval;
+            this._playingInterval = null;
+            var audio = this._audioElement;
+            this._audioElement = null;
+            if (audio) {
+                audio.pause();
+                audio.removeAttribute("src");
+                audio.load();
+                audio.remove();
+            }
+            if (!interval) return;
+            interval.el.classList.remove("playing");
+            interval.btn.classList.remove("playing");
+            if (interval.label) interval.btn.setAttribute("aria-label", interval.label);
+            else {
+                interval.btn.removeAttribute("aria-label");
+                interval.btn.textContent = interval.caption;
+            }
         };
 
         /**
@@ -1228,7 +1247,7 @@
          * @param {number} index - self._allUtterances 배열 내 인덱스
          * @param {HTMLElement} textEl - 현재 텍스트를 보여주는 element
          */
-        ViewerView.prototype._beginEditUtterance = function (index, textEl) {
+        ViewerView.prototype._beginEditUtterance = function (index, textEl, draft) {
             var self = this;
             if (!self._canEditTranscript()) {
                 return;
@@ -1236,12 +1255,15 @@
             if (!self._allUtterances || index < 0 || index >= self._allUtterances.length) return;
             if (textEl.classList.contains("editing")) return;
             var openEditor = self._els.timeline.querySelector(".utterance-textarea");
-            if (openEditor) {
+            if (!draft && openEditor) {
                 openEditor.focus();
                 return;
             }
 
             var originalText = self._allUtterances[index].text;
+            var key = textEl.dataset.draftKey;
+            var id = self._meetingId;
+            var base = draft ? draft.base : originalText;
             textEl.removeAttribute("tabindex");
             textEl.classList.add("editing");
             textEl.innerHTML = "";
@@ -1250,7 +1272,7 @@
             textarea.className = "utterance-textarea";
             textarea.setAttribute("aria-label", "발화 편집");
             textarea.maxLength = 10000;
-            textarea.value = originalText;
+            textarea.value = draft ? draft.text : originalText;
             textarea.rows = Math.max(2, Math.ceil(originalText.length / 60));
             textEl.appendChild(textarea);
 
@@ -1267,51 +1289,103 @@
             actions.appendChild(cancelBtn);
             actions.appendChild(saveBtn);
             textEl.appendChild(actions);
+            var draftStatus = document.createElement("span");
+            draftStatus.className = "summary-draft-status";
+            draftStatus.setAttribute("role", "status");
+            actions.prepend(draftStatus);
+            function remember() {
+                var changed = textarea.value !== originalText;
+                var stored = persistUtteranceDraft(id, key, changed ? {
+                    base: base, text: textarea.value, selection: [textarea.selectionStart, textarea.selectionEnd]
+                } : null);
+                draftStatus.textContent = changed ? (stored ? "이 창에 초안 보관됨" : "화면 이동 시 초안 유지") : "";
+            }
+            textarea.addEventListener("input", remember);
+            if (draft) {
+                draftStatus.textContent = "편집 초안 복원됨";
+                if (Array.isArray(draft.selection)) textarea.setSelectionRange(draft.selection[0], draft.selection[1]);
+            }
             var saveError = document.createElement("p");
             saveError.className = "utterance-edit-error";
             saveError.setAttribute("role", "alert");
             saveError.hidden = true;
             textEl.appendChild(saveError);
 
-            var conflict = false;
-            var restore = async function () {
-                if (saveBtn.disabled) return;
+            if (draft && draft.error) {
+                saveError.textContent = draft.error;
+                saveError.hidden = false;
+            }
+            if (draft && draft.needsRefresh && draft.failedBase === originalText) {
+                var refreshBtn = document.createElement("button");
+                refreshBtn.type = "button";
+                refreshBtn.className = "btn-icon";
+                refreshBtn.textContent = "최신 전사문 보기";
+                refreshBtn.addEventListener("click", function () { self._loadTranscript(); });
+                actions.appendChild(refreshBtn);
+                saveBtn.disabled = true;
+            } else if (draft && originalText !== base && originalText !== draft.text) {
+                saveError.textContent = "원문이 변경됐습니다. 현재 저장된 문장: " + originalText;
+                saveError.hidden = false;
+                saveBtn.textContent = "현재 문장을 초안으로 바꾸기";
+            }
+            function markSaving() {
+                saveBtn.disabled = cancelBtn.disabled = textarea.readOnly = true;
+                saveBtn.textContent = "저장 중…";
+                saveError.hidden = true;
+            }
+            if (transcriptSaves.has(id)) markSaving();
+            var restore = function () {
+                if (cancelBtn.disabled) return;
+                persistUtteranceDraft(id, key, null);
                 self._renderTimeline(self._allUtterances, self._currentQuery || "");
-                if (conflict) await self._loadTranscript({silent: true});
                 var row = self._els.timeline.children[index];
                 if (row && !self._destroyed) row.querySelector(".utterance-text").focus({preventScroll: true});
             };
             cancelBtn.addEventListener("click", restore);
-            saveBtn.addEventListener("click", async function () {
-                if (saveBtn.disabled) return;
+            saveBtn.addEventListener("click", function () {
+                if (saveBtn.disabled || transcriptSaves.has(id)) return;
                 var next = textarea.value;
                 if (next === originalText) {
                     restore();
                     return;
                 }
-                saveBtn.disabled = cancelBtn.disabled = textarea.readOnly = true;
-                saveError.hidden = true;
-                try {
-                    var data = await self._saveTranscript(index, originalText, next);
+                markSaving();
+                var request = self._saveTranscript(index, originalText, next).then(function (data) {
+                    persistUtteranceDraft(id, key, null);
+                    return data;
+                }).catch(function (err) {
+                    var latest = meetingDrafts(id).get(key);
+                    persistUtteranceDraft(id, key, Object.assign({}, latest, {
+                        base: base, text: next, failedBase: originalText,
+                        needsRefresh: err.status === 409 || err.status === 412,
+                        error: "전사문 저장 실패 · " + err.message
+                    }));
+                    return null;
+                }).finally(function () {
+                    transcriptSaves.delete(id);
+                });
+                transcriptSaves.set(id, request);
+                request.then(function (data) {
                     if (self._destroyed) return;
+                    var active = document.activeElement;
+                    var returnFocus = active === document.body || self._els.timeline.contains(active);
+                    if (!data) {
+                        self._renderTimeline(self._allUtterances, self._currentQuery);
+                        var editorRow = self._els.timeline.children[index];
+                        var editor = editorRow && editorRow.querySelector("textarea");
+                        if (returnFocus && editor) editor.focus({preventScroll: true});
+                        return;
+                    }
                     self._transcriptReadVersion++;
                     self._applyTranscriptResponse(data, {force: true, silent: true});
                     var savedRow = self._els.timeline.children[index];
                     if (!savedRow) return;
                     if (data.vocabulary_suggestions && data.vocabulary_suggestions.length) {
-                        self._showVocabularyReview(index, savedRow, data.vocabulary_suggestions);
-                    } else {
+                        self._showVocabularyReview(index, savedRow, data.vocabulary_suggestions, returnFocus);
+                    } else if (returnFocus) {
                         savedRow.querySelector(".utterance-text").focus({preventScroll: true});
                     }
-                } catch (err) {
-                    if (self._destroyed) return;
-                    conflict = err.status === 409 || err.status === 412;
-                    if (conflict) cancelBtn.textContent = "최신 전사문 보기";
-                    saveError.textContent = "전사문 저장 실패 · " + err.message;
-                    saveError.hidden = false;
-                    saveBtn.disabled = cancelBtn.disabled = textarea.readOnly = false;
-                    textarea.focus({preventScroll: true});
-                }
+                });
             });
             textarea.addEventListener("keydown", function (e) {
                 if (e.isComposing) return;
@@ -1324,16 +1398,18 @@
                 }
             });
 
-            setTimeout(function () {
-                textarea.focus();
-                textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            if (!draft) setTimeout(function () {
+                if (textarea.isConnected) {
+                    textarea.focus();
+                    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+                }
             }, 0);
         };
 
         /**
          * 편집을 시작했을 때의 문장과 새 문장을 보낸다. 저장 전까지 화면의 원문은 유지한다.
          */
-        ViewerView.prototype._saveTranscript = function (index, before, after) {
+        ViewerView.prototype._saveTranscript = async function (index, before, after) {
             if (!this._canEditTranscript()) throw new Error("처리 중이거나 읽기 전용인 전사문은 수정할 수 없습니다.");
             var utterances = this._allUtterances.map(function (u, i) {
                 return {
@@ -1352,7 +1428,7 @@
         };
 
         /** 저장한 발화의 변경 후보를 검토하고 선택한 표현만 용어집에 등록한다. */
-        ViewerView.prototype._showVocabularyReview = function (index, row, suggestions) {
+        ViewerView.prototype._showVocabularyReview = function (index, row, suggestions, returnFocus) {
             var self = this;
             var form = document.createElement("form");
             form.className = "vocabulary-review";
@@ -1439,7 +1515,7 @@
             var utterance = self._allUtterances[index];
             self._vocabularyReviews.set(index, {text: utterance.text, start: utterance.start, speaker: utterance.speaker, element: form});
             row.querySelector(".utterance-content").appendChild(form);
-            choices[0].check.focus({preventScroll: true});
+            if (returnFocus !== false) choices[0].check.focus({preventScroll: true});
         };
 
         /**
@@ -3371,6 +3447,8 @@
             try {
                 await App.apiDelete("/meetings/" + encodeURIComponent(meetingId));
                 setSummaryDraft(meetingId, null);
+                meetingDrafts(meetingId).clear();
+                persistUtteranceDraft(meetingId, "", null);
                 ListPanel.loadMeetings();
                 Router.navigate("/app");
             } catch (e) {
@@ -3624,6 +3702,9 @@
             }
 
             try {
+                // 방금 저장한 회의를 다시 열면 이전 뷰의 PUT이 끝난 뒤 파일을 읽는다.
+                if (transcriptSaves.has(self._meetingId)) await transcriptSaves.get(self._meetingId);
+                if (self._destroyed) return true;
                 var data = await App.apiRequest(
                     "/meetings/" + encodeURIComponent(self._meetingId) + "/transcript"
                 );
@@ -4118,17 +4199,7 @@
             this._timers = [];
 
             // 발화 음성 재생용 audio element 정리 (다른 뷰로 이동 시 leak 방지)
-            if (this._audioElement) {
-                try { this._audioElement.pause(); } catch (e) { /* no-op */ }
-                this._audioElement.src = "";
-                if (this._audioElement.parentNode) {
-                    this._audioElement.parentNode.removeChild(this._audioElement);
-                }
-                this._audioElement = null;
-            }
-            this._currentPlayingIdx = -1;
-            this._currentPlayingEl = null;
-            this._currentPlayingBtn = null;
+            this._stopUtterancePlayback();
 
             // 페이지 타이틀 복원
             document.title = "회의록 · Recap";

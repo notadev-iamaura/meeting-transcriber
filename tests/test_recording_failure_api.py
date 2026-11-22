@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import time
 import wave
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from api.routers.recording import router
 from config import AppConfig, PathsConfig
+from core.zoom_topic import ZoomTopicObservation
 from steps.recorder import AudioRecorder, FFmpegRecordError, RecordingState
 
 
@@ -47,7 +49,9 @@ def _api(recorder: AudioRecorder) -> FastAPI:
     ("duration", "sample", "saved", "reason"),
     [
         (31, b"\x00\x10\x00\xf0", True, ""),
-        (1, b"\x00\x10", False, "30초"),
+        (30, b"\x00\x10\x00\xf0", True, ""),
+        (29, b"\x00\x00", True, "30초"),
+        (1, b"\x00\x10", True, "30초"),
         (31, b"\x00\x00", False, "소리가 감지되지"),
     ],
 )
@@ -74,13 +78,105 @@ def test_saved_and_discarded_receipts_match_disk_and_are_repeatable(
         assert outcome["files"] == ([source.name] if saved else [])
         assert outcome["expected_files"] == 1 and reason in outcome["reason"]
         assert not source.exists()
-        dest = recorder._audio_input_dir / source.name
+        short = duration < recorder._min_duration
+        assert outcome["short_recording"] is short
+        dest = (
+            Path(response.json()["file_path"])
+            if saved
+            else recorder._audio_input_dir / source.name
+        )
         assert dest.exists() is saved
         if saved:
             assert dest.read_bytes() == audio
+        if short:
+            assert dest.parent == recorder._config.paths.short_recordings_dir
+            assert not (recorder._audio_input_dir / source.name).exists()
+            with wave.open(str(dest), "rb") as wav:
+                assert wav.getnframes() == duration * 16_000
+            assert AudioRecorder(recorder._config).get_status()["has_short_recordings"]
+        if saved and not short:
             done.assert_awaited_once()
         else:
             done.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_zoom_stop_preserves_live_short_stereo_capture(tmp_path: Path) -> None:
+    """실제 ffmpeg가 두 채널을 기록하는 동안 Zoom 종료를 전달하고 완성된 WAV를 디코드한다."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg 미설치")
+    recorder = AudioRecorder(AppConfig(paths=PathsConfig(base_dir=str(tmp_path))))
+    recorder._temp_dir.mkdir(parents=True)
+    source = recorder._temp_dir / "zoom.wav"
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-stats_period",
+        "0.1",
+        "-progress",
+        "pipe:1",
+        "-re",
+        "-f",
+        "lavfi",
+        "-i",
+        "aevalsrc=0.05*sin(440*2*PI*t)|0.1*sin(660*2*PI*t):s=16000",
+        "-c:a",
+        "pcm_s16le",
+        str(source),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        await asyncio.wait_for(proc.stdout.readuntil(b"progress=continue"), timeout=8)
+        recorder._state = RecordingState.RECORDING
+        recorder._start_time = time.time() - 31  # 권한 확인을 포함한 벽시계는 30초를 넘었다.
+        recorder._process = proc
+        recorder._current_file = source
+        recorder._meeting_id = source.stem
+        session = ZoomTopicObservation()
+        recorder.track_zoom_topic(session)
+        done = AsyncMock()
+        recorder.on_recording_complete(done)
+        result = await recorder.stop_recording(zoom_session=session)
+        assert result and result.short_recording
+        assert result.file_path.parent == recorder._config.paths.short_recordings_dir
+        with wave.open(str(result.file_path), "rb") as wav:
+            assert wav.getnchannels() == 2 and 0 < wav.getnframes() < 30 * 16_000
+            pcm = wav.readframes(wav.getnframes())
+            assert pcm[0::4] != pcm[2::4] and any(pcm[0::4]) and any(pcm[2::4])
+        done.assert_not_called()
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+def test_short_multitrack_preserves_both_wavs_and_name_collision(tmp_path: Path) -> None:
+    """기존 동명 원본을 보존하고 작은 마이크 및 상대 트랙의 PCM을 그대로 읽는다."""
+    recorder = AudioRecorder(AppConfig(paths=PathsConfig(base_dir=str(tmp_path))))
+    mic = _capture(recorder, 2, b"\x01\x00")
+    system = mic.with_name("synthetic_system.wav")
+    with wave.open(str(system), "wb") as wav:
+        wav.setparams((1, 2, 16_000, 0, "NONE", ""))
+        wav.writeframes(b"\x00\x10" * 32_000)
+    recorder._processes = {"mic": recorder._process, "system": recorder._process}
+    recorder._current_files = {"mic": mic, "system": system}
+    folder = recorder._config.paths.short_recordings_dir
+    folder.mkdir(parents=True)
+    previous = folder / mic.name
+    previous.write_bytes(b"previous")
+    with TestClient(_api(recorder)) as client:
+        receipt = client.post("/api/recording/stop").json()
+    assert receipt["short_recording"] and receipt["saved"] and len(receipt["files"]) == 2
+    assert previous.read_bytes() == b"previous"
+    for name, sample in zip(receipt["files"], (b"\x01\x00", b"\x00\x10"), strict=True):
+        with wave.open(str(folder / name), "rb") as wav:
+            assert wav.readframes(32_000) == sample * 32_000
 
 
 @pytest.mark.parametrize("two_tracks", [False, True])

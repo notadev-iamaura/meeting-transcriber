@@ -1,6 +1,7 @@
 """기기 선택·권한 실패와 출력 재연결 중 Zoom 녹음 세션의 수명을 검증한다."""
 
 import sys
+import wave
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -30,11 +31,16 @@ async def test_zoom_uses_tap_without_blackhole(
     monkeypatch.setattr(recorder, "_select_audio_device", selected)
     monkeypatch.setattr(ZoomAudioActivityChecker, "is_active", AsyncMock(return_value=True))
     script = (
-        "import sys\n"
+        "import sys, wave\n"
+        "with wave.open(sys.argv[1], 'wb') as out:\n"
+        "    out.setparams((2, 2, int(sys.argv[2]), 0, 'NONE', ''))\n"
+        "    out.writeframes(bytes.fromhex('6400c800') * 160)\n"
         "print('frame:1\\nlavfi.astats.1.RMS_level=-20\\nlavfi.astats.2.RMS_level=-12',flush=True)\n"
         "sys.stdin.buffer.read(1)\n"
     )
-    command = AsyncMock(return_value=[sys.executable, "-c", script])
+    command = AsyncMock(
+        side_effect=lambda output, rate: [sys.executable, "-c", script, str(output), str(rate)]
+    )
     monkeypatch.setattr(ZoomAudioActivityChecker, "tap_command", command)
     await recorder.start_recording("test_zoom", zoom_meeting=auto)
     try:
@@ -42,7 +48,16 @@ async def test_zoom_uses_tap_without_blackhole(
         assert status["is_recording"] and status["is_system_audio"]
         assert status["audio_levels"] == {"mic_dbfs": -20, "system_dbfs": -12}
     finally:
-        await recorder.stop_recording()
+        result = await recorder.stop_recording()
+    assert (
+        result
+        and result.short_recording
+        and result.file_path.parent == config.paths.short_recordings_dir
+    )
+    with wave.open(str(result.file_path), "rb") as audio:
+        assert (
+            audio.getnchannels() == 2 and audio.readframes(160) == bytes.fromhex("6400c800") * 160
+        )
     selected.assert_not_awaited()
     command.assert_awaited_once()
 

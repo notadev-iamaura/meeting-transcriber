@@ -24,7 +24,10 @@ import sqlite3
 import sys
 import threading
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -378,6 +381,37 @@ def _lexical_anchors(query: str | None) -> list[str]:
 # === 벡터 검색 ===
 
 
+def _speaker_label_matcher(config: AppConfig, label: str) -> Callable[[str, str], bool]:
+    """검색 한 번 동안 회의별 표시명을 재사용하고 해당 청크의 실제 화자만 대조한다."""
+    from core.speaker_labels import read_speaker_labels
+
+    def normalized(value: str) -> str:
+        """입력 예시로 제공했던 '화자 1'도 '참석자 1'로 인식한다."""
+        return re.sub(
+            r"^(?:화자|참석자)\s*(\d+|\?)$",
+            r"참석자 \1",
+            unicodedata.normalize("NFC", value.strip()),
+        )
+
+    expected = normalized(label)
+
+    @cache
+    def labels_for(meeting: str) -> dict[str, str]:
+        """동일한 번호가 회의마다 다른 사람을 가리키는 원래 표시 규칙을 따른다."""
+        return read_speaker_labels(config, [meeting])[meeting]
+
+    def matches(meeting: str, speakers: str) -> bool:
+        """화자 목록 중 화면에 표시할 이름이 입력과 일치하는지 확인한다."""
+        labels = labels_for(meeting)
+        return any(
+            normalized(labels.get(raw, "참석자 ?" if raw == "UNKNOWN" else raw)) == expected
+            for raw in (s.strip() for s in speakers.split(","))
+            if raw
+        )
+
+    return matches
+
+
 def _search_vector(
     query_embedding: list[float],
     collection: Any,
@@ -386,6 +420,7 @@ def _search_vector(
     speaker_filter: str | None = None,
     meeting_id_filter: str | None = None,
     strict: bool = False,
+    label_matches: Callable[[str, str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """ChromaDB에서 벡터 유사도 검색을 수행한다.
 
@@ -431,6 +466,30 @@ def _search_vector(
             where = where_conditions[0]
         elif len(where_conditions) > 1:
             where = {"$and": where_conditions}
+
+        if label_matches is not None:
+            # 같은 CSV도 회의가 다르면 다른 표시명을 갖는다. 회의와 화자의 조합을
+            # 먼저 제한해야 상위 k건보다 뒤의 실제 일치 결과가 누락되지 않는다.
+            candidates = collection.get(where=where, include=["metadatas"])
+            groups: dict[str, set[str]] = {}
+            for meta in candidates.get("metadatas", []):
+                if not isinstance(meta, dict):
+                    continue
+                mid, speakers = meta.get("meeting_id"), meta.get("speakers")
+                if (
+                    isinstance(mid, str)
+                    and isinstance(speakers, str)
+                    and label_matches(mid, speakers)
+                ):
+                    groups.setdefault(speakers, set()).add(mid)
+            if not groups:
+                return []
+            choices = [
+                {"$and": [{"speakers": {"$eq": speakers}}, {"meeting_id": {"$in": sorted(ids)}}]}
+                for speakers, ids in groups.items()
+            ]
+            scoped: dict[str, Any] = choices[0] if len(choices) == 1 else {"$or": choices}
+            where = {"$and": [where, scoped]} if where else scoped
 
         if speaker_filter:
             # 기존 CSV metadata를 그대로 지원한다. 배열 $contains는 문자열에
@@ -505,6 +564,7 @@ def _search_fts(
     meeting_id_filter: str | None = None,
     cached_conn: sqlite3.Connection | None = None,
     strict: bool = False,
+    label_matches: Callable[[str, str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """SQLite FTS5에서 키워드 검색을 수행한다.
 
@@ -579,11 +639,20 @@ def _search_fts(
                 params.append(meeting_id_filter)
 
             # bm25 점수 내림차순 (bm25는 음수 → 작을수록 관련도 높음)
-            sql += " ORDER BY rank_score LIMIT ?"
-            params.append(top_k)
+            sql += " ORDER BY rank_score"
+            if label_matches is None:
+                sql += " LIMIT ?"
+                params.append(top_k)
 
             cursor = conn.execute(sql, params)
-            rows = cursor.fetchall()
+            rows = (
+                islice(
+                    (r for r in cursor if label_matches(r["meeting_id"], r["speakers"] or "")),
+                    top_k,
+                )
+                if label_matches is not None
+                else cursor
+            )
 
             # 결과 변환
             output: list[dict[str, Any]] = []
@@ -883,6 +952,8 @@ class HybridSearchEngine:
         speaker_filter: str | None = None,
         meeting_id_filter: str | None = None,
         top_k: int | None = None,
+        *,
+        speaker_label_filter: str | None = None,
     ) -> SearchResponse:
         """하이브리드 검색을 수행한다.
 
@@ -925,6 +996,8 @@ class HybridSearchEngine:
             filters_applied["date"] = date_filter
         if speaker_filter:
             filters_applied["speaker"] = speaker_filter
+        if speaker_label_filter:
+            filters_applied["speaker_label"] = speaker_label_filter
         if meeting_id_filter:
             filters_applied["meeting_id"] = meeting_id_filter
 
@@ -936,6 +1009,11 @@ class HybridSearchEngine:
         # 두 검색은 독립적인 I/O 작업이므로 동시에 수행할 수 있다.
         # PERF-011: 캐시된 ChromaDB 컬렉션 사용
         collection = self._get_chroma_collection()
+        label_options = (
+            {"label_matches": _speaker_label_matcher(self._config, speaker_label_filter)}
+            if speaker_label_filter
+            else {}
+        )
 
         vector_task = asyncio.to_thread(
             _search_vector,
@@ -946,6 +1024,7 @@ class HybridSearchEngine:
             speaker_filter,
             meeting_id_filter,
             strict=True,
+            **label_options,
         )
         # PERF: 캐시된 FTS SQLite 연결 사용 (매 검색마다 connect/close 제거)
         fts_conn = self._get_fts_connection()
@@ -959,6 +1038,7 @@ class HybridSearchEngine:
             meeting_id_filter,
             fts_conn,
             strict=True,
+            **label_options,
         )
         outcomes = await asyncio.gather(vector_task, fts_task, return_exceptions=True)
         source_errors: dict[str, str] = {}

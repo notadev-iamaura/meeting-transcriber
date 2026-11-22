@@ -18,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, TypeAdapter
 
 from config import AppConfig
-from core.io_utils import read_text_no_follow, rename_no_replace
+from core.io_utils import publish_text_no_replace, read_text_no_follow, rename_no_replace
 from core.job_queue import AsyncJobQueue, Job, JobQueue, JobQueueError, lexical_root_no_symlinks
 from core.meeting_mutation import MeetingMutationCoordinator
 from core.meeting_progress import recording_start
@@ -27,6 +27,7 @@ from core.quarantine import (
     QuarantineError,
     _open_directory_tree_no_follow,
     _verify_lexical_directory_identity,
+    move_to_quarantine_exact,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,86 @@ class _AudioEntry(BaseModel):
 
 
 _PLAN = TypeAdapter(list[_AudioEntry])
+
+
+class _ShortReceipt(BaseModel):
+    """큐에 등록되지 않는 짧은 녹음의 시각과 원본 파일 지문."""
+
+    recorded_at: datetime
+    audio: _AudioEntry
+
+
+def preserve_short_recording(source: Path, folder: Path, recorded_at: datetime) -> Path:
+    """원본 지문을 기록한 뒤 감시 폴더 밖에 짧은 WAV를 덮어쓰기 없이 옮긴다."""
+    fd = _open_directory_tree_no_follow(folder, create=True)
+    try:
+        parent = os.fstat(fd)
+        src = source.lstat()
+        if not stat.S_ISREG(src.st_mode) or src.st_nlink != 1:
+            raise OSError("녹음 원본이 단일 일반 파일이 아닙니다")
+        token = uuid.uuid4().hex
+        name = source.name
+        if _entry_stat(fd, name) is not None:
+            name = f"{source.stem}-{token}{source.suffix}"
+        dest = folder / name
+        entry = _AudioEntry(
+            path=str(dest),
+            parent_inode=(parent.st_dev, parent.st_ino),
+            identity=_identity(src),
+            token=token,
+        )
+        receipt = _ShortReceipt(recorded_at=recorded_at, audio=entry)
+        publish_text_no_replace(folder / f".recap-short-{token}.json", receipt.model_dump_json())
+        return move_to_quarantine_exact(
+            source, dest, reason="짧은 녹음 보관", expected_identity=entry.identity
+        )
+    finally:
+        os.close(fd)
+
+
+def _expire_short_recordings(folder: Path, cutoff: datetime, result: AudioRetentionResult) -> None:
+    """보관 영수증과 같은 파일만 만료시킨다. 사용자가 추가하거나 교체한 파일은 보존한다."""
+    try:
+        fd = _open_directory_tree_no_follow(folder, create=False)
+    except FileNotFoundError:
+        return
+    try:
+        parent = os.fstat(fd)
+        for name in os.listdir(fd):
+            if not re.fullmatch(r"\.recap-short-[0-9a-f]{32}\.json", name):
+                continue
+            try:
+                receipt_stat = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISREG(receipt_stat.st_mode) or receipt_stat.st_nlink != 1:
+                    continue
+                receipt = _ShortReceipt.model_validate_json(read_text_no_follow(folder / name))
+                audio = receipt.audio
+                if (
+                    receipt.recorded_at.tzinfo is None
+                    or receipt.recorded_at > cutoff
+                    or name != f".recap-short-{audio.token}.json"
+                    or Path(audio.path).parent != folder
+                    or Path(audio.path).suffix != ".wav"
+                    or audio.parent_inode != (parent.st_dev, parent.st_ino)
+                ):
+                    continue
+                freed = _remove_claimed_file(audio)
+                if freed is not None:
+                    result.deleted_files += 1
+                    result.bytes_freed += freed
+                _remove_claimed_file(
+                    _AudioEntry(
+                        path=str(folder / name),
+                        parent_inode=audio.parent_inode,
+                        identity=_identity(receipt_stat),
+                        token=uuid.uuid4().hex,
+                    )
+                )
+            except (ValueError, OSError, QuarantineError) as exc:
+                result.errors += 1
+                logger.warning(f"짧은 녹음 만료 처리 보류: {name} ({exc})")
+    finally:
+        os.close(fd)
 
 
 def _path_key(path: Path) -> str:
@@ -301,6 +382,15 @@ async def expire_recording_audio(
     current = (now or datetime.now(UTC)).astimezone(UTC)
     cutoff = current - timedelta(days=AUDIO_RETENTION_DAYS)
     roots = _Roots.from_config(config)
+    try:
+        await finish_started_write(
+            asyncio.to_thread(
+                _expire_short_recordings, config.paths.short_recordings_dir, cutoff, result
+            )
+        )
+    except (OSError, QuarantineError) as exc:
+        result.errors += 1
+        logger.warning(f"짧은 녹음 보관 폴더 확인 실패: {exc}")
     pending = []
     for job in await queue.get_all_jobs():
         if not config.lifecycle.audio_retention_enabled:

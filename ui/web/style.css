@@ -2688,6 +2688,36 @@ ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: in
   color: var(--accent);
 }
 
+.result-open,
+.result-speaker-filter {
+  font-family: inherit;
+  background: none;
+  color: var(--accent);
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.result-open { padding: 0; }
+
+.result-speaker-filter {
+  padding: 3px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  font-size: inherit;
+}
+
+.result-speaker-filter:hover,
+.result-speaker-filter:focus-visible { text-decoration: underline; }
+
+.search-speaker-scope {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.search-speaker-scope:empty { display: none; }
+
 .result-score {
   font-size: 11px;
   font-weight: 500;
@@ -2954,6 +2984,12 @@ ul#command-palette-list [aria-selected="true"] .meeting-heading-date { color: in
 .mic-global-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 .mic-transcription-copy { min-width: 0; overflow-wrap: anywhere; }
 .mic-transcription-copy p { margin: 4px 0 0; }
+.viewer-track-choice { display: inline-flex; align-items: center; gap: 8px; margin: 6px 0; }
+.viewer-track-choice[hidden], #viewerMicIntervals[hidden] { display: none; }
+.viewer-track-choice select { font: inherit; }
+#viewerMicIntervals { margin-top: 6px; }
+#viewerMicIntervals summary { cursor: pointer; }
+#viewerMicIntervals ul { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px; list-style: none; max-height: 12rem; overflow: auto; }
 .mic-transcription-error { font-weight: 500; }
 .mic-transcription-notice button { flex-shrink: 0; }
 @media (max-width: 600px) {

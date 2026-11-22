@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import wave
+
 import pytest
 from playwright.sync_api import Browser, Page, Route, expect
 
@@ -13,6 +16,39 @@ pytestmark = pytest.mark.ui
 def _control(page: Page, action: str) -> None:
     """제품 API와 분리한 합성 검증 버튼을 누른다."""
     page.locator(f'[data-fixture="{action}"]').click()
+
+
+def test_review_switches_tracks_at_the_same_missing_interval(browser: Browser) -> None:
+    """키보드로 두 번째 구간을 재생하고 트랙 전환 시 똑같은 시각부터 비교한다."""
+    with audio_recovery_server("partial") as fixture:
+        fixture.mic.update(split_playback_available=True, uncovered_intervals=[[20, 22], [51, 59]])
+        with io.BytesIO() as buffer:
+            with wave.open(buffer, "wb") as wav:
+                wav.setparams((1, 2, 8000, 0, "NONE", ""))
+                wav.writeframes(bytes(8 * 8000 * 2))
+            payload = buffer.getvalue()
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            page.route(
+                "**/audio/clip?*",
+                lambda route: route.fulfill(content_type="audio/wav", body=payload),
+            )
+            page.goto(f"{fixture.url}/app/viewer/{MEETING_ID}")
+            page.get_by_text("의심 구간 2개 듣기", exact=True).press("Enter")
+            track = page.get_by_role("combobox", name="재생 트랙")
+            track.select_option("mic")
+            with page.expect_request("**/audio/clip?track=mic&start=51&end=59"):
+                page.get_by_role("button", name="00:51–00:59 듣기").press("Enter")
+            expect(page.get_by_role("button", name="재생 정지")).to_be_visible()
+            for selected in ("system", "mix"):
+                with page.expect_request(f"**/audio/clip?track={selected}&start=51&end=59"):
+                    track.select_option(selected)
+            page.get_by_role("button", name="재생 정지").click()
+            expect(page.locator("audio")).to_have_count(0)
+            expect(page.get_by_role("button", name="00:51–00:59 듣기")).to_be_visible()
+        finally:
+            context.close()
 
 
 def test_home_mic_warning_opens_the_affected_meeting(browser: Browser) -> None:
@@ -140,8 +176,10 @@ def test_partial_mic_retry_keeps_existing_self_and_remote_speech(browser: Browse
         try:
             page.goto(f"{fixture.url}/app/viewer/{MEETING_ID}")
             expect(page.locator("#viewerMicTitle")).to_contain_text("일부가 전사되지 않았을 수")
-            expect(page.locator("#viewerMicIntervals")).to_have_text(
-                "확인이 필요한 구간: 00:20–00:23 외 1구간"
+            intervals = page.locator("#viewerMicIntervals")
+            intervals.get_by_text("의심 구간 2개 듣기").click()
+            expect(intervals.get_by_role("button")).to_have_text(
+                ["00:20–00:23 듣기", "00:51–00:55 듣기"]
             )
             page.locator("#viewerMicRetry").click()
             expect(page.locator("#viewerMicRetry")).to_be_disabled()
@@ -408,16 +446,35 @@ def test_short_recording_has_no_transcription_link(browser: Browser, automatic: 
             _control(page, "record-start")
             with page.expect_response("**/__fixture/record-short"):
                 _control(page, "record-short")
+            expect(page.locator("#recordingOverlayCountdown")).to_contain_text(
+                "전사 최소 길이까지"
+            )
             if automatic:
                 _control(page, "record-auto-stop")
             else:
-                page.get_by_role("button", name="녹음 끝내기", exact=True).click()
+                stop = page.get_by_role("button", name="녹음 끝내기", exact=True)
+                stop.click()
+                dialog = page.get_by_role("dialog", name="지금 녹음을 끝낼까요?")
+                keep = dialog.get_by_role("button", name="계속 녹음")
+                expect(keep).to_be_focused()
+                keep.click()
+                expect(dialog).to_be_hidden()
+                assert fixture.stop_posts == 0
+                stop.click()
+                dialog.get_by_role("button", name="저장하고 끝내기").click()
             notice = page.locator("#recordingOutcome")
-            expect(notice).to_contain_text("저장하지 않았습니다")
-            expect(notice).to_contain_text("최소 녹음 시간(30초)")
-            expect(notice).to_contain_text("전사를 시작하지 않았습니다")
+            expect(notice).to_contain_text("녹음 파일을 저장했습니다")
+            expect(notice).to_contain_text("30초 미만이어서 자동 전사하지 않습니다")
+            expect(notice).to_contain_text("capture_1.wav")
             expect(notice.get_by_role("link")).to_have_count(0)
             assert fixture.stop_posts == int(not automatic)
+            with page.expect_response("**/system/open-audio-folder?short_recordings=true"):
+                notice.get_by_role("button", name="짧은 녹음 폴더 열기").click()
+            assert fixture.folder_opens == 1
+            notice.get_by_role("button", name="녹음 결과 닫기").click()
+            page.reload()
+            expect(notice).to_be_hidden()
+            expect(page.locator("#homeShortFolder")).to_be_visible()
         finally:
             context.close()
 

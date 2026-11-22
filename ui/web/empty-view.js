@@ -317,6 +317,7 @@
             '      </svg>',
             '      <span>전사 폴더 열기</span>',
             '    </button>',
+            '    <button class="home-action-btn" id="homeShortFolder" type="button" hidden><span>짧은 녹음 폴더 열기</span></button>',
             '    <button class="home-action-btn home-bulk-action" id="homeActionImport" type="button" hidden>',
             '      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
             '        <path d="M3 13v3a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/>',
@@ -388,6 +389,13 @@
 
         // 전사 폴더 열기 — POST /api/system/open-audio-folder
         var openBtn = document.getElementById("homeActionOpenFolder");
+        var shortFolder = document.getElementById("homeShortFolder");
+        if (shortFolder) {
+            shortFolder.addEventListener("click", function () { self._openAudioFolder(shortFolder, true); });
+            App.apiRequest("/recording/status").then(function (status) {
+                if (!self._destroyed && status && status.has_short_recordings) shortFolder.hidden = false;
+            }).catch(function () {});
+        }
         if (openBtn) {
             openBtn.addEventListener("click", function () {
                 self._openAudioFolder(openBtn);
@@ -555,7 +563,7 @@
     /**
      * 폴더 열기 액션. 성공 시 toast/badge 메시지로 결과 표시.
      */
-    EmptyView.prototype._openAudioFolder = function (btn) {
+    EmptyView.prototype._openAudioFolder = function (btn, shortRecording) {
         var self = this;
         if (self._destroyed) return;
         var seq = self._folderSeq + 1;
@@ -564,7 +572,7 @@
         btn.disabled = true;
         var original = btn.querySelector("span") ? btn.querySelector("span").textContent : "";
         if (btn.querySelector("span")) btn.querySelector("span").textContent = "여는 중…";
-        App.apiPost("/system/open-audio-folder", {})
+        App.apiPost(shortRecording ? "/system/open-audio-folder?short_recordings=true" : "/system/open-audio-folder", {})
             .then(function (data) {
                 if (self._destroyed || seq !== self._folderSeq) return;
                 if (msgEl) {
@@ -585,7 +593,7 @@
                 }
             })
             .then(function () {
-                if (self._destroyed || seq !== self._folderSeq) return;
+                if (self._destroyed) return;
                 btn.disabled = false;
                 if (btn.querySelector("span")) btn.querySelector("span").textContent = original || "전사 폴더 열기";
             });

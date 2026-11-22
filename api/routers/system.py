@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_job_queue as _get_job_queue
+from core.job_queue import JobQueueError, lexical_root_no_symlinks
 
 logger = logging.getLogger(__name__)
 
@@ -460,7 +461,9 @@ async def recover_unregistered_audio(
 
 
 @router.post("/system/open-audio-folder", response_model=OpenFolderResponse)
-async def open_audio_folder(request: Request) -> OpenFolderResponse:
+async def open_audio_folder(
+    request: Request, short_recordings: bool = False
+) -> OpenFolderResponse:
     """오디오 입력 폴더를 macOS Finder 로 연다.
 
     `~/.meeting-transcriber/audio_input` 폴더(설정에 따라 다를 수 있음)를
@@ -474,10 +477,19 @@ async def open_audio_folder(request: Request) -> OpenFolderResponse:
         HTTPException 500: 폴더 생성 실패 또는 외부 명령 실행 실패
     """
     config = _get_config(request)
-    folder = config.paths.resolved_audio_input_dir
-
+    folder = (
+        config.paths.short_recordings_dir
+        if short_recordings
+        else config.paths.resolved_audio_input_dir
+    )
     try:
-        folder.mkdir(parents=True, exist_ok=True)
+        if short_recordings:
+            if not lexical_root_no_symlinks(folder).is_dir():
+                raise HTTPException(status_code=404, detail="짧은 녹음 폴더를 찾을 수 없습니다.")
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+    except JobQueueError as exc:
+        raise HTTPException(status_code=404, detail="짧은 녹음 폴더를 찾을 수 없습니다.") from exc
     except OSError as e:
         logger.error(f"오디오 입력 폴더 생성 실패: {folder} — {e}")
         raise HTTPException(
