@@ -30,6 +30,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="검색 쿼리")
     date_filter: str | None = None
     speaker_filter: str | None = None
+    speaker_label_filter: str | None = Field(None, description="회의별 화면 표시명 필터")
     meeting_id_filter: str | None = None
     top_k: int | None = Field(None, ge=1, le=20)
 
@@ -205,6 +206,11 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
             speaker_filter=body.speaker_filter,
             meeting_id_filter=body.meeting_id_filter,
             top_k=body.top_k,
+            **(
+                {"speaker_label_filter": body.speaker_label_filter}
+                if body.speaker_label_filter
+                else {}
+            ),
         )
 
         # SearchResult → SearchResultItem 변환

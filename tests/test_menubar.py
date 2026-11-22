@@ -730,6 +730,45 @@ class TestToggleRecording:
     녹음 시작/정지 토글 동작, 에러 처리를 검증한다.
     """
 
+    @pytest.mark.parametrize("choice", [1, -1])
+    def test_short_recording_confirmation(self, tmp_path: Path, choice: int) -> None:
+        """메뉴에서도 계속 녹음이 기본이며 명시적으로 저장할 때만 해당 회의를 종료한다."""
+        app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)
+        app.config = _make_test_config(tmp_path)
+        app._is_recording = True
+        status = MagicMock()
+        status.__enter__.return_value.read.return_value = json.dumps(
+            {
+                "meeting_id": "short",
+                "duration_seconds": 2,
+                "min_duration_seconds": 30,
+            }
+        ).encode()
+        receipt = MagicMock()
+        receipt.__enter__.return_value.read.return_value = json.dumps(
+            {
+                "saved": True,
+                "short_recording": True,
+                "expected_files": 1,
+                "files": ["short.wav"],
+                "reason": "30초 미만이어서 자동 전사하지 않습니다.",
+            }
+        ).encode()
+        with (
+            patch("ui.menubar.urllib.request.urlopen", side_effect=[status, receipt]) as request,
+            patch("ui.menubar.rumps.alert", return_value=choice) as confirm,
+            patch("ui.menubar.rumps.notification") as notify,
+        ):
+            app._on_toggle_recording(None)
+        assert confirm.call_args.kwargs["ok"] == "계속 녹음"
+        if choice == 1:
+            assert request.call_count == 1
+            notify.assert_not_called()
+        else:
+            assert request.call_count == 2
+            assert json.loads(request.call_args.args[0].data) == {"meeting_id": "short"}
+            assert "짧은 녹음 폴더 · short.wav" in notify.call_args.args[2]
+
     def test_종료_결과는_저장된_파일별_전사_상태를_표시(self, tmp_path: Path) -> None:
         """미등록과 이미 시작한 전사, 미저장을 각각 알려준다."""
         app = MeetingTranscriberApp.__new__(MeetingTranscriberApp)

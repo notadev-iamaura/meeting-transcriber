@@ -58,6 +58,31 @@ def _seed(
 
 
 @pytest.mark.asyncio
+async def test_short_recordings_use_owned_receipts_and_exact_45_day_cutoff(store: Store) -> None:
+    """앱이 보관한 동일 원음만 만료하고 교체 파일과 사용자 WAV는 보존한다."""
+    config, _, _ = store
+    folder = config.paths.short_recordings_dir
+    cutoff = NOW.astimezone() - timedelta(days=45)
+    for name, recorded_at in (
+        ("old", cutoff),
+        ("fresh", cutoff + timedelta(seconds=1)),
+        ("replaced", cutoff),
+    ):
+        source = config.paths.resolved_base_dir / f"{name}.wav"
+        source.write_bytes(b"original")
+        retention.preserve_short_recording(source, folder, recorded_at)
+    (folder / "replaced.wav").rename(folder / "user.wav")
+    (folder / "replaced.wav").write_bytes(b"replacement")
+    config.lifecycle.audio_retention_enabled = False
+    assert (await retention.expire_recording_audio(*store, now=NOW)).deleted_files == 0
+    config.lifecycle.audio_retention_enabled = True
+    assert (await retention.expire_recording_audio(*store, now=NOW)).deleted_files == 1
+    assert not (folder / "old.wav").exists()
+    assert (folder / "fresh.wav").read_bytes() == (folder / "user.wav").read_bytes() == b"original"
+    assert (folder / "replaced.wav").read_bytes() == b"replacement"
+
+
+@pytest.mark.asyncio
 async def test_45_day_boundary_and_metadata_survive(store: Store) -> None:
     config, queue, _ = store
     cutoff = NOW - timedelta(days=45)

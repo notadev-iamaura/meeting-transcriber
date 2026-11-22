@@ -37,7 +37,7 @@ class PreparedRecordingTrack:
     speech_intervals: tuple[tuple[float, float], ...] = ()
 
 
-def _matches_track_layout(source: SoundFile) -> bool:
+def matches_track_layout(source: SoundFile) -> bool:
     """앱 표시가 있고 저장 포맷도 일치하는 파일만 두 트랙으로 해석한다."""
     return (
         source.format in {"WAV", "WAVEX"}
@@ -56,7 +56,7 @@ def has_separate_mic_track(wav_path: Path) -> bool:
     with open_audio_path_no_symlinks(wav_path) as (source_fd, _):
         try:
             with sf.SoundFile(source_fd, closefd=False) as source:
-                return _matches_track_layout(source)
+                return matches_track_layout(source)
         except sf.LibsndfileError:
             return False
 
@@ -79,7 +79,7 @@ def has_sustained_recording_signal(
             )
         try:
             with sf.SoundFile(source_fd, closefd=False) as audio:
-                if not _matches_track_layout(audio):
+                if not matches_track_layout(audio):
                     return None
                 window = max(1, round(audio.samplerate * 0.10))
                 found = False
@@ -132,7 +132,7 @@ def extract_recording_tracks(
                 failure_kind=AudioFailureKind.SOURCE_BUSY,
             )
         source = stack.enter_context(sf.SoundFile(source_fd, closefd=False))
-        if not _matches_track_layout(source) or source.frames <= 0:
+        if not matches_track_layout(source) or source.frames <= 0:
             raise ValueError("분리 녹음의 WAV 프로필이 유효하지 않습니다.")
         suppress = (
             MIC_CHANNEL in channels

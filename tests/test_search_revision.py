@@ -260,6 +260,85 @@ def test_real_chroma_and_fts_exact_speaker_and_partial_index(
     assert index_health(config, collection, "meeting") == "incomplete"
 
 
+def test_display_speaker_filter_applies_per_meeting_before_result_limit(
+    config: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """같은 표시명과 다른 원문 ID를 두 실제 인덱스와 HTTP 검색 경계에서 구별한다."""
+    import chromadb
+
+    from api.routers.search_chat import router
+    from search.hybrid_search import HybridSearchEngine
+
+    db = config.paths.resolved_meetings_db
+    _ensure_fts_table(db)
+    client = chromadb.PersistentClient(path=str(tmp_path / "speaker-index"))
+    collection = client.get_or_create_collection("speaker-index", embedding_function=None)
+    # 뒷 회의의 원문 ID는 앞 회의와 반대다. 우선순위 높은 오답을 먼저 넣는다.
+    for mid, order in [
+        ("first", ["SPEAKER_09", "SPEAKER_00"]),
+        ("second", ["SPEAKER_00", "SPEAKER_09"]),
+    ]:
+        atomic_write_json_pinned(
+            config.paths.resolved_outputs_dir / mid / "corrected.json",
+            {"utterances": [{"speaker": s, "text": "일정"} for s in order]},
+        )
+        chunks = [
+            EmbeddedChunk(
+                chunk_id=f"{mid}-{i}",
+                text="일정 일정 일정" if i < 9 else "일정",
+                embedding=[1.0, 0.0 if i < 9 else 1.0],
+                meeting_id=mid,
+                date="2026-11-22",
+                speakers=[order[1] if i < 9 else order[0]],
+                start_time=i,
+                end_time=i + 1,
+                chunk_index=i,
+            )
+            for i in range(10)
+        ]
+        _store_chunks_fts(chunks, db, mid)
+        collection.upsert(
+            ids=[c.chunk_id for c in chunks],
+            embeddings=[c.embedding for c in chunks],
+            documents=[c.text for c in chunks],
+            metadatas=[
+                {"meeting_id": mid, "speakers": c.speakers[0], "date": c.date} for c in chunks
+            ],
+        )
+    manager = MagicMock()
+    manager.acquire.return_value = AsyncMock()
+    engine = HybridSearchEngine(config=config, model_manager=manager)
+    monkeypatch.setattr(engine, "_embed_query", lambda *_: [1.0, 0.0])
+    monkeypatch.setattr(engine, "_get_chroma_collection", lambda: collection)
+    app = FastAPI()
+    app.state.search_engine = engine
+    app.include_router(router, prefix="/api")
+    with TestClient(app) as http:
+
+        def hits(**filters: str) -> set[str]:
+            """실제 두 저장소 모두 해당 청크를 반환했을 때만 성공시킨다."""
+            resp = http.post("/api/search", json={"query": "일정", "top_k": 2, **filters})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert not data["source_errors"]
+            assert all(row["source"] == "both" for row in data["results"])
+            return {row["chunk_id"] for row in data["results"]}
+
+        assert hits(speaker_label_filter="참석자 1") == {"first-9", "second-9"}
+        assert hits(speaker_label_filter="화자 1", date_filter="2026-11-22") == {
+            "first-9",
+            "second-9",
+        }
+        assert hits(speaker_filter="SPEAKER_09", meeting_id_filter="first") == {"first-9"}
+        assert not hits(speaker_label_filter="참석자 3")
+        atomic_write_json_pinned(
+            config.paths.resolved_checkpoints_dir / "second" / "self_speaker.json",
+            {"meeting_id": "second", "speaker_id": "SPEAKER_00"},
+        )
+        assert hits(speaker_label_filter="나") == {"second-9"}
+        assert hits(speaker_label_filter="참석자 1") == {"first-9"}
+
+
 @pytest.mark.asyncio
 async def test_restart_and_consecutive_edit_recover_latest_source(config: AppConfig) -> None:
     """편집 종료 후 재시작과 연속 편집은 FIFO에서 최신 버전 하나로 수렴한다."""

@@ -75,6 +75,11 @@ class PathsConfig(BaseModel):
         return self.resolve_path(self.audio_input_dir)
 
     @property
+    def short_recordings_dir(self) -> Path:
+        """자동 전사에서 제외한 짧은 녹음의 보관 폴더."""
+        return self.resolved_audio_input_dir / "짧은 녹음"
+
+    @property
     def resolved_outputs_dir(self) -> Path:
         """출력 폴더 절대 경로"""
         return self.resolve_path(self.outputs_dir)
@@ -842,7 +847,7 @@ class RecordingConfig(BaseModel):
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
     channels: int = Field(default=1, ge=1, le=2)
     max_duration_seconds: int = Field(default=14400, ge=60)  # 4시간
-    min_duration_seconds: int = Field(default=30, ge=1)  # 최소 길이 미달 시 파기
+    min_duration_seconds: int = Field(default=30, ge=1)  # 더 짧은 녹음은 전사 없이 별도 보관
     ffmpeg_graceful_timeout_seconds: int = Field(default=10, ge=1, le=60)
     capture_stall_timeout_seconds: float = Field(default=5.0, ge=1, le=60)
     multi_track: bool = False  # True: BlackHole + 마이크 동시 녹음

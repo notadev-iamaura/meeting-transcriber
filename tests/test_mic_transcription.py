@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -145,6 +146,55 @@ async def request(env: Any, method: str, suffix: str) -> httpx.Response:
         transport=httpx.ASGITransport(app=env.app), base_url="http://test"
     ) as client:
         return await client.request(method, f"/api/meetings/{env.mid}/{suffix}")
+
+
+@pytest.mark.parametrize("track", ["mic", "system", "mix"])
+async def test_original_recording_clip_pcm_and_ranges(env: Any, track: str) -> None:
+    """원본의 같은 2초에 실제로 겹친 두 신호를 각 채널·혼합과 샘플 단위로 대조한다."""
+    assert (await request(env, "GET", "mic-transcription")).json()["split_playback_available"]
+    url = f"/api/meetings/{env.mid}/audio/clip?track={track}&start=1.5&end=3.5"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=env.app), base_url="http://test"
+    ) as client:
+        response = await client.get(url)
+        assert response.status_code == 200 and "no-store" in response.headers["cache-control"]
+        assert len(response.content) == 44 + 32000 * 2
+        pcm, rate = sf.read(io.BytesIO(response.content), dtype="int16")
+        original, _ = sf.read(env.audio, start=24000, frames=32000, dtype="int16")
+        expected = (
+            (original[:, 0].astype("int32") + original[:, 1]) // 2
+            if track == "mix"
+            else original[:, 0 if track == "mic" else 1]
+        )
+        assert rate == 16000 and np.array_equal(pcm, expected)
+        for first, last in ((0, 1), (41, 55), (123, 3002)):
+            partial = await client.get(url, headers={"Range": f"bytes={first}-{last}"})
+            assert partial.status_code == 206
+            assert partial.content == response.content[first : last + 1]
+
+
+async def test_recording_clip_rejects_outside_or_expired_audio(env: Any) -> None:
+    """음성 끝과 만료 상태를 확인하며 컷오프 뒤 캐시된 구간을 반환하지 않는다."""
+    path = "audio/clip?track=mic&start=40&end=41"
+    assert (await request(env, "GET", path)).status_code == 416
+    assert (await request(env, "GET", "audio/clip?track=mic&start=2&end=1")).status_code == 416
+    assert env.queue.claim_audio_retention(env.queue.get_job(env.job_id), "2031-03-15", "[]")
+    assert (await request(env, "GET", "audio/clip?track=mic&start=1&end=2")).status_code == 410
+    assert not (await request(env, "GET", "mic-transcription")).json()["split_playback_available"]
+
+
+async def test_recording_clip_requires_verified_original(env: Any) -> None:
+    """일반 스테레오나 심볼릭 링크를 채널별 원본이라고 표시하지 않는다."""
+    path = "audio/clip?track=system&start=1&end=2"
+    original = env.audio.with_name("original.wav")
+    env.audio.rename(original)
+    env.audio.symlink_to(original)
+    assert (await request(env, "GET", path)).status_code == 400
+    assert not (await request(env, "GET", "mic-transcription")).json()["split_playback_available"]
+    env.audio.unlink()
+    sf.write(env.audio, np.zeros((24000, 2)), 8000, subtype="PCM_16")
+    assert (await request(env, "GET", path)).status_code == 409
+    assert not (await request(env, "GET", "mic-transcription")).json()["split_playback_available"]
 
 
 @pytest.mark.parametrize("failure", ["empty", "low_volume"])

@@ -301,6 +301,30 @@ class TestAudioInputRecoveryEndpoint:
 class TestOpenAudioFolderEndpoint:
     """폴더 열기 엔드포인트 — subprocess.run 모킹."""
 
+    def test_short_folder_opens_existing_archive_only(self, tmp_path: Path) -> None:
+        """보관 폴더가 없거나 링크면 열지 않고, 생성된 실제 경로만 Finder에 전달한다."""
+        app = _make_test_app(tmp_path)
+        folder = _make_test_config(tmp_path).paths.short_recordings_dir
+        url = "/api/system/open-audio-folder?short_recordings=true"
+        with (
+            TestClient(app) as client,
+            patch("api.routes.sys") as mock_sys,
+            patch("api.routes.shutil.which", return_value="/usr/bin/open"),
+            patch("api.routes.subprocess.run") as open_folder,
+        ):
+            mock_sys.platform = "darwin"
+            assert client.post(url).status_code == 404
+            assert not folder.exists()
+            folder.parent.mkdir(parents=True, exist_ok=True)
+            folder.symlink_to(tmp_path, target_is_directory=True)
+            assert client.post(url).status_code == 404
+            open_folder.assert_not_called()
+            folder.unlink()
+            folder.mkdir()
+            response = client.post(url)
+            assert response.json() == {"opened": True, "path": str(folder)}
+            assert open_folder.call_args.args[0] == ["/usr/bin/open", str(folder)]
+
     def test_macos_정상_호출(self, tmp_path: Path) -> None:
         """darwin 환경에서 `open` 명령이 정확한 인자로 호출되고 200 을 반환한다."""
         app = _make_test_app(tmp_path)

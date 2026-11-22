@@ -418,6 +418,11 @@ def test_auto_processing_run_now_api는_큐등록과_상한보류를_분리해_�
     app.state.auto_processing_scheduler = _Scheduler()
 
     with TestClient(app) as client:
+        stale = client.post(
+            "/api/auto-processing/run-now", json={"max_items_per_run": 1, "action": "full"}
+        )
+        assert stale.status_code == 409
+        assert "설정" in stale.json()["detail"]
         response = client.post("/api/auto-processing/run-now")
 
     assert response.status_code == 200, response.text

@@ -253,6 +253,8 @@
                 var _recTerminal = false;
                 var _recActive = false;
                 var _recEpoch = 0;
+                var _recMinimum = 0;
+                var shortDialog = document.getElementById("shortRecordingDialog");
                 var _recStatusPending = null;
                 var _recFailureSignature = "";
                 var failureIdentity = null;
@@ -291,6 +293,13 @@
                 var outcome = null;
                 var outcomeQuery = null;
                 var outcomeStamp = "";
+                var shortFolder = document.getElementById("recordingOutcomeShortFolder");
+                shortFolder.addEventListener("click", async function () {
+                    try {
+                        var opened = await App.apiPost("/system/open-audio-folder?short_recordings=true", {});
+                        if (!opened.opened) errorBanner.show("짧은 녹음 폴더: " + opened.path);
+                    } catch (error) { errorBanner.show(error.message); }
+                });
 
                 function _hideOutcome() {
                     if (outcomeNotice) outcomeNotice.hidden = true;
@@ -305,7 +314,7 @@
                 });
 
                 async function _refreshOutcomeTracks() {
-                    if (!outcome || !outcome.saved || outcomeQuery || outcomeNotice.hidden) return;
+                    if (!outcome || !outcome.saved || outcome.short_recording || outcomeQuery || outcomeNotice.hidden) return;
                     var current = outcome;
                     outcomeQuery = current;
                     try {
@@ -378,8 +387,14 @@
                             title = "녹음 파일 " + detail.expected_files + "개 중 " + files.length + "개를 저장했습니다";
                         }
                         App.safeText(document.getElementById("recordingOutcomeTitle"), title);
-                        App.safeText(document.getElementById("recordingOutcomeMessage"), detail.saved
-                            ? "전사 상태 확인 중…" : detail.reason + " 전사를 시작하지 않았습니다.");
+                        var message = detail.saved ? "전사 상태 확인 중…" : detail.reason + " 전사를 시작하지 않았습니다.";
+                        if (detail.short_recording) {
+                            message = detail.reason + "\n" + files.join(", ");
+                            var homeShortFolder = document.getElementById("homeShortFolder");
+                            if (homeShortFolder) homeShortFolder.hidden = false;
+                        }
+                        shortFolder.hidden = !detail.short_recording;
+                        App.safeText(document.getElementById("recordingOutcomeMessage"), message);
                         var links = document.getElementById("recordingOutcomeLinks");
                         links.replaceChildren();
                         delete links.dataset.ids;
@@ -405,9 +420,18 @@
                     var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
                     return pad(h) + ":" + pad(m) + ":" + pad(s);
                 }
+                function _elapsedRecordingSeconds() {
+                    return _recBaseSeconds + (Date.now() - _recBaseWallClock) / 1000;
+                }
                 function _renderRecDuration() {
-                    var elapsedMs = Date.now() - _recBaseWallClock;
-                    var cur = _recBaseSeconds + elapsedMs / 1000;
+                    var cur = _elapsedRecordingSeconds();
+                    var remaining = Math.ceil(_recMinimum - cur);
+                    ["recordingPillCountdown", "recordingOverlayCountdown"].forEach(function (id) {
+                        var label = document.getElementById(id);
+                        label.hidden = remaining <= 0;
+                        if (!label.hidden) App.safeText(label, "전사 최소 길이까지 " + remaining + "초");
+                    });
+                    if (remaining <= 0 && shortDialog.open) shortDialog.close("continue");
                     var pillDur = document.getElementById("recordingDuration");
                     if (pillDur) App.safeText(pillDur, _formatRecDuration(cur));
                     var overlayTimer = document.getElementById("recordingOverlayTimer");
@@ -494,6 +518,7 @@
                 }
 
                 function _finishRecHUD() {
+                    if (shortDialog.open) shortDialog.close("continue");
                     _recEpoch += 1;
                     _recActive = false;
                     _recTerminal = true;
@@ -544,6 +569,8 @@
                 }
 
                 function _beginRecHUD(detail, mode) {
+                    if (shortDialog.open) shortDialog.close("continue");
+                    _recMinimum = Number(detail.min_duration_seconds) || 0;
                     _recEpoch += 1;
                     _recActive = true;
                     _recTerminal = false;
@@ -582,6 +609,7 @@
                     var epoch = _recEpoch;
                     _recStatusPending = App.apiRequest("/recording/status").then(function (rec) {
                         if (!rec || epoch !== _recEpoch) return false;
+                        _recMinimum = Number(rec.min_duration_seconds) || 0;
                         if (rec.last_error) {
                             _renderRecordingFailure(rec.last_error);
                             return true;
@@ -692,8 +720,22 @@
                         }
                     }
 
+                    var confirmedEpoch = null;
+                    function requestStop() {
+                        if (_recMinimum > _elapsedRecordingSeconds() && _recActive) {
+                            confirmedEpoch = _recEpoch;
+                            shortDialog.returnValue = "continue";
+                            shortDialog.showModal();
+                        } else {
+                            sendStop();
+                        }
+                    }
+                    shortDialog.addEventListener("close", function () {
+                        if (shortDialog.returnValue === "save" && confirmedEpoch === _recEpoch) sendStop();
+                        confirmedEpoch = null;
+                    });
                     var pillStop = document.getElementById("recordingStopBtn");
-                    if (pillStop) pillStop.addEventListener("click", sendStop);
+                    if (pillStop) pillStop.addEventListener("click", requestStop);
                     // Overlay 내부 버튼들 — data-recording-action 속성으로 delegate
                     var overlay = document.getElementById("recordingOverlay");
                     if (overlay) {
@@ -704,7 +746,7 @@
                             if (action === "minimize") {
                                 _showRecHUD("pill");
                             } else if (action === "stop") {
-                                sendStop();
+                                requestStop();
                             }
                         });
                     }

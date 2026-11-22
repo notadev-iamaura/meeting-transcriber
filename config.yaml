@@ -243,7 +243,7 @@ recording:
   sample_rate: 16000                           # 녹음 샘플레이트 (Hz)
   channels: 1                                  # 모노
   max_duration_seconds: 14400                  # 최대 녹음 시간 (초, 4시간)
-  min_duration_seconds: 30                     # 최소 녹음 시간 (미달 시 파기)
+  min_duration_seconds: 30                     # 자동 전사 가능한 녹음 시간 (미달 시 음성만 보관)
   ffmpeg_graceful_timeout_seconds: 10          # ffmpeg 정상 종료 대기 시간
   capture_stall_timeout_seconds: 5            # 분리 녹음 프레임이 끊기면 오류로 종료 (무음과 구분)
   multi_track: false                            # 멀티트랙: BlackHole + 마이크 동시 녹음

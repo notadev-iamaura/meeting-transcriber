@@ -481,14 +481,29 @@ class MeetingTranscriberApp(rumps.App):
             _sender: 메뉴 아이템 콜백 발신자 (사용 안함)
         """
         try:
+            payload = {}
             if self._is_recording:
+                status_url = build_api_url(self.config, "/api/recording/status")
+                with urllib.request.urlopen(status_url, timeout=HTTP_TIMEOUT_SECONDS) as response:
+                    recording = json.loads(response.read())
+                if recording.get("meeting_id"):
+                    payload["meeting_id"] = recording["meeting_id"]
+                if recording.get("duration_seconds", 0) < recording.get("min_duration_seconds", 0):
+                    chosen = rumps.alert(
+                        title="지금 녹음을 끝낼까요?",
+                        message="음성은 짧은 녹음 폴더에 저장합니다. 지금 끝내면 자동 전사는 시작하지 않습니다.",
+                        ok="계속 녹음",
+                        other="저장하고 끝내기",
+                    )
+                    if chosen != -1:  # NSAlertOtherReturn
+                        return
                 url = build_api_url(self.config, "/api/recording/stop")
             else:
                 url = build_api_url(self.config, "/api/recording/start")
 
             req = urllib.request.Request(
                 url,
-                data=b"{}",
+                data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -513,6 +528,9 @@ class MeetingTranscriberApp(rumps.App):
         if not result["saved"]:
             return "녹음이 저장되지 않았습니다", f"{result.get('reason', '')} · 전사 시작 안 함"
         files = result["files"]
+        title = "녹음 저장 완료" if len(files) == result["expected_files"] else "녹음 일부 저장"
+        if result.get("short_recording"):
+            return title, f"{result['reason']}\n짧은 녹음 폴더 · {', '.join(files)}"
         lines = []
         for name in files:
             meeting_id = urllib.parse.quote(Path(name).stem, safe="")
@@ -531,7 +549,6 @@ class MeetingTranscriberApp(rumps.App):
             except (OSError, ValueError, KeyError):
                 status = "전사 상태 확인 필요"
             lines.append(f"{name} · {status}" if len(files) > 1 else status)
-        title = "녹음 저장 완료" if len(files) == result["expected_files"] else "녹음 일부 저장"
         return title, "\n".join(lines)
 
     def _on_open_web_ui(self, _sender: Any) -> None:

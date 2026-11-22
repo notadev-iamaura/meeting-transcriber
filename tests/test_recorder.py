@@ -10,7 +10,7 @@
     - 이중 녹음 시작 방지
     - 녹음 정지 (graceful 종료, 타임아웃 처리)
     - 파일 이동 (recordings_temp → audio_input)
-    - 최소 시간 미달 파기
+    - 짧은 녹음의 원본 보관
     - 콜백 호출 (동기/비동기)
     - 최대 시간 가드
     - 에러 계층 구조
@@ -52,7 +52,7 @@ def _mock_ffmpeg_process(*, pid: int = 12345) -> AsyncMock:
     return mock_process
 
 
-from config import AppConfig, PathsConfig, RecordingConfig
+from config import AppConfig, AudioQualityConfig, PathsConfig, RecordingConfig
 from steps.recorder import (
     AlreadyRecordingError,
     AudioDevice,
@@ -71,6 +71,7 @@ from steps.zoom_activity import ZoomAudioActivityChecker
 def _make_test_config(tmp_path: Path) -> AppConfig:
     """테스트용 AppConfig를 생성한다."""
     return AppConfig(
+        audio_quality=AudioQualityConfig(min_duration_seconds=5),
         paths=PathsConfig(base_dir=str(tmp_path)),
         recording=RecordingConfig(
             enabled=True,
@@ -761,8 +762,8 @@ class TestStopRecording:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_최소시간_미달_파기(self, tmp_path: Path) -> None:
-        """녹음 시간이 최소 시간보다 짧으면 파일을 파기한다."""
+    async def test_최소시간_미달_보관(self, tmp_path: Path) -> None:
+        """짧은 녹음은 입력 감시 폴더 밖에 따로 보관한다."""
         config = _make_test_config(tmp_path)
         recorder = AudioRecorder(config=config)
 
@@ -788,8 +789,10 @@ class TestStopRecording:
 
         result = await recorder.stop_recording()
 
-        assert result is None
-        assert not temp_file.exists()  # 파일이 삭제됨
+        assert result is not None and result.short_recording
+        assert result.file_path.read_bytes() == b"test audio data"
+        assert result.file_path.parent == config.paths.short_recordings_dir
+        assert not temp_file.exists()
         assert recorder.state == RecordingState.IDLE
 
     @pytest.mark.asyncio
@@ -1368,6 +1371,7 @@ class TestRecordingState:
 def _make_multitrack_config(tmp_path: Path) -> AppConfig:
     """멀티트랙 테스트용 AppConfig를 생성한다."""
     return AppConfig(
+        audio_quality=AudioQualityConfig(min_duration_seconds=5),
         paths=PathsConfig(base_dir=str(tmp_path)),
         recording=RecordingConfig(
             enabled=True,

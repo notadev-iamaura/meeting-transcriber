@@ -71,6 +71,8 @@ class AudioRecoveryFixture:
         self.stop_error = False
         self.record_number = 0
         self.short = False
+        self.has_short_files = False
+        self.folder_opens = 0
         self.capture_status: str | None = None
         self.stop_posts = 0
         self.mic = self.mic_state(mic_status)
@@ -170,11 +172,14 @@ class AudioRecoveryFixture:
                 "state": "recording",
                 "meeting_id": f"capture_{self.record_number}",
                 "duration_seconds": 37,
+                "min_duration_seconds": 30,
                 "audio_levels": {"mic_dbfs": -18, "system_dbfs": -12},
             }
             event("recording_started", self.recording)
         elif name == "record-short":
             self.short = True
+            self.recording["duration_seconds"] = 3
+            event("recording_duration", self.recording)
         elif name in {"record-register", "record-queue", "record-transcribe", "record-complete"}:
             self.capture_status = {
                 "record-register": "recorded",
@@ -208,13 +213,15 @@ class AudioRecoveryFixture:
         result = {
             "meeting_id": mid,
             "ended_at": f"2026-11-18T12:01:{self.record_number:02}",
-            "files": [] if self.short else [f"{mid}.wav"],
+            "files": [f"{mid}.wav"],
             "expected_files": 1,
-            "saved": not self.short,
-            "discarded": self.short,
-            "reason": "최소 녹음 시간(30초)보다 짧습니다." if self.short else "",
+            "saved": True,
+            "discarded": False,
+            "short_recording": self.short,
+            "reason": "30초 미만이어서 자동 전사하지 않습니다." if self.short else "",
         }
         self.recording = {"is_recording": False, "state": "idle", "last_stop": result}
+        self.has_short_files |= self.short
         return result
 
     def api(
@@ -233,7 +240,10 @@ class AudioRecoveryFixture:
             self.mic_gets += 1
             return 200, self.mic
         if path == "/api/recording/status":
-            return 200, self.recording
+            return 200, {**self.recording, "has_short_recordings": self.has_short_files}
+        if path == "/api/system/open-audio-folder":
+            self.folder_opens += 1
+            return 200, {"opened": True, "path": "/synthetic/짧은 녹음"}
         if path == "/api/recording/error/acknowledge":
             failure = self.recording.get("last_error") or {}
             matched = payload == {k: failure.get(k) for k in ("meeting_id", "occurred_at")}

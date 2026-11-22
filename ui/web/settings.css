@@ -1163,6 +1163,16 @@
   line-height: 1.5;
 }
 
+.engine-description {
+  margin: 8px 0 12px;
+  overflow-wrap: anywhere;
+}
+
+#settingsAutoProcessingPreview {
+  flex: 1;
+  margin-right: 12px;
+}
+
 .stt-models {
   display: flex;
   flex-direction: column;

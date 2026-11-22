@@ -254,6 +254,7 @@
       <p id="recordingOutcomeMessage"></p>
     </div>
     <div id="recordingOutcomeLinks"></div>
+    <button type="button" class="btn-secondary" id="recordingOutcomeShortFolder" hidden>짧은 녹음 폴더 열기</button>
     <button type="button" class="btn-secondary" id="recordingOutcomeClose" aria-label="녹음 결과 닫기">닫기</button>
   </section>
 
@@ -265,6 +266,7 @@
       <span></span><span></span><span></span><span></span>
     </div>
     <span class="recording-duration" id="recordingDuration" aria-live="off">00:00</span>
+    <span id="recordingPillCountdown" aria-live="off" hidden></span>
     <button type="button" id="recordingExpandBtn" class="recording-expand-btn" aria-label="녹음 HUD 열기" title="녹음 패널 열기">
       <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 10h12M10 4v12"></path>
@@ -304,6 +306,7 @@
         <span id="recordingSourceLabel">녹음 중 · 시스템 오디오</span>
       </div>
       <div class="recording-timer" id="recordingOverlayTimer" aria-live="off">00:00:00</div>
+      <span id="recordingOverlayCountdown" aria-live="off" hidden></span>
       <div id="recordingOverlayTitle" class="sr-only">녹음 진행 중</div>
       <div class="recording-wave" aria-hidden="true">
         <!-- 48 bars — spa.js 가 마운트 시점에 생성 -->
@@ -325,6 +328,15 @@
       </div>
     </div>
   </div>
+
+  <dialog id="shortRecordingDialog" class="short-recording-dialog" aria-labelledby="shortRecordingTitle" aria-describedby="shortRecordingDetail">
+    <h2 id="shortRecordingTitle">지금 녹음을 끝낼까요?</h2>
+    <p id="shortRecordingDetail">음성은 짧은 녹음 폴더에 저장합니다. 지금 끝내면 자동 전사는 시작하지 않습니다.</p>
+    <form method="dialog">
+      <button class="btn-primary" value="continue" autofocus>계속 녹음</button>
+      <button class="btn-secondary" value="save">저장하고 끝내기</button>
+    </form>
+  </dialog>
 
   <!-- 오디오 가져오기 모달 (레퍼런스 ImportPanel.jsx) — dropzone + 큐 스캐폴드 -->
   <div id="importModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">

@@ -14,16 +14,18 @@ import logging
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_job_queue as _get_job_queue
@@ -71,6 +73,7 @@ from steps.transcriber import (
     AudioFileIdentity,
     EmptyAudioError,
     inspect_audio_path_no_symlinks,
+    open_audio_path_no_symlinks,
 )
 
 logger = logging.getLogger(__name__)
@@ -2506,6 +2509,111 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
     return (start, end)
 
 
+@router.get("/meetings/{meeting_id}/audio/clip")
+def get_recording_clip(
+    request: Request,
+    meeting_id: str,
+    track: Literal["mic", "system", "mix"],
+    start: Annotated[float, Query(ge=0, allow_inf_nan=False)],
+    end: Annotated[float, Query(gt=0, allow_inf_nan=False)],
+) -> Any:
+    """분리 녹음 원본에서 요청한 시간·채널만 고정된 파일 핸들로 스트리밍한다."""
+    import soundfile as sf
+    from fastapi.responses import Response, StreamingResponse
+    from starlette.background import BackgroundTask
+
+    from core.recording_channels import MIC_CHANNEL, SYSTEM_CHANNEL, matches_track_layout
+
+    _validate_meeting_id(meeting_id)
+    job = _get_job_queue(request).queue.get_job_by_meeting_id(meeting_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="회의를 찾을 수 없습니다.")
+    require_unexpired_audio(job)
+    path = _require_audio_in_config_base(_get_config(request), Path(job.audio_path))
+    with ExitStack() as opening:
+        try:
+            fd, _ = opening.enter_context(open_audio_path_no_symlinks(path))
+            source = opening.enter_context(sf.SoundFile(fd, closefd=False))
+        except AudioAdmissionError as exc:
+            raise HTTPException(
+                status_code=_AUDIO_FAILURE_HTTP_STATUS[exc.failure_kind], detail=str(exc)
+            ) from exc
+        except (OSError, EmptyAudioError, sf.LibsndfileError) as exc:
+            raise HTTPException(status_code=404, detail="재생 가능한 원본이 없습니다.") from exc
+        if not matches_track_layout(source):
+            raise HTTPException(
+                status_code=409, detail="분리 녹음 원본에서만 트랙을 선택할 수 있습니다."
+            )
+        rate = source.samplerate
+        duration = source.frames / rate
+        first = round(min(start, duration) * rate)
+        last = round(min(end, duration) * rate)
+        if first >= last:
+            raise HTTPException(status_code=416, detail="재생할 구간이 녹음 범위를 벗어났습니다.")
+        pcm_size = (last - first) * 2
+        # 16-bit mono PCM WAV. 파일을 따로 만들지 않고 구간의 헤더만 구성한다.
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            36 + pcm_size,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            1,
+            rate,
+            rate * 2,
+            2,
+            16,
+            b"data",
+            pcm_size,
+        )
+        size = len(header) + pcm_size
+        range_header = request.headers.get("range")
+        bounds = _parse_range_header(range_header, size) if range_header else (0, size - 1)
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, no-store"}
+        if bounds is None:
+            return Response(
+                status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"}
+            )
+        left, right = bounds
+        headers["Content-Length"] = str(right - left + 1)
+        if range_header:
+            headers["Content-Range"] = f"bytes {left}-{right}/{size}"
+        stream = opening.pop_all()
+
+    def chunks() -> Iterator[bytes]:
+        """부분 헤더나 홀수 바이트 Range도 같은 가상 WAV의 바이트로 반환한다."""
+        with stream:
+            if left < len(header):
+                yield header[left : right + 1]
+            offset = max(0, left - len(header))
+            remaining = right - max(left, len(header)) + 1
+            source.seek(first + offset // 2)
+            skip = offset % 2
+            while remaining > 0:
+                frames = min(32768, (remaining + skip + 1) // 2)
+                data = source.read(frames, dtype="int16", always_2d=True)
+                if len(data) != frames:
+                    raise OSError("녹음 구간을 끝까지 읽지 못했습니다.")
+                if track == "mix":
+                    samples = (data[:, MIC_CHANNEL].astype("int32") + data[:, SYSTEM_CHANNEL]) // 2
+                else:
+                    samples = data[:, MIC_CHANNEL if track == "mic" else SYSTEM_CHANNEL]
+                piece = samples.astype("<i2", copy=False).tobytes()[skip : skip + remaining]
+                skip = 0
+                remaining -= len(piece)
+                yield piece
+
+    return StreamingResponse(
+        chunks(),
+        status_code=206 if range_header else 200,
+        media_type="audio/wav",
+        headers=headers,
+        background=BackgroundTask(stream.close),
+    )
+
+
 @router.get("/meetings/{meeting_id}/audio")
 async def get_meeting_audio(request: Request, meeting_id: str) -> Any:
     """회의의 원본 음성을 재생용으로 스트리밍한다 (HTTP Range 지원).
@@ -2885,13 +2993,27 @@ async def get_mic_transcription(request: Request, meeting_id: str) -> dict[str, 
 async def _read_meeting_mic_status(config: Any, meeting_id: str, job: Any) -> dict[str, Any]:
     """이미 조회한 회의 작업으로 분리 녹음의 처리 결과를 읽는다."""
     from core.mic_transcription import mic_transcription_status
+    from core.recording_channels import has_separate_mic_track
 
     try:
-        return await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
+        state = await asyncio.to_thread(mic_transcription_status, config, meeting_id, job)
     except (OSError, ValueError, AudioAdmissionError) as exc:
         raise HTTPException(
             status_code=409, detail="마이크 처리 기록을 확인할 수 없습니다."
         ) from exc
+    if not isinstance(getattr(job, "audio_path", None), (str, Path)):
+        state["split_playback_available"] = False
+        return state
+    try:
+        require_unexpired_audio(job)
+        source = _require_audio_in_config_base(config, Path(job.audio_path))
+        # 재시도 가능 판정이 이미 확인한 녹음 표시는 다시 읽을 필요가 없다.
+        state["split_playback_available"] = state["retry_available"] or await asyncio.to_thread(
+            has_separate_mic_track, source
+        )
+    except (HTTPException, OSError, ValueError, TypeError, EmptyAudioError, AudioAdmissionError):
+        state["split_playback_available"] = False
+    return state
 
 
 @router.post(

@@ -1369,6 +1369,89 @@ def test_search_results_are_safe_and_navigate_to_viewer(
         assert "t=12.5" in page.url
 
 
+def test_speaker_search_scope_and_return_to_result(
+    browser: Browser, spa_static_server: str
+) -> None:
+    """표시명 직접 검색·회의별 화자 선택·결과 복귀를 실제 SPA에서 검사한다."""
+    sent: list[dict] = []
+    meeting = {"meeting_id": "meeting-a", "title": "검색 복귀 시험", "status": "completed"}
+
+    def api(route: Route) -> None:
+        path = urlparse(route.request.url).path
+        if path == "/api/meetings":
+            route.fulfill(json={"meetings": [meeting]})
+        elif path == "/api/meetings/meeting-a":
+            route.fulfill(json=meeting)
+        elif path == "/api/search":
+            sent.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                json={
+                    "query": "일정",
+                    "results": [
+                        {
+                            **meeting,
+                            "chunk_id": f"c{i}",
+                            "chunk_index": i,
+                            "text": f"일정 {i}",
+                            "start_time": i,
+                            "end_time": i + 1,
+                            "score": 0.1,
+                            "speakers": ["SPEAKER_09"],
+                            "speaker_labels": {"SPEAKER_09": "참석자 1"},
+                        }
+                        for i in range(8)
+                    ],
+                }
+            )
+        else:
+            _mock_api(route)
+
+    with _spa_page(
+        browser,
+        spa_static_server,
+        {"width": 1024, "height": 768},
+        path="/app/search",
+        api_handler=api,
+    ) as page:
+        page.get_by_label("검색 날짜 필터").fill("2026-11-22")
+        page.get_by_label("검색 화자 필터").fill("참석자 1")
+        query = page.get_by_role("textbox", name="회의 내용 검색")
+        query.fill("일정")
+        query.press("Enter")
+        chip = page.get_by_role("button", name="이 회의의 참석자 1 발화로 검색").last
+        chip.press("Enter")
+        expect(page.locator("#searchSpeakerScope")).to_contain_text("검색 복귀 시험")
+        result = page.locator(".result-open").last
+        result.scroll_into_view_if_needed()
+        result.focus()
+        scroll = page.locator("#content").evaluate("(el) => el.scrollTop")
+        assert scroll > 0
+        result.press("Enter")
+        page.wait_for_url("**/app/viewer/meeting-a?**")
+        page.go_back()
+        expect(query).to_have_value("일정")
+        expect(page.locator("#searchFilterDate")).to_have_value("2026-11-22")
+        expect(page.locator("#searchFilterSpeaker")).to_have_value("참석자 1")
+        expect(result).to_be_focused()
+        assert abs(page.locator("#content").evaluate("(el) => el.scrollTop") - scroll) < 2
+        result.press("Enter")
+        page.get_by_role("navigation", name="주요 내비게이션").get_by_role(
+            "button", name="검색"
+        ).click()
+        expect(result).to_be_focused()
+        expect(page.locator("#searchSpeakerScope")).to_contain_text("검색 복귀 시험")
+        assert abs(page.locator("#content").evaluate("(el) => el.scrollTop") - scroll) < 2
+        assert sent == [
+            {"query": "일정", "date_filter": "2026-11-22", "speaker_label_filter": "참석자 1"},
+            {
+                "query": "일정",
+                "date_filter": "2026-11-22",
+                "speaker_filter": "SPEAKER_09",
+                "meeting_id_filter": "meeting-a",
+            },
+        ]
+
+
 def test_search_stale_requests_do_not_mutate_after_newer_search_or_destroy(
     browser: Browser,
     spa_static_server: str,
@@ -2771,6 +2854,7 @@ def test_settings_auto_processing_gui_save_and_run_now(
     captured_settings: list[dict] = []
     run_now_calls: list[str] = []
     state = {"has_result": False}
+    delayed_put: list[Route] = []
 
     def settings_api(route: Route) -> None:
         url = route.request.url
@@ -2820,6 +2904,9 @@ def test_settings_auto_processing_gui_save_and_run_now(
         if "/api/settings" in url and method == "PUT":
             payload = json.loads(route.request.post_data or "{}")
             captured_settings.append(payload)
+            if state.get("hold_save"):
+                delayed_put.append(route)
+                return
             route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -2985,13 +3072,43 @@ def test_settings_auto_processing_gui_save_and_run_now(
         assert payload["stt_openai_model"] == "gpt-4o-transcribe-diarize"
         assert payload["external_upload_confirmed"] is False
 
-        page.locator("#settingsAutoProcessingRunNow").click()
+        # 야간 실행이 다른 미저장 항목까지 적용하지 않는지 함께 확인한다.
+        page.locator("#settingsDiarizationEngine").select_option("senko")
+        page.locator("#settingsAutoProcessingMaxItems").fill("1")
+        page.locator("#settingsAutoProcessingAction").select_option("summarize")
+        assert "최대 1건" in page.locator("#settingsAutoProcessingPreview").inner_text()
+        page.get_by_role("button", name="저장 후 실행", exact=True).click()
         page.wait_for_function(
             "() => document.querySelector('#settingsAutoProcessingStatus').textContent.includes('큐 등록 1건')"
         )
         status_text = page.locator("#settingsAutoProcessingStatus").inner_text()
         assert "상한 보류 2건" in status_text
         assert "실패 0건" not in status_text
+        assert captured_settings[-1] == {
+            "auto_processing_max_items_per_run": 1,
+            "auto_processing_action": "summarize",
+        }
+        assert "저장되지 않은 변경" in page.locator("#settingsSaveStatus").inner_text()
+        state["hold_save"] = True
+        with page.expect_request(lambda r: r.method == "PUT" and "/api/settings" in r.url):
+            page.locator("#settingsSaveBtn").click()
+        page.locator("#settingsAutoProcessingMaxItems").fill("2")
+        assert page.locator("#settingsSaveBtn").is_disabled()
+        assert page.locator("#settingsAutoProcessingRunNow").is_disabled()
+        delayed_put.pop().fulfill(status=200, json={"settings": captured_settings[-1]})
+        page.wait_for_function("() => !document.querySelector('#settingsSaveBtn').disabled")
+        assert page.locator("#settingsAutoProcessingRunNow").inner_text() == "저장 후 실행"
+        assert "저장되지 않은 변경" in page.locator("#settingsSaveStatus").inner_text()
+        for width in (1194, 390):
+            page.set_viewport_size({"width": width, "height": 760})
+            assert page.locator("#settingsEngineDescription").evaluate(
+                """el => {
+                  const text = document.createRange(); text.selectNodeContents(el);
+                  const rect = text.getBoundingClientRect(), box = el.getBoundingClientRect();
+                  return rect.width <= box.width + 1 && rect.height <= box.height + 1 &&
+                    rect.bottom <= el.nextElementSibling.getBoundingClientRect().top;
+                }"""
+            )
 
     assert run_now_calls
 

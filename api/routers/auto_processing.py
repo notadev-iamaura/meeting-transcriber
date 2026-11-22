@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from config import AutoProcessingConfig
+
 router = APIRouter()
 
 
@@ -37,7 +39,9 @@ async def get_auto_processing_status(request: Request) -> dict[str, Any]:
 
 
 @router.post("/auto-processing/run-now")
-async def run_auto_processing_now(request: Request) -> dict[str, Any]:
+async def run_auto_processing_now(
+    request: Request, expected: AutoProcessingConfig | None = None
+) -> dict[str, Any]:
     """자동 전사/요약을 즉시 1회 실행한다."""
     from api.openai_settings_guard import get_openai_settings_mutation_lock
 
@@ -68,6 +72,16 @@ async def run_auto_processing_now(request: Request) -> dict[str, Any]:
             raise HTTPException(
                 status_code=409,
                 detail="자동 전사/요약이 이미 실행 중입니다.",
+            )
+        if expected is not None and (
+            config is None
+            or any(
+                getattr(config.auto_processing, key) != value
+                for key, value in expected.model_dump(exclude_unset=True).items()
+            )
+        ):
+            raise HTTPException(
+                status_code=409, detail="야간 설정이 변경됐습니다. 설정을 다시 열어 확인해 주세요."
             )
         if config is not None and getattr(config.auto_processing, "action", "full") in {
             "transcribe",

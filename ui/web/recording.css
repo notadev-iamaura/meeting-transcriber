@@ -25,6 +25,8 @@
 }
 
 .recording-failure[hidden],
+.home-action-btn[hidden],
+.recording-outcome button[hidden],
 .recording-outcome[hidden],
 .recording-failure details[hidden] { display: none; }
 .recording-outcome {
@@ -33,6 +35,19 @@
   padding-right: 64px;
 }
 .recording-outcome p { margin: 3px 0 0; white-space: pre-line; }
+.short-recording-dialog {
+  width: min(400px, calc(100vw - 32px));
+  padding: 20px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+.short-recording-dialog::backdrop { background: rgba(0, 0, 0, .4); }
+.short-recording-dialog h2 { font-size: 16px; }
+.short-recording-dialog p { margin: 10px 0 18px; }
+.short-recording-dialog form { display: flex; justify-content: flex-end; gap: 8px; }
+#recordingOutcomeShortFolder { margin-top: 8px; }
 .recording-outcome a { display: inline-block; margin: 6px 12px 0 0; color: var(--accent-text); }
 #recordingOutcomeClose { position: absolute; top: 10px; right: 10px; }
 .recording-failure-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
