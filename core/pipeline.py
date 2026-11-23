@@ -2371,6 +2371,11 @@ class PipelineManager:
         else:
             result.save_markdown(markdown_path)
 
+        from core.agenda_records import refresh_after_write
+
+        await refresh_after_write(
+            self._config, output_dir.name, published_markdown=result.markdown
+        )
         return result
 
     def _derive_meeting_date(self, meeting_id: str, audio_path: Path) -> str:
@@ -2818,6 +2823,7 @@ class PipelineManager:
         should_cancel: Callable[[], bool] | None = None,
     ) -> PipelineState:
         """같은 회의의 편집·삭제와 직렬화해 마이크 트랙만 다시 전사한다."""
+        from core.agenda_records import refresh_after_write
         from core.mic_transcription import retry_mic_track
 
         self._validate_meeting_id(meeting_id)
@@ -2846,6 +2852,7 @@ class PipelineManager:
                         stt_model=stt_model,
                     )
                     self._save_state(recovered, self._get_state_path(meeting_id))
+                await refresh_after_write(self._config, meeting_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -3638,6 +3645,9 @@ class PipelineManager:
                 except Exception as e:
                     logger.warning(f"Wiki 진행 콜백 예외 (complete, 무시): {e}")
 
+        from core.agenda_records import refresh_after_write
+
+        await refresh_after_write(self._config, meeting_id)
         # 부가 Wiki의 non-fatal 결과까지 저장한 뒤 전체 완료를 게시한다.
         state.status = "completed"
         state.current_step = ""
@@ -4060,6 +4070,9 @@ class PipelineManager:
                 on_step_start=on_step_start,
             )
 
+        from core.agenda_records import refresh_after_write
+
+        await refresh_after_write(self._config, meeting_id)
         state.status = "completed"
         state.current_step = ""
         self._save_state(state, state_path)

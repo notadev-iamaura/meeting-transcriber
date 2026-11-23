@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_chat_engine as _get_chat_engine
 from api.dependencies import get_search_engine as _get_search_engine
+from core.chat_scope import meeting_lookup_topic
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +131,15 @@ class ChatReferenceItem(BaseModel):
     meeting_id: str
     date: str
     speakers: list[str] = Field(default_factory=list)
-    start_time: float = 0.0
-    end_time: float = 0.0
+    start_time: float | None = 0.0
+    end_time: float | None = 0.0
     text_preview: str = ""
     score: float = 0.0
     speaker_labels: dict[str, str] = Field(default_factory=dict)
     quote: ChatQuoteItem | None = None
+    source_kind: Literal["transcript", "minutes"] = "transcript"
+    source_excerpt: str | None = None
+    source_digest: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -176,6 +180,7 @@ class ChatResponse(BaseModel):
     source_type: str | None = None
     router_verdict: dict[str, Any] | None = None
     wiki_sources: list[dict[str, Any]] | None = None
+    topic_brief: bool = False
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -318,6 +323,15 @@ def _build_chat_references(
             end_time=r.end_time,
             text_preview=r.text_preview,
             score=r.score,
+            source_kind="minutes"
+            if getattr(r, "source_kind", None) == "minutes"
+            else "transcript",
+            source_excerpt=r.source_excerpt
+            if isinstance(getattr(r, "source_excerpt", None), str)
+            else None,
+            source_digest=r.source_digest
+            if isinstance(getattr(r, "source_digest", None), str)
+            else None,
             speaker_labels=(
                 r.speaker_labels if isinstance(getattr(r, "speaker_labels", None), dict) else {}
             ),
@@ -508,7 +522,10 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
         from search.chat import EmptyQueryError as ChatEmptyQueryError
 
         # ─── 라우터 비활성 (default) — 기존 동작 100% 보존 ──────────────────
-        if not router_enabled:
+        topic_lookup = not any(
+            (body.meeting_id_filter, body.date_filter, body.speaker_filter)
+        ) and meeting_lookup_topic(body.query)
+        if not router_enabled or topic_lookup:
             result = await chat_engine.chat(
                 query=body.query,
                 session_id=body.session_id,
@@ -527,9 +544,10 @@ async def chat(request: Request, body: ChatRequest) -> ChatResponse:
                 repair_actions=list(getattr(result, "repair_actions", [])),
                 error_message=result.error_message,
                 # 회귀 보장: 라우터 비활성 시 새 필드는 None 유지
-                source_type=None,
+                source_type="rag" if router_enabled else None,
                 router_verdict=None,
                 wiki_sources=None,
+                topic_brief=getattr(result, "topic_brief", False) is True,
             )
 
         # ─── 라우터 활성 — HybridChatService 분기 ───────────────────────────

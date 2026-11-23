@@ -293,6 +293,31 @@ async def test_actual_api_and_worker_retry_only_mic_preserving_source_and_metada
     assert state["mic_transcription"]["status"] == "complete" and state["summary_needs_review"]
 
 
+async def test_mic_recovery_refreshes_agenda_without_rebinding_old_minutes(env: Any) -> None:
+    """추가된 내 발화를 재시작 없이 찾고, 재전사 전에 작성한 회의록은 분리한다."""
+    from core.agenda_records import (
+        agenda_for_topic,
+        minutes_match_transcript,
+        refresh_agenda_records,
+    )
+
+    minutes = "## 결정 사항\n- 기존 계획은 금요일에 공유하기로 했습니다."
+    output = env.config.paths.resolved_outputs_dir / env.mid
+    output.mkdir(parents=True)
+    (output / "meeting_minutes.md").write_text(minutes, encoding="utf-8")
+    refresh_agenda_records(env.config, env.mid, published_markdown=minutes)
+    assert agenda_for_topic(env.config, env.mid, "상대 발화") is not None
+    assert minutes_match_transcript(env.config, env.mid, minutes)
+
+    assert (await request(env, "POST", "mic-transcription/retry")).status_code == 202
+    assert await env.worker._process_job(env.queue.get_job(env.job_id))
+
+    recovered = agenda_for_topic(env.config, env.mid, "복구된", anchor_index=0)
+    assert recovered is not None and recovered.title == "복구된 내 발화"
+    assert agenda_for_topic(env.config, env.mid, "상대 발화") is not None
+    assert not minutes_match_transcript(env.config, env.mid, minutes)
+
+
 async def test_stt_failure_keeps_current_source_and_can_retry(env: Any) -> None:
     """실제 재시도 실패는 원문을 교체하지 않으며 다음 요청을 허용한다."""
     before = env.source.read_bytes()

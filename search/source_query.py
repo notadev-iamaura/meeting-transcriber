@@ -180,6 +180,12 @@ def content_terms(query: str) -> list[str]:
     return output
 
 
+def topic_content_terms(topic: str) -> list[str]:
+    """대화체 나열 조사를 같은 방식으로 처리해 검색과 후속 발언 판독을 일치시킨다."""
+    normalized = re.sub(r"([가-힣]{2,}?)(?:이랑|랑)(?=\s|$)", r"\1", topic)
+    return content_terms(normalized)
+
+
 def focused_source_query(query: str, max_terms: int) -> str:
     """검색 지시와 날짜가 드문 내용 단어를 압도하지 않도록 내용 주제만 구성한다."""
     quotes = _QUOTED.findall(query)

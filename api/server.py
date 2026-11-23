@@ -83,6 +83,31 @@ def _normalize_runtime_profile(runtime_profile: RuntimeProfile | str) -> Runtime
 # === lifespan 컨텍스트 매니저 ===
 
 
+async def _backfill_agenda_records(
+    config: AppConfig, queue: AsyncJobQueue, coordinator: MeetingMutationCoordinator
+) -> None:
+    """업그레이드 전 완료된 회의의 안건 기록을 백그라운드에서 순차적으로 복구한다."""
+    from core.agenda_records import refresh_agenda_records
+    from core.nightly_window import finish_started_write
+
+    for job in await queue.get_all_jobs():
+        if job.status != "completed":
+            continue
+        async with coordinator.lease(job.meeting_id):
+            current = await asyncio.to_thread(queue.queue.get_job_by_meeting_id, job.meeting_id)
+            if current is None or current.status != "completed":
+                continue
+            try:
+                await finish_started_write(
+                    asyncio.to_thread(refresh_agenda_records, config, job.meeting_id)
+                )
+            except FileNotFoundError:
+                # 보관 정책에 따라 원문이 삭제된 회의는 복원 대상에서 제외한다.
+                continue
+            except (OSError, ValueError) as exc:
+                logger.warning(f"안건 기록 복구 보류: {job.meeting_id} ({type(exc).__name__})")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI 앱의 생명주기를 관리한다.
@@ -385,6 +410,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     from api.routers.reindex import recover_edited_indexes
 
                     await recover_edited_indexes(app)
+                    await _backfill_agenda_records(
+                        config, async_queue, app.state.meeting_mutation_coordinator
+                    )
             except asyncio.CancelledError:
                 if app.state.startup_scan_status in {"pending", "running"}:
                     app.state.startup_scan_status = "cancelled"
