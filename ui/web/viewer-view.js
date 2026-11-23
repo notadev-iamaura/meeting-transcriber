@@ -1398,12 +1398,10 @@
                 }
             });
 
-            if (!draft) setTimeout(function () {
-                if (textarea.isConnected) {
-                    textarea.focus();
-                    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-                }
-            }, 0);
+            if (!draft) {
+                textarea.focus();
+                textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            }
         };
 
         /**

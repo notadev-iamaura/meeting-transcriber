@@ -966,6 +966,32 @@ class TestTranscriptEdit:
 
 
 class TestTranscriptDraft:
+    def test_immediate_search_keeps_keyboard_focus(
+        self, page: Page, seeded_meeting_id: str
+    ) -> None:
+        """편집 직후 다음 타이머 전에 검색으로 이동해도 초안 복원 뒤 계속 입력할 수 있다."""
+        _open_viewer(page, seeded_meeting_id)
+        row = page.locator(".utterance-text").first
+        draft = "검색 도중 유지할 발화 초안"
+        row.evaluate(
+            """(row, draft) => {
+                row.dispatchEvent(new MouseEvent("dblclick", {bubbles: true}));
+                const editor = row.querySelector("textarea");
+                editor.value = draft;
+                editor.dispatchEvent(new Event("input", {bubbles: true}));
+                const search = document.getElementById("viewerSearchInput");
+                search.focus();
+                search.value = "파이";
+                search.dispatchEvent(new Event("input", {bubbles: true}));
+            }""",
+            draft,
+        )
+        expect(page.get_by_text("편집 초안 복원됨")).to_be_visible()
+        expect(page.get_by_role("textbox", name="전사문 내 검색")).to_be_focused()
+        page.keyboard.insert_text("선")
+        expect(page.get_by_role("textbox", name="전사문 내 검색")).to_have_value("파이선")
+        expect(page.get_by_role("textbox", name="발화 편집")).to_have_value(draft)
+
     def test_conflict_keeps_draft_when_reading_latest(
         self, page: Page, seeded_meeting_id: str
     ) -> None:
