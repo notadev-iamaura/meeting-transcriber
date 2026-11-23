@@ -3579,6 +3579,9 @@ async def update_summary(
         logger.exception(f"회의록 저장 실패: {exc}")
         raise _artifact_io_http_exception("회의록 저장", exc) from exc
 
+    from core.agenda_records import refresh_after_write
+
+    await refresh_after_write(config, meeting_id, minutes_edited=True)
     logger.info(
         "회의록 수동 편집 저장: meeting_id=%s, path=%s, length=%d",
         meeting_id,
@@ -3820,7 +3823,9 @@ async def update_transcript(
         ) from exc
 
     from api.routers.reindex import schedule_edited_reindex
+    from core.agenda_records import refresh_after_write
 
+    await refresh_after_write(config, meeting_id)
     await schedule_edited_reindex(request.app, meeting_id)
     logger.info(
         "전사문 수동 편집 저장: meeting_id=%s, utterances=%d",
@@ -3965,7 +3970,9 @@ async def replace_transcript_pattern(
         ) from exc
 
     from api.routers.reindex import schedule_edited_reindex
+    from core.agenda_records import refresh_after_write
 
+    await refresh_after_write(config, meeting_id)
     await schedule_edited_reindex(request.app, meeting_id)
     logger.info(
         "전사문 패턴 치환: meeting_id=%s, find=%r, replace=%r, changes=%d",

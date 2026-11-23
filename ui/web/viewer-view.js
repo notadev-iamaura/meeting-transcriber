@@ -148,7 +148,7 @@
 
             self._render();
             self._bind();
-            if (getSummaryDraft(meetingId) && !urlParams.has("t") && !urlParams.has("q")) {
+            if ((urlParams.get("tab") === "summary" || getSummaryDraft(meetingId)) && !urlParams.has("t") && !urlParams.has("q")) {
                 document.getElementById("viewerTabSummary").click();
             }
             self._loadData();

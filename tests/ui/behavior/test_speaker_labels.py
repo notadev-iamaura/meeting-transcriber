@@ -105,12 +105,14 @@ def test_all_views_use_whole_meeting_aliases(
         context.close()
 
 
+@pytest.mark.parametrize("topic_brief", [False, True])
 def test_each_quote_from_one_parent_has_own_actor_time_preview_and_literal_text(
     browser: Browser,
+    topic_brief: bool,
 ) -> None:
     """같은 청크의 두 인용은 각 원문 시각으로 이동하고 마크다운·가짜 참조는 표시만 한다."""
     quotes = [
-        SourceQuote("[참조 99] **공유** <b>내용</b>", "SPEAKER_01", 10.0, 11.0),
+        SourceQuote("[참조 1] **공유** <b>내용</b>", "SPEAKER_01", 10.0, 11.0),
         SourceQuote("검토 후 회신하겠습니다.", "SPEAKER_07", 20.0, 21.0),
     ]
     answer = render_source_answer(
@@ -133,6 +135,24 @@ def test_each_quote_from_one_parent_has_own_actor_time_preview_and_literal_text(
         )
         for q in quotes
     ]
+    excerpt = "최종본은 <담당자>가 검수합니다."
+    if topic_brief:
+        answer += " [참조 3]"
+        refs.append(
+            dict(
+                chunk_id="minutes",
+                meeting_id="synthetic",
+                date="",
+                speakers=[],
+                start_time=None,
+                end_time=None,
+                score=0,
+                quote=None,
+                text_preview=excerpt,
+                source_kind="minutes",
+                source_excerpt=excerpt,
+            )
+        )
     context = browser.new_context()
     page = context.new_page()
     try:
@@ -140,32 +160,39 @@ def test_each_quote_from_one_parent_has_own_actor_time_preview_and_literal_text(
         for name in ("app.js", "chat-view.js"):
             page.add_script_tag(path=str(WEB / name))
         output = page.evaluate(
-            """({answer,refs})=>{
+            """({answer,refs,topic_brief})=>{
             const deps={App:MeetingApp,Router:{getContentEl:()=>document.querySelector('#fixture'),navigate:()=>{}}};
             const C=MeetingChatView.create(deps),chat=Object.create(C.prototype);
             chat._messageCount=0;chat._scrollToBottom=()=>{};chat._els={messagesArea:document.querySelector('#fixture')};
-            chat._addAssistantMessage({answer,references:refs,llm_used:true});
+            chat._addAssistantMessage({answer,references:refs,llm_used:true,topic_brief});
             let copied='';MeetingApp.copyToClipboard=text=>{copied=text;return Promise.resolve(false);};
             document.querySelector('.btn-copy').click();
             return {hrefs:Array.from(document.querySelectorAll('.ref-card')).map(e=>e.getAttribute('href')),
                 previews:Array.from(document.querySelectorAll('.ref-card-preview')).map(e=>e.textContent),
                 metadata:Array.from(document.querySelectorAll('.ref-card-meta')).map(e=>e.textContent),
+                overlines:Array.from(document.querySelectorAll('.ref-card-overline')).map(e=>e.textContent),
                 bubble:document.querySelector('.message-bubble').textContent,copied,
-                formatted:document.querySelector('.message-bubble').querySelectorAll('b,strong,script,a').length,
+                formatted:document.querySelector('.message-bubble').querySelectorAll('b,strong,script').length,
+                inlineLinks:Array.from(document.querySelectorAll('.message-bubble a')).map(e=>e.getAttribute('href')),
                 raw:refs.map(r=>({id:r.chunk_id,start:r.start_time,end:r.end_time,preview:r.text_preview}))};
         }""",
-            {"answer": answer, "refs": refs},
+            {"answer": answer, "refs": refs, "topic_brief": topic_brief},
         )
-        assert output["hrefs"] == ["/app/viewer/synthetic?t=10", "/app/viewer/synthetic?t=20"]
-        assert output["previews"] == [q.text for q in quotes]
+        assert output["hrefs"][:2] == ["/app/viewer/synthetic?t=10", "/app/viewer/synthetic?t=20"]
+        assert output["previews"][:2] == [q.text for q in quotes]
+        if topic_brief:
+            assert output["hrefs"][2:] == ["/app/viewer/synthetic?tab=summary"]
+            assert output["previews"][2] == excerpt and output["overlines"][2] == "회의록"
+            assert "~" not in output["metadata"][2] and "참석자" not in output["metadata"][2]
         assert "참석자 1" in output["metadata"][0] and "참석자 2" not in output["metadata"][0]
         assert "참석자 2" in output["metadata"][1]
         assert quotes[0].text in output["bubble"]
         assert output["copied"] == output["bubble"]
         assert output["formatted"] == 0
+        assert output["inlineLinks"] == (output["hrefs"] if topic_brief else [])
         assert all(
             r == dict(id="same-parent", start=0, end=30, preview="원래 parent 미리보기")
-            for r in output["raw"]
+            for r in output["raw"][:2]
         )
     finally:
         context.close()

@@ -37,6 +37,21 @@
             };
         }
 
+        function referenceLink(ref) {
+            var anchor = document.createElement("a");
+            var path = "/app/viewer/" + encodeURIComponent(ref.meeting_id);
+            var time = ref.quote ? ref.quote.start_time : ref.start_time;
+            if (ref.source_kind === "minutes") path += "?tab=summary";
+            else if (time != null) path += "?t=" + encodeURIComponent(time);
+            anchor.href = path;
+            anchor.addEventListener("click", function (event) {
+                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                Router.navigate(path);
+            });
+            return anchor;
+        }
+
         // =================================================================
         // === ChatView (AI 채팅) ===
         // =================================================================
@@ -129,7 +144,7 @@
                 '<path d="M16 18h22a4 4 0 014 4v12a4 4 0 01-4 4h-2v6l-6-6h-14a4 4 0 01-4-4V22a4 4 0 014-4z" transform="translate(0 4)" opacity="0.6"/>' +
                 '</svg>' +
                 '<h2 class="empty-state-title">대화를 시작해 보세요</h2>' +
-                '<p class="empty-state-description">회의 내용에 대해 무엇이든 물어보세요. 화자별 요약·결정사항·다음 액션 등을 정리해 드려요.</p>' +
+                '<p class="empty-state-description">전체 회의에서 주제를 입력하면, 관련 회의를 찾아 결정사항·후속 작업·일정을 정리해 드려요.</p>' +
                 '</div>' +
                 '<div class="welcome-tips" aria-label="추천 질문">' +
                     '<button type="button" class="welcome-tip" data-prompt="지난 회의에서 결정된 일정이 뭐야?"><span class="tip-arrow" aria-hidden="true">&rarr;</span> 지난 회의에서 결정된 일정이 뭐야?</button>' +
@@ -181,8 +196,8 @@
                 '    <div class="input-row">',
                 '      <div class="input-wrapper">',
                 '        <textarea class="chat-input" id="chatInput"',
-                '                  placeholder="회의 내용에 대해 질문하세요..."',
-                '                  aria-label="회의 내용 질문 입력"',
+                '                  placeholder="회의 주제나 질문을 입력하세요"',
+                '                  aria-label="회의 주제 또는 질문 입력"',
                 '                  disabled',
                 '                  rows="1"></textarea>',
                 '      </div>',
@@ -380,7 +395,7 @@
             var readinessState = this._getReadinessState();
             els.chatInput.disabled = !canAsk || this._isSending;
             if (canAsk) {
-                els.chatInput.placeholder = "회의 내용에 대해 질문하세요...";
+                els.chatInput.placeholder = "회의 주제나 질문을 입력하세요";
             } else if (readinessState === "no_meetings") {
                 els.chatInput.placeholder = "회의를 추가하면 질문할 수 있습니다.";
             } else if (readinessState === "no_completed") {
@@ -482,12 +497,24 @@
             // 답변 버블
             var bubble = document.createElement("div");
             bubble.className = "message-bubble";
-            var literalQuotes = (data.references || []).some(function (ref) { return Boolean(ref.quote); });
+            var literalQuotes = (data.references || []).some(function (ref) { return Boolean(ref.quote) || ref.source_kind === "minutes"; });
             if (literalQuotes) {
                 // 원문 속 마크다운·가짜 인용은 표시만 하고 소스 링크로 해석하지 않는다.
-                bubble.textContent = String(data.answer || "")
-                    .replace(/&#(\d+);/g, function (_, n) { return String.fromCodePoint(Number(n)); })
-                    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+                var answer = String(data.answer || "");
+                var parts = data.topic_brief ? answer.split(/(\[참조 [1-9]\d*\])/g) : [answer];
+                parts.forEach(function (part) {
+                    var marker = /^\[참조 (\d+)\]$/.exec(part);
+                    var ref = data.topic_brief && marker && data.references[Number(marker[1]) - 1];
+                    if (ref && (ref.quote || ref.source_kind === "minutes")) {
+                        var link = referenceLink(ref);
+                        link.textContent = part;
+                        bubble.appendChild(link);
+                    } else {
+                        var text = part.replace(/&#(\d+);/g, function (_, n) { return String.fromCodePoint(Number(n)); })
+                            .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+                        bubble.appendChild(document.createTextNode(text));
+                    }
+                });
             } else {
                 bubble.innerHTML = App.renderMarkdown(data.answer);
             }
@@ -630,19 +657,9 @@
 
                 data.references.forEach(function (ref, index) {
                     var quote = ref.quote || null;
-                    var card = document.createElement("a");
+                    var fromMinutes = ref.source_kind === "minutes";
+                    var card = referenceLink(ref);
                     card.className = "ref-card";
-                    // SPA 내비게이션으로 뷰어 이동
-                    var refPath = "/app/viewer/" + encodeURIComponent(ref.meeting_id);
-                    var jumpTime = quote ? quote.start_time : ref.start_time;
-                    if (jumpTime != null) {
-                        refPath += "?t=" + encodeURIComponent(jumpTime);
-                    }
-                    card.href = refPath;
-                    card.addEventListener("click", function (e) {
-                        e.preventDefault();
-                        Router.navigate(refPath);
-                    });
 
                     // 인덱스
                     var indexEl = document.createElement("span");
@@ -656,7 +673,7 @@
                     // REFERENCE 오버라인 (레퍼런스 Chat.jsx 기준 citation 문서화)
                     var overline = document.createElement("div");
                     overline.className = "overline ref-card-overline";
-                    overline.textContent = "REFERENCE";
+                    overline.textContent = fromMinutes ? "회의록" : "REFERENCE";
                     bodyEl.appendChild(overline);
 
                     // 메타 정보
@@ -666,34 +683,34 @@
                     var meetingSpan = document.createElement("span");
                     App.renderReferenceHeading(meetingSpan, ref, self._meetings);
 
-                    var speakersSpan = document.createElement("span");
-                    speakersSpan.textContent = (quote ? [quote.speaker] : ref.speakers || []).map(function (speaker) {
-                        return App.speakerLabel(speaker, ref.speaker_labels);
-                    }).join(", ");
-
-                    var timeSpan = document.createElement("span");
-                    timeSpan.textContent = App.formatTime(quote ? quote.start_time : ref.start_time) + "~" + App.formatTime(quote ? quote.end_time : ref.end_time);
-
                     meta.appendChild(meetingSpan);
-                    if (quote || ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
-                    meta.appendChild(timeSpan);
+                    if (!fromMinutes) {
+                        var speakersSpan = document.createElement("span");
+                        speakersSpan.textContent = (quote ? [quote.speaker] : ref.speakers || []).map(function (speaker) {
+                            return App.speakerLabel(speaker, ref.speaker_labels);
+                        }).join(", ");
+                        var timeSpan = document.createElement("span");
+                        timeSpan.textContent = App.formatTime(quote ? quote.start_time : ref.start_time) + "~" + App.formatTime(quote ? quote.end_time : ref.end_time);
+                        if (quote || ref.speakers && ref.speakers.length) meta.appendChild(speakersSpan);
+                        meta.appendChild(timeSpan);
+                    }
 
                     // 미리보기
                     var preview = document.createElement("div");
                     preview.className = "ref-card-preview";
-                    preview.textContent = quote ? quote.text : ref.text_preview || "";
+                    preview.textContent = fromMinutes ? ref.source_excerpt || ref.text_preview || "" : quote ? quote.text : ref.text_preview || "";
 
                     bodyEl.appendChild(meta);
                     bodyEl.appendChild(preview);
 
-                    // 점수
-                    var scoreEl = document.createElement("span");
-                    scoreEl.className = "ref-card-score";
-                    scoreEl.textContent = (ref.score * 100).toFixed(0) + "%";
-
                     card.appendChild(indexEl);
                     card.appendChild(bodyEl);
-                    card.appendChild(scoreEl);
+                    if (!data.topic_brief && !fromMinutes) {
+                        var scoreEl = document.createElement("span");
+                        scoreEl.className = "ref-card-score";
+                        scoreEl.textContent = (ref.score * 100).toFixed(0) + "%";
+                        card.appendChild(scoreEl);
+                    }
                     refsSection.appendChild(card);
                 });
 
