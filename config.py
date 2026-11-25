@@ -823,7 +823,7 @@ class SplitTrackProcessingConfig(BaseModel):
 
     native_capture: bool = True
     echo_suppression: bool = True
-    echo_max_delay_ms: int = Field(default=280, ge=40, le=500)
+    echo_max_delay_ms: int = Field(default=500, ge=40, le=500)
     speech_floor_dbfs: float = Field(default=-67.0, ge=-80, le=-45)
     max_gain_db: float = Field(default=32.0, ge=0, le=42)
     silence_gap_seconds: float = Field(default=5.0, ge=1, le=45)

@@ -38,14 +38,18 @@ def _fft_size(size: int) -> int:
 
 
 def _match_windows(
-    mic: NDArray[np.float32], reference: NDArray[np.float32], rate: int, width: int
+    mic: NDArray[np.float32],
+    reference: NDArray[np.float32],
+    rate: int,
+    width: int,
+    starts: list[int] | None = None,
 ) -> list[_Window]:
     """서로 다른 시간의 일관된 지연 후보를 찾는다. 단일 톤의 모호한 상관은 제외한다."""
     history = len(reference) - len(mic)
     size = _fft_size(2 * width + history)
     exclusion = max(1, rate * 4 // 1000)
     windows = []
-    for start in range(0, len(mic) - width + 1, width):
+    for start in starts if starts is not None else range(0, len(mic) - width + 1, width):
         # 차분으로 DC와 저주파 단조 신호가 후보를 압도하지 않게 한다.
         captured = np.diff(mic[start : start + width].astype(np.float64))
         played = np.diff(reference[start : start + width + history].astype(np.float64))
@@ -73,7 +77,7 @@ def _delay_groups(windows: list[_Window], rate: int) -> list[list[_Window]]:
     """재생 중 경로가 바뀐 시점의 지연 후보도 별도로 검증한다."""
     tolerance = max(1, rate // 500)
     groups: list[list[_Window]] = []
-    while len(windows) >= _MIN_WINDOWS and len(groups) < 3:
+    while windows and len(groups) < 3:
         group = max(
             (
                 [
@@ -85,12 +89,33 @@ def _delay_groups(windows: list[_Window], rate: int) -> list[list[_Window]]:
             ),
             key=len,
         )
-        if len(group) < _MIN_WINDOWS:
-            break
         groups.append(group)
         selected = set(group)
         windows = [w for w in windows if w not in selected]
     return groups
+
+
+def _short_windows(
+    mic: NDArray[np.float32],
+    reference: NDArray[np.float32],
+    rate: int,
+    anchors: list[_Window],
+    width: int,
+) -> list[_Window]:
+    """반 초 창에서 찾은 지연을 같은 위치 주변의 독립된 짧은 창에서 다시 확인한다."""
+    starts: set[int] = set()
+    for anchor in anchors:
+        # 창 경계에 걸친 음절을 포함한다. 겹치는 근거를 두 번 세지 않도록 같은 격자를 쓴다.
+        first = max(0, anchor.start // width - 1) * width
+        stop = min(len(mic) - width + 1, anchor.start + rate // 2 + width)
+        starts.update(range(first, stop, width))
+    candidates = _match_windows(mic, reference, rate, width, sorted(starts))
+    anchor = anchors[0]
+    return [
+        w
+        for w in candidates
+        if w.sign == anchor.sign and abs(w.delay - anchor.delay) <= max(1, rate // 500)
+    ]
 
 
 def _predict(
@@ -117,6 +142,7 @@ def _fit_sparse_paths(
     width: int,
     history: int,
     direct_gain: float,
+    rate: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """뚜렷한 직접음과 소수 반사 지연을 고르고 같은 훈련 구간에서 계수를 다시 맞춘다."""
     played = np.stack(
@@ -159,7 +185,7 @@ def _fit_sparse_paths(
         taps[history - np.array(positions)] = coefficients
         # 스피커 응답 한 갈래가 여러 샘플에 걸치면 한 점만 추정한 필터에 말소리 잔향이
         # 남는다. 뚜렷한 갈래의 이웃만 같이 맞춰 독립 잡음·겹말을 학습하는 자유도를 줄인다.
-        grouped = _fit_reflection_clusters(played, captured, residual, positions)
+        grouped = _fit_reflection_clusters(played, captured, residual, positions, rate)
     return taps, grouped
 
 
@@ -168,11 +194,13 @@ def _fit_reflection_clusters(
     captured: NDArray[np.float64],
     residual: NDArray[np.float64],
     positions: list[int],
+    rate: int,
 ) -> NDArray[np.float64]:
     """훈련 잔차가 낮은 창에서 인접 반사 계수를 함께 추정한다."""
     width = captured.shape[1]
     history = played.shape[1] - width
-    radius = max(1, width // 2000)
+    # 각 경로의 스피커 착색은 같은 시간 폭을 가진다. 짧은 발화라도 인접 탭을 줄이지 않는다.
+    radius = max(1, rate // 4000)
     offsets = np.unique(
         np.clip(np.array(positions)[:, None] + np.arange(-radius, radius + 1), 0, history)
     )
@@ -229,10 +257,10 @@ def _validated_path(
     rate: int,
     windows: list[_Window],
     previous: list[EchoPath],
+    width: int,
 ) -> EchoPath | None:
     """같은 지연의 후보 중 일부에서 추정하고 나머지에서 전달 경로를 검증한다."""
     history = len(reference) - len(mic)
-    width = rate // 2
     train, holdout = windows[::2], windows[1::2]
     delay = int(np.median([window.delay for window in train]))
     offset = history - delay
@@ -252,8 +280,8 @@ def _validated_path(
     power = np.sum(np.abs(x) ** 2, axis=0)
     transfer = np.sum(np.conj(x) * y, axis=0) / (power + max(1e-12, float(power.mean()) * 0.002))
     # 가장 뚜렷한 상관점이 늦은 반사음일 수 있어 그 앞의 직접음도 함께 추정한다.
-    earlier = min(delay, rate // 10)
-    later = min(history - delay, rate // 5)
+    earlier = min(delay, rate // 10, width // 4)
+    later = min(history - delay, rate // 5, width // 2)
 
     def room_taps(spectrum: NDArray[np.complex128]) -> NDArray[np.float64]:
         """방의 짧은 선행·후행 반사만 전사용 필터에 포함한다."""
@@ -261,7 +289,7 @@ def _validated_path(
         return np.concatenate((response[size - earlier :], response[: later + 1]))
 
     reflected = room_taps(transfer)
-    sparse, grouped = _fit_sparse_paths(reference, captured, train, width, history, gain)
+    sparse, grouped = _fit_sparse_paths(reference, captured, train, width, history, gain, rate)
     candidates = [
         (np.array([gain]), delay),
         (reflected, delay - earlier),
@@ -313,9 +341,11 @@ def _validated_path(
             )
     best_path = None
     best_error = float("inf")
+    short = width < rate // 2
     for taps, start_delay in candidates:
         estimate = _predict(reference, taps, start_delay, history, len(mic))
-        validation = _track_replay_gain(mic, estimate, rate, training=train)
+        # 짧은 후보는 고정 이득으로만 검증한다. 125ms 이득 추정 창은 100ms 훈련 창을 넘어간다.
+        validation = estimate if short else _track_replay_gain(mic, estimate, rate, training=train)
         errors = []
         for span in holdout:
             raw = mic[span.start : span.start + width]
@@ -323,7 +353,12 @@ def _validated_path(
             errors.append(float(np.dot(residual, residual) / max(1e-12, np.dot(raw, raw))))
         # 겹말 한 구간에 우연히 더 맞는 복잡한 필터가 단순한 직접음을 밀어내지 않게 한다.
         error = float(np.median(errors))
-        if error < best_error * 0.98 and np.mean(errors) < 0.52 and max(errors) <= 0.80:
+        # 짧은 근거로 추정할 때는 모든 검증 창에서 재생이 마이크 에너지의 대부분을 설명해야 한다.
+        if (
+            error < best_error * 0.98
+            and np.mean(errors) < (0.06 if short else 0.52)
+            and max(errors) <= (0.12 if short else 0.80)
+        ):
             best_path, best_error = EchoPath(taps, start_delay, delay), error
     return best_path
 
@@ -361,11 +396,22 @@ def suppress_recording_echo(
     previous: list[EchoPath] | None = None,
 ) -> tuple[NDArray[np.float32], bool]:
     """검증된 재생 필터를 시간별로 선택하고 독립된 마이크 발화는 그대로 유지한다."""
-    groups = _delay_groups(_match_windows(mic, reference, rate, rate // 2), rate)
+    coarse_width = rate // 2
+    if coarse_width < 4 or len(mic) < coarse_width or not np.any(reference):
+        return mic, False
+    groups = _delay_groups(_match_windows(mic, reference, rate, coarse_width), rate)
     history = len(reference) - len(mic)
     paths: list[EchoPath] = []
     for windows in groups:
-        path = _validated_path(mic, reference, rate, windows, paths + (previous or []))
+        width = coarse_width
+        if len(windows) < _MIN_WINDOWS:
+            width = rate // 10
+            if width < 4:
+                continue
+            windows = _short_windows(mic, reference, rate, windows, width)
+            if len(windows) < _MIN_WINDOWS:
+                continue
+        path = _validated_path(mic, reference, rate, windows, paths + (previous or []), width)
         if path is not None:
             paths.append(path)
     if not paths:
@@ -377,6 +423,7 @@ def suppress_recording_echo(
     boundaries = np.arange(0, len(mic), frame)
     samples = np.arange(len(mic))
     centers = np.minimum(boundaries + frame / 2, len(mic) - 1)
+    pcm_floor_power = np.diff(boundaries, append=len(mic)) / 32768**2
     errors = [np.add.reduceat(mic.astype(np.float64) ** 2, boundaries)]
     predictions = []
     for path in paths:
@@ -387,6 +434,15 @@ def suppress_recording_echo(
     chosen = np.argmin(errors, axis=0)
     cleaned = mic.astype(np.float64)
     for index, estimate in enumerate(predictions, 1):
-        weight = np.interp(samples, centers, (chosen == index).astype(np.float64))
+        selected = chosen == index
+        prediction_power = np.add.reduceat(estimate**2, boundaries)
+        quiet = (chosen == 0) & (prediction_power <= pcm_floor_power)
+        weight = np.interp(samples, centers, selected.astype(np.float64))
+        # 무음과 맞닿은 선택 프레임 안에서만 페이드를 생략해 첫·끝 음절의 누설을 줄인다.
+        # 무음 프레임의 보간점을 바꾸면 그 너머의 마이크 무음에 재생 신호가 생길 수 있다.
+        for start in boundaries[1:][quiet[:-1] & selected[1:]]:
+            weight[start : start + (frame + 1) // 2] = 1.0
+        for stop in boundaries[1:][selected[:-1] & quiet[1:]]:
+            weight[stop - frame // 2 : stop] = 1.0
         cleaned -= estimate * weight
     return cleaned.astype(np.float32), True
