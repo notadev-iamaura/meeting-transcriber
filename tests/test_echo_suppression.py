@@ -141,6 +141,48 @@ def test_silent_boundary_does_not_create_echo_in_an_unselected_frame() -> None:
     assert np.linalg.norm(cleaned[resumed]) < 0.001 * np.linalg.norm(mic[resumed])
 
 
+@pytest.mark.parametrize("rate", [8000, 16000])
+def test_muted_microphone_stays_at_pcm_floor_while_playback_continues(
+    tmp_path: Path, rate: int
+) -> None:
+    """재생이 이어져도 마이크 무음과 PCM 1단계 신호를 블록 경계 양쪽에서 보존한다."""
+    size = 49 * rate + 13
+    frame = rate // 50
+    delay = round(rate * 0.086)
+    far = _bandlimited(500 + rate, size)
+    mic = 0.58 * np.pad(far, (delay, 0))[:size]
+    mute_frames = (370, 1199, 1200, 1261, 2399, 2400, 2450)
+    muted = np.zeros(size, dtype=bool)
+    for index in mute_frames:
+        muted[index * frame : (index + 1) * frame] = True
+    mic[muted] = 0
+    mic[1261 * frame : 1262 * frame] = -1 / 32768
+    source = tmp_path / "microphone-mute.wav"
+    with sf.SoundFile(source, "w", rate, 2, subtype="PCM_16") as recording:
+        recording.comment = RECORDING_TRACK_COMMENT
+        recording.write(np.column_stack((mic, far)))
+    original = source.read_bytes()
+    raw, _ = sf.read(source, dtype="int16")
+
+    with open_audio_path_no_symlinks(source) as (_, identity):
+        tracks = extract_recording_tracks(
+            source,
+            tmp_path,
+            (MIC_CHANNEL, SYSTEM_CHANNEL),
+            identity,
+            echo_settings=SplitTrackProcessingConfig(),
+        )
+
+    cleaned, _ = sf.read(tracks[MIC_CHANNEL], dtype="int16")
+    remote, _ = sf.read(tracks[SYSTEM_CHANNEL], dtype="int16")
+    np.testing.assert_array_equal(cleaned[muted], raw[muted, MIC_CHANNEL])
+    for index in mute_frames[:-1]:
+        around = slice((index - 1) * frame, (index + 2) * frame)
+        assert np.max(np.abs(cleaned[around])) <= 2
+    np.testing.assert_array_equal(remote, raw[:, SYSTEM_CHANNEL])
+    assert source.read_bytes() == original
+
+
 @pytest.mark.parametrize("delay_ms", [55, 350])
 def test_reflected_short_syllables_do_not_enter_microphone_stt(
     tmp_path: Path, delay_ms: int, monkeypatch: pytest.MonkeyPatch

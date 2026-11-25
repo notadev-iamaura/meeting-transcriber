@@ -423,8 +423,12 @@ def suppress_recording_echo(
     boundaries = np.arange(0, len(mic), frame)
     samples = np.arange(len(mic))
     centers = np.minimum(boundaries + frame / 2, len(mic) - 1)
-    pcm_floor_power = np.diff(boundaries, append=len(mic)) / 32768**2
-    errors = [np.add.reduceat(mic.astype(np.float64) ** 2, boundaries)]
+    frame_lengths = np.diff(boundaries, append=len(mic))
+    pcm_floor_power = frame_lengths / 32768**2
+    cleaned = mic.astype(np.float64)
+    mic_power = np.add.reduceat(cleaned**2, boundaries)
+    quiet_mic = mic_power <= pcm_floor_power
+    errors = [mic_power]
     predictions = []
     for path in paths:
         estimate = _predict(reference, path.taps, path.start_delay, history, len(mic))
@@ -432,11 +436,11 @@ def suppress_recording_echo(
         errors.append(np.add.reduceat((mic - estimate) ** 2, boundaries))
         predictions.append(estimate)
     chosen = np.argmin(errors, axis=0)
-    cleaned = mic.astype(np.float64)
+    chosen[quiet_mic] = 0
     for index, estimate in enumerate(predictions, 1):
         selected = chosen == index
         prediction_power = np.add.reduceat(estimate**2, boundaries)
-        quiet = (chosen == 0) & (prediction_power <= pcm_floor_power)
+        quiet = (chosen == 0) & (quiet_mic | (prediction_power <= pcm_floor_power))
         weight = np.interp(samples, centers, selected.astype(np.float64))
         # 무음과 맞닿은 선택 프레임 안에서만 페이드를 생략해 첫·끝 음절의 누설을 줄인다.
         # 무음 프레임의 보간점을 바꾸면 그 너머의 마이크 무음에 재생 신호가 생길 수 있다.
@@ -445,4 +449,6 @@ def suppress_recording_echo(
         for stop in boundaries[1:][selected[:-1] & quiet[1:]]:
             weight[stop - frame // 2 : stop] = 1.0
         cleaned -= estimate * weight
+    # 재생음이 계속돼도 마이크가 PCM 바닥값인 프레임의 원 샘플을 보존한다.
+    np.copyto(cleaned, mic, where=np.repeat(quiet_mic, frame_lengths))
     return cleaned.astype(np.float32), True
