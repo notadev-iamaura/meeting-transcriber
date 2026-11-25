@@ -81,6 +81,109 @@ def test_ambiguous_periodic_reference_is_not_used_to_erase_the_microphone() -> N
     np.testing.assert_array_equal(result, signal)
 
 
+@pytest.mark.parametrize("overlap_gain", [0.0, 0.09], ids=["echo-only", "quiet-double-talk"])
+def test_isolated_short_reply_loses_only_the_replayed_component(overlap_gain: float) -> None:
+    """0.6초짜리 상대 발화 한 번도 시간차와 반사를 검증해 실제 마이크 성분만 남긴다."""
+    far = np.zeros(RATE * 6, dtype=np.float32)
+    start = int(2.36 * RATE)
+    size = int(0.60 * RATE)
+    far[start : start + size] = _bandlimited(117, size)
+    reference = np.pad(far, (HISTORY, 0))
+    echo = 0.47 * np.pad(far, (1280, 0))[: len(far)]
+    echo -= 0.12 * np.pad(far, (1513, 0))[: len(far)]
+    near = np.zeros_like(far)
+    overlap = slice(start + 2500, start + 6300)
+    near[overlap] = overlap_gain * _bandlimited(118, overlap.stop - overlap.start)
+    near[RATE : RATE + size] = 0.3 * _bandlimited(119, size)
+    cleaned, applied = suppress_recording_echo(near + echo, reference, RATE)
+    assert applied
+    assert np.linalg.norm(cleaned - near) < 0.04 * np.linalg.norm(echo)
+    np.testing.assert_allclose(cleaned[RATE : RATE + size], near[RATE : RATE + size], atol=1e-9)
+    if overlap_gain:
+        gain = np.dot(cleaned[overlap], near[overlap]) / np.dot(near[overlap], near[overlap])
+        assert gain == pytest.approx(1.0, abs=0.025)
+
+
+def test_single_matching_piece_does_not_authorize_a_short_echo_filter() -> None:
+    """단 한 조각만 재생과 같으면 뒤의 독립 마이크 파형은 그대로 보존한다."""
+    size = RATE * 4
+    far = np.zeros(size, dtype=np.float32)
+    reply = slice(RATE, RATE + int(0.6 * RATE))
+    far[reply] = _bandlimited(531, reply.stop - reply.start)
+    mic = np.zeros_like(far)
+    mic[reply] = _bandlimited(532, reply.stop - reply.start)
+    shared = slice(RATE, RATE + RATE // 6)
+    mic[shared] = 1.8 * far[shared]
+    result, applied = suppress_recording_echo(mic, np.pad(far, (HISTORY, 0)), RATE)
+    assert not applied
+    np.testing.assert_array_equal(result, mic)
+
+
+def test_silent_boundary_does_not_create_echo_in_an_unselected_frame() -> None:
+    """누설이 멈춘 프레임을 건너뛰고 재생음이 다시 돌아올 때 무음을 보존한다."""
+    frame = RATE // 50
+    delay = RATE // 10
+    predicted = np.zeros(RATE * 8, dtype=np.float32)
+    training = slice(RATE + frame // 2, 5 * RATE + frame // 2)
+    predicted[training] = _bandlimited(742, training.stop - training.start)
+    silent = slice(6 * RATE, 6 * RATE + frame)
+    predicted[silent] = 0.3 * _bandlimited(743, frame)
+    resumed = slice(silent.stop + frame, silent.stop + 3 * frame)
+    predicted[resumed] = _bandlimited(744, resumed.stop - resumed.start)
+    mic = 0.62 * predicted
+    mic[silent] = 0
+    reference = np.pad(predicted[delay:], (HISTORY, delay))
+
+    cleaned, applied = suppress_recording_echo(mic, reference, RATE)
+
+    assert applied
+    np.testing.assert_allclose(cleaned[silent], 0, atol=1e-9)
+    assert np.linalg.norm(cleaned[resumed]) < 0.001 * np.linalg.norm(mic[resumed])
+
+
+@pytest.mark.parametrize("delay_ms", [55, 350])
+def test_reflected_short_syllables_do_not_enter_microphone_stt(
+    tmp_path: Path, delay_ms: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """단독 짧은 유성음이 반사되어도 정규화·음성 인식 단계로 마이크 사본을 넘기지 않는다."""
+    size = round(0.60 * RATE)
+    t = np.arange(size) / RATE
+    phase = 2 * np.pi * np.cumsum(168 + 42 * np.sin(t * 6.2 + np.cos(t * 11))) / RATE
+    voice = sum(np.sin(i * phase + 0.1 * i) / i for i in range(1, 37))
+    # 음량이 거의 끊겼다가 다시 시작되는 짧은 음절을 포함한다.
+    envelope = np.interp(
+        t,
+        [0, 0.02, 0.10, 0.14, 0.16, 0.18, 0.24, 0.29, 0.38, 0.46, 0.56, 0.60],
+        [0, 1, 1, 0.58, 0.009, 0.01, 0.95, 0.65, 0.42, 0.55, 0.15, 0],
+    )
+    far = np.zeros(6 * RATE)
+    start = round(2.05 * RATE)
+    far[start : start + size] = voice * envelope * (0.65 / np.max(np.abs(voice * envelope)))
+    coloration = np.array([1, 2, 3, 5, 3, 2, 1]) / 17
+    delay = round(delay_ms * RATE / 1000)
+    room = np.zeros(delay + 675 + len(coloration))
+    for offset, gain in ((0, 0.62), (256, -0.19), (675, 0.09)):
+        room[delay + offset : delay + offset + len(coloration)] = gain * coloration
+    echo = np.convolve(far, room)[: len(far)]
+    source = tmp_path / "short-speech.wav"
+    with sf.SoundFile(source, "w", RATE, channels=2, subtype="PCM_16") as f:
+        f.comment = RECORDING_TRACK_COMMENT
+        f.write(np.column_stack((echo, far)))
+    settings = SplitTrackProcessingConfig()
+    with open_audio_path_no_symlinks(source) as (_, identity):
+        tracks = extract_recording_tracks(
+            source, tmp_path, (MIC_CHANNEL, SYSTEM_CHANNEL), identity, echo_settings=settings
+        )
+    # 음성 감지기가 두 트랙을 모두 음성으로 판정하더라도 원음에 근거해 에코만 걸러야 한다.
+    monkeypatch.setattr(
+        "core.recording_channels._detect_recording_speech", lambda *_: [(2.0, 3.5)]
+    )
+    residual, _ = sf.read(tracks[MIC_CHANNEL])
+    assert np.linalg.norm(residual) < 0.003 * np.linalg.norm(echo)
+    assert prepare_recording_track(tracks[MIC_CHANNEL], settings, -40) is None
+    assert prepare_recording_track(tracks[SYSTEM_CHANNEL], settings, -40) is not None
+
+
 @pytest.mark.parametrize("vary_volume", [False, True], ids=["fixed", "changing-volume"])
 def test_filtered_room_echo_leaves_quiet_near_speech_intact_in_both_extraction_paths(
     tmp_path: Path, vary_volume: bool
@@ -135,11 +238,17 @@ def test_filtered_room_echo_leaves_quiet_near_speech_intact_in_both_extraction_p
 
 
 @pytest.mark.parametrize(
-    ("switch_time", "shorter_delay"),
-    [(9.37, False), (23.87, False), (24.06, False), (22.15, True)],
+    ("switch_time", "shorter_delay", "shift_seconds"),
+    [
+        (9.37, False, 0.0734),
+        (23.87, False, 0.0734),
+        (24.06, False, 0.0734),
+        (22.15, True, 0.0734),
+        (23.87, False, 0.350),
+    ],
 )
 def test_quiet_double_talk_survives_a_render_delay_change(
-    tmp_path: Path, switch_time: float, shorter_delay: bool
+    tmp_path: Path, switch_time: float, shorter_delay: bool, shift_seconds: float
 ) -> None:
     """재생 경로가 블록 안·경계 양쪽에서 바뀌어도 작은 발화와 출력 시간을 보존한다."""
     duration = 31 * RATE
@@ -150,7 +259,7 @@ def test_quiet_double_talk_survives_a_render_delay_change(
     room[812:816] = [0.07, 0.12, 0.11, 0.03]
     original_echo = np.convolve(far, room)[:duration]
     pivot = round(switch_time * RATE)
-    shift = round(0.0734 * RATE)
+    shift = round(shift_seconds * RATE)
     delayed = np.pad(original_echo, (shift, 0))[:duration]
     before, after = (delayed, original_echo) if shorter_delay else (original_echo, delayed)
     echo = np.concatenate((before[:pivot], after[pivot:]))

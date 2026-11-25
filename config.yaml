@@ -251,7 +251,7 @@ recording:
   split_track_processing:
     native_capture: true                       # 확인된 Aggregate에는 macOS CoreAudio 입력 큐 사용
     echo_suppression: true                     # 검증된 스피커 누설만 마이크 전사용 사본에서 줄임
-    echo_max_delay_ms: 280
+    echo_max_delay_ms: 500                      # 마이크에 돌아온 재생음을 찾는 최대 지연(ms)
     speech_floor_dbfs: -67.0                    # 짧은 유효 구간을 찾는 최소 음량
     max_gain_db: 32.0
     silence_gap_seconds: 5.0
