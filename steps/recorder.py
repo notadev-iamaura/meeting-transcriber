@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import shutil
@@ -38,6 +39,68 @@ from security.audio_retention import preserve_short_recording
 from steps.zoom_activity import ZoomActivityError, ZoomAudioActivityChecker, use_zoom_tap
 
 logger = logging.getLogger(__name__)
+
+_CAPTURE_FAILURE_PREFIX = b"capture-failure="
+_CAPTURE_FAILURE_STAGES = (
+    "startup",
+    "input_layout",
+    "input_queue",
+    "writer_queue",
+    "audio_convert",
+    "wav_write",
+    "meter_write",
+    "stop_wait",
+    "device_stop",
+    "wav_finalize",
+)
+_CAPTURE_ERROR_DOMAINS = (
+    "RecapCapture",
+    "NSOSStatusErrorDomain",
+    "NSPOSIXErrorDomain",
+    "NSCocoaErrorDomain",
+    "AVFoundationErrorDomain",
+    "other",
+)
+
+
+@dataclass(frozen=True)
+class _NativeCaptureFailure:
+    """헬퍼가 전달한 단계·코드·입력 시각 중 검증한 필드만 보존한다."""
+
+    stage: str
+    error_domain: str
+    error_code: int
+    last_input_frame_at: str | None
+
+    @classmethod
+    def from_line(cls, line: bytes) -> _NativeCaptureFailure | None:
+        """고정 형식의 짧은 진단 한 줄을 읽는다."""
+        if len(line) > 512 or not line.startswith(_CAPTURE_FAILURE_PREFIX):
+            return None
+        try:
+            record = json.loads(line[len(_CAPTURE_FAILURE_PREFIX) :])
+        except ValueError:
+            return None
+        if not isinstance(record, dict):
+            return None
+        stage = record.get("stage")
+        error_domain = record.get("error_domain")
+        error_code = record.get("error_code")
+        if (
+            stage not in _CAPTURE_FAILURE_STAGES
+            or error_domain not in _CAPTURE_ERROR_DOMAINS
+            or type(error_code) is not int
+            or not -(1 << 63) <= error_code < (1 << 63)
+        ):
+            return None
+        millis = record.get("last_input_frame_ms")
+        frame_at = None
+        if type(millis) is int and millis >= 0:
+            with contextlib.suppress(OverflowError, OSError, ValueError):
+                frame_at = datetime.fromtimestamp(millis / 1000, UTC).isoformat(
+                    timespec="milliseconds"
+                )
+        return cls(stage, error_domain, error_code, frame_at)
 
 
 # === 에러 계층 ===
@@ -209,6 +272,9 @@ class AudioRecorder:
         self._capture_failure_callback: Callable[[], None] | None = None
         self._split_level_meter = False
         self._capture_start_error: str | None = None
+        self._native_capture_failure: _NativeCaptureFailure | None = None
+        self._native_capture_drain: asyncio.Task[None] | None = None
+        self._last_meter_at: float | None = None
         self._audio_levels: dict[str, float] | None = None
         self._audio_levels_at = 0.0
         self._first_audio_levels = asyncio.Event()
@@ -726,6 +792,55 @@ class AudioRecorder:
             # 막으면 안 되므로 로그만 남기고 조용히 끝낸다.
             logger.debug(f"ffmpeg 파이프 drain 중 종료: {e}")
 
+    async def _read_native_capture_failure(self, stream: asyncio.StreamReader) -> None:
+        """stderr를 비우며 첫 구조화 진단만 읽는다."""
+        try:
+            while True:
+                try:
+                    line = await stream.readline()
+                except ValueError:
+                    continue  # 스트림 한도를 넘은 줄은 readline에서 소비된다.
+                if not isinstance(line, bytes) or not line:
+                    return
+                failure = _NativeCaptureFailure.from_line(line)
+                if failure is not None:
+                    self._native_capture_failure = failure
+                    await self._drain_pipe(stream)
+                    return
+        except OSError:
+            return
+
+    async def _log_native_capture_failure(self, *, startup: bool = False) -> None:
+        """종료 직전에 쓰인 진단을 회수해 생성한 헬퍼의 종료 코드와 함께 기록한다."""
+        proc, drain = self._process, self._native_capture_drain
+        if proc is None or drain is None:
+            return
+        if isinstance(proc.returncode, int) and not drain.done():
+            # EOF가 늦어져도 오류 알림과 실패 정리가 무기한 대기하지 않는다.
+            await asyncio.wait((drain,), timeout=0.25)
+        failure = self._native_capture_failure
+        stage = "startup" if startup else "capture"
+        error_domain, error_code = "unknown", "unknown"
+        frame_at = None
+        exit_code = proc.returncode
+        if failure is not None:
+            stage = failure.stage
+            error_domain, error_code = failure.error_domain, str(failure.error_code)
+            frame_at = failure.last_input_frame_at
+        elif isinstance(exit_code, int) and not startup:
+            stage = "process_exit"
+        frame_time_source = "helper" if frame_at else "unknown"
+        if frame_at is None and self._last_meter_at is not None:
+            frame_at = datetime.fromtimestamp(self._last_meter_at, UTC).isoformat(
+                timespec="milliseconds"
+            )
+            frame_time_source = "meter_received"
+        logger.error(
+            f"CoreAudio 녹음 실패 진단: pid={proc.pid}, stage={stage}, "
+            f"error_domain={error_domain}, error_code={error_code}, exit_code={exit_code}, "
+            f"last_input_frame_at={frame_at or 'unknown'}, frame_time_source={frame_time_source}"
+        )
+
     def _capture_failure_reason(self) -> str | None:
         """종료 요청 전 프로세스 종료와 프레임 단절을 감지한다. 무음은 정상 입력이다."""
         processes = self._processes or ({"recording": self._process} if self._process else {})
@@ -825,9 +940,13 @@ class AudioRecorder:
                     pass  # 실패 원본은 후처리·삭제·완료 콜백 없이 보존한다.
         finally:
             try:
-                await self._cleanup_recording_processes()
+                # 프레임 단절로 정리할 때도 종료 중 늦게 전달된 최초 진단을 회수한다.
+                await self._log_native_capture_failure()
             finally:
-                await self._reset_recording_state()
+                try:
+                    await self._cleanup_recording_processes()
+                finally:
+                    await self._reset_recording_state()
 
     async def _read_audio_levels(self, stream: asyncio.StreamReader) -> None:
         """녹음기의 채널별 숫자만 읽고 최신 프레임을 메모리에 둔다."""
@@ -861,6 +980,7 @@ class AudioRecorder:
                 if len(frame) == len(meters):
                     self._audio_levels = frame.copy()
                     self._audio_levels_at = time.monotonic()
+                    self._last_meter_at = time.time()
                     self._first_audio_levels.set()
         except (ValueError, OSError):
             await self._drain_pipe(stream)
@@ -874,14 +994,24 @@ class AudioRecorder:
         return None
 
     def _start_pipe_drain(
-        self, proc: asyncio.subprocess.Process, *, split_meter: bool = False
+        self,
+        proc: asyncio.subprocess.Process,
+        *,
+        split_meter: bool = False,
+        native_capture: bool = False,
     ) -> None:
         """프로세스의 stdout/stderr를 백그라운드에서 drain하기 시작한다."""
         if proc.stdout is not None:
             reader = self._read_audio_levels if split_meter else self._drain_pipe
             self._pipe_drain_tasks.append(asyncio.create_task(reader(proc.stdout)))
         if proc.stderr is not None:
-            self._pipe_drain_tasks.append(asyncio.create_task(self._drain_pipe(proc.stderr)))
+            if native_capture:
+                self._native_capture_drain = asyncio.create_task(
+                    self._read_native_capture_failure(proc.stderr)
+                )
+                self._pipe_drain_tasks.append(self._native_capture_drain)
+            else:
+                self._pipe_drain_tasks.append(asyncio.create_task(self._drain_pipe(proc.stderr)))
 
     async def _start_singletrack_recording(self, meeting_id: str) -> None:
         """싱글트랙 녹음을 시작한다 (기존 로직).
@@ -988,7 +1118,9 @@ class AudioRecorder:
                 stderr=asyncio.subprocess.PIPE,
             )
             self._split_level_meter = split_meter
-            self._start_pipe_drain(self._process, split_meter=self._split_level_meter)
+            self._start_pipe_drain(
+                self._process, split_meter=split_meter, native_capture=native_capture
+            )
         except FileNotFoundError as e:
             if native_capture:
                 raise AudioDeviceError("CoreAudio 분리 녹음 실행 파일을 찾을 수 없습니다.") from e
@@ -1001,10 +1133,12 @@ class AudioRecorder:
             try:
                 await asyncio.wait_for(self._first_audio_levels.wait(), timeout=timeout)
             except TimeoutError as e:
+                await self._log_native_capture_failure(startup=True)
                 raise AudioDeviceError(
                     "CoreAudio 녹음에서 입력을 받지 못했습니다. 마이크와 시스템 오디오 녹음 권한을 확인해 주세요."
                 ) from e
             if self._audio_levels is None or self._process.returncode is not None:
+                await self._log_native_capture_failure(startup=True)
                 raise AudioDeviceError(
                     self._capture_start_error or "CoreAudio 녹음이 입력을 받기 전에 종료됐습니다."
                 )
@@ -1405,6 +1539,9 @@ class AudioRecorder:
                 task.cancel()
         if drain_tasks:
             await asyncio.gather(*drain_tasks, return_exceptions=True)
+        self._native_capture_drain = None
+        self._native_capture_failure = None
+        self._last_meter_at = None
 
     def _is_short_recording(self, elapsed: float, paths: list[Path]) -> bool:
         """장치 준비 지연으로 실제 PCM이 짧은 녹음도 전사 없이 보관한다."""
@@ -1510,33 +1647,40 @@ class AudioRecorder:
         """
         # 정지 상태로 전환한 뒤 백그라운드 태스크를 정리하는 await 사이에도
         # 캡처가 끝날 수 있다. q를 보내기 직전에 다시 확인해 코드 0도 실패로 남긴다.
-        exited_before_stop = isinstance(proc.returncode, int)
+        returncode = proc.returncode
+        exited_before_stop = isinstance(returncode, int)
         stop_pipe_failed = False
-        # stdin 'q' 전송
-        try:
-            if proc.stdin is not None:
-                proc.stdin.write(b"q")
-                await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            stop_pipe_failed = True
-            logger.debug(f"ffmpeg stdin 전송 실패 ({label}, 이미 종료됨)")
+        stdin = proc.stdin
+        if not exited_before_stop and stdin is not None:
+            try:
+                if stdin.is_closing():
+                    stop_pipe_failed = True
+                else:
+                    stdin.write(b"q")
+                    await stdin.drain()
+            except (OSError, RuntimeError):
+                # 종료 확인 직후 파이프가 닫히면 uvloop는 RuntimeError를 낸다.
+                stop_pipe_failed = True
+            if stop_pipe_failed:
+                logger.debug(f"녹음 프로세스 stdin 전송 실패 ({label})")
 
         # 종료 신호가 필요했던 파일은 끝부분의 완전성을 확인할 수 없다.
         forced = False
-        try:
-            returncode = await asyncio.wait_for(proc.wait(), timeout=self._graceful_timeout)
-        except TimeoutError:
-            forced = True
-            logger.warning(f"ffmpeg graceful 타임아웃 ({label}). SIGTERM 전송")
+        if not exited_before_stop:
             try:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-                returncode = await asyncio.wait_for(proc.wait(), timeout=5)
+                returncode = await asyncio.wait_for(proc.wait(), timeout=self._graceful_timeout)
             except TimeoutError:
-                logger.error(f"ffmpeg SIGTERM 타임아웃 ({label}). SIGKILL 전송")
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                returncode = await proc.wait()
+                forced = True
+                logger.warning(f"ffmpeg graceful 타임아웃 ({label}). SIGTERM 전송")
+                try:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.terminate()
+                    returncode = await asyncio.wait_for(proc.wait(), timeout=5)
+                except TimeoutError:
+                    logger.error(f"ffmpeg SIGTERM 타임아웃 ({label}). SIGKILL 전송")
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    returncode = await proc.wait()
 
         if forced or returncode != 0 or exited_before_stop or stop_pipe_failed:
             if forced:
@@ -1626,6 +1770,8 @@ class AudioRecorder:
     async def _cleanup_multitrack_processes(self) -> None:
         """시작 실패 시 이미 시작된 멀티트랙 프로세스를 정리한다."""
         for track_name, proc in list(self._processes.items()):
+            if isinstance(proc.returncode, int):
+                continue
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -1645,7 +1791,8 @@ class AudioRecorder:
             await asyncio.sleep(self._max_duration)
             logger.warning(f"최대 녹음 시간 초과 ({self._max_duration}초). 자동 정지")
             await self.stop_recording(_from_guard=True)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, FFmpegRecordError):
+            # 정지 중 발견한 캡처 실패의 알림과 파일 정리는 이미 정지 경로에서 끝났다.
             pass
 
     async def _duration_broadcast_loop(self) -> None:

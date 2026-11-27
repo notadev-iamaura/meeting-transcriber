@@ -251,6 +251,74 @@ private func wavHeader(rate: UInt32, frames: UInt32) -> Data {
     return data
 }
 
+private enum CaptureStage: String, Encodable {
+    case startup
+    case inputLayout = "input_layout"
+    case inputQueue = "input_queue"
+    case writerQueue = "writer_queue"
+    case audioConvert = "audio_convert"
+    case wavWrite = "wav_write"
+    case meterWrite = "meter_write"
+    case stopWait = "stop_wait"
+    case deviceStop = "device_stop"
+    case wavFinalize = "wav_finalize"
+}
+
+private enum CaptureProblem: Int, Error {
+    case permission = 1, microphone = 2, layout = 3, writerOverrun = 4
+}
+
+private struct CaptureFailure: Error, Encodable {
+    let stage: CaptureStage
+    let errorDomain: String
+    let errorCode: Int
+    let lastInputFrameMs: Int64?
+    var didReport = false
+
+    private enum CodingKeys: String, CodingKey {
+        case stage, errorDomain, errorCode, lastInputFrameMs
+    }
+
+    init(_ error: Error, stage: CaptureStage, lastInputFrameMs: Int64? = nil) {
+        self.stage = stage
+        self.lastInputFrameMs = lastInputFrameMs
+        if let problem = error as? CaptureProblem {
+            errorDomain = "RecapCapture"
+            errorCode = problem.rawValue
+        } else {
+            let native = error as NSError
+            switch native.domain {
+            case NSOSStatusErrorDomain, NSPOSIXErrorDomain, NSCocoaErrorDomain, AVFoundationErrorDomain:
+                errorDomain = native.domain
+            default: errorDomain = "other"
+            }
+            errorCode = native.code
+        }
+    }
+}
+
+@discardableResult
+private func writeCaptureDiagnostic(_ failure: CaptureFailure) -> Bool {
+    // 원본 오류 설명 대신 고정된 단계와 코드만 전달한다. stderr를 쓰므로 미터 파이프와 독립적이다.
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+    guard let data = try? encoder.encode(failure) else { return false }
+    return fputs("capture-failure=\(String(decoding: data, as: UTF8.self))\n", stderr) >= 0
+        && fflush(stderr) == 0
+}
+
+private func reportCaptureFailure(_ error: Error) {
+    let failure = error as? CaptureFailure ?? CaptureFailure(error, stage: .startup)
+    if !failure.didReport { writeCaptureDiagnostic(failure) }
+    let problem = failure.errorDomain == "RecapCapture" ? CaptureProblem(rawValue: failure.errorCode) : nil
+    switch problem {
+    case .permission: print("capture-error=permission")
+    case .microphone: print("capture-error=microphone")
+    case .layout: print("capture-error=layout")
+    default: print("capture-error=coreaudio")
+    }
+}
+
 // AudioQueue의 여러 입력 버퍼를 직접 받아 두 채널을 같은 프레임에 쓴다.
 // 녹음 스레드만 샘플과 카운터를 쓰며, 호출자는 큐를 멈춘 뒤 헤더를 마감한다.
 private final class SplitRecording {
@@ -258,7 +326,10 @@ private final class SplitRecording {
     let rate: UInt32
     let mic: Int
     var frames: UInt32 = 0
-    var failure: Error?
+    private let diagnosticLock = NSLock()
+    private var firstFailure: CaptureFailure?
+    private var lastInputFrameMs: Int64?
+    var failure: CaptureFailure? { diagnosticLock.withLock { firstFailure } }
     var micPower = 0.0
     var systemPower = 0.0
     var meterCount = 0
@@ -278,10 +349,24 @@ private final class SplitRecording {
         for fd in failurePipe where fd >= 0 { close(fd) }
     }
 
-    func recordFailure(_ error: Error) {
-        // 콜백 스레드만 failure를 쓰며, 메인 스레드는 큐를 멈춘 뒤 읽는다.
-        guard failure == nil else { return }
-        failure = error
+    func observeInputFrame() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        diagnosticLock.withLock {
+            if firstFailure == nil { lastInputFrameMs = now }
+        }
+    }
+
+    private func diagnose(_ error: Error, stage: CaptureStage) -> CaptureFailure {
+        CaptureFailure(error, stage: stage, lastInputFrameMs: diagnosticLock.withLock { lastInputFrameMs })
+    }
+
+    func recordFailure(_ error: Error, stage: CaptureStage) {
+        let recorded = diagnosticLock.withLock {
+            guard firstFailure == nil else { return false }
+            firstFailure = error as? CaptureFailure ?? CaptureFailure(error, stage: stage, lastInputFrameMs: lastInputFrameMs)
+            return true
+        }
+        guard recorded else { return }
         var signal: UInt8 = 1
         var count: Int
         repeat {
@@ -289,27 +374,41 @@ private final class SplitRecording {
         } while count < 0 && errno == EINTR
     }
 
+    func recordStatus(_ status: OSStatus, stage: CaptureStage) {
+        if status != noErr {
+            recordFailure(NSError(domain: NSOSStatusErrorDomain, code: Int(status)), stage: stage)
+        }
+    }
+
+    func reportFirstFailure() {
+        guard let failure, !failure.didReport, writeCaptureDiagnostic(failure) else { return }
+        diagnosticLock.withLock { firstFailure?.didReport = true }
+    }
+
     func finish() throws {
         // 실패 전 완전히 기록한 프레임 수로 헤더를 마감한다. 부분 파일은 삭제하지 않는다.
         do {
             try output.seek(toOffset: 0)
             try output.write(contentsOf: wavHeader(rate: rate, frames: frames))
+            try output.close()
         } catch {
             try? output.close()
-            throw error
+            recordFailure(error, stage: .wavFinalize)
         }
-        try output.close()
+        if let failure { throw failure }
     }
 
     func append(_ buffer: AudioQueueBufferRef) throws {
         let count = Int(buffer.pointee.mAudioDataByteSize) / 6
+        guard count > 0 else { return }
+        observeInputFrame()
         try append(buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self), frames: count)
     }
 
     func append(_ input: UnsafePointer<Int16>, frames count: Int) throws {
         guard count > 0 else { return }
         guard UInt64(frames) + UInt64(count) <= (UInt64(UInt32.max) - 128) / 4 else {
-            throw CocoaError(.fileWriteOutOfSpace)
+            throw diagnose(CocoaError(.fileWriteOutOfSpace), stage: .wavWrite)
         }
         let rx = mic == 0 ? 1 : 0
         var stereo = [Int16](repeating: 0, count: count * 2)
@@ -322,8 +421,12 @@ private final class SplitRecording {
             micPower += Double(near) * Double(near)
             systemPower += Double(far) * Double(far)
         }
-        try stereo.withUnsafeBytes { samples in
-            try output.write(contentsOf: Data(samples))
+        do {
+            try stereo.withUnsafeBytes { samples in
+                try output.write(contentsOf: Data(samples))
+            }
+        } catch {
+            throw diagnose(error, stage: .wavWrite)
         }
         frames += UInt32(count)
         meterCount += count
@@ -333,16 +436,19 @@ private final class SplitRecording {
             }
             let report = "frame:\(frames)\nlavfi.astats.1.RMS_level=\(level(micPower))\n"
                 + "lavfi.astats.2.RMS_level=\(level(systemPower))\n"
-            try FileHandle.standardOutput.write(contentsOf: Data(report.utf8))
+            do { try FileHandle.standardOutput.write(contentsOf: Data(report.utf8)) }
+            catch { throw diagnose(error, stage: .meterWrite) }
             meterCount = 0; micPower = 0; systemPower = 0
         }
     }
 }
 
-private func waitForRecordingStop(failureDescriptor: Int32) throws {
+private func waitForRecordingStop(_ recording: SplitRecording) throws {
+    // 장치 정지와 WAV 마감이 지연돼도 첫 오류를 제어 스레드에서 먼저 전달한다.
+    defer { recording.reportFirstFailure() }
     var descriptors = [
         pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0),
-        pollfd(fd: failureDescriptor, events: Int16(POLLIN), revents: 0),
+        pollfd(fd: recording.failureDescriptor, events: Int16(POLLIN), revents: 0),
     ]
     while true {
         let status = poll(&descriptors, nfds_t(descriptors.count), -1)
@@ -393,10 +499,10 @@ private func recordDevice(_ device: AudioObjectID, mic: Int, path: String, rate:
         do {
             try state.append(buffer)
             let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
-            if status != noErr && status != kAudioQueueErr_EnqueueDuringReset {
-                state.recordFailure(NSError(domain: NSOSStatusErrorDomain, code: Int(status)))
+            if status != kAudioQueueErr_EnqueueDuringReset {
+                state.recordStatus(status, stage: .inputQueue)
             }
-        } catch { state.recordFailure(error) }
+        } catch { state.recordFailure(error, stage: .wavWrite) }
     }, Unmanaged.passUnretained(state).toOpaque(), nil, nil, 0, &reference))
     guard let queue = reference else { throw CocoaError(.featureUnsupported) }
     defer { AudioQueueDispose(queue, true) }
@@ -412,16 +518,10 @@ private func recordDevice(_ device: AudioObjectID, mic: Int, path: String, rate:
         try audioCheck(AudioQueueEnqueueBuffer(queue, buffer, 0, nil))
     }
     try audioCheck(AudioQueueStart(queue, nil))
-    var waitFailure: Error?
-    do { try waitForRecordingStop(failureDescriptor: state.failureDescriptor) }
-    catch { waitFailure = error }
-    let stopStatus = AudioQueueStop(queue, true)
-    var finishFailure: Error?
-    do { try state.finish() }
-    catch { finishFailure = error }
-    if let failure = state.failure { throw failure }
-    if let failure = waitFailure ?? finishFailure { throw failure }
-    try audioCheck(stopStatus)
+    do { try waitForRecordingStop(state) }
+    catch { state.recordFailure(error, stage: .stopWait) }
+    state.recordStatus(AudioQueueStop(queue, true), stage: .deviceStop)
+    try state.finish()
 }
 
 // Zoom의 실제 출력 스트림만 선택한다. 일반 앱 이름에 포함된 "zoom"은 대상이 아니다.
@@ -650,25 +750,34 @@ private func recordTapDevice(_ device: AudioObjectID, format: AVAudioFormat, pat
     try audioCheck(AudioDeviceCreateIOProcIDWithBlock(&proc, device, io) { _, buffers, _, _, _ in
         do {
             guard let frame = try copyTapFrame(buffers, format: format) else { return }
-            guard slots.wait(timeout: .now()) == .success else { throw CocoaError(.fileWriteUnknown) }
+            state.observeInputFrame()
+            guard slots.wait(timeout: .now()) == .success else {
+                writer.async { state.recordFailure(CaptureProblem.writerOverrun, stage: .writerQueue) }
+                return
+            }
             writer.async {
                 defer { slots.signal() }
                 guard state.failure == nil else { return }
-                do { playback(frame); try convert(frame) } catch { state.recordFailure(error) }
+                do { playback(frame); try convert(frame) }
+                catch { state.recordFailure(error, stage: .audioConvert) }
             }
-        } catch { writer.async { state.recordFailure(error) } }
+        } catch { writer.async { state.recordFailure(error, stage: .inputLayout) } }
     })
     guard let proc else { throw CaptureProblem.layout }
     defer { AudioDeviceDestroyIOProcID(device, proc) }
     try audioCheck(AudioDeviceStart(device, proc))
-    let stop = Result { try waitForRecordingStop(failureDescriptor: state.failureDescriptor) }
+    let stop = Result { try waitForRecordingStop(state) }
     let status = AudioDeviceStop(device, proc)
     io.sync {}
-    writer.sync { if state.failure == nil { do { try convert(nil) } catch { state.recordFailure(error) } } }
+    writer.sync {
+        // 먼저 대기열의 캡처 오류를 확인한 뒤 정지·마감 과정의 실패를 적용한다.
+        if case let .failure(error) = stop { state.recordFailure(error, stage: .stopWait) }
+        state.recordStatus(status, stage: .deviceStop)
+        if state.failure == nil {
+            do { try convert(nil) } catch { state.recordFailure(error, stage: .audioConvert) }
+        }
+    }
     try state.finish()
-    if let failure = state.failure { throw failure }
-    try stop.get()
-    try audioCheck(status)
 }
 
 @available(macOS 14.2, *)
@@ -721,8 +830,6 @@ private func recordZoomTap(path: String, rate: UInt32) throws {
     defer { timer.cancel(); control.sync {} }
     try recordTapDevice(aggregate, format: format, path: path, rate: rate, playback: route.play)
 }
-
-private enum CaptureProblem: Error { case permission, microphone, layout }
 
 // 회의 창의 명시적 주제 필드만 본다. 창을 열거나 권한을 요청하지 않는다.
 private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -820,7 +927,7 @@ if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "--record-spl
         try splitRecord(CommandLine.arguments[2], CommandLine.arguments[3], rate)
         exit(0)
     } catch {
-        fputs("CoreAudio recording: \(error)\n", stderr)
+        reportCaptureFailure(error)
         exit(2)
     }
 }
@@ -844,15 +951,7 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--record-zoo
         try recordZoomTap(path: CommandLine.arguments[2], rate: rate)
         exit(0)
     } catch {
-        let reason: String
-        switch error {
-        case CaptureProblem.permission: reason = "permission"
-        case CaptureProblem.microphone: reason = "microphone"
-        case CaptureProblem.layout: reason = "layout"
-        default: reason = "coreaudio"
-        }
-        print("capture-error=\(reason)")
-        fputs("Recap CoreAudio: \(error)\n", stderr)
+        reportCaptureFailure(error)
         exit(2)
     }
 }
