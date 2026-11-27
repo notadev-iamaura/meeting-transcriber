@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import select
 import shutil
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -75,14 +78,29 @@ DispatchQueue.global().async {
         try failing.append(buffer)
         fatalError("expected write failure")
     } catch {
-        state.recordFailure(error)
+        state.recordFailure(error, stage: .wavWrite)
+    }
+    // 마감 자체도 실패하는 경우 먼저 기록한 CoreAudio 단계가 남아야 한다.
+    failing.recordStatus(-50, stage: .inputLayout)
+    do {
+        try failing.finish()
+        fatalError("expected finalize failure")
+    } catch let failure as CaptureFailure {
+        precondition(failure.stage == .inputLayout && failure.errorCode == -50)
+    } catch {
+        fatalError("expected the original CoreAudio failure")
     }
     callbackFinished.signal()
 }
-try waitForRecordingStop(failureDescriptor: state.failureDescriptor)
+try waitForRecordingStop(state)
 callbackFinished.wait()
-try state.finish()
-guard state.failure != nil else { fatalError("missing write error") }
+if CommandLine.arguments.contains("--hold-finalize") { _ = readLine() }
+do {
+    try state.finish()
+    fatalError("missing write error")
+} catch {
+    reportCaptureFailure(error)
+}
 samples.deinitialize(count: 192)
 samples.deallocate()
 buffer.deallocate()
@@ -114,23 +132,51 @@ def test_native_usb_route_and_tap_channels(capture_failure_binary: Path) -> None
     subprocess.run([str(capture_failure_binary), "--route-test"], check=True, timeout=5)
 
 
+@pytest.mark.parametrize(
+    "hold_finalize", [False, True], ids=["automatic-exit", "delayed-finalize"]
+)
 def test_native_write_failure_exits_without_q_and_finalizes_partial_wav(
-    capture_failure_binary: Path, tmp_path: Path
+    capture_failure_binary: Path, tmp_path: Path, hold_finalize: bool
 ) -> None:
     """stdin을 열어 둬도 쓰기 오류가 대기를 깨우며 성공한 프레임을 WAV로 보존한다."""
     partial = tmp_path / "partial.wav"
+    started_ms = time.time_ns() // 1_000_000
+    command = [str(capture_failure_binary), str(partial)]
+    if hold_finalize:
+        command.append("--hold-finalize")
+    early_diagnostic = b""
     with subprocess.Popen(
-        [str(capture_failure_binary), str(partial)],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ) as proc:
         try:
+            if hold_finalize:
+                assert proc.stdin is not None and proc.stderr is not None
+                readable, _, _ = select.select([proc.stderr], [], [], 5)
+                assert readable, "부분 WAV를 마감하기 전에 최초 진단을 받아야 한다."
+                early_diagnostic = proc.stderr.readline()
+                assert early_diagnostic.startswith(b"capture-failure=")
+                assert proc.poll() is None
+                proc.stdin.write(b"\n")
+                proc.stdin.flush()
             assert proc.wait(timeout=5) == 2
+            stdout, stderr = proc.communicate(timeout=5)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=5)
+    prefix = b"capture-failure="
+    stderr = early_diagnostic + stderr
+    assert stdout == b"capture-error=coreaudio\n"
+    assert stderr.startswith(prefix) and len(stderr.splitlines()) == 1
+    diagnostic = json.loads(stderr[len(prefix) :])
+    assert diagnostic["stage"] == "wav_write"
+    assert diagnostic["error_domain"] in {"NSCocoaErrorDomain", "NSPOSIXErrorDomain"}
+    assert isinstance(diagnostic["error_code"], int) and diagnostic["error_code"] != 0
+    assert started_ms <= diagnostic["last_input_frame_ms"] <= time.time_ns() // 1_000_000
+    assert str(partial).encode() not in stderr
     with wave.open(str(partial)) as audio:
         assert audio.getnchannels() == 2
         assert audio.getframerate() == 16000

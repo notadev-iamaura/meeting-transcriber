@@ -30,11 +30,26 @@ print('ready', flush=True)
 def meter():
     print('frame:1\\nlavfi.astats.1.RMS_level=-inf\\nlavfi.astats.2.RMS_level=-inf', flush=True)
 meter()
+def native_failure():
+    print('raw stderr: /private/synthetic-path authorization=synthetic-token', file=sys.stderr)
+    print('x' * 70000, file=sys.stderr)
+    print('capture-failure={"stage":"/private/synthetic-path","error_domain":"RecapCapture",'
+          '"error_code":4}', file=sys.stderr)
+    print('capture-failure={"stage":"input_layout","error_domain":"RecapCapture",'
+          '"error_code":3,"last_input_frame_ms":1735689600123}', file=sys.stderr)
+    print('capture-failure={"stage":"wav_finalize","error_domain":"NSCocoaErrorDomain",'
+          '"error_code":512}', file=sys.stderr)
+    print('capture-error=layout', flush=True)
+    sys.exit(2)
 while True:
+    if mode == 'native-failure' and pathlib.Path(gate).exists():
+        native_failure()
     if mode.startswith('exit') and pathlib.Path(gate).exists():
         sys.exit(int(mode[4:]))
     if select.select([sys.stdin], [], [], 0.02)[0]:
         if sys.stdin.buffer.read(1) in (b'q', b''):
+            if mode == 'late-native-failure':
+                native_failure()
             if mode == 'finalize':
                 output.close()
             sys.exit(0)
@@ -143,6 +158,115 @@ async def test_failure_without_stop_preserves_audio_and_reports_once(
             notification.assert_called_once_with()
         finally:
             await recorder.cleanup()
+
+
+@pytest.mark.parametrize("stop_path", ["watchdog", "duration-limit", "late-diagnostic"])
+def test_native_exit_two_under_uvloop_logs_first_failure_and_preserves_wav(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stop_path: str
+) -> None:
+    """실제 uvloop 자식이 종료해도 최초 진단과 부분 WAV가 남고 알림은 한 번만 간다."""
+    uvloop = pytest.importorskip("uvloop")
+
+    async def exercise() -> None:
+        recorder = _recorder(tmp_path)
+        if stop_path == "duration-limit":
+            recorder._max_duration = 1
+        event, complete, notification = AsyncMock(), AsyncMock(), Mock()
+        recorder.on_recording_complete(complete)
+        recorder.on_capture_failure(notification)
+        gate = recorder._temp_dir / "fail-now"
+        command = AsyncMock(
+            side_effect=lambda output, _: [
+                sys.executable,
+                "-c",
+                _CAPTURE,
+                str(output),
+                str(gate),
+                "late-native-failure" if stop_path == "late-diagnostic" else "native-failure",
+            ]
+        )
+        unhandled: list[dict[str, object]] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _, context: unhandled.append(context)
+        )
+        with (
+            patch("steps.recorder.use_zoom_tap", return_value=True),
+            patch("steps.recorder.ZoomAudioActivityChecker.tap_command", command),
+            patch.object(recorder, "_broadcast_event", event),
+        ):
+            await recorder.start_recording("native-failure", zoom_meeting=True)
+            proc, partial = recorder._process, recorder._current_file
+            watcher = recorder._capture_watchdog_task
+            assert proc is not None and proc.stdin is not None and partial is not None
+            assert watcher is not None
+            original = partial.read_bytes()
+            try:
+                stopper = watcher
+                if stop_path == "duration-limit":
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
+                    stopper = recorder._max_duration_task
+                    assert stopper is not None
+                with patch.object(proc.stdin, "write", wraps=proc.stdin.write) as write:
+                    gate.touch()
+                    await asyncio.wait_for(stopper, timeout=5)
+                    if stop_path == "late-diagnostic":
+                        write.assert_called_once_with(b"q")
+                    else:
+                        write.assert_not_called()
+                assert proc.returncode == 2 and recorder.state == RecordingState.IDLE
+                assert partial.read_bytes() == original
+                assert not list(recorder._audio_input_dir.glob("*.wav"))
+                assert (
+                    len([c for c in event.await_args_list if c.args[0] == "recording_error"]) == 1
+                )
+                assert recorder.get_status()["last_error"]["partial_files_preserved"] is True
+                notification.assert_called_once_with()
+                complete.assert_not_awaited()
+            finally:
+                await recorder.cleanup()
+        assert not unhandled
+
+    uvloop.run(exercise())
+    diagnostics = [
+        r.getMessage() for r in caplog.records if "CoreAudio 녹음 실패 진단" in r.message
+    ]
+    assert len(diagnostics) == 1
+    assert "stage=input_layout" in diagnostics[0]
+    assert "error_domain=RecapCapture" in diagnostics[0]
+    assert "error_code=3" in diagnostics[0]
+    assert "exit_code=2" in diagnostics[0]
+    assert "last_input_frame_at=2025-01-01T00:00:00.123+00:00" in diagnostics[0]
+    assert "wav_finalize" not in caplog.text
+    assert "synthetic-path" not in caplog.text and "synthetic-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("closed_at", ["before_write", "write", "drain"])
+async def test_stop_handles_stdin_transport_closing_during_q(
+    tmp_path: Path, closed_at: str
+) -> None:
+    """자식 종료 통지가 늦게 도착해도 닫힌 입력을 일반 녹음 실패로 처리한다."""
+    recorder = _recorder(tmp_path)
+    stdin = Mock(spec=asyncio.StreamWriter)
+    stdin.is_closing.return_value = closed_at == "before_write"
+    stdin.drain = AsyncMock()
+    if closed_at == "write":
+        stdin.write.side_effect = RuntimeError("unable to perform operation on a closed handler")
+    if closed_at == "drain":
+        stdin.drain.side_effect = RuntimeError("unable to perform operation on a closed handler")
+    proc = Mock(
+        spec=asyncio.subprocess.Process,
+        returncode=None,
+        stdin=stdin,
+        wait=AsyncMock(return_value=2),
+    )
+
+    with pytest.raises(FFmpegRecordError, match="정지 요청 전 종료 코드 2"):
+        await recorder._terminate_one_ffmpeg(proc, "recording")
+    if closed_at == "before_write":
+        stdin.write.assert_not_called()
+    proc.wait.assert_awaited_once()
 
 
 @pytest.mark.asyncio

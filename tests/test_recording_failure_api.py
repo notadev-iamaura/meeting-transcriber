@@ -31,6 +31,7 @@ def _capture(recorder: AudioRecorder, duration: int, sample: bytes) -> Path:
     recorder._meeting_id = source.stem
     recorder._current_file = source
     proc = MagicMock(returncode=None)
+    proc.stdin.is_closing.return_value = False
     proc.stdin.drain = AsyncMock()
     proc.wait = AsyncMock(return_value=0)
     recorder._process = proc

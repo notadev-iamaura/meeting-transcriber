@@ -38,6 +38,7 @@ def _mock_ffmpeg_process(*, pid: int = 12345) -> AsyncMock:
     mock_process = AsyncMock()
     mock_process.pid = pid
     mock_process.stdin = MagicMock()
+    mock_process.stdin.is_closing.return_value = False
     mock_process.stdin.write = MagicMock()
     mock_process.stdin.drain = AsyncMock()
     mock_process.wait = AsyncMock(return_value=0)
@@ -780,12 +781,7 @@ class TestStopRecording:
         recorder._meeting_id = "test"
 
         # ffmpeg 프로세스 모킹
-        mock_process = AsyncMock()
-        mock_process.stdin = MagicMock()
-        mock_process.stdin.write = MagicMock()
-        mock_process.stdin.drain = AsyncMock()
-        mock_process.wait = AsyncMock(return_value=0)
-        recorder._process = mock_process
+        recorder._process = _mock_ffmpeg_process()
 
         result = await recorder.stop_recording()
 
@@ -814,12 +810,7 @@ class TestStopRecording:
         recorder._meeting_id = "test"
 
         # ffmpeg 프로세스 모킹
-        mock_process = AsyncMock()
-        mock_process.stdin = MagicMock()
-        mock_process.stdin.write = MagicMock()
-        mock_process.stdin.drain = AsyncMock()
-        mock_process.wait = AsyncMock(return_value=0)
-        recorder._process = mock_process
+        recorder._process = _mock_ffmpeg_process()
 
         result = await recorder.stop_recording()
 
@@ -1554,11 +1545,7 @@ class TestMultiTrackRecording:
         recorder._meeting_id = "mt"
 
         # ffmpeg 프로세스 모킹
-        mock_proc = AsyncMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdin.write = MagicMock()
-        mock_proc.stdin.drain = AsyncMock()
-        mock_proc.wait = AsyncMock(return_value=0)
+        mock_proc = _mock_ffmpeg_process()
         recorder._processes = {"system": mock_proc, "mic": mock_proc}
 
         result = await recorder.stop_recording()
